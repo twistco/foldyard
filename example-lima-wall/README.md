@@ -63,13 +63,15 @@ subuid egress still caught), box egress (allowed vs blocked), and the worker's i
 It's non-destructive and re-runnable, and prints WHY each check matters so a paste-back is a
 full diagnosis.
 
-## The no_proxy caveat (see `compose.yml`)
+## The no_proxy caveat (see `[proxy] no_proxy`)
 
 With the wall on, foldyard sets proxy env on the VM's rootless podman service, and podman
 propagates it into stack containers. So a container calling another **by compose service name**
 (`worker` → `http://api:8090`) would try to reach it *through* the Mac proxy — which can't resolve
-an in-stack name. The fix is a per-service `no_proxy` listing the in-stack names; the `worker`
-service shows it. Delete that line and re-run `test_network.sh` to watch check **E** flip to FAIL.
+an in-stack name. The fix is listing the in-stack names in `foldyard.toml`'s `[proxy] no_proxy`,
+which the VM puts on every container's `NO_PROXY` at boot. Drop `api` from it, restart the VM
+(`fy machine stop && fy up`), recreate the stack (`fy down && fy up`) and re-run `test_network.sh`
+to watch check **E** flip to FAIL.
 
 ## Turning the wall off
 

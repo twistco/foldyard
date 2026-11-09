@@ -703,6 +703,104 @@ def test_provision_id_changes_with_the_proxy_ca(lima_env):
     assert machine.provision_id() != before
 
 
+@pytest.fixture
+def stack_names(fresh_config, monkeypatch, tmp_path):
+    """Point the config at a scratch repo whose ``[proxy] no_proxy`` is ``names`` (and the gcp
+    plugin configured, so foldyard's own service is named too). Ports pinned: the scratch
+    project would otherwise draw a band from the registry."""
+    monkeypatch.setenv("FY_PROXY_PORT", "41000")
+    monkeypatch.setenv("GCP_MINTER_PORT", "41100")
+
+    def write(names: list[str], *, gcp: bool = True) -> None:
+        repo = tmp_path / "noproxy-repo"
+        repo.mkdir(exist_ok=True)
+        (repo / "foldyard.toml").write_text(
+            '[project]\nprefix = "acme"\n[proxy]\n'
+            f"no_proxy = {json.dumps(names)}\n"
+            + ('[plugins.gcp-metadata]\nproject = "acme-staging"\n' if gcp else "")
+        )
+        fresh_config(FOLDYARD_REPO=repo)
+
+    return write
+
+
+def _wall_invocation(script: str) -> str:
+    return next(ln for ln in script.splitlines() if ln.startswith('FY_WALL_UID="$uid" '))
+
+
+def test_provision_script_hands_stack_containers_the_projects_no_proxy(lima_env, stack_names):
+    # podman gives every container the VM user's NO_PROXY, so a stack service calling a sibling
+    # by name through a client that honours HTTP_PROXY (gaxios, requests, curl) went to the host
+    # proxy, which can't resolve it (`fake-gcs:8000`, would_block, on every retry). The names are
+    # the box's: foldyard's own services and `[proxy] no_proxy`, `{project}` as the MAIN checkout's.
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    stack_names(["{project}-postgres", "fake-gcs"])
+    line = _wall_invocation(machine.guest_provision_script())
+    assert "FY_WALL_NO_PROXY=metadata-emulator,acme-postgres,fake-gcs " in line
+    assert line.endswith("install 192.168.5.2 '41000-41089, 41100-41189' http://192.168.5.2:41000")
+
+
+def test_provision_id_changes_with_the_projects_no_proxy(lima_env, stack_names):
+    # Baked at boot like the rest, so a changed list is stale provisioning: restart to apply.
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    stack_names(["fake-gcs"])
+    before = machine.provision_id()
+    stack_names(["fake-gcs", "gotenberg"])
+    assert machine.provision_id() != before
+
+
+def test_an_unwalled_vm_hands_stack_containers_no_names(lima_env, stack_names):
+    _, _, set_wall, _ = lima_env
+    set_wall(False)
+    stack_names(["fake-gcs"])
+    assert "fake-gcs" not in machine.guest_provision_script()
+
+
+@pytest.mark.parametrize("entry", ["a$(id)", "a b", "a'b", "a\nHTTP_PROXY=x", "a;b", "a`b`"])
+def test_provisioning_refuses_a_no_proxy_entry_no_host_name_has(lima_env, stack_names, entry):
+    # These names land in files root writes at boot, one of them sourced by every login shell:
+    # anything a host name can't hold is refused before it is recorded, not quoted around.
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    stack_names([entry], gcp=False)
+    with pytest.raises(SystemExit):
+        machine.guest_provision_script()
+
+
+def _no_proxy_fn() -> str:
+    text = machine._wall_asset().read_text()
+    start = text.index("\n_no_proxy() {\n")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+@pytest.mark.spawns("bash")  # the REAL function under bash; nothing else runs
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("", "localhost,127.0.0.1,192.168.5.2"),
+        ("fake-gcs,acme-postgres", "localhost,127.0.0.1,192.168.5.2,fake-gcs,acme-postgres"),
+        ("x$(id)", "localhost,127.0.0.1,192.168.5.2"),  # never trusted into profile.d
+    ],
+)
+def test_the_wall_adds_the_hosts_names_to_the_vms_no_proxy(tmp_path, given, expected):
+    calls = _stubbed_bash(
+        tmp_path,
+        _no_proxy_fn() + f"FY_WALL_NO_PROXY={shlex.quote(given)} _no_proxy 192.168.5.2",
+        (),
+    )
+    assert calls[0] == expected
+
+
+def test_the_wall_writes_that_no_proxy_for_podman_and_login_shells():
+    install = _wall_section("install")
+    assert 'NO_PROXY_LIST="$(_no_proxy "$GW")"' in install
+    assert "\nNO_PROXY=$NO_PROXY_LIST\nno_proxy=$NO_PROXY_LIST\n" in install  # environment.d
+    assert "export NO_PROXY=$NO_PROXY_LIST no_proxy=$NO_PROXY_LIST" in install  # profile.d
+    assert "NO_PROXY=localhost" not in install
+
+
 def test_ensure_generates_a_missing_ca_before_recording_walled_provisioning(
     lima_env, monkeypatch, tmp_path
 ):

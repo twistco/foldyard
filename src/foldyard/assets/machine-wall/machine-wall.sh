@@ -52,6 +52,20 @@ _wall_user() {
     fi
 }
 
+# The NO_PROXY podman hands every container: loopback, the host gateway, and the in-stack names
+# the host recorded in FY_WALL_NO_PROXY (`[proxy] no_proxy` + foldyard's own services). The host
+# refuses anything a host name can't hold; this drops it too, since profile.d is shell.
+_no_proxy() {
+    local extra="${FY_WALL_NO_PROXY:-}"
+    case "$extra" in
+    *[!A-Za-z0-9_.:,-]*)
+        echo "⚠ FY_WALL_NO_PROXY holds more than host names; containers won't get it" >&2
+        extra=""
+        ;;
+    esac
+    echo "localhost,127.0.0.1,$1${extra:+,$extra}"
+}
+
 # The guest's OWN trust store: what the VM user's podman verifies image PULLS against (Go reads
 # the system bundle), so a registry host the proxy decrypts no longer fails "unknown authority".
 # With the CA it goes in; without one (no CA yet, or the firewall off) ours comes out. One fixed
@@ -87,8 +101,8 @@ _guest_trust() {
 # the drop-in. A build's RUN step also gets NODE_USE_ENV_PROXY=1: Node's own fetch ignores the
 # proxy env without it, so a tool built on it (corepack ≥ 0.35, Node 24's) dials out directly and
 # the firewall refuses it, with no proxy row to say why (seen live, 2026-10-14). Build steps only:
-# a stack service's NO_PROXY doesn't list its sibling services, so turning it on there would send
-# their calls to the proxy, which can't resolve them. Every create passes through it (a build's
+# a stack service's NO_PROXY lists only the siblings `[proxy] no_proxy` names, so turning it on
+# there would send calls to the others to the proxy, which can't resolve them. Every create passes through it (a build's
 # RUN step from the host or the box, a docker-compat create); nothing lands in an image, since the spec is the runtime's, not a layer.
 # Anything unexpected leaves the spec as the engine wrote it, and crun runs regardless.
 # npm's proxy settings (92-fy-proxy-npm.conf) are deliberately NOT added here: a build's proxy is
@@ -459,19 +473,20 @@ EOF
     for d in "$WALL_HOME/.config" "$WALL_HOME/.config/environment.d"; do
         [ -d "$d" ] || install -d -o "$WALL_UID" -g "$WALL_GID" "$d"
     done
+    NO_PROXY_LIST="$(_no_proxy "$GW")"
     cat >"$WALL_HOME/.config/environment.d/90-fy-wall-proxy.conf" <<EOF
 HTTP_PROXY=$PROXY_URL
 HTTPS_PROXY=$PROXY_URL
 http_proxy=$PROXY_URL
 https_proxy=$PROXY_URL
-NO_PROXY=localhost,127.0.0.1,$GW
-no_proxy=localhost,127.0.0.1,$GW
+NO_PROXY=$NO_PROXY_LIST
+no_proxy=$NO_PROXY_LIST
 EOF
     chown -R "$WALL_UID" "$WALL_HOME/.config/environment.d"
     cat >/etc/profile.d/fy-wall-proxy.sh <<EOF
 export HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL
 export http_proxy=$PROXY_URL https_proxy=$PROXY_URL
-export NO_PROXY=localhost,127.0.0.1,$GW no_proxy=localhost,127.0.0.1,$GW
+export NO_PROXY=$NO_PROXY_LIST no_proxy=$NO_PROXY_LIST
 EOF
     # npm's own proxy settings for every container this podman creates. podman hands each one the
     # proxy env above, but a postinstall script that fetches with its own client (node-fetch:
@@ -479,11 +494,10 @@ EOF
     # firewall refused it. Proxy env, not the CA's, so a sibling drop-in that doesn't wait for a
     # CA. As with the CA's, an image's own ENV and a create's explicit env (the box's) win.
     # NOT NODE_USE_ENV_PROXY, though the box and build steps get it: the NO_PROXY podman
-    # propagates covers only loopback and $GW, and Node's fetch (undici) ignoring HTTP_PROXY is the only reason a Node
-    # service in a stack reaches another by service name (Supabase Studio -> http://kong:8000).
-    # Set here, those calls would go to the proxy, which can't resolve a stack name. An app
-    # container that wants it sets it itself, with a NO_PROXY listing the stack's services in
-    # BOTH cases (podman injects a lowercase no_proxy, which undici prefers).
+    # propagates names only what `[proxy] no_proxy` lists, and Node's fetch (undici) ignoring
+    # HTTP_PROXY is what lets a Node service reach an unlisted sibling by service name (Supabase
+    # Studio -> http://kong:8000). Set here, those calls would go to the proxy, which can't
+    # resolve a stack name. An app container that wants it sets it itself.
     rm -f /etc/containers/containers.conf.d/92-fy-proxy-npm.conf
     install -d -m 0755 /etc/containers/containers.conf.d
     cat >/etc/containers/containers.conf.d/92-fy-proxy-npm.conf.tmp <<EOF

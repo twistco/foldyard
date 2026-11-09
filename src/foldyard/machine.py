@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -442,16 +443,40 @@ def _ensure_guest_ca() -> None:
         _err("  then `fy machine stop && fy up`.")
 
 
+# What a NO_PROXY entry may hold here: these land in files root writes at boot, one of them
+# sourced by every login shell, so anything a host name can't contain is refused, not quoted.
+_HOST_NAME = re.compile(r"[A-Za-z0-9_.:-]+")
+
+
+def _stack_no_proxy() -> str:
+    """The in-stack names the walled VM adds to the ``NO_PROXY`` podman gives every container:
+    the box's own resolution (``proxy.stack_no_proxy``), ``{project}`` as the MAIN checkout's
+    compose project. The VM is shared by every worktree but this is baked at boot, so a worktree's
+    prefixed names aren't in it: listing them would make each ``fy worktree add`` stale
+    provisioning. Its services reach siblings by service name, which needs no prefix."""
+    from .plugins import proxy, registry
+
+    names = proxy.stack_no_proxy(config.project_prefix(), registry())
+    if bad := [n for n in names if not _HOST_NAME.fullmatch(n)]:
+        raise SystemExit(
+            f"✗ [proxy] no_proxy holds {', '.join(map(repr, bad))}, which no host name can.\n"
+            "  The VM firewall writes these into the VM's proxy settings; fix the entry."
+        )
+    return ",".join(dict.fromkeys(names))
+
+
 def _render_provisioning() -> tuple[str, str]:
     """The boot script for the CURRENT config and its id (a hash of the rendered content, so a
-    flipped wall, a moved band, a changed asset or a new proxy CA all read as a different
-    recording)."""
+    flipped wall, a moved band, a changed asset, a new proxy CA or a changed ``[proxy]
+    no_proxy`` all read as a different recording)."""
     ca = None
+    no_proxy = ""
     if config.machine_wall():
         args = ["install", config.LIMA_HOST_GATEWAY, _wall_ports(), config.wall_proxy_url()]
         ca = _guest_ca()
         if ca is not None:
             args.append(_GUEST_CA_PATH)
+        no_proxy = _stack_no_proxy()
     else:
         args = ["uninstall"]
     ca_step = (
@@ -465,6 +490,7 @@ def _render_provisioning() -> tuple[str, str]:
         .replace("@@WALL_ASSET@@", _wall_asset().read_text().rstrip("\n"))
         .replace("@@WALL_PATH@@", _WALL_SCRIPT_PATH)
         .replace("@@WALL_ARGS@@", " ".join(shlex.quote(a) for a in args))
+        .replace("@@WALL_NO_PROXY@@", shlex.quote(no_proxy))
         .replace("@@PROXY_CA_STEP@@", ca_step)
         .replace("@@WANT@@", _provision_want())
         .replace("@@JOURNAL@@", guestlog.journal_snippet(sudo="").strip("\n"))
@@ -606,8 +632,8 @@ def _record_provisioning() -> None:
         return
     if state() == "running":
         _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the VM")
-        _err("  firewall, its port range or the proxy CA changed (or the VM predates boot")
-        _err("  provisioning).")
+        _err("  firewall, its port range, the proxy CA or [proxy] no_proxy changed (or the VM")
+        _err("  predates boot provisioning, or foldyard was upgraded).")
         _err("  It applies at boot, as root, from the recorded config, so restart:")
         _err("      fy machine stop && fy up")
         raise SystemExit(1)

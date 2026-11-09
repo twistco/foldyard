@@ -40,8 +40,12 @@ don't share a listener, and a token meant for one worktree can't be read through
 If a pin or `WT_OFFSET` puts two worktrees on one port anyway, only one proxy runs there, and
 `fy host logs` names the other.
 
-Traffic between your services (by container name) never touches the proxy: it's on `NO_PROXY`
-and stays inside the VM.
+Traffic between your services stays inside the VM only when the client making it skips the
+proxy: the name is on `NO_PROXY`, or the client ignores the proxy variables (Node's `fetch()`
+does, by default). List your stack's service names in `[proxy] no_proxy`: the box gets them, and
+with the VM firewall on so does every stack container
+([Stack containers trust the proxy too](#stack-containers-trust-the-proxy-too)). A name missing
+from it is sent to the proxy, which can't resolve it.
 
 ## The log
 
@@ -326,8 +330,8 @@ section is set up by the firewall's boot setup. Without the firewall, your stack
 get neither the proxy settings nor the CA.
 
 With it, podman hands the VM's proxy settings (`HTTP_PROXY`, `HTTPS_PROXY` and their lowercase
-forms, with a `NO_PROXY` of loopback and the host gateway) to every container it creates — your
-stack's services, and anything the box starts — so their traffic is decrypted like the box's.
+forms, with a `NO_PROXY` described below) to every container it creates — your stack's services,
+and anything the box starts — so their traffic is decrypted like the box's.
 They trust the proxy's CA the same way, without any change to your compose files: the VM's boot
 setup installs the CA and a podman default that mounts it into every container
 (`/etc/fy-proxy-ca.pem`, plus `/etc/fy-proxy-ca-combined.pem` = the VM's trusted roots and the CA)
@@ -341,6 +345,24 @@ CA. A container you route through the proxy yourself (`HTTPS_PROXY` in a compose
 without the firewall fails TLS on every host not on `passthrough`, unless its image already
 trusts the proxy's CA.
 
+- **`NO_PROXY` names your stack.** It holds `localhost`, `127.0.0.1`, the host gateway
+  (`192.168.5.2` on lima), foldyard's own services (the gcp metadata emulator, when configured)
+  and your `[proxy] no_proxy`, in both cases. Without that, a service calling a sibling by name
+  through a client that honours the proxy variables (curl, Python's `requests`, Google's Node
+  clients) sends the call to the proxy, which can't resolve the name and refuses it: the
+  Network Log shows `fake-gcs:8000`, say, as a blocked host. Three things to know:
+  - **One list for the whole VM, set at boot.** After changing `[proxy] no_proxy` (and after
+    the foldyard upgrade that brought this), `fy up` refuses the running VM until you restart
+    it, `fy machine stop && fy up`. Then recreate the stack, `fy down && fy up`: a container
+    keeps the environment it was created with.
+  - **`{project}` is the main checkout's.** Every worktree's stack runs in the same VM, so a
+    worktree's prefixed container names (`myapp-feature-postgres`) aren't on it; listing each
+    worktree would make every `fy worktree add` need a VM restart. Bare service names cover every
+    worktree, and inside a stack a service reaches its siblings by service name anyway. A
+    service that calls a sibling by its prefixed container name sets its own `NO_PROXY`.
+  - **Your stack's service names aren't added for you.** foldyard would have to read them from
+    the compose files at boot, so renaming a service would need a VM restart. List the ones
+    your services call each other by.
 - **Your settings win, even stale ones.** A variable your image or compose file already sets keeps
   its value, so don't restate what foldyard provides: a proxy address copied into a compose file
   stops working when the port band moves, and a mount of `.devbox-ca` (the copy of the CA
@@ -426,19 +448,25 @@ In the box, all three are defaults: `[box].env` may override any of them. With
 `NODE_USE_ENV_PROXY`, Node honours `NO_PROXY` like curl does, so a stack service the box calls by
 name has to be in `[proxy] no_proxy` (it already had to be for curl and Python).
 
-**Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY` of
-only loopback and the host gateway. Node ignoring it is what lets one Node service reach another
-by service name (Supabase Studio calling `http://kong:8000`). Set everywhere, those calls would
-go to the proxy, which runs on your computer and can't resolve a stack name.
+**Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY`
+naming, besides loopback and the host gateway, only what `[proxy] no_proxy` lists
+([above](#stack-containers-trust-the-proxy-too)). Node
+ignoring it is what lets one Node service reach a sibling that isn't listed (Supabase Studio
+calling `http://kong:8000`). Set everywhere, those calls would go to the proxy, which runs on
+your computer and can't resolve a stack name.
 
-**An app container that calls the internet from Node** sets it itself, with a `NO_PROXY` naming
-the stack services it calls:
+**An app container that calls the internet from Node** sets it itself. If `[proxy] no_proxy`
+lists every stack service it calls, that is all it needs:
 
 ```yaml
 environment:
   NODE_USE_ENV_PROXY: "1"
-  # Both cases: podman injects a lowercase no_proxy of its own, and undici prefers it.
-  # Keep podman's entries (loopback and the host gateway, 192.168.5.2 on lima).
+```
+
+Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers the lowercase
+one), keeping podman's entries (loopback, the host gateway, and your `[proxy] no_proxy`):
+
+```yaml
   NO_PROXY: localhost,127.0.0.1,192.168.5.2,kong,db
   no_proxy: localhost,127.0.0.1,192.168.5.2,kong,db
 ```

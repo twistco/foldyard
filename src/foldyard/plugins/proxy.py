@@ -31,7 +31,16 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .. import config, mountwrite
-from . import DoctorContext, DoctorFix, PanelGroup, PanelTree, Plugin, TuiPanel, _netlog
+from . import (
+    DoctorContext,
+    DoctorFix,
+    PanelGroup,
+    PanelTree,
+    Plugin,
+    Registry,
+    TuiPanel,
+    _netlog,
+)
 from ._passthrough_bundles import BUNDLES
 
 # The host ports the mitmdump injection proxy listens on come from ``config.proxy_port()`` —
@@ -182,6 +191,17 @@ def stage_ca_for_box(checkout: str, here: str) -> Path | None:
         ) from None
     os.environ["MITMPROXY_CA"] = str(staged)
     return staged
+
+
+def stack_no_proxy(project: str, registry: Registry | None) -> list[str]:
+    """The in-stack names that must bypass the proxy, which runs on the host and can't resolve
+    them: each plugin's OWN services (config-gated, so an unconfigured plugin adds nothing), then
+    the consumer's ``[proxy] no_proxy`` with ``{project}`` expanded to ``project``. foldyard names
+    no consumer service. Shared by the box's ``NO_PROXY`` and the walled VM's, which every stack
+    container gets (``machine._stack_no_proxy``)."""
+    declared = [h.replace("{project}", project) for h in config.proxy_no_proxy()]
+    from_plugins = registry.no_proxy_hosts() if registry else []
+    return [*from_plugins, *declared]
 
 
 def _node_proxy_args(proxy_url: str) -> list[str]:
@@ -809,21 +829,12 @@ class ProxyPlugin(Plugin):
                 f"✗ FY_PROXY set ({proxy}) but no CA at {ca} — `fy host restart` on the host "
                 "once to generate it (or 'fy doctor', which offers the same fix)."
             )
-        # In-stack services bypass the proxy (NO_PROXY): it runs on the host and can't resolve a
-        # stack-network hostname, so a proxied call to one 502s (after hanging). Three sources,
-        # and the split is the point — foldyard names NO consumer service:
-        #   loopback   always, for every consumer;
-        #   plugins    each contributes its OWN services (the gcp metadata emulator), config-gated
-        #              so an unconfigured plugin adds nothing;
-        #   consumer   `[proxy] no_proxy`, with {project} expanded to the compose project name so
-        #              one entry covers every worktree's container-name prefix.
-        # An entry is inert when its container isn't running, so listing a service a rung hasn't
-        # started costs nothing.
-        project = env.get("PODMAN_PROJECT", "")
-        declared = [h.replace("{project}", project) for h in config.proxy_no_proxy()]
-        # `_registry` (bound in Registry.__init__) — THIS registry, not the global cached one.
-        from_plugins = self._registry.no_proxy_hosts() if self._registry else []
-        no_proxy = ",".join(["localhost", "127.0.0.1", *from_plugins, *declared])
+        # Loopback, then the in-stack names (`stack_no_proxy`), {project} as THIS box's compose
+        # project so one entry covers every worktree's container-name prefix. An entry is inert
+        # when its container isn't running, so listing a service a rung hasn't started costs
+        # nothing. `_registry` (bound in Registry.__init__) — THIS registry, not the cached one.
+        in_stack = stack_no_proxy(env.get("PODMAN_PROJECT", ""), self._registry)
+        no_proxy = ",".join(["localhost", "127.0.0.1", *in_stack])
         return [
             *args,
             "-e",

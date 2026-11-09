@@ -960,7 +960,8 @@ def proxy_passthrough() -> list[str]:
 
 def proxy_no_proxy() -> list[str]:
     """``[proxy] no_proxy`` — the consumer's OWN in-stack hostnames the dev box must reach
-    directly, bypassing the egress proxy (they join the box's ``NO_PROXY``). The proxy runs on
+    directly, bypassing the egress proxy (they join the box's ``NO_PROXY``, and the walled VM's
+    that every stack container gets — ``proxy.stack_no_proxy``). The proxy runs on
     the host and can't resolve a stack-network name, so a proxied call to one 502s — or hangs
     first, which is how a proxied emulator read reads as a mysteriously slow test.
 
