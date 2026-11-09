@@ -185,7 +185,12 @@ belongs in the middle — but *one* middle, not a switch between two.
   needs no credential in the box, so that grant is an exfiltration channel. A **path grant**,
   `fy allow add storage.googleapis.com/chrome-for-testing-public/`, allows reads under that prefix
   and nothing else:
-  - GET/HEAD only, no body, no `Upgrade`, on the ports a host grant covers;
+  - GET/HEAD only, no body, no `Upgrade`, on the ports a host grant covers. The headers rule
+    out a body over HTTP/1. Over HTTP/2 they can't: a HEADERS frame can leave its stream open
+    for DATA with no `content-length`, and mitmproxy streams a body past `stream_large_bodies`
+    upstream before the `request` hook sees it. So a path-granted read is streamed through a
+    filter that drops every chunk (a bodyless one, whose stream ends with its headers, is never
+    streamed);
   - judged on the raw path before the query, on a segment boundary;
   - refused outright if a server might resolve the path elsewhere (dot segments, `..;`, `//`, a
     backslash, a percent-encoded `/`, `\`, `.` or `%`).

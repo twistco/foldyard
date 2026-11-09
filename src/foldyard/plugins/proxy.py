@@ -465,7 +465,7 @@ def _network_panel_tree() -> PanelTree:
             _net_leaf(e, escape, resolver.who(e.get("origin"), e.get("ts")) if resolver else None)
             for e in v.rows
         ]
-        rows: list[object] = list(v.rows)  # each leaf's request: what `a` and `y` act on
+        rows: list[object] = list(v.rows)  # each leaf's request: what `a` and `l` act on
         if v.earlier:
             children.append(f"[dim]… {v.earlier} earlier[/dim]")
             rows.append(None)

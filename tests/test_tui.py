@@ -1435,7 +1435,7 @@ async def test_allow_on_a_request_with_no_path_to_grant_offers_its_host(monkeypa
 
 async def test_a_relabelled_leaf_carries_its_new_row(monkeypatch):
     # The panel refreshes in place while the line count holds: each leaf's row must follow its
-    # line, or `a`/`y` would act on the request that USED to be there.
+    # line, or `a`/`l` would act on the request that USED to be there.
     state: dict[str, list[dict] | None] = {"rows": None}
     monkeypatch.setattr(
         tui,

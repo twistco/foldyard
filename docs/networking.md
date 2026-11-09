@@ -209,13 +209,20 @@ fy allow add storage.googleapis.com/chrome-for-testing-public/ --level once --tt
 
 A path grant lets the box **read** under that prefix and nothing else on the host:
 
-- `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket);
+- `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket). Over HTTP/2 a request
+  can send a body its headers don't announce; the proxy drops it, so only the read goes out;
 - at or under the prefix, on a segment boundary (`/bucket/` doesn't cover `/bucket-two/`), judged
   on the path before the query;
 - never a path a server could resolve to somewhere else: a `.` or `..` segment (`..;` too), `//`,
   a backslash, or a percent-encoded `/`, `\`, `.` or `%` is refused;
 - the ports a host grant covers (HTTPS `:443`, plain HTTP `:80`). The host has to be exact: no
-  `*.` glob and no port.
+  `*.` glob and no port. On an [address on your computer](#services-on-your-computer)
+  (`127.0.0.1/repo/`) it covers requests to that address, never a granted name that resolves
+  there.
+
+A read still sends something: the URL. The path under the prefix and the query reach the host,
+and whoever reads its logs. For a public bucket that doesn't matter. For a host you don't trust,
+it's a small way out, so grant a path there the way you'd grant the host.
 
 The proxy has to see each request to check its path, so a path-granted host is always decrypted,
 even if `[proxy] passthrough` lists it. It's never tunnelled for an image build either, which is
