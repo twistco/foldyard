@@ -469,8 +469,9 @@ Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers t
 one). That replaces the list podman hands it, so keep every entry podman's has: loopback, the
 host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` while
 `[plugins.gcp-metadata]` is configured, even with gcp off: turning it on doesn't rebuild the VM's
-list). A throwaway container with no override of its own shows the list to start from:
-`podman run --rm alpine printenv NO_PROXY` (a service that already overrides it shows its own).
+list). Start from the VM's own copy, which no client's environment can colour:
+`limactl shell <machine> cat ~/.config/environment.d/90-fy-wall-proxy.conf` (`[machine] name`). A
+running service's `printenv` won't do: one that already overrides `NO_PROXY` shows its own.
 
 ```yaml
   NO_PROXY: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
