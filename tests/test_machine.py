@@ -801,6 +801,100 @@ def test_the_wall_writes_that_no_proxy_for_podman_and_login_shells():
     assert "NO_PROXY=localhost" not in install
 
 
+# ── the stable engine-socket path a stack service bind-mounts (/run/foldyard/engine.sock) ──
+
+
+def _engine_link_line(script: str) -> str:
+    return next(ln for ln in script.splitlines() if ln.startswith("_engine_link "))
+
+
+@pytest.mark.parametrize("wall", [True, False])
+@pytest.mark.parametrize(
+    ("runtime", "sock"), [("", "podman.sock"), ("gvisor", "podman-runsc-filtered.sock")]
+)
+def test_provision_script_links_the_engine_socket_for_the_runtime(
+    lima_env, monkeypatch, wall, runtime, sock
+):
+    # The socket's own path carries the VM user's uid, which differs per developer, so a compose
+    # file mounts this link. Under gVisor it is the FILTERED socket: the runsc one, or crun's,
+    # would let a stack container create a container outside gVisor.
+    _, _, set_wall, _ = lima_env
+    set_wall(wall)
+    monkeypatch.setattr(machine.config, "machine_runtime", lambda: runtime)
+    line = _engine_link_line(machine.guest_provision_script())
+    assert line == f'_engine_link /run/foldyard/engine.sock "$uid" {sock}'
+
+
+def test_provision_id_changes_with_the_machine_runtime(lima_env, monkeypatch):
+    # Baked at boot, so switching gVisor on or off is stale provisioning: `fy up` refuses the
+    # running VM until it restarts, rather than leave the stack on the other runtime's socket.
+    _, _, set_wall, _ = lima_env
+    set_wall(False)
+    monkeypatch.setattr(machine.config, "machine_runtime", lambda: "")
+    before = machine.provision_id()
+    monkeypatch.setattr(machine.config, "machine_runtime", lambda: "gvisor")
+    assert machine.provision_id() != before
+
+
+def test_the_stale_provisioning_refusal_names_the_machine_runtime(lima_env, tmp_path, capsys):
+    be, _, set_wall, _ = lima_env
+    be._provision = "stale"
+    set_wall(False)
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert "[machine] runtime" in capsys.readouterr().err
+
+
+def _engine_link_fn() -> str:
+    text = machine._boot_asset().read_text()
+    start = text.index("\n_engine_link() {\n")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+@pytest.mark.spawns("bash")  # the REAL function under bash; every command is a stub
+def test_the_engine_link_is_a_root_made_dir_and_a_symlink(tmp_path):
+    calls = _stubbed_bash(
+        tmp_path,
+        _engine_link_fn() + "_engine_link /run/foldyard/engine.sock 501 podman.sock",
+        ("install", "ln"),
+    )
+    assert calls[:2] == [
+        "install -d -m 0755 /run/foldyard",
+        "ln -sfn /run/user/501/podman/podman.sock /run/foldyard/engine.sock",
+    ]
+
+
+@pytest.mark.spawns("bash")  # the REAL function with the real `install` and `ln`, in tmp only
+def test_the_engine_link_is_made_before_its_socket_exists(tmp_path):
+    # The gVisor filter is a user unit that starts after this boot script, so the link dangles
+    # until then. That's fine: podman resolves a bind mount's source when it creates a container.
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    for tool in ("install", "ln"):  # the suite's PATH is scrubbed, so look where they live
+        found = next((p for d in ("/usr/bin", "/bin") if (p := Path(d, tool)).exists()), None)
+        if found is None:
+            pytest.skip(f"no {tool} on this host")
+        (tools / tool).symlink_to(found)
+    link = tmp_path / "run" / "foldyard" / "engine.sock"
+    body = _engine_link_fn() + f"_engine_link {shlex.quote(str(link))} 501 podman.sock"
+    for _ in range(2):  # every boot runs it; a second run must leave the same link
+        out = subprocess.run(
+            [shutil.which("bash") or "bash", "-c", body],
+            capture_output=True,
+            text=True,
+            env={"PATH": str(tools)},
+        )
+        assert out.returncode == 0, out.stderr
+    assert os.readlink(link) == "/run/user/501/podman/podman.sock"
+    assert not link.exists()  # dangling, as at boot
+    assert (link.parent.stat().st_mode & 0o777) == 0o755
+
+
+def test_the_gcp_docs_mount_the_stable_engine_socket():
+    gcp = Path(__file__).resolve().parents[1] / "docs" / "gcp.md"
+    assert f"- {machine.ENGINE_SOCK_IN_VM}:/var/run/docker.sock" in gcp.read_text()
+
+
 def test_ensure_generates_a_missing_ca_before_recording_walled_provisioning(
     lima_env, monkeypatch, tmp_path
 ):

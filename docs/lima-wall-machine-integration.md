@@ -130,8 +130,12 @@ which only works on a stopped VM. Lima runs it as root on every boot. It:
 
 1. narrows Lima's passwordless sudo grant to `shutdown` only (cloud-init re-creates
    `NOPASSWD:ALL` every boot, so this runs every boot too);
-2. installs or removes the firewall from its own embedded copy, never from the repo mount;
-3. writes what it applied to `/run/fy-wall/state`, world-readable.
+2. links `/run/foldyard/engine.sock` (a root-owned directory) to the VM user's engine socket, or
+   to the gVisor filter's under `[machine] runtime = "gvisor"`, for a stack service to mount
+   ([stack.md](./stack.md#variables-your-compose-files-can-use)). It runs whether or not the
+   firewall is on;
+3. installs or removes the firewall from its own embedded copy, never from the repo mount;
+4. writes what it applied to `/run/fy-wall/state`, world-readable.
 
 **What the host checks.** The host keeps no state file of its own. It compares two things:
 

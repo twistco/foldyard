@@ -169,7 +169,10 @@ bounded what the socket could get at. So:
   every runtime opt-out (`oci_runtime`, `dev.gvisor.*`, compat `HostConfig.Runtime`) from
   container creates and refuses what it can't parse, so a sibling can't escape gVisor
   ([ADR-0025](./adrs/0025-gvisor-machine-posture-and-socket-narrowing.md);
-  `src/foldyard/assets/sandbox/socket_filter.py`).
+  `src/foldyard/assets/sandbox/socket_filter.py`). A stack service that talks to the engine
+  mounts `/run/foldyard/engine.sock`, which the lima boot script points at that same filtered
+  socket under gVisor, so foldyard's recommended mount doesn't reopen the route. A compose file
+  that names the runsc or crun socket itself still can: that is the allowlist below.
 - **Deferred:** a broader mount/endpoint allowlist, so a box-created sibling can't bind-mount the
   VM's `/`. On one VM per project that sibling reads only this project's VM, which holds no
   credentials, so it is defence in depth (ADR-0025, Decision §5).

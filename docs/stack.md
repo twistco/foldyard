@@ -118,6 +118,12 @@ guest has and an Ubuntu runner may not. Name the registry in full, or add
 Variables the current mode sets (from the plugins you use) are there too, and so is the project
 `.env` beside your first compose file, which compose reads itself.
 
+**A service that talks to the engine** (the [gcp metadata emulator](./gcp.md#in-your-compose-file),
+say) mounts `/run/foldyard/engine.sock:/var/run/docker.sock`, written as is: it's the same path on
+every lima VM. foldyard's boot script links it to the VM user's engine socket, whose own path
+holds your user id, or under `[machine] runtime = "gvisor"` to the box's filtered socket. On the
+deprecated podman machine backend, mount `/run/docker.sock`.
+
 **Nothing else from your shell reaches the compose client.** It gets only what it needs to run
 (`PATH`, `HOME`, locale, the engine's and compose's own `COMPOSE_*`/`PODMAN_*` settings) and the
 names you list in `[project] compose_env`. Any name in the secrets file foldyard keeps on your

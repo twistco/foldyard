@@ -361,23 +361,28 @@ def _note_host_wall_install() -> None:
 # every boot — the instance id changes each boot — to Lima's own non-passwordless form, shutdown
 # only, which a graceful `limactl stop` still needs: the VM user, the uid the box runs as, gets
 # no path to VM-root; (2) installs or removes the nftables wall (`machine-wall.sh`, embedded and
-# root-owned in the guest — never read from the repo mount); (3) writes what it applied to
-# /run/fy-wall/state, world-readable, so the host can check without root.
+# root-owned in the guest — never read from the repo mount); (3) links ENGINE_SOCK_IN_VM to the
+# VM user's engine socket (the gVisor filter's under that posture); (4) writes what it applied
+# to /run/fy-wall/state, world-readable, so the host can check without root.
 #
 # The host therefore never runs `sudo` in the guest: it records the script while the VM is
 # STOPPED (`limactl edit` refuses a running one) and reads the guest's report after boot. A
-# change — the wall flipped, a moved port band, a VM created before the grant was dropped — needs
-# a restart, and a running VM with stale provisioning is REFUSED: fail closed rather than run
-# unwalled or with the old grant. The host-side proxy stays the chokepoint (allowlist, keyless
-# injection, network log, creds all host-side); the wall makes the VM fail-closed on the VM
-# user's uid, whose only opening is the host's foldyard daemons at the Lima host gateway. There
-# is deliberately NO separate CLI verb: toggling IS editing foldyard.toml + `fy machine stop` +
-# `fy up`; in-VM diagnosis is `limactl shell <name> cat /run/fy-wall/boot.log`.
+# change — the wall flipped, a moved port band, `[machine] runtime`, a VM created before the
+# grant was dropped — needs a restart, and a running VM with stale provisioning is REFUSED: fail
+# closed rather than run unwalled, with the old grant or on the other runtime's engine socket.
+# The host-side proxy stays the chokepoint (allowlist, keyless injection, network log, creds all
+# host-side); the wall makes the VM fail-closed on the VM user's uid, whose only opening is the
+# host's foldyard daemons at the Lima host gateway. There is deliberately NO separate CLI verb:
+# toggling IS editing foldyard.toml + `fy machine stop` + `fy up`; in-VM diagnosis is
+# `limactl shell <name> cat /run/fy-wall/boot.log`.
 
 _WALL_SCRIPT_PATH = "/usr/local/libexec/fy-machine-wall"
 # Where the boot script drops the embedded proxy CA for the wall's install to pick up (tmpfs,
 # root-owned, rewritten every boot).
 _GUEST_CA_PATH = "/run/fy-wall/proxy-ca.pem"
+# The VM's engine socket at a path that is the same on every Lima VM, for a stack service to
+# bind-mount: the socket's own path carries the VM user's uid. Under gVisor, the filtered socket.
+ENGINE_SOCK_IN_VM = "/run/foldyard/engine.sock"
 
 
 def _wall_asset() -> Path:
@@ -396,6 +401,12 @@ def _wall_ports() -> str:
     sibling project's."""
     bases = {config.proxy_port_base(), config.gcp_minter_port_base()}
     return ", ".join(f"{b}-{b + 89}" for b in sorted(bases))
+
+
+def _engine_sock_name() -> str:
+    """The socket in the VM user's ``podman/`` runtime dir that :data:`ENGINE_SOCK_IN_VM` names:
+    under gVisor the filter's, never the runsc socket or crun's, which create outside it."""
+    return sandbox.FILTER_SOCKET if sandbox.wanted() else "podman.sock"
 
 
 def _provision_want() -> str:
@@ -467,8 +478,8 @@ def _stack_no_proxy() -> str:
 
 def _render_provisioning() -> tuple[str, str]:
     """The boot script for the CURRENT config and its id (a hash of the rendered content, so a
-    flipped wall, a moved band, a changed asset, a new proxy CA or a changed ``[proxy]
-    no_proxy`` all read as a different recording)."""
+    flipped wall, a moved band, a changed asset, a new proxy CA, a changed ``[proxy] no_proxy``
+    or ``[machine] runtime`` all read as a different recording)."""
     ca = None
     no_proxy = ""
     if config.machine_wall():
@@ -492,6 +503,8 @@ def _render_provisioning() -> tuple[str, str]:
         .replace("@@WALL_ARGS@@", " ".join(shlex.quote(a) for a in args))
         .replace("@@WALL_NO_PROXY@@", shlex.quote(no_proxy))
         .replace("@@PROXY_CA_STEP@@", ca_step)
+        .replace("@@ENGINE_LINK@@", ENGINE_SOCK_IN_VM)
+        .replace("@@ENGINE_SOCK@@", _engine_sock_name())
         .replace("@@WANT@@", _provision_want())
         .replace("@@JOURNAL@@", guestlog.journal_snippet(sudo="").strip("\n"))
     )
@@ -632,8 +645,8 @@ def _record_provisioning() -> None:
         return
     if state() == "running":
         _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the VM")
-        _err("  firewall, its port range, the proxy CA or [proxy] no_proxy changed (or the VM")
-        _err("  predates boot provisioning, or foldyard was upgraded).")
+        _err("  firewall, its port range, the proxy CA, [proxy] no_proxy or [machine] runtime")
+        _err("  changed (or the VM predates boot provisioning, or foldyard was upgraded).")
         _err("  It applies at boot, as root, from the recorded config, so restart:")
         _err("      fy machine stop && fy up")
         raise SystemExit(1)

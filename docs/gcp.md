@@ -138,14 +138,17 @@ services:
       GCP_MINTER_URL: ${GCP_MINTER_URL}  # set by foldyard: this worktree's token service
     volumes:
       - ${FOLDYARD_CHECKOUT}/.devbox-foldyard/server.py:/srv/server.py:ro
-      - /run/user/1000/podman/podman.sock:/var/run/docker.sock
+      - /run/foldyard/engine.sock:/var/run/docker.sock
 ```
 
 - `fy up` copies the server into the gitignored `.devbox-foldyard/` in your checkout, because the
   VM mounts only your repo. If you set `[project] dev_vm_dir`, it lands under that directory.
-- The last line mounts the VM's engine socket, so the emulator can look up callers. Use the path
-  the box mounts: on the lima backend `/run/user/<uid>/podman/podman.sock`, where `<uid>` is
-  your user id on your computer (`id -u`), or your `[box] sock_in_vm` if you set one.
+- The last line mounts the VM's engine socket, so the emulator can look up callers.
+  `/run/foldyard/engine.sock` is the same path on every lima VM: foldyard's boot script links it
+  to the VM user's own socket, whose path holds your user id. Under
+  [`[machine] runtime = "gvisor"`](./configuration.md#machine) it's the box's filtered socket,
+  so the emulator can still look up callers but can't create a container outside gVisor. On the
+  deprecated podman machine backend, mount `/run/docker.sock` instead.
 
 **Your services.** Give each service that needs Google its label and point its client libraries
 at the emulator, in an overlay that applies at `sa` and `user`:

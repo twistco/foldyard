@@ -291,8 +291,11 @@ disk_gib = 60
   - The box gets a *filtered* view of that socket as its own engine socket: the filter strips
     runtime-selecting fields from every container create, so the box can't opt a container out
     of gVisor, and refuses a create it can't parse. A box that came up under another runtime is
-    removed before bootstrap.
-  - Changing it means `fy box down && fy box up` (the box, not the VM).
+    removed before bootstrap. On lima, `/run/foldyard/engine.sock` (the engine socket a stack
+    service mounts, [gcp.md](./gcp.md#in-your-compose-file)) is that filtered socket too.
+  - Changing it means `fy box down && fy box up`. On lima, also restart the VM first
+    (`fy machine stop && fy up`): its boot script points `/run/foldyard/engine.sock` at the
+    socket for the runtime, so `fy up` refuses the running VM until it restarts.
   - Cost: about 1.2× on a Python test suite, 2–4× on sub-second git/lint calls.
   - File watching: edits made on your computer don't fire `inotify` in the box, so a dev server
     that hot-reloads on them must poll (`CHOKIDAR_USEPOLLING=1`, Vite `server.watch.usePolling`,

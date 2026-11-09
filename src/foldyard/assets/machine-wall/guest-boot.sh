@@ -40,6 +40,17 @@ echo "sudo: '$user' may only 'shutdown -h now' without a password"
 
 # 1b. The journal cap (guestlog.py) — root-owned /etc, so only this script can place it here.
 @@JOURNAL@@
+# 1c. A stable path to the VM user's engine socket for a stack service to bind-mount, since the
+#     socket's own path carries the uid. Under gVisor it is the filtered socket, so a container
+#     holding it can't create one outside gVisor. Root-owned, so nothing below root repoints it.
+#     The filter is a user unit that starts later, so the link may dangle until then; podman
+#     resolves a bind mount's source when it creates the container.
+_engine_link() {
+    install -d -m 0755 "${1%/*}"
+    ln -sfn "/run/user/$2/podman/$3" "$1"
+}
+_engine_link @@ENGINE_LINK@@ "$uid" @@ENGINE_SOCK@@
+
 # 2. The firewall script, root-owned in the guest — from this recording, never from the repo mount.
 install -d -m 0755 /usr/local/libexec
 cat >@@WALL_PATH@@.tmp <<'__FY_WALL_ASSET__'
