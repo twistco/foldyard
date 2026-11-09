@@ -22,8 +22,12 @@ import time
 import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # The canonical addon the proxy plugin runs (consumer-side until the framework extracts to core).
 ADDON = Path(__file__).resolve().parents[1] / "src/foldyard/assets/proxy/egress_proxy.py"
@@ -50,6 +54,8 @@ class _Req:
         self.path = path
         self.url = f"https://{host}{path}"  # the addon re-issues against this on a 401
         self.raw_content: bytes | None = b""
+        # mitmproxy's request-body streaming: off, on, or on through a filter.
+        self.stream: Callable[[bytes], bytes] | bool | None = None
         self.headers: dict[str, str] = {}
         # mitmproxy's request.query is a settable MultiDictView reflected into the URL; the addon
         # only ever does `query[name] = value`, so a plain dict is a faithful enough stand-in.

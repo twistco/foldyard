@@ -805,7 +805,8 @@ def unanswered(keys: Iterable[str]) -> set[str]:
         return set()
     granted = live_hosts()
     # A path grant answers its host: the operator decided how much of it the box gets, and a
-    # refusal outside those paths says so on its own row (`outside`) rather than re-asking.
+    # refusal outside those paths says so on its own row (`outside`) rather than re-asking. At
+    # runtime only — a path grant never covers a build, so a build-side reader can't use this.
     scoped = {parsed[0] for parsed in map(path_grant, granted) if parsed is not None}
     return {
         key

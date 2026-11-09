@@ -1682,6 +1682,8 @@ class Injector:
             return False
         if headers.get("content-length", "0").strip() not in ("", "0"):
             return False
+        if request.raw_content:  # judged with its body in (`request` without `requestheaders`)
+            return False
         path = _plain_path(request.path)
         return path is not None and any(_under(path, p) for p in self._path_grants[host])
 
@@ -2112,14 +2114,21 @@ class Injector:
         ctx.log.info(f"egress_proxy: refused a connection to {key} (not granted)")
 
     def _local_granted(
-        self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int, build: bool
+        self,
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        port: int,
+        build: bool,
+        *,
+        by_name: bool = False,
     ) -> bool:
         """Is there a grant for exactly this local address? Only one that NAMES it — never a
         wildcard, never the name it was reached by, never an injector's exemption: the operator
         wrote ``fy allow add 127.0.0.1:8123`` meaning that service and nothing else. The port rule
         is every grant's — a bare address covers :443 and cleartext :80, ``address:port`` that
         port — and a build-scoped grant counts for a build. An IPv6 address can't be granted (a
-        grant can't spell one), so it is always refused."""
+        grant can't spell one), so it is always refused. A path grant on the address counts only
+        for a dial to the address itself (``by_name`` false), whose requests are each judged against
+        it — never for a name resolving there, granted as a whole host."""
         self._refresh_allow()
         bare = str(ip)
         keys = {bare if port == _HTTPS_PORT else f"{bare}:{port}"}
@@ -2129,8 +2138,9 @@ class Injector:
         if any(key in patterns for key in keys):
             return True
         # A path grant naming this address names it too (typed, like any local grant): the dial
-        # it allows is still only a connection that earned it (`_dial_ok`).
-        return port in (_HTTPS_PORT, _HTTP_PORT) and bare in self._path_grants
+        # it allows is still only a connection that earned it (`_dial_ok`). Not a name's answer:
+        # that name's own grant would carry every request to the address, not one read.
+        return not by_name and port in (_HTTPS_PORT, _HTTP_PORT) and bare in self._path_grants
 
     def _refuse_local(
         self,
@@ -2202,7 +2212,11 @@ class Injector:
         kept, refused = [], None
         for info in infos:
             ip = _address(info[4][0])
-            if ip is not None and _is_local(ip) and not self._local_granted(ip, number, False):
+            if (
+                ip is not None
+                and _is_local(ip)
+                and not self._local_granted(ip, number, False, by_name=True)
+            ):
                 # Name a v4 answer when there is one: only that can be granted (`localhost`'s ::1
                 # often comes first).
                 if refused is None or (refused.version == 6 and ip.version == 4):
@@ -2467,6 +2481,14 @@ class Injector:
         streaming decision included, which it reads after the hook — so nothing about the flow
         changes, and every other connection keeps moving meanwhile."""
         await self._on_request(flow)
+        if flow.metadata.get("egress_proxy_path_read") and flow.response is None:
+            # A read has no body, but over HTTP/2 the headers can't promise that: a HEADERS frame
+            # may leave its stream open for DATA with no content-length, and mitmproxy streams a
+            # body past `stream_large_bodies` upstream before `request` could look at it. So the
+            # read is streamed through a filter that keeps nothing, at any size; a bodyless one
+            # (its stream ended with the headers) is never streamed at all. Only a read that is
+            # leaving: mitmproxy refuses a stream on a request the proxy answered itself.
+            flow.request.stream = self._no_body(flow, _destination(flow.request))
 
     async def request(self, flow: http.HTTPFlow) -> None:
         """Fires after ``requestheaders`` (after a buffered body, or after a streamed one has gone
@@ -2564,6 +2586,7 @@ class Injector:
         allowed = self._allowed_plain(host, port, flow.request.scheme)
         if not allowed and self._path_granted(flow.request):
             allowed = True
+            flow.metadata["egress_proxy_path_read"] = True  # `requestheaders` drops any body
             client_id = _client_id(flow)
             if client_id is not None and host:
                 self._path_dials.add((client_id, host))  # a cleartext request: its dial follows
@@ -2613,6 +2636,21 @@ class Injector:
         flow.metadata["egress_proxy_injected"] = True
         if rule.query_param:  # redact what WAS written, whatever the rules are at log time
             flow.metadata["egress_proxy_redact"] = rule.query_param
+
+    @staticmethod
+    def _no_body(flow: http.HTTPFlow, host: str | None):
+        """A request-body stream filter for a path-granted read: every chunk dropped, and the
+        first one noted, so the host gets the read and never what was sent with it."""
+
+        def drop(chunk: bytes) -> bytes:
+            if chunk and not flow.metadata.get("egress_proxy_body_dropped"):
+                flow.metadata["egress_proxy_body_dropped"] = True
+                ctx.log.info(
+                    f"egress_proxy: dropped the body of a read a path grant let through to {host}"
+                )
+            return b""
+
+        return drop
 
     def _owe_nothing(self, flow: http.HTTPFlow) -> None:
         """A request refused inside a tunnel the proxy answered has logged its own row, which

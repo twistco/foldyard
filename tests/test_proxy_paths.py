@@ -21,6 +21,7 @@ wire path — the dial counted on a real socket — is ``test_proxy_wall_e2e.py`
 
 from __future__ import annotations
 
+import asyncio
 import types
 
 import pytest
@@ -159,6 +160,31 @@ async def test_anything_but_a_plain_read_under_the_prefix_is_refused(walled, met
     assert flow.response is not None and flow.response.status_code == 403
 
 
+async def test_a_body_the_headers_dont_announce_never_leaves(walled):
+    # HTTP/2: HEADERS without END_STREAM, then DATA, and no content-length — nothing in the headers
+    # to refuse, and mitmproxy streams a body past `stream_large_bodies` upstream before `request`
+    # fires. So the read is streamed through a filter that keeps nothing (the wire: the e2e's
+    # `test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host`).
+    inj, allow, _log = walled
+    _write_allow(allow, [GRANT])
+    flow = _request()
+    assert await _judged(inj, flow)
+    stream = flow.request.stream
+    assert callable(stream)
+    assert stream(b"exfiltrated") == b"" and stream(b"") == b""
+    assert flow.metadata["egress_proxy_body_dropped"] is True
+    # Only a read that leaves: mitmproxy won't stream a request the proxy answered itself.
+    refused = _request(path="/another-bucket/x")
+    assert not await _judged(inj, refused)
+    assert refused.request.stream is None
+    # A request whose body is already in when it is first judged (a caller that skips
+    # `requestheaders`) is refused outright.
+    late = _request()
+    late.request.raw_content = b"exfiltrated"
+    await inj.request(late)
+    assert late.response is not None and late.response.status_code == 403
+
+
 async def test_a_prefix_without_a_slash_covers_itself_and_below_never_a_sibling(walled):
     inj, allow, _log = walled
     _write_allow(allow, [f"{GCS}/bucket/file.zip"])
@@ -295,6 +321,20 @@ def test_raw_bytes_inside_a_decrypted_tunnel_are_never_relayed(walled):
         )
     )
     assert kept.content == b"raw"
+
+
+async def test_a_path_grant_on_an_address_reaches_it_by_that_address_only(walled):
+    # A path grant naming a local address lets that address's own earned dial through …
+    inj, allow, _log = walled
+    _write_allow(allow, ["127.0.0.1/repo/", "dev.example.com"])
+    _connect(inj, "127.0.0.1")
+    inj.tls_clienthello(_ClientHello("127.0.0.1"))
+    assert _dial(inj, "127.0.0.1") is None
+    # … but never a name resolving there: that name is granted as a whole, so every request on
+    # it would reach the address the operator granted one read under /repo/ on.
+    await t._resolving_to(inj, ["127.0.0.1"])
+    with pytest.raises(OSError, match="a local address"):
+        await asyncio.get_running_loop().getaddrinfo("dev.example.com", 443)
 
 
 # ── the redirect that brought the box here ────────────────────────────────────────────────────

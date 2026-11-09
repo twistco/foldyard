@@ -210,8 +210,14 @@ class _Recorder:
         self.sock.listen()
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+        # mitmproxy offers upstream what the box offered it, and answers the box with what the
+        # upstream chose: HTTP/2 to the box only where the host speaks it, as GCS does.
+        self.ctx.set_alpn_protocols(["h2", "http/1.1"])
         self.accepted = 0
         self.received: list[bytes] = []
+        # What came after the answer: a body the request head didn't announce (mitmproxy relays
+        # an HTTP/2 request's DATA as raw bytes after an HTTP/1 head) arrives here.
+        self.after: list[bytes] = []
         threading.Thread(target=self._serve, daemon=True).start()
 
     def _serve(self) -> None:
@@ -226,6 +232,9 @@ class _Recorder:
     def _one(self, conn) -> None:
         try:
             tls = self.ctx.wrap_socket(conn, server_side=True)
+            if tls.selected_alpn_protocol() == "h2":
+                self._h2(tls)
+                return
             tls.settimeout(3)
             data = b""
             while b"\r\n\r\n" not in data:
@@ -241,11 +250,54 @@ class _Recorder:
                     b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
                     % (len(body), body)
                 )
+                tls.settimeout(1)
+                after = b""
+                try:
+                    while chunk := tls.recv(4096):
+                        after += chunk
+                except (TimeoutError, OSError):
+                    pass
+                self.after.append(after)
             tls.close()
         except (OSError, ssl.SSLError):
             pass
         finally:
             conn.close()
+
+    def _h2(self, tls) -> None:
+        """An HTTP/2 connection: each request's head goes to ``received`` (as ``METHOD path``),
+        the DATA every stream carried to ``after``, and every stream that ends is answered 200."""
+        import h2.config
+        import h2.connection
+        import h2.events
+        import h2.exceptions
+
+        conn = h2.connection.H2Connection(h2.config.H2Configuration(client_side=False))
+        conn.initiate_connection()
+        tls.sendall(conn.data_to_send())
+        tls.settimeout(5)
+        body = b""
+        try:
+            while data := tls.recv(65535):
+                for event in conn.receive_data(data):
+                    if isinstance(event, h2.events.RequestReceived):
+                        head = dict(event.headers)
+                        self.received.append(head[b":method"] + b" " + head[b":path"])
+                    elif isinstance(event, h2.events.DataReceived):
+                        body += event.data
+                        conn.acknowledge_received_data(
+                            event.flow_controlled_length, event.stream_id
+                        )
+                    elif isinstance(event, h2.events.StreamEnded):
+                        conn.send_headers(
+                            event.stream_id, [(":status", "200"), ("content-length", "2")]
+                        )
+                        conn.send_data(event.stream_id, b"ok", end_stream=True)
+                tls.sendall(conn.data_to_send())
+        except (OSError, ssl.SSLError, h2.exceptions.H2Error):
+            pass
+        finally:
+            self.after.append(body)
 
     def close(self) -> None:
         try:
@@ -340,6 +392,7 @@ def test_raw_bytes_after_a_decrypted_handshake_never_reach_the_host(scoped):
     # server may skip that CRLF and read the request after it.
     proxy, recorder = scoped
     ctx = ssl.create_default_context(cafile=str(proxy.ca))
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection((HOST, proxy.pport), timeout=10) as raw:
         raw.sendall(f"CONNECT {SCOPED}:443 HTTP/1.1\r\nHost: {SCOPED}:443\r\n\r\n".encode())
         assert raw.recv(4096).startswith(b"HTTP/1.1 200")
@@ -359,3 +412,61 @@ def test_raw_bytes_after_a_decrypted_handshake_never_reach_the_host(scoped):
         "the raw-bytes refusal row",
         proxy.mitm_log.read_text(),
     )
+
+
+def test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host(scoped):
+    # HTTP/2 lets a GET leave its stream open after HEADERS and send DATA with no content-length,
+    # so the headers give the wall nothing to refuse — and mitmproxy streams a body past
+    # `stream_large_bodies` upstream before the `request` hook could look at it. The read goes
+    # through; the body never does, whatever its size.
+    import h2.config
+    import h2.connection
+    import h2.events
+
+    proxy, recorder = scoped
+    secret = b"EXFILTRATED-" * 4
+    for size in (1, 200_000):  # buffered, and past `stream_large_bodies=1m` (streamed)
+        ctx = ssl.create_default_context(cafile=str(proxy.ca))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.set_alpn_protocols(["h2"])
+        with socket.create_connection((HOST, proxy.pport), timeout=10) as raw:
+            raw.sendall(f"CONNECT {SCOPED}:443 HTTP/1.1\r\nHost: {SCOPED}:443\r\n\r\n".encode())
+            assert raw.recv(4096).startswith(b"HTTP/1.1 200")
+            with ctx.wrap_socket(raw, server_hostname=SCOPED) as tls:
+                assert tls.selected_alpn_protocol() == "h2"
+                conn = h2.connection.H2Connection(h2.config.H2Configuration(client_side=True))
+                conn.initiate_connection()
+                conn.increment_flow_control_window(2**30)
+                conn.send_headers(
+                    1,
+                    [
+                        (":method", "GET"),
+                        (":path", f"{PREFIX}chrome.zip"),
+                        (":scheme", "https"),
+                        (":authority", SCOPED),
+                    ],
+                )
+                tls.sendall(conn.data_to_send())
+                body, status, done = secret * size, None, False
+                tls.settimeout(20)
+                while not done:
+                    window = min(conn.local_flow_control_window(1), conn.max_outbound_frame_size)
+                    if body and window > 0:
+                        conn.send_data(1, body[:window], end_stream=len(body) <= window)
+                        body = body[window:]
+                        tls.sendall(conn.data_to_send())
+                        continue
+                    data = tls.recv(65535)
+                    if not data:
+                        break
+                    for event in conn.receive_data(data):
+                        if isinstance(event, h2.events.ResponseReceived):
+                            status = dict(event.headers)[b":status"]
+                        elif isinstance(event, (h2.events.StreamEnded, h2.events.StreamReset)):
+                            done = True
+                    tls.sendall(conn.data_to_send())
+        assert status == b"200", (size, proxy.mitm_log.read_text())
+    time.sleep(1.5)  # the recorder's wait for anything after the answer
+    seen = recorder.received + recorder.after
+    assert f"GET {PREFIX}chrome.zip".encode() in recorder.received, seen
+    assert not any(b"EXFILTRATED" in r for r in seen), seen
