@@ -122,7 +122,11 @@ Consequences of running as the VM user:
   your computer does, so a `podman login` run in the VM isn't sent along with guest builds.
 - **Names in `[project] compose_env`** reach the guest on every compose call, where a box could read
   them from the client's `/proc`. That widens nothing: a box can already edit a compose file to
-  interpolate any of them into a container it can inspect.
+  interpolate any of them into a container it can inspect. The exceptions are names that only
+  describe your computer (`guestcompose._HOST_ONLY`): `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TMPDIR`, the `XDG_*` directories, the engine connection (`DOCKER_HOST`, `CONTAINER_HOST`, …), the
+  containers config files and `REGISTRY_AUTH_FILE`. The guest uses its own `PATH`, `HOME`, `USER`,
+  `LOGNAME` and `XDG_RUNTIME_DIR`, so a compose file that interpolates one renders differently.
 - **Terminal output.** What's relayed from the guest has its control sequences stripped
   (`guestcompose.printable`). The client on your computer doesn't do that, so `fy logs` is cleaner
   here than it is without the switch.
@@ -133,10 +137,10 @@ Consequences of running as the VM user:
   always is, since `fy machine ensure` creates the VM from it. A VM that doesn't mount the checkout
   used to work for image-only and context-shipped stacks, and now refuses, naming `fy machine
   recreate`.
-- **Registry logins on your computer don't reach the VM.** A client on your computer read
-  `auth.json` and sent the credentials with each pull and build, which is itself a host secret the
-  compose files could spend. In the VM there is no such file, so a private base image needs another
-  route. None of the maintainers' projects uses one today, so this stays a documented limit for now,
+- **Registry logins on your computer don't reach the VM.** The client on your computer sends none
+  unless the project opts in ([stack.md, Private images](./stack.md#private-images)): an exported
+  `FY_REGISTRY_AUTH_FILE` that `[project] compose_env` names, a host secret the compose files could
+  spend. The client in the VM has no such file, so a private image needs another route. None of the maintainers' projects uses one today, so this stays a documented limit for now,
   and it **blocks phase 4**: other projects need a route before the host path goes. The two options:
   an adopted list of images pulled by `podman pull` from your computer (small, and needs no new tool,
   but the named registry's login reaches the VM during that pull), or by `skopeo` on your computer

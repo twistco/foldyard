@@ -146,8 +146,9 @@ def failure_hint() -> list[str]:
         return [
             '  If that was a pull from a private registry: with [machine] compose = "vm" no login',
             "  on your computer reaches the VM. An image already in the VM needs none, so pull it",
-            f"  once with the client here: opt in with {OPT_IN}, then",
-            "  `MACHINE_COMPOSE=host fy up` (`fy docs stack`, Private images).",
+            f"  once with the client here: export {OPT_IN} to a file with only that login, add",
+            "  that name to [project] compose_env, then run `MACHINE_COMPOSE=host fy up`",
+            "  (`fy docs stack`, Private images).",
         ]
     if _offered(config.compose_env()) or not _your_logins():
         return []

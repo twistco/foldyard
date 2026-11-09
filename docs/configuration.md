@@ -474,8 +474,9 @@ disk_gib = 60
 - **`compose`** *(experimental)* — where the stack's compose client runs. `"host"` (the default)
   runs it on your computer, which refuses compose files that name paths outside the checkout
   ([stack](./stack.md#which-paths-compose-may-read)). `"vm"` runs foldyard's own podman-compose in
-  the VM instead, over the VM's ssh route, so a path in a compose file reads the VM, which holds
-  nothing of yours. Any other value is an error. Env: `MACHINE_COMPOSE`.
+  the VM instead, over the VM's ssh route, so a path in a compose file reads the VM, where the
+  checkout and its worktrees are the only files of yours. Any other value is an error. Env:
+  `MACHINE_COMPOSE`.
   - *Experimental*: it hasn't run under gVisor or on the podman backend, and it hasn't been used
     day to day.
   - Every compose call and the build of a project's own box image run in the VM. `fy shell` enters

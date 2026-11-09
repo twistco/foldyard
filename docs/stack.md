@@ -200,8 +200,9 @@ repo and its worktrees (at the same paths as on your computer). A bind mount of 
 or give it a credential through a mode ([below](#keep-secrets-out-of-compose)).
 
 Run from inside the box, or with `[machine] compose = "vm"`
-([experimental](./configuration.md#machine)), the compose client runs in the VM, where none of
-your files are, so these checks don't apply: a path like that just isn't there.
+([experimental](./configuration.md#machine)), the compose client runs in the VM, where the
+checkout and its worktrees are your only files, so these checks don't apply: a path like that just
+isn't there.
 
 ## Private images
 
@@ -232,8 +233,8 @@ An image already in the VM needs no registry, so `fy up` in the box finds it. A 
 pull: the box has no login, and an agent can't make your logins fetch something new by editing a
 compose file. An anonymous pull also means Docker Hub's lower rate limit.
 
-With `[machine] compose = "vm"` *(experimental)* the client runs in the VM, where no file on your
-computer reaches it, so the opt-in does nothing there. Pull a private image once with the client on
+With `[machine] compose = "vm"` *(experimental)* the client runs in the VM, where the auth file
+you exported doesn't reach, so the opt-in does nothing there. Pull a private image once with the client on
 your computer, `MACHINE_COMPOSE=host fy up` with the opt-in above. That covers base images and
 services that only name an image, which `fy build` skips. From then on the image is in the VM and
 needs no login, and the override lasts only that run: the supervisor keeps following
