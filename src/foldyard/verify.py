@@ -114,6 +114,10 @@ class _Report:
         print(f"  {_WARN}  {msg}")
         self.warns += 1
 
+    def info(self, msg: str) -> None:
+        """Worth seeing, nothing to judge: no exit effect and not a warning."""
+        print(f"  ℹ  {msg}")
+
     def na(self, msg: str) -> None:
         """Not applicable HERE — the check is fulfilled at another layer and there is nothing to
         act on in this context. Neutral: no exit effect and not a warning (unlike `warn`, which
@@ -1012,6 +1016,83 @@ def _wall_posture(rep: _Report) -> None:
                 )
         except OSError:
             rep.ok(f"direct egress to a public IP:{what} rejected")
+    try:
+        openings = config.machine_firewall_allow()
+    except SystemExit as e:
+        rep.warn(f"{e} (the VM applies only what was adopted)")
+        return
+    # In the box this is the working tree; the VM applied what the host adopted.
+    source = (
+        "this checkout declares [machine] firewall_allow"
+        if config.in_box()
+        else "opened by [machine] firewall_allow"
+    )
+    for o in openings:
+        rep.info(f"{source}: {o.to} tcp/{o.port} — {o.why}")
+    if config.in_box():
+        rep.info("the firewall's refusals are in the VM: run `fy verify` on your computer")
+
+
+_REFUSAL_GROUPS = 10
+
+
+def _chatter(row: dict) -> bool:
+    """IGMP and multicast (v6 neighbour discovery included): the VM's own network noise."""
+    import ipaddress
+
+    if row.get("proto") == "2":
+        return True
+    try:
+        return ipaddress.ip_address(row["dst"]).is_multicast
+    except ValueError:
+        return False
+
+
+def _wall_refusals(rep: _Report) -> None:
+    """What the VM firewall refused since boot (the guest's log, read through limactl), grouped
+    by destination, newest first. Informational, except a refused address on a port an opening
+    names: the likeliest reason an opening's client fails is that the address moved."""
+    import ipaddress
+
+    print(f"▶ VM firewall refusals since boot (the VM's {machine._DENIES_PATH})")
+    rows = machine.wall_denies()
+    if rows is None:
+        rep.info("couldn't read the firewall's refusals (VM unreachable, or provisioned before it)")
+        return
+    noise = [r for r in rows if _chatter(r)]
+    groups: dict[tuple, list[dict]] = {}
+    for r in rows:
+        if not _chatter(r):
+            groups.setdefault((r["dst"], r.get("port"), r.get("proto", "")), []).append(r)
+    if not groups and not noise:
+        rep.info("nothing refused since the VM booted")
+        return
+    try:
+        openings = config.machine_firewall_allow()
+    except SystemExit:
+        openings = []  # _wall_posture / `fy config widenings` report a bad list
+    newest = sorted(groups.items(), key=lambda kv: kv[1][-1]["seq"], reverse=True)
+    for (dst, port, proto), hits in newest[:_REFUSAL_GROUPS]:
+        try:
+            dst = str(ipaddress.ip_address(dst))  # the kernel writes v6 uncompressed
+        except ValueError:
+            pass
+        last = next((h["ts"] for h in reversed(hits) if h.get("ts")), "")
+        where = f"{dst} {proto}/{port}" if port is not None else f"{dst} {proto}"
+        line = f"refused {where} ×{len(hits)}" + (f", last {last}" if last else "")
+        named = [o for o in openings if proto == "tcp" and o.port == port]
+        if named and all(str(ipaddress.ip_network(o.to).network_address) != dst for o in named):
+            to = ", ".join(f"{ipaddress.ip_network(o.to).network_address} ({o.why})" for o in named)
+            rep.warn(
+                f"{line}: firewall_allow opens tcp/{port} only to {to}; something tried {dst}: "
+                "has the address changed?"
+            )
+        else:
+            rep.info(line)
+    if len(newest) > _REFUSAL_GROUPS:
+        rep.info(f"{len(newest) - _REFUSAL_GROUPS} more destinations")
+    if noise:
+        rep.info(f"{len(noise)} more: local-network chatter (multicast, IGMP, neighbour discovery)")
 
 
 class _Listener:
@@ -1186,6 +1267,7 @@ def verify() -> int:
     else:
         if _walled():
             _host_loopback(rep, engine, ctx.env, probe)
+            _wall_refusals(rep)
         print(
             "▶ dev-box checks — skipped (not inside the box; run via 'fy box shell' "
             "then 'fy verify')"

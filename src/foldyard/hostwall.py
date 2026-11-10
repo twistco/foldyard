@@ -263,12 +263,17 @@ def render(vm: str, slice_path: str) -> str:
     nothing from a running VM (Lima's forwarded SSH port, the hostagent's listener ports) and
     nothing from the network (resolvers), so the same text is valid across every boot of the VM.
     Loopback is allowed out under the VM's :func:`ct_mark` and judged on INPUT by the receiving
-    socket (the module docstring has the why); DNS goes to any resolver, both transports. The
+    socket (the module docstring has the why); DNS goes to any resolver, both transports;
+    ``[machine] firewall_allow``'s openings are the VM firewall's, carried over. The
     ``delete table`` before the ``table`` block makes the whole file idempotent — a re-apply
     replaces the table atomically rather than erroring on the existing one or stacking a second
     copy."""
     level = cgroup_level(slice_path)
     bands = ", ".join(_allowed_ports())
+    openings = "".join(
+        f"    {'ip6' if ':' in o.to else 'ip'} daddr {o.to} tcp dport {o.port} accept\n"
+        for o in config.machine_firewall_allow()
+    )
     name = table_name(vm)
     mark = f"{ct_mark():#010x}"
     return f"""\
@@ -282,7 +287,7 @@ def render(vm: str, slice_path: str) -> str:
     udp dport 53 accept
     tcp dport 53 accept
     oif "lo" ct mark set {mark} accept
-    meta l4proto tcp counter reject with tcp reset
+{openings}    meta l4proto tcp counter reject with tcp reset
     counter reject with icmpx type admin-prohibited
   }}
   chain input {{

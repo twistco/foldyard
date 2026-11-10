@@ -29,6 +29,7 @@ in the box, on the recipe hot path.
 from __future__ import annotations
 
 import contextvars
+import ipaddress
 import json
 import math
 import os
@@ -1172,6 +1173,87 @@ def machine_wall() -> bool:
     if env is not None:
         return env
     return bool(_table("machine").get("firewall", False))
+
+
+@dataclass(frozen=True)
+class FirewallOpening:
+    """One ``[machine] firewall_allow`` entry: TCP to ``to`` (a network, normalised) on ``port``."""
+
+    to: str
+    port: int
+    why: str
+
+
+# What an opening may never reach: your computer and LAN (0.8.0's guarantee), a tailnet, a
+# cloud's metadata service, multicast, and v4 hidden in v6. Checked alongside the proxy's own
+# predicate (allowlist.local_key), which is the authority; this list only adds to it.
+_WALL_PROTECTED = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "::/127",
+        "::ffff:0:0/96",
+        "64:ff9b::/96",
+        "64:ff9b:1::/48",  # local-use NAT64: Python before 3.11.10 calls it global
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8",
+    )
+)
+
+
+def machine_firewall_allow() -> list[FirewallOpening]:
+    """``[machine] firewall_allow`` — direct TCP openings in the VM firewall, for a client that
+    can't use an HTTP proxy (cloud-sql-proxy's instance dial). Each is ``{ to, port, why }``: one
+    IP address (never a range or a name: nothing resolves at boot), one TCP port, and a reason. On
+    your computer this is the adopted config, so the box can't widen it. Refuses a bad entry."""
+    raw = _table("machine").get("firewall_allow", [])
+
+    def bad(why: str) -> SystemExit:
+        return SystemExit(f"✗ [machine] firewall_allow: {why}")
+
+    if not isinstance(raw, list):
+        raise bad("must be a list of { to, port, why } tables")
+    out: list[FirewallOpening] = []
+    for entry in raw:
+        if not isinstance(entry, dict) or set(entry) - {"to", "port", "why"}:
+            raise bad(f"{entry!r} must be a table with only to, port and why")
+        to, port, why = entry.get("to"), entry.get("port"), entry.get("why")
+        try:
+            net = ipaddress.ip_network(str(to), strict=True)
+        except ValueError:
+            raise bad(f"to = {to!r} must be an IP address (no host names)")
+        # One address each: every one opened is somewhere the box can send unseen, and cloud
+        # neighbours are other tenants. Loosening later breaks nobody; tightening would.
+        if net.num_addresses != 1:
+            raise bad(f"to = {to!r} is a range: list each address as its own entry")
+        from .allowlist import local_key
+
+        # The proxy's own predicate too (non-global, and v4 wrapped in 6to4/Teredo/mapped v6).
+        if any(net.overlaps(p) for p in _WALL_PROTECTED if p.version == net.version) or local_key(
+            str(net.network_address)
+        ):
+            raise bad(f"to = {to!r} reaches a private, local or reserved range")
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+            raise bad(f"port = {port!r} for {to} must be one TCP port, 1-65535")
+        if port == 53:
+            raise bad(f"{to} port 53: the wall lets DNS reach local resolvers only")
+        if not isinstance(why, str) or not why.strip():
+            raise bad(f"{to} port {port} needs a why")
+        opening = FirewallOpening(str(net), port, why.strip())
+        if all((o.to, o.port) != (opening.to, opening.port) for o in out):
+            out.append(opening)
+    return out
 
 
 def machine_host_wall() -> bool:

@@ -66,6 +66,27 @@ _no_proxy() {
     echo "localhost,127.0.0.1,$1${extra:+,$extra}"
 }
 
+# The accepts for `[machine] firewall_allow`, from FY_WALL_OPEN ("<network>@<port>" each, host-
+# validated): $1 picks the family, "ip" or "ip6". A token that isn't plainly that is dropped.
+_openings() {
+    local tok net port bad
+    for tok in ${FY_WALL_OPEN:-}; do
+        net="${tok%@*}" port="${tok#*@}"
+        case "$tok" in
+        *[!0-9a-fA-F.:/@]* | *@*@* | @* | *@ | *[!0-9]@* | */) bad=1 ;;
+        *) case "$port" in *[!0-9]*) bad=1 ;; *) bad="" ;; esac ;;
+        esac
+        if [ -n "$bad" ] || [ "${net#*/}" = "$net" ]; then
+            echo "⚠ FY_WALL_OPEN entry '$tok' dropped: not <network>@<port>" >&2
+            continue
+        fi
+        case "$net" in
+        *:*) if [ "$1" = ip6 ]; then printf '    ip6 daddr %s tcp dport %s accept comment "[machine] firewall_allow"\n' "$net" "$port"; fi ;;
+        *) if [ "$1" = ip ]; then printf '    ip daddr %s tcp dport %s accept comment "[machine] firewall_allow"\n' "$net" "$port"; fi ;;
+        esac
+    done
+}
+
 # The guest's OWN trust store: what the VM user's podman verifies image PULLS against (Go reads
 # the system bundle), so a registry host the proxy decrypts no longer fails "unknown authority".
 # With the CA it goes in; without one (no CA yet, or the firewall off) ours comes out. One fixed
@@ -248,11 +269,13 @@ _denies_reporter() {
 lines in /run/fy-wall/denies.jsonl (world-readable). Runs as root under fy-wall-denies.service."""
 
 import collections
+import datetime
 import json
 import os
 import re
 import select
 import sys
+import time
 
 OUT = "/run/fy-wall/denies.jsonl"
 KEEP = 200
@@ -265,8 +288,9 @@ def boot_id():
         return fh.read().strip()
 
 
-def parse(record, boot):
-    """One /dev/kmsg record (``pri,seq,usec,flags;message``) → a row, or None."""
+def parse(record, boot, offset=None):
+    """One /dev/kmsg record (``pri,seq,usec,flags;message``) → a row, or None. ``offset`` (wall
+    clock minus monotonic) adds ``ts``, the refusal's UTC time."""
     head, sep, message = record.partition(";")
     if not sep:
         return None
@@ -274,15 +298,17 @@ def parse(record, boot):
     prefix = message.split(" ", 1)[0]
     if prefix not in CHAINS:
         return None
+    parts = head.split(",")
     try:
-        seq = int(head.split(",")[1])
+        seq = int(parts[1])
     except (IndexError, ValueError):
         return None
+    usec = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
     fields = dict(FIELD.findall(message))
     if "DST" not in fields:
         return None
     port = fields.get("DPT")
-    return {
+    row = {
         "boot": boot,
         "seq": seq,
         "chain": CHAINS[prefix],
@@ -290,6 +316,10 @@ def parse(record, boot):
         "proto": fields.get("PROTO", "").lower(),
         "port": int(port) if port and port.isdigit() else None,
     }
+    if offset is not None and usec is not None:
+        at = datetime.datetime.fromtimestamp(offset + usec / 1e6, datetime.timezone.utc)
+        row["ts"] = at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return row
 
 
 def write(rows):
@@ -304,6 +334,9 @@ def write(rows):
 def drain(fd, rows, boot):
     """Every record the kernel has for us now; True when one was a refusal."""
     new = False
+    # Taken per batch, not once at start: the guest's clock is synced after boot, so an offset
+    # read then (or /proc/stat's btime) can be off by however far the sync moved it.
+    offset = time.time() - time.monotonic()
     while True:
         try:
             record = os.read(fd, 8192)
@@ -311,7 +344,7 @@ def drain(fd, rows, boot):
             return new
         except BrokenPipeError:
             continue  # records were overwritten before we read them: carry on from the next
-        row = parse(record.decode("utf-8", "replace"), boot)
+        row = parse(record.decode("utf-8", "replace"), boot, offset)
         if row is not None:
             rows.append(row)
             new = True
@@ -412,6 +445,8 @@ table inet fy_wall {
     ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } udp dport 53 accept comment "DNS to LOCAL resolvers only"
     ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport 53 accept comment "a public-IP :53 stream is an exfil tunnel, not resolution — deny it"
     ip daddr $GW tcp dport { $PORTS } accept comment "host-side foldyard daemons (proxy, minters)"
+$(_openings ip)
+$(_openings ip6)
     log prefix "fy-wall-deny " counter
     meta l4proto tcp reject with tcp reset comment "REJECT fast, not a silent hang"
     reject
@@ -429,6 +464,7 @@ table ip6 fy_wall6 {
     type filter hook output priority 0; policy accept;
     meta skuid != { $WALL_UID$SUB } accept comment "system uids only — walled user + container subuids fall through"
     oifname "lo" accept
+$(_openings ip6)
     log prefix "fy-wall-deny6 " counter comment "force the walled uid onto the v4 proxy path"
     reject
   }
@@ -606,7 +642,7 @@ EOF
         systemctl enable fy-wall-denies.service >/dev/null 2>&1 || true
         systemctl restart fy-wall-denies.service || echo "⚠ fy-wall-denies didn't start" >&2
     fi
-    echo "✓ VM firewall (fy-wall) installed: uid $WALL_UID${SUB:+ +subuid$SUB} default-deny; open: lo, local-DNS, $GW tcp {$PORTS}"
+    echo "✓ VM firewall (fy-wall) installed: uid $WALL_UID${SUB:+ +subuid$SUB} default-deny; open: lo, local-DNS, $GW tcp {$PORTS}${FY_WALL_OPEN:+, firewall_allow: $FY_WALL_OPEN}"
     ;;
 
 uninstall)

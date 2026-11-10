@@ -252,6 +252,26 @@ disk_gib = 60
   rejected, not let through. Lima only (preflight enforces it), and needs `[proxy]` declared, or
   the box has no way out at all. Default: `false` (`init` writes `true`). Env:
   `MACHINE_FIREWALL` (`1`/`true`/`on`/`yes`).
+- **`firewall_allow`** — direct openings in the VM firewall, for a client that can't use an HTTP
+  proxy (cloud-sql-proxy dials its instance on TCP 3307, say). A list of `{ to, port, why }`:
+  `to` one IP address (never a range or a host name: nothing resolves at boot), `port` one
+  TCP port other than 53 (DNS stays with local resolvers), `why` the reason, which `fy verify`
+  shows beside the opening. Default: none.
+
+  ```toml
+  firewall_allow = [
+    { to = "34.147.131.70", port = 3307, why = "Cloud SQL instance: cloud-sql-proxy dials it directly" },
+  ]
+  ```
+
+  An opening can't name an address the proxy treats as local: anything private, loopback,
+  link-local, CGNAT, multicast or reserved, including a v4 address wrapped in v6 (mapped, 6to4,
+  Teredo, NAT64), is refused, and so is a range: list each address as its own entry. Your
+  computer's own public address can't be known here: don't open one, or use `host_firewall`.
+  It is applied at boot like the rest of the firewall, so a change takes
+  `fy machine stop && fy up`. With `host_firewall`, the host's rules carry the openings too, and
+  a change means installing them again (`fy machine host-firewall`). Read from the adopted
+  config, so the box can't add one.
 - **`host_firewall`** — the host firewall: the same rules again on your computer, matching the
   VM process's own traffic, so a guest-kernel exploit that removes the VM firewall still can't
   get out. It allows only DNS, this project's port range, and the VM's own loopback plumbing

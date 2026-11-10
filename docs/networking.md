@@ -272,6 +272,26 @@ software and ignored by anything else:
 - **QUIC/HTTP-3 (UDP/443)** bypasses a CONNECT proxy entirely. With the VM firewall, it is
   refused. Without it, it is not captured at all.
 
+**A client that can't use a proxy gets a narrow opening, not the firewall off.** Some protocols
+aren't HTTP: cloud-sql-proxy authenticates over HTTPS through the proxy, then dials the database
+instance on TCP 3307 itself, and the firewall refuses that. `[machine] firewall_allow` opens one
+TCP port to one address or small network, with the reason written down
+([configuration](./configuration.md)):
+
+```toml
+[machine]
+firewall_allow = [
+  { to = "34.147.131.70", port = 3307, why = "Cloud SQL instance: cloud-sql-proxy dials it directly" },
+]
+```
+
+That traffic leaves the VM directly: the proxy doesn't see it, log it or apply the allowlist to it,
+so keep the list short. An opening can't name a local address, judged as the proxy judges one
+(below), though your computer's own public address isn't one foldyard can know. It comes from the
+adopted config, so the box can't add one. `fy verify` lists each opening and its
+reason. The firewall's refusals are in the VM's `/run/fy-wall/denies.jsonl`, which is where a
+missing opening shows up: the address and port the client tried.
+
 ### The host firewall
 
 `[machine] host_firewall = true` (Linux only; needs `firewall = true`) enforces the same rules
@@ -287,7 +307,8 @@ the box, and stays out of its reach in two ways:
 
 - **Directly.** Lima gives the VM your computer's loopback at `192.168.5.2`. With the VM firewall,
   a container reaches only this project's proxy ports there. Without it, a container reaches every
-  service on your loopback that way.
+  service on your loopback that way. A `firewall_allow` opening can't change that: foldyard
+  refuses one that points at `192.168.5.2`, loopback or any other private or local range.
 - **Through the proxy.** The proxy runs on your computer, so whatever it dials, it dials from
   there. It refuses loopback, the private ranges, CGNAT (a tailnet) and link-local (a cloud's
   metadata service), in every mode, learning included. That holds whether the box names an
@@ -546,6 +567,15 @@ own HTTP client, or a program opening raw sockets.
 - **A build fails at the network and nothing was refused at the proxy.** The tool connected
   directly and the VM firewall refused it. See "A tool that ignores the proxy settings" under
   image builds above. The build's output lists what the firewall refused.
+- **A client using a `firewall_allow` opening fails.** The firewall's refusals are in the VM's
+  `/run/fy-wall/denies.jsonl` (one JSON line each, with `ts` in UTC to line up with the client's
+  log), and `fy verify` on your computer lists them. Three cases:
+  - `fy up` refused the VM, naming `[machine] firewall_allow`: the list changed since the VM
+    booted. Run `fy machine stop && fy up`.
+  - `fy verify` warns about a refusal on the opening's port at another address: the service's
+    address changed. Update the entry, adopt it, and restart the VM.
+  - Nothing was refused: the connection left the VM, so the trouble is at the far end (the service
+    is down, or its login failed, an expired access grant, say). Read the client's own logs.
 - **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate
   it once (`fy box down && fy box up`). The log only shows a request once it gets a response, so
   a failing TLS handshake (CA not trusted) shows nothing.

@@ -151,6 +151,10 @@ class Exposure:
     # (names, origin) for `[project] compose_env`: host variables handed to the compose client,
     # which runs on the operator's computer over box-writable compose files. None = not declared.
     compose_env: tuple[list[str], str] | None = None
+    # (network, port, why) from `[machine] firewall_allow`: direct, so no proxy, log or allowlist.
+    openings: list[tuple[str, int, str]] = field(default_factory=list)
+    openings_origin: str = DEFAULT
+    openings_error: str = ""  # an invalid entry's refusal: reported, not raised
     wall: bool = False
     host_wall: bool = False  # the same wall enforced on the HOST too (hostwall.py)
     backend: str = ""
@@ -165,6 +169,8 @@ class Exposure:
         ]
         out += [f"unknown passthrough bundle @{ref}" for ref in self.unknown_refs]
         out += [f"`{old}` was renamed to `{new}`" for old, new, _origin in self.renamed]
+        if self.openings_error:
+            out.append(self.openings_error.removeprefix("✗ "))
         return out
 
 
@@ -515,6 +521,11 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         )
         for e in config.proxy_recommend()
     ]
+    # SystemExit is a BaseException: raised here it would end `fy doctor` partway through.
+    try:
+        openings, openings_error = config.machine_firewall_allow(), ""
+    except SystemExit as e:
+        openings, openings_error = [], str(e)
     return Exposure(
         label=drift.label,
         adopted=drift.pinned_digest(),
@@ -548,6 +559,9 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
             if config.compose_env()
             else None
         ),
+        openings=[(o.to, o.port, o.why) for o in openings],
+        openings_origin=_origin(shared, local, "machine", "firewall_allow"),
+        openings_error=openings_error,
         wall=config.machine_wall(),
         host_wall=config.machine_host_wall(),
         backend=config.machine_backend(),
@@ -567,6 +581,19 @@ def render(exp: Exposure) -> list[str]:
     else:
         where = f"[{exp.label} · adopted {exp.adopted}]"
     out = [f"Repo-declared widenings — what foldyard.toml asks the HOST to allow   {where}", ""]
+
+    if exp.openings_error:
+        out.append(f"  ⚠ {exp.openings_error.removeprefix('✗ ')}")
+        out.append("    The VM never applies an invalid list; fix the entry.")
+        out.append("")
+    if exp.openings:
+        out.append(
+            f"  direct openings      [machine] firewall_allow{_shared_note(exp.openings_origin)}"
+        )
+        out.append("    These bypass the proxy: not logged, not decrypted, no allowlist.")
+        for net, port, why in exp.openings:
+            out.append(f"    {net} tcp/{port} — {why}")
+        out.append("")
 
     out.append(f"  capture exemptions   [proxy] passthrough{_shared_note(exp.passthrough_origin)}")
     source = (
@@ -694,8 +721,13 @@ def render(exp: Exposure) -> list[str]:
         out.append("")
 
     out.append(f"  Not counted — runs in the VM, not on your computer: {' · '.join(BOX_SCOPED)}")
+    opened = (
+        f", {_plural(len(exp.openings), 'direct opening', 'direct openings')}"
+        if exp.openings
+        else ""
+    )
     wall = (
-        f"VM firewall ON ({exp.backend}{', host firewall too' if exp.host_wall else ''})"
+        f"VM firewall ON ({exp.backend}{', host firewall too' if exp.host_wall else ''}{opened})"
         if exp.wall
         else f"VM firewall OFF ({exp.backend}) — proxy routing is cooperative"
     )
