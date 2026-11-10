@@ -1186,9 +1186,16 @@ def _remove_orphan_containers(
             f"▶ removing {len(orphans)} container(s) whose service left the rendered config "
             f"({names}); named volumes are kept…"
         )
+        # No `--depend`: a live container that still `--requires` an orphan would go with it,
+        # after `up`, with nothing to recreate it. A refusal leaves the orphan, and says so.
         cmd = [config.engine(), "rm", "-f"] + [cid for cid, _ in orphans]
         emit("+ " + " ".join(cmd))
-        _run(cmd, env=ctx.env)
+        rm = _run(cmd, env=ctx.env)
+        if rm.returncode != 0:
+            emit(
+                f"⚠ the engine refused to remove some of them (exit {rm.returncode}), so they "
+                f"stay: {(rm.stderr or '').strip()}"
+            )
     except Exception:
         return  # best-effort: an orphan left running is recoverable, a bad sweep is not
 
@@ -1288,11 +1295,21 @@ def _remove_stranded_dependents(
             f"▶ removing {len(stranded)} stopped container(s) compose would drop without "
             f"re-creating ({', '.join(stranded)}) — recreated on `up`; named volumes are kept…"
         )
-        cmd = [config.engine(), "rm", "-f", *stranded]
+        # podman removes the listed names in parallel, so one that another `--requires` is
+        # refused in any order. `--depend` takes dependents first; all of them are downstream of
+        # a recreated service, which compose's own `down` removes anyway.
+        cmd = [config.engine(), "rm", "-f", "--depend", *stranded]
         emit("+ " + " ".join(cmd))
-        _run(cmd, env=ctx.env)
+        rm = _run(cmd, env=ctx.env)
+        if rm.returncode != 0:
+            emit(
+                f"⚠ the engine refused that removal (exit {rm.returncode}): "
+                f"{(rm.stderr or '').strip()}\n"
+                "  compose may now skip re-creating them and wait forever on one's health; if "
+                "`up` hangs, interrupt it and run `fy down && fy up`."
+            )
     except Exception:
-        return  # best-effort: compose then fails loudly, exactly as it would have anyway
+        return  # best-effort: a probe that can't answer removes nothing
 
 
 def _stack_is_up(ctx: Context, ignore_services: set[str] | frozenset[str] = frozenset()) -> bool:

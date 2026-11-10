@@ -2256,9 +2256,12 @@ def test_stack_is_up_ignores_posture_services(fake_repo, monkeypatch):
 # docstring). These pin the replacement's exact engine sequence and its fail-safe edges.
 
 
-def _orphan_world(monkeypatch, *, services: str, ps: str, inspect: str):
+def _orphan_world(
+    monkeypatch, *, services: str, ps: str, inspect: str, rm_stderr: str | None = None
+):
     """Script the sweep's three probes (compose config --services, engine ps, engine inspect)
-    and record every command; returns the recorded call list."""
+    and record every command; returns the recorded call list. ``rm_stderr`` makes the engine
+    refuse the removal with it."""
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kw):
@@ -2270,6 +2273,8 @@ def _orphan_world(monkeypatch, *, services: str, ps: str, inspect: str):
             proc.stdout = ps
         elif cmd[1] == "inspect":
             proc.stdout = inspect
+        elif cmd[1] == "rm" and rm_stderr is not None:
+            proc.returncode, proc.stderr = 125, rm_stderr
         return proc
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
@@ -2288,6 +2293,24 @@ def test_orphan_sweep_removes_only_departed_services(fake_repo, monkeypatch):
     rms = [c for c in calls if c[1] == "rm"]
     assert rms == [["podman", "rm", "-f", "bbb"]]  # ONLY the departed service's container
     assert any("metadata" in ln for ln in lines)  # named in the sweep announcement
+
+
+def test_a_refused_orphan_removal_is_reported_and_takes_no_dependent_with_it(
+    fake_repo, monkeypatch
+):
+    # No `--depend`: it would also remove a live container that still `--requires` the orphan,
+    # after `up` has finished, so nothing would recreate it. The refusal is reported instead.
+    calls = _orphan_world(
+        monkeypatch,
+        services="app\n",
+        ps="aaa\nbbb\n",
+        inspect="aaa app\nbbb metadata\n",
+        rm_stderr="Error: container bbb has dependent containers which must be removed before it",
+    )
+    lines: list[str] = []
+    stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lines.append)
+    assert [c for c in calls if c[1] == "rm"] == [["podman", "rm", "-f", "bbb"]]
+    assert any("has dependent containers" in ln for ln in lines)
 
 
 def test_orphan_sweep_fails_safe_on_empty_render_and_unlabeled_containers(fake_repo, monkeypatch):
@@ -2754,9 +2777,11 @@ def _pc_labels(service: str, config_hash: str) -> dict:
     }
 
 
-def _stranded_stack(monkeypatch, desired: dict | None, drop: tuple[str, ...] = ()):
+def _stranded_stack(
+    monkeypatch, desired: dict | None, drop: tuple[str, ...] = (), rm_fails: bool = False
+):
     """An engine holding a stopped app (stale hash) + a stopped sim that depends on it; ``drop``
-    removes those labels from the sim."""
+    removes those labels from the sim, ``rm_fails`` makes the engine refuse the removal."""
     import types
 
     from foldyard import confighash
@@ -2774,6 +2799,11 @@ def _stranded_stack(monkeypatch, desired: dict | None, drop: tuple[str, ...] = (
         calls.append(cmd)
         if cmd[1:3] == ["ps", "-a"] and "json" in cmd:
             return types.SimpleNamespace(returncode=0, stdout=json.dumps(ps), stderr="")
+        if rm_fails and cmd[1:2] == ["rm"]:
+            refusal = (
+                "Error: container 1a2b has dependent containers which must be removed before it"
+            )
+            return types.SimpleNamespace(returncode=125, stdout="", stderr=refusal)
         return _FakeProc()
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
@@ -2790,9 +2820,30 @@ def test_up_removes_stranded_dependents_before_compose_up(fake_repo, monkeypatch
     calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"})
     assert stack.up() == 0
     rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
-    assert rm[3:] == ["tangible-podman-sim"]
+    assert rm[-1:] == ["tangible-podman-sim"]
     up_idx = next(i for i, c in enumerate(calls) if "compose" in c and "up" in c)
     assert calls.index(rm) < up_idx
+
+
+def test_stranded_dependents_are_removed_with_their_own_dependents(fake_repo, monkeypatch):
+    # podman removes the names one `rm` lists in parallel, so a stranded sim whose stranded
+    # worker `--requires` it is refused in either order (podman 5.8.9, measured), and the sim
+    # then strands for real: compose's `up` skips creating it and waits forever on its health.
+    # `--depend` removes dependents first. They're all downstream of a recreated service, so
+    # compose's own `down` would remove them anyway.
+    calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"})
+    assert stack.up() == 0
+    rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
+    assert "--depend" in rm
+
+
+def test_a_refused_stranded_removal_is_reported_not_swallowed(fake_repo, monkeypatch, capsys):
+    calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"}, rm_fails=True)
+    assert stack.up() == 0
+    err = capsys.readouterr().err
+    assert "has dependent containers" in err
+    assert "fy down && fy up" in err
+    assert any("compose" in c and "up" in c for c in calls)
 
 
 @pytest.mark.parametrize(
@@ -2821,7 +2872,7 @@ def test_up_removes_a_stranded_dependent_carrying_only_the_docker_service_label(
     )
     assert stack.up() == 0
     rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
-    assert rm[3:] == ["tangible-podman-sim"]
+    assert rm[-1:] == ["tangible-podman-sim"]
 
 
 def test_up_removes_nothing_when_the_hashes_are_unavailable(fake_repo, monkeypatch):
