@@ -202,6 +202,7 @@ packages = ["src/foldyard"]
 "docs/testing-modes.md" = "foldyard/assets/docs/testing-modes.md"
 "docs/github-app.md" = "foldyard/assets/docs/github-app.md"
 "docs/git.md" = "foldyard/assets/docs/git.md"
+"docs/private-config.md" = "foldyard/assets/docs/private-config.md"
 "docs/gcp.md" = "foldyard/assets/docs/gcp.md"
 "docs/stack.md" = "foldyard/assets/docs/stack.md"
 "docs/workshop.md" = "foldyard/assets/docs/workshop.md"

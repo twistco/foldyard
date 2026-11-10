@@ -34,6 +34,8 @@ For using foldyard. These pages also ship with the install — `fy docs` prints 
 - [git.md](./git.md) — git when the box and your computer share one checkout: the index shim
   and its refusals, recovering a wrong-looking `git status`, the shared stash, the executable
   bit, and why pushing happens on your computer.
+- [private-config.md](./private-config.md) — foldyard on a project that doesn't use it: your
+  config untracked and hidden from git in your clone, worktrees, and telling the agent.
 - [stack.md](./stack.md) — bringing your compose stack in: the variables compose can use,
   worktree stacks and shared volumes, which paths compose may read, running it in CI, and
   podman-compose's differences from docker compose.

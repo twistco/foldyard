@@ -66,6 +66,15 @@ The stash is shared too: `git stash list` is one list for the human, every workt
 agent, and a bare `git stash pop` takes whatever went on last, which may be theirs. Label yours
 (`git stash push -m <label>`) and pop that entry by its `stash@{n}` from `git stash list`.
 
+## When the project doesn't use foldyard
+
+Sometimes `foldyard.toml` is the human's private file, not the project's: they contribute to a
+project that doesn't use foldyard and keep their setup untracked. Check before treating it as
+the project's: `git ls-files --error-unmatch foldyard.toml` fails when git doesn't track it. If
+it doesn't, never commit the foldyard files or mention foldyard in tracked files, commits or
+PR text, never delete ignored files (`git clean -x`/`-X`, `git stash --all`), and ask before
+changing `foldyard.toml`. `fy docs private-config` has the whole setup.
+
 ## Working in another checkout
 
 Your box sees every checkout of the project — the main one and each worktree — so read and edit
