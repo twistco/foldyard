@@ -381,6 +381,64 @@ def test_without_a_terminal_the_printed_command_is_a_build_grant(env, capsys):
     assert "fy allow add storage.googleapis.com --build" in capsys.readouterr().out
 
 
+# ── a refused path: decrypted for the build, so the gate offers the path, not the host ──────────
+
+_ZIP = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+_CFT = "storage.googleapis.com/chrome-for-testing-public/"
+
+
+def _path_row(path: str = _ZIP, host: str = "storage.googleapis.com") -> dict:
+    return {**_row(host, ua="node"), "method": "GET", "path": path}
+
+
+def test_a_refused_path_is_offered_as_its_first_directory(env, capsys):
+    build = _Build(env["log"], [(1, [_path_row(), _path_row(_ZIP + "?sig=x")]), (0, [])])
+    prompt, asked = _answers("o")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert asked[0].startswith(f"  allow {_CFT} (2× · node)")
+    assert "[h]ost: all of storage.googleapis.com" in asked[0]
+    eff = allowlist.effective()
+    assert eff["build_allow"] == [_CFT] and eff["allow"] == []
+    out = capsys.readouterr().out
+    assert f'{{ host = "{_CFT}", why = "observed: node GET /chrome-for-testing-public/' in out
+
+
+def test_the_whole_host_is_one_answer_away(env):
+    build = _Build(env["log"], [(1, [_path_row()]), (0, [])])
+    prompt, asked = _answers("h", "s")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert "all of storage.googleapis.com for builds?" in asked[1]
+    assert allowlist.effective()["build_allow"] == ["storage.googleapis.com"]
+
+
+def test_several_directories_or_no_path_offer_the_host(env):
+    build = _Build(env["log"], [(1, [_path_row(), _path_row("/other-bucket/x")]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (2×") and "[h]ost" not in asked[0]
+
+
+def test_a_build_path_recommendations_why_is_shown(env):
+    toml = config.current().repo_root / "foldyard.toml"
+    toml.write_text(
+        toml.read_text().replace(
+            "[proxy]\n",
+            f'[proxy]\nrecommend = [{{ host = "{_CFT}", why = "CfT browsers", when = "build" }}]\n',
+        )
+    )
+    config.clear_caches()
+    build = _Build(env["log"], [(1, [_path_row()]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert "CfT browsers" in asked[0]
+
+
+def test_without_a_terminal_the_printed_command_is_the_path(env, capsys):
+    build = _Build(env["log"], [(1, [_path_row()])])
+    buildgate.run(build, what="box image", interactive=False, prompt=lambda q: "")
+    assert f"fy allow add {_CFT} --build" in capsys.readouterr().out
+
+
 def test_concurrent_token_updates_are_serialized(env):
     # Two builds (fy up in two worktrees) issue and revoke against one project-wide file: without
     # a lock a token is lost (that build can't use its grants) or a revoked one is written back.

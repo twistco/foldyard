@@ -1090,14 +1090,16 @@ def allow_add(
     A path grant, `storage.googleapis.com/chrome-for-testing-public/`, lets the box READ under
     that path and nothing else on the host: GET and HEAD with no body, decrypted and checked
     request by request. It's the narrow answer when a granted host redirects to a shared one
-    (a CDN sending its downloads to one bucket of a storage service). For the box only, never
-    `--build`.
+    (a CDN sending its downloads to one bucket of a storage service). With `--build` it is for
+    image builds only: the proxy decrypts the build's connection to that host to check each path
+    (on a walled VM a build step trusts the proxy's CA).
     """
     from . import allowlist
 
     eff = allowlist.grant(host, level, ttl or None, build=build)
     scoped = allowlist.path_grant(host.strip())
-    scope = "for builds, " if build else "GET/HEAD under that path only, " if scoped else ""
+    reads = "GET/HEAD under that path only, " if scoped else ""
+    scope = f"for builds, {reads}" if build else reads
     listed = ", ".join(eff["allow"]) or "empty"
     print(f"✓ {host} allowed ({scope}{level}). Effective allowlist: {listed}")
     if allowlist.local_key(host):

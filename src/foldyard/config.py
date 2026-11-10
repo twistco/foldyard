@@ -1023,17 +1023,31 @@ def proxy_recommend() -> list[dict]:
     SHARES its allowlist: the list travels with the branch, the grants stay host-owned.
 
     Entries are ``{ host = "pypi.org", why = "…" }`` tables or bare host strings (``why`` then
-    empty). ``when = "build"`` marks a host only an IMAGE BUILD needs: it isn't offered at launch
-    but by the build gate when a build is refused, and granted for builds only — the runtime wall
-    stays narrower. Every entry carries ``when`` (``"build"`` or ``""``). Malformed entries and
-    invalid hosts are dropped rather than raising — this is read on prompt paths that must not
-    crash — and the widenings report names what a config declares."""
-    from .allowlist import valid_host  # stdlib-only, no cycle: allowlist never imports config-time
+    empty). ``host`` may be a PATH GRANT (``storage.googleapis.com/chrome-for-testing-public/``:
+    reads under that prefix only), kept as the store keys it. ``when = "build"`` marks a host only
+    an IMAGE BUILD needs: it isn't offered at launch but by the build gate when a build is refused,
+    and granted for builds only — the runtime wall stays narrower. Every entry carries ``when``
+    (``"build"`` or ``""``). Malformed entries and invalid keys are dropped rather than raising —
+    this is read on prompt paths that must not crash — and :func:`proxy_recommend_dropped` names
+    them for the widenings report."""
+    return _proxy_recommend_parsed()[0]
+
+
+def proxy_recommend_dropped() -> list[str]:
+    """The ``[proxy] recommend`` entries :func:`proxy_recommend` ignores, each as written (cut
+    short): a key that is neither a host nor a path grant, or an entry of the wrong type. Said
+    by ``fy config widenings`` so an ignored entry is never a mystery."""
+    return _proxy_recommend_parsed()[1]
+
+
+def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
+    from .allowlist import grant_key  # stdlib-only, no cycle: allowlist never imports config-time
 
     raw = _table("proxy").get("recommend")
     if not isinstance(raw, list):
-        return []
+        return [], []
     out: list[dict] = []
+    dropped: list[str] = []
     for entry in raw:
         when = ""
         if isinstance(entry, str):
@@ -1042,11 +1056,14 @@ def proxy_recommend() -> list[dict]:
             host, why = str(entry.get("host") or ""), str(entry.get("why") or "")
             when = "build" if entry.get("when") == "build" else ""
         else:
+            dropped.append(repr(entry)[:80])
             continue
-        host = host.strip()
-        if valid_host(host) and host not in {e["host"] for e in out}:
-            out.append({"host": host, "why": why.strip(), "when": when})
-    return out
+        key = grant_key(host)
+        if key is None:
+            dropped.append(repr(host.strip() or entry)[:80])
+        elif key not in {e["host"] for e in out}:
+            out.append({"host": key, "why": why.strip(), "when": when})
+    return out, dropped
 
 
 def proxy_default_deny_seed() -> str:

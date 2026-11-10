@@ -1,16 +1,20 @@
 """The build gate — an image build the egress wall refused, turned into one question per host.
 
 Under the in-VM wall an image build (`fy box build`, the stack's `fy up` build) reaches the proxy
-as a trusted build: tunnelled, not decrypted, and still walled (ADR-0029's amendment). When the
-wall refuses it, the tool reports the URL it ASKED for, which is often not the host that was
-refused: a CDN redirects inside the build's tunnel, where the proxy can't see the redirect
-(`cdn.playwright.dev` → `storage.googleapis.com`, seen live). Naming the real host used to mean
-reading the egress log by hand.
+as a trusted build: tunnelled, not decrypted, to a host granted as a whole, and still walled
+(ADR-0029's amendment). When the wall refuses it, the tool reports the URL it ASKED for, which is
+often not the host that was refused: a CDN redirects inside the build's tunnel, where the proxy
+can't see the redirect (`cdn.playwright.dev` → `storage.googleapis.com`, seen live). Naming the
+real host used to mean reading the egress log by hand.
 
 So the gate reads the refusals the proxy attributed to the build (its secret flags them)
 and, on the host with a terminal, offers each one — once / session / permanent / no — then
-retries. A retry is cheap for a build (the layer cache replays everything before the failing
-step), and a redirect chain reveals one hop per attempt, so it loops, bounded. Whatever is
+retries. A refused host is decrypted for a build whose step trusts the proxy CA, so its row names
+the path: the gate then offers a PATH grant (`storage.googleapis.com/chrome-for-testing-public/`,
+the request's first directory) rather than the whole of a shared host, with the host one keypress
+away. A refusal with no path to go on (a client that didn't trust the CA) offers the host.
+A retry is cheap for a build (the layer cache replays everything before the failing step), and a
+redirect chain reveals one hop per attempt, so it loops, bounded. Whatever is
 granted comes back as `[proxy] recommend` lines, so the team is offered the same hosts at their
 own `fy up` — the operator's consent, shared, never a grant written into the repo.
 
@@ -198,32 +202,53 @@ def _report_bypasses(bypassed: list[dict], what: str, echo: Callable[[str], None
     echo("  postinstall script with its own HTTP client, a raw socket. More: `fy docs networking`.")
 
 
-def _describe(entry: dict) -> str:
+def _describe(entry: dict, key: str | None = None) -> str:
     tool = f" · {entry['uas'][0]}" if entry["uas"] else ""
-    return f"{entry['host']} ({entry['count']}×{tool})"
+    return f"{key or entry['host']} ({entry['count']}×{tool})"
+
+
+def _key(entry: dict) -> str:
+    """What a refusal is offered as: the one path grant its requests share (the narrowest grant
+    that answers them all), else — several directories, or a refusal with no path — the host."""
+    scopes = entry.get("scopes") or []
+    return scopes[0] if len(scopes) == 1 and not entry.get("whole") else entry["host"]
+
+
+_LEVELS = f"[o]nce ({ONCE_TTL_SECONDS // 60} min) · [s]ession · [p]ermanent"
 
 
 def _offer(refused: list[dict], prompt: Callable[[str], str], echo: Callable[[str], None]):
     granted: list[dict] = []
     whys = allowlist.build_recommendations()
     for entry in refused:
-        why = f" — {whys[entry['host']]}" if whys.get(entry["host"]) else ""
+        host = entry["host"]
+        key = _key(entry)
+        known = whys.get(key) or whys.get(host)
+        why = f" — {known}" if known else ""
+        wider = f" · [h]ost: all of {host}" if key != host else ""
         answer = (
             prompt(
-                f"  allow {_describe(entry)}{why} for builds?  [o]nce ({ONCE_TTL_SECONDS // 60} "
-                "min) · [s]ession · [p]ermanent · [n]o (default): "
+                f"  allow {_describe(entry, key)}{why} for builds?  {_LEVELS}{wider} · [n]o "
+                "(default): "
             )
             .strip()
             .lower()
         )
+        if wider and answer in ("h", "host"):
+            key = host
+            answer = (
+                prompt(f"  allow all of {host} for builds?  {_LEVELS} · [n]o (default): ")
+                .strip()
+                .lower()
+            )
         level = _ANSWERS.get(answer)  # exact matches only; anything else is no
         if level is None:
-            echo(f"    ({entry['host']} not granted)")
+            echo(f"    ({key} not granted)")
             continue
         ttl = ONCE_TTL_SECONDS if level == "once" else None
-        allowlist.grant(entry["host"], level, ttl, build=True)
-        echo(f"  ✓ {entry['host']} allowed for builds ({level})")
-        granted.append(entry)
+        allowlist.grant(key, level, ttl, build=True)
+        echo(f"  ✓ {key} allowed for builds ({level})")
+        granted.append({**entry, "host": key})  # what was granted is what the team is offered
     return granted
 
 
@@ -282,7 +307,7 @@ def _run(
         echo(f"✗ the allowlist refused {hosts} during the {what}")
         if not interactive:
             for e in refused:
-                echo(f"    fy allow add {e['host']} --build --level once --ttl {ONCE_TTL_SECONDS}")
+                echo(f"    fy allow add {_key(e)} --build --level once --ttl {ONCE_TTL_SECONDS}")
             echo("  No terminal here — grant with the commands above, then build again.")
             break
         granted = _offer(refused, prompt, echo)

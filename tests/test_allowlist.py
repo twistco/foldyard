@@ -942,10 +942,90 @@ def test_a_path_grant_lands_in_the_effective_allow_list_as_typed(env):
     assert allowlist.live_hosts() == []
 
 
-def test_a_path_grant_is_never_for_builds(env):
-    with pytest.raises(SystemExit, match="a path grant is for the box"):
-        allowlist.grant(_GCS_PATH, "session", build=True)
+def test_a_path_grant_can_be_for_builds_only(env):
+    # The proxy decrypts a build's connection to a host it holds only a path grant for (its
+    # steps trust the CA on the walled VM), so the path can be judged there too.
+    allowlist.grant("Storage.GoogleAPIs.com/chrome-for-testing-public/", "session", build=True)
+    eff = allowlist.effective()
+    assert eff["build_allow"] == [_GCS_PATH] and eff["allow"] == []
+    allowlist.revoke(_GCS_PATH)
     assert allowlist.build_hosts() == []
+
+
+def test_a_whole_host_grant_covers_a_path_one():
+    assert allowlist.covered(_GCS_PATH, ["storage.googleapis.com"])
+    assert allowlist.covered(_GCS_PATH, ["*.googleapis.com"])
+    assert allowlist.covered(_GCS_PATH, [_GCS_PATH])
+    assert not allowlist.covered(_GCS_PATH, ["storage.googleapis.com/other/"])
+    assert not allowlist.covered(_GCS_PATH, ["storage.googleapis.com:8443"])
+    assert not allowlist.covered("storage.googleapis.com", [_GCS_PATH])  # a path never a host
+
+
+def test_recommend_takes_a_path_grant_as_the_store_keys_it(env):
+    _recommend(
+        env,
+        '["Storage.GoogleAPIs.com/chrome-for-testing-public/", '
+        '{ host = "storage.googleapis.com/chrome-for-testing-public/", why = "dup" }, '
+        '{ host = "cdn.example.com/a/../b/" }, { host = "*.googleapis.com/a/" }, '
+        '{ host = "storage.googleapis.com/builds/", why = "chromium", when = "build" }]',
+    )
+    assert config.proxy_recommend() == [
+        {"host": _GCS_PATH, "why": "", "when": ""},
+        {"host": "storage.googleapis.com/builds/", "why": "chromium", "when": "build"},
+    ]
+    assert config.proxy_recommend_dropped() == [
+        "'cdn.example.com/a/../b/'",
+        "'*.googleapis.com/a/'",
+    ]
+
+
+def test_a_recommended_path_is_answered_by_its_path_or_its_whole_host(env):
+    _recommend(env, f'["{_GCS_PATH}", "storage.googleapis.com/other/"]')
+    assert [e["host"] for e in allowlist.pending_recommendations()] == [
+        _GCS_PATH,
+        "storage.googleapis.com/other/",
+    ]
+    allowlist.grant(_GCS_PATH, "session")
+    assert [e["host"] for e in allowlist.pending_recommendations()] == [
+        "storage.googleapis.com/other/"
+    ]
+    allowlist.decline("storage.googleapis.com/other/")
+    assert allowlist.pending_recommendations() == []
+    allowlist.grant("storage.googleapis.com/other/", "once", 60)  # granting clears the decline
+    assert "storage.googleapis.com/other/" not in allowlist.declined()
+
+
+def test_a_recommended_build_path_is_granted_for_builds_by_sync_yes(env):
+    _recommend(env, f'[{{ host = "{_GCS_PATH}", why = "browsers", when = "build" }}]')
+    assert allowlist.pending_recommendations() == []  # offered by the build, not at launch
+    prompt, echo, _lines = _offer([])
+    allowlist.offer_recommendations(interactive=False, prompt=prompt, echo=echo, accept_all=True)
+    assert allowlist.effective()["build_allow"] == [_GCS_PATH]
+    assert allowlist.effective()["allow"] == []
+
+
+def test_a_build_refusal_offers_its_first_directory(env):
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None
+    ts = "2026-09-22T10:01:00+00:00"
+    zip_ = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+
+    def row(path: str, method: str = "GET", host: str = "storage.googleapis.com") -> dict:
+        return {"ts": ts, "host": host, "method": method, "path": path, "ua": "node",
+                "status": 403, "blocked": True, "build": True}  # fmt: skip
+
+    (entry,) = allowlist.build_refusals([row(zip_), row(zip_ + "?sig=1")], since)
+    assert entry["scopes"] == [_GCS_PATH] and entry["whole"] is False
+    assert entry["paths"] == ["/chrome-for-testing-public/156.0.8078.4"]
+    assert "GET /chrome-for-testing-public/156.0.8078.4" in allowlist.recommend_why(entry)
+
+    # A client that didn't trust the CA left only its CONNECT: nothing to shape a path on.
+    (entry,) = allowlist.build_refusals([row(zip_), row("", method="CONNECT")], since)
+    assert entry["whole"] is True
+    # A path already granted for builds isn't offered again; another directory on the host is.
+    allowlist.grant(_GCS_PATH, "session", build=True)
+    (entry,) = allowlist.build_refusals([row(zip_), row("/other-bucket/x")], since)
+    assert entry["scopes"] == ["storage.googleapis.com/other-bucket/"]
 
 
 @pytest.mark.parametrize(

@@ -199,7 +199,8 @@ belongs in the middle — but *one* middle, not a switch between two.
   It lives in the effective file's `allow` list beside the host grants. A proxy that predates
   path grants matches no host against `host/path`, so it fails closed. A path can only be judged
   decrypted, so a path-granted host is never blind-tunnelled: not on `passthrough`, not for a
-  build. That makes `--build` path grants a refusal, since builds are tunnelled. The tunnel itself
+  build. That made `--build` path grants a refusal, since builds were tunnelled (until the
+  amendment below). The tunnel itself
   had to be fenced. mitmproxy relays a CONNECT's raw TCP, and inside a decrypted tunnel it relays
   any stream that doesn't look like HTTP: a leading CRLF is enough, and a server may skip the CRLF
   and read the request after it. So the proxy answers the CONNECT itself, as for a refused host,
@@ -209,6 +210,31 @@ belongs in the middle — but *one* middle, not a switch between two.
   all three on a real mitmdump. A refusal that follows a granted host's redirect names that host
   and suggests the path grant (`via` on the row). The proxy keeps that memory for two minutes, as
   an explanation only.
+- **A build can hold a path grant, and a refused build is decrypted** (amended 2026-11-10). The
+  refusal above was inherited from the 2026-09-23 reason for tunnelling builds (a build container
+  had no CA), which the 2026-10-06 amendment had already removed for the walled VM: every build
+  step trusts the CA. Left as it was, the narrow grant was the box's alone, and a build that
+  needed one bucket of `storage.googleapis.com` got the whole host, for a step whose Dockerfile
+  the box can edit: an upload to any bucket there, logged as one hostname. Now:
+  - `fy allow add host/path/ --build` writes the path into `build_allow`. The proxy decrypts a
+    build's connection to a host it holds only by path for that build (runtime or build path
+    grants, none whole for it), and judges each request as for the box. A host granted to builds
+    as a whole is tunnelled as before. The build's requests inside a decrypted connection carry
+    no proxy header, so a build is known by its CONNECT's connection (`_build_clients`), which
+    also flags its rows `build`.
+  - A refused build CONNECT on :443 is answered and decrypted like the box's, so its refused
+    request's row has the path, and the build gate offers that request's first directory as a
+    path grant, with the whole host one answer away. A step that doesn't trust the CA (Java,
+    GnuTLS, the gVisor posture's runtime, which the crun wrapper doesn't front) fails its
+    handshake and leaves the CONNECT's row, as before — the gate then offers the host. The cost
+    is that tool's error: a certificate failure where it used to read a 403.
+  - `[proxy] recommend` takes `host/path/` entries, `when = "build"` included, and a whole-host
+    grant answers one. An entry that is neither a host nor a path grant is named by
+    `fy config widenings` instead of dropped silently.
+
+  Weighed and rejected: decrypting every host-started build. It is the simpler rule, but it
+  would put each Java and GnuTLS step's whole-host grants through a handshake that fails, for no
+  narrower grant.
 
 ## Rejected
 

@@ -138,6 +138,26 @@ def valid_grant(key: str) -> bool:
     return valid_host(key) or path_grant(key) is not None
 
 
+def grant_key(key: str) -> str | None:
+    """``key`` as the store keeps it — a path grant's host lower-cased, as the proxy compares it;
+    a host key as written — or None when it is neither (:func:`valid_grant`)."""
+    key = key.strip()
+    scoped = path_grant(key)
+    if scoped is not None:
+        return scoped[0] + scoped[1]
+    return key if valid_host(key) else None
+
+
+def covered(key: str, grants: Iterable[str]) -> bool:
+    """Does one of ``grants`` already answer ``key``: the same key, or — for a path grant — a
+    grant of its whole host (which covers every path on it)?"""
+    grants = list(grants)
+    if key in grants:
+        return True
+    scoped = path_grant(key)
+    return scoped is not None and _matches(scoped[0], [g for g in grants if "/" not in g])
+
+
 _SCOPE_DIRS = 3  # how many directory prefixes a request offers, shallowest first
 
 
@@ -634,8 +654,12 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     :func:`recommend_why` reads it). Only rows the proxy attributed to a build (its ``build`` flag,
     set only for a live build secret) count — a box session refused in the same minute is not the
     build's, even one presenting the public marker.
-    A build is tunnelled, so there are never paths. Box-originated text, handled as in
-    :func:`learned_hosts`."""
+    A refused host is decrypted for a build that trusts the proxy CA (ADR-0029), so its row names
+    the path it asked for: ``paths`` samples them (for :func:`recommend_why`) and ``scopes`` lists
+    the path grant each would be answered with — its first directory (:func:`path_scopes`),
+    distinct, first-seen. ``whole`` says some refusal had no path to shape one on (a client that
+    didn't trust the CA leaves only its CONNECT), so only the host answers it. Box-originated
+    text, handled as in :func:`learned_hosts`."""
     granted = live_hosts() + build_hosts()  # either answers a build
     out: dict[str, dict] = {}
     for row in rows:
@@ -647,12 +671,34 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
         if local_key(key):
             continue
         entry = out.setdefault(
-            key, {"host": key, "count": 0, "uas": [], "paths": [], "more_paths": 0}
+            key,
+            {
+                "host": key,
+                "count": 0,
+                "uas": [],
+                "paths": [],
+                "more_paths": 0,
+                "scopes": [],
+                "whole": False,
+            },
         )
         entry["count"] += 1
         ua = _printable(row.get("ua"))
         if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
             entry["uas"].append(ua)
+        path = row.get("path") if row.get("method") != "CONNECT" else None
+        scopes = path_scopes(key, path)
+        if not scopes:
+            entry["whole"] = True
+            continue
+        if scopes[0] not in entry["scopes"] and not covered(scopes[0], granted):
+            entry["scopes"].append(scopes[0])
+        sample = _printable(_sample_path(path))
+        if sample and sample not in entry["paths"]:
+            if len(entry["paths"]) < _PATH_EXAMPLES:
+                entry["paths"].append(sample)
+            else:
+                entry["more_paths"] += 1
     return list(out.values())
 
 
@@ -805,8 +851,8 @@ def unanswered(keys: Iterable[str]) -> set[str]:
         return set()
     granted = live_hosts()
     # A path grant answers its host: the operator decided how much of it the box gets, and a
-    # refusal outside those paths says so on its own row (`outside`) rather than re-asking. At
-    # runtime only — a path grant never covers a build, so a build-side reader can't use this.
+    # refusal outside those paths says so on its own row (`outside`) rather than re-asking.
+    # Runtime grants only: a build's path grant answers nothing the box was refused.
     scoped = {parsed[0] for parsed in map(path_grant, granted) if parsed is not None}
     return {
         key
@@ -883,8 +929,9 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
     """Allow ``host`` at ``level`` (once|session|permanent) — for everything, or with ``build``
     only for a host-started image build. Host only. Returns the new effective.
 
-    ``host`` may be a path grant (:func:`path_grant`): reads under that prefix only, for the box
-    (never ``build``).
+    ``host`` may be a path grant (:func:`path_grant`): reads under that prefix only — for the box,
+    or with ``build`` for a host-started build alone, which the proxy then decrypts to judge each
+    path (a build step trusts its CA on the walled VM: ADR-0029).
 
     A build grant never replaces a live runtime one (which already covers builds); a runtime grant
     replaces a build one."""
@@ -903,12 +950,6 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
             )
         raise SystemExit(f"✗ not a valid host/glob: {host!r}")
     if scoped is not None:
-        if build:
-            raise SystemExit(
-                f"✗ a path grant is for the box, not for builds: a build is tunnelled, so the "
-                f"proxy can't see its paths. Grant the host for builds instead "
-                f"(`fy allow add {scoped[0]} --build`)."
-            )
         host = scoped[0] + scoped[1]  # the host part as the proxy compares it
 
     hosts, _ = _prune(_load_store())
@@ -999,9 +1040,10 @@ def decline(host: str) -> None:
     :func:`grant` drops the record — or by re-adding it by hand with `fy allow add`."""
     _require_host()
     _require_readable_store()
-    host = host.strip()
-    if not valid_host(host):
-        raise SystemExit(f"✗ not a valid host/glob: {host!r}")
+    key = grant_key(host)
+    if key is None:
+        raise SystemExit(f"✗ not a valid host/glob or path grant: {host.strip()!r}")
+    host = key
     doc = _load_raw()
     declined = doc.setdefault("declined", {})
     if not isinstance(declined, dict):  # pragma: no cover — _checked_raw already rejected this
@@ -1046,11 +1088,11 @@ def pending_recommendations() -> list[dict]:
     refused = declined()
     if "*" in refused:
         return []
-    granted = set(live_hosts())
+    granted = live_hosts()
     return [
         e
         for e in recommendations()
-        if e.get("when") != "build" and e["host"] not in granted and e["host"] not in refused
+        if e.get("when") != "build" and not covered(e["host"], granted) and e["host"] not in refused
     ]
 
 
@@ -1144,9 +1186,9 @@ def _accept_build_recommendations(echo: Callable[[str], None]) -> None:
     refused = declined()
     if "*" in refused:  # a damaged store: grant nothing, as pending_recommendations does
         return
-    have = set(live_hosts()) | set(build_hosts())
+    have = live_hosts() + build_hosts()
     for host, why in build_recommendations().items():
-        if host not in have and host not in refused:
+        if not covered(host, have) and host not in refused:
             grant(host, "permanent", build=True)
             echo(f"  ✓ {host} allowed for builds (permanent)" + (f" — {why}" if why else ""))
 

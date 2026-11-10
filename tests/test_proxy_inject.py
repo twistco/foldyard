@@ -1852,13 +1852,18 @@ def test_a_builds_connect_is_blind_tunnelled_and_logged_as_a_build(building):
 
 
 def test_a_build_never_opens_the_runtime_wall(building):
-    # Being a build decides DECRYPTION (and build grants) only: an ungranted host is refused.
+    # Being a build decides DECRYPTION (and build grants) only: an ungranted host is refused —
+    # answered in the proxy and decrypted like the box's (build steps trust the CA), never dialled.
     inj, _allow, log = building
     connect = _build(_Flow("evil.example.com"))
     connect.request.headers["user-agent"] = "node"
     connect.response = None
     inj.http_connect(connect)
-    assert connect.response is not None and connect.response.status_code == 403
+    assert _answered(inj, connect)
+    hello = _ClientHello("evil.example.com")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False  # decrypted, so a refused request names its path
+    inj.client_disconnected(connect.client_conn)  # nothing inside was refused: the CONNECT's row
     row = _last_log(log)
     # Attributed to the build, with the tool: what `fy box build` reads back to offer the host.
     assert row["blocked"] is True and row["build"] is True and row["ua"] == "node"
@@ -1899,7 +1904,9 @@ async def test_the_bare_marker_does_not_attribute_a_refusal_to_a_build(building)
     connect = _marked(_Flow("evil.example.com"))
     connect.response = None
     inj.http_connect(connect)
-    assert connect.response is not None and "build" not in _last_log(log)
+    assert _walled(inj, connect)
+    inj.client_disconnected(connect.client_conn)  # the CONNECT's row, owed until it ends
+    assert "build" not in _last_log(log)
     plain = _marked(_Flow("deb.example.org", port=80, scheme="http"))
     plain.response = None
     await inj.request(plain)
@@ -2520,8 +2527,9 @@ def _connect(inj, host: str, **mark) -> _Flow:
     return flow
 
 
-def _refused(flow: _Flow) -> bool:
-    return flow.response is not None and flow.response.status_code == 403
+def _refused(inj, flow: _Flow) -> bool:
+    """The wall holds it: refused at CONNECT, or answered in the proxy with nothing dialled."""
+    return _walled(inj, flow)
 
 
 def test_a_build_with_its_secret_reaches_a_build_only_host(gh, build_walled):
@@ -2560,16 +2568,16 @@ def test_the_box_cannot_reach_a_build_only_host(gh, build_walled):
     inj = gh.Injector()
     assert _answered(inj, _connect(inj, "cdn.example.com"))  # unmarked: answered, never dialled
     # The bare marker is public — anyone, the box included, can present it.
-    assert _refused(_connect(inj, "cdn.example.com", user="fy-build"))
-    assert _refused(_connect(inj, "cdn.example.com", password="guessed"))
+    assert _refused(inj, _connect(inj, "cdn.example.com", user="fy-build"))
+    assert _refused(inj, _connect(inj, "cdn.example.com", password="guessed"))
 
 
 def test_an_expired_or_revoked_secret_unlocks_nothing(gh, build_walled):
     _write_tokens(build_walled.tokens, "s3cret", expired=True)
     inj = gh.Injector()
-    assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
+    assert _refused(inj, _connect(inj, "cdn.example.com", password="s3cret"))
     _write_tokens(build_walled.tokens)  # revoked when the build ended
-    assert _refused(_connect(inj, "cdn.example.com", password="s3cret"))
+    assert _refused(inj, _connect(inj, "cdn.example.com", password="s3cret"))
 
 
 async def test_a_cleartext_build_request_uses_build_grants_too(gh, build_walled):
