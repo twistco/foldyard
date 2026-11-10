@@ -2778,10 +2778,15 @@ def _pc_labels(service: str, config_hash: str) -> dict:
 
 
 def _stranded_stack(
-    monkeypatch, desired: dict | None, drop: tuple[str, ...] = (), rm_fails: bool = False
+    monkeypatch,
+    desired: dict | None,
+    drop: tuple[str, ...] = (),
+    rm_fails: bool = False,
+    outsider: bool = False,
 ):
     """An engine holding a stopped app (stale hash) + a stopped sim that depends on it; ``drop``
-    removes those labels from the sim, ``rm_fails`` makes the engine refuse the removal."""
+    removes those labels from the sim, ``rm_fails`` makes the engine refuse the removal, and
+    ``outsider`` adds another project's container that `--requires` the sim."""
     import types
 
     from foldyard import confighash
@@ -2790,15 +2795,34 @@ def _stranded_stack(
     for label in drop:
         del labels["sim"][label]
     ps = [
-        {"Names": [f"tangible-podman-{svc}"], "Exited": True, "Labels": labels[svc]}
+        {
+            "Id": f"id-{svc}",
+            "Names": [f"tangible-podman-{svc}"],
+            "Exited": True,
+            "Labels": labels[svc],
+        }
         for svc in ("app", "sim")
     ]
+    deps = {"id-app": [], "id-sim": ["id-app"]}
+    if outsider:
+        ps.append(
+            {
+                "Id": "id-ext",
+                "Names": ["elsewhere-tool"],
+                "Exited": False,
+                "Labels": {"io.podman.compose.project": "elsewhere"},
+            }
+        )
+        deps["id-ext"] = ["id-sim"]
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
         if cmd[1:3] == ["ps", "-a"] and "json" in cmd:
             return types.SimpleNamespace(returncode=0, stdout=json.dumps(ps), stderr="")
+        if cmd[1:2] == ["inspect"] and any("Dependencies" in a for a in cmd):
+            lines = [f"{cid} {json.dumps(deps[cid])}" for cid in cmd if cid in deps]
+            return types.SimpleNamespace(returncode=0, stdout="\n".join(lines), stderr="")
         if rm_fails and cmd[1:2] == ["rm"]:
             refusal = (
                 "\x1b[31mError: container 1a2b has dependent containers\n"
@@ -2829,6 +2853,31 @@ def test_up_removes_stranded_dependents_before_compose_up(fake_repo, monkeypatch
     assert rm == ["podman", "rm", "-f", "--depend", "tangible-podman-sim"]
     up_idx = next(i for i, c in enumerate(calls) if "compose" in c and "up" in c)
     assert calls.index(rm) < up_idx
+
+
+def test_outside_dependents_follow_the_engines_graph_transitively():
+    # The engine's own `.Dependencies` (`--requires` and `--network container:` alike), so an
+    # edge the rendered config doesn't model still counts.
+    containers = [
+        {"id": "s", "name": "p-sim", "project": "p", "deps": []},
+        {"id": "w", "name": "p-worker", "project": "p", "deps": ["s"]},
+        {"id": "x", "name": "x-tool", "project": "x", "deps": ["w"]},
+        {"id": "n", "name": "loose", "project": "", "deps": []},
+    ]
+    assert stack._outside_dependents({"s"}, containers, "p") == ["x-tool"]
+    assert stack._outside_dependents({"s"}, containers[:2], "p") == []
+
+
+def test_a_dependent_outside_the_project_stops_up_before_any_removal(
+    fake_repo, monkeypatch, capsys
+):
+    # `rm --depend` would take another project's container too, and compose here would never
+    # recreate it: refuse instead, before compose can hang on the stranded sim.
+    calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"}, outsider=True)
+    assert stack.up() != 0
+    assert not any(c[1:2] == ["rm"] for c in calls)
+    assert not any("compose" in c and "up" in c for c in calls)
+    assert "elsewhere-tool" in capsys.readouterr().err
 
 
 def test_a_refused_stranded_removal_is_reported_not_swallowed(fake_repo, monkeypatch, capsys):

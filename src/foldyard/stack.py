@@ -1039,7 +1039,8 @@ def up() -> int:
         # can't see — it would die on name conflicts instead of adopting them.
         _reconcile_foreign_containers(ctx)
         rendered = _render_config(ctx, extra)
-        _remove_stranded_dependents(ctx, rendered, extra_profiles=extra)
+        if not _remove_stranded_dependents(ctx, rendered, extra_profiles=extra):
+            return 1
         # Build has already selected the engine-appropriate implementation; compose only starts
         # the resulting images, never re-enters a provider build path.
         rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra, rendered=rendered)
@@ -1254,19 +1255,20 @@ def _remove_stranded_dependents(
     rendered: dict | None,
     emit: Callable[[str], None] | None = None,
     extra_profiles: list[str] | None = None,
-) -> None:
+) -> bool:
     """Remove the containers :func:`_stranded_dependents` finds, BEFORE ``up``, so ``up`` sees
     them as missing and creates them. Typical trigger: a stopped stack (VM restart) brought up
     after a posture change. podman-compose only; fail-safe — any probe that can't answer
     removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
-    shared with the path guard so the sweep adds no host-side parse of the compose files."""
+    shared with the path guard so the sweep adds no host-side parse of the compose files.
+    False means ``up`` must not run: another project's container depends on one of them."""
     emit = emit or _err
     try:
         from . import confighash
 
         desired, _ = confighash.desired(ctx, extra_profiles)
         if not desired or not rendered:
-            return
+            return True
         graph: dict[str, set[str]] = {}
         for name, svc in (rendered.get("services") or {}).items():
             deps = svc.get("depends_on") or {}
@@ -1285,7 +1287,7 @@ def _remove_stranded_dependents(
             env=ctx.env,
         )
         if ps.returncode != 0:
-            return
+            return True
         containers = [
             {
                 "name": c["Names"][0],
@@ -1297,14 +1299,26 @@ def _remove_stranded_dependents(
         ]
         stranded = _stranded_dependents(graph, containers, desired)
         if not stranded:
-            return
+            return True
+        engine_graph = _engine_dependencies(ctx)
+        if engine_graph is None:
+            return True
+        ids = {c["id"] for c in engine_graph if c["name"] in stranded}
+        if outside := _outside_dependents(ids, engine_graph, ctx.project):
+            emit(
+                f"✗ {', '.join(outside)} (outside {ctx.project}) depend on "
+                f"{', '.join(stranded)}, which `up` needs removed first, and removing them would "
+                "take those too with nothing to recreate them. Remove them or their "
+                "dependency, then `fy up` again."
+            )
+            return False
         emit(
             f"▶ removing {len(stranded)} stopped container(s) compose would drop without "
             f"re-creating ({', '.join(stranded)}) — recreated on `up`; named volumes are kept…"
         )
         # podman removes the listed names in parallel, so one that another `--requires` is
-        # refused in any order. `--depend` takes dependents first; all of them are downstream of
-        # a recreated service, which compose's own `down` removes anyway.
+        # refused in any order. `--depend` takes dependents first; checked above to be all this
+        # project's, so downstream of a recreated service, which compose's `down` removes anyway.
         cmd = [config.engine(), "rm", "-f", "--depend", *stranded]
         emit("+ " + " ".join(cmd))
         rm = _run(cmd, env=ctx.env)
@@ -1316,7 +1330,57 @@ def _remove_stranded_dependents(
                 "`up` hangs, interrupt it and run `fy down && fy up`."
             )
     except Exception:
-        return  # best-effort: a probe that can't answer removes nothing
+        pass  # best-effort: a probe that can't answer removes nothing
+    return True
+
+
+def _engine_dependencies(ctx: Context) -> list[dict] | None:
+    """Every container on the engine as ``{id, name, project, deps}``, ``deps`` being the ids it
+    depends on as podman records them (``--requires`` and ``--network container:``), which is
+    the graph ``rm --depend`` follows. None when the engine can't say."""
+    eng = config.engine()
+    ps = _run([eng, "ps", "-a", "--format", "json"], env=ctx.env)
+    if ps.returncode != 0:
+        return None
+    listed = json.loads(ps.stdout or "[]")
+    if not listed:
+        return []
+    insp = _run(
+        [eng, "inspect", "--format", "{{.Id}} {{json .Dependencies}}", *[c["Id"] for c in listed]],
+        env=ctx.env,
+    )
+    if insp.returncode != 0:
+        return None
+    deps: dict[str, list[str]] = {}
+    for line in insp.stdout.splitlines():
+        cid, _, raw = line.strip().partition(" ")
+        if cid:
+            deps[cid] = json.loads(raw or "null") or []
+    return [
+        {
+            "id": c["Id"],
+            "name": c["Names"][0],
+            "project": (c.get("Labels") or {}).get("io.podman.compose.project", ""),
+            "deps": deps.get(c["Id"], []),
+        }
+        for c in listed
+    ]
+
+
+def _outside_dependents(ids: set[str], containers: list[dict], project: str) -> list[str]:
+    """Names of the containers outside ``project`` that depend on ``ids``, transitively."""
+    dependents: dict[str, list[dict]] = {}
+    for c in containers:
+        for dep in c["deps"]:
+            dependents.setdefault(dep, []).append(c)
+    seen: set[str] = set()
+    todo = list(ids)
+    while todo:
+        for c in dependents.get(todo.pop(), []):
+            if c["id"] not in seen:
+                seen.add(c["id"])
+                todo.append(c["id"])
+    return sorted(c["name"] for c in containers if c["id"] in seen and c["project"] != project)
 
 
 def _stack_is_up(ctx: Context, ignore_services: set[str] | frozenset[str] = frozenset()) -> bool:
@@ -1456,8 +1520,12 @@ def reconcile_posture(
             # bundled-podman-compose switch).
             _reconcile_foreign_containers(ctx, emit)
             rendered = _render_config(ctx, extra)
-            _remove_stranded_dependents(ctx, rendered, emit, extra)
-            rc = _compose_captured(ctx, ["up", "-d"], emit, extra_profiles=extra, rendered=rendered)
+            if _remove_stranded_dependents(ctx, rendered, emit, extra):
+                rc = _compose_captured(
+                    ctx, ["up", "-d"], emit, extra_profiles=extra, rendered=rendered
+                )
+            else:
+                rc = 1
             if rc != 0:
                 emit(
                     f"✗ reconcile failed (compose exited {rc}) — the stack may still be "
