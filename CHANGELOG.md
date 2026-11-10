@@ -6,6 +6,38 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.9.1 — 2026-11-10
+
+Two fixes for `fy up` hanging forever, both seen on a Lima VM restarted after a config change. A
+stopped container that another one depends on is now removed safely before compose runs, and if a
+dependency still never gets a container, foldyard stops compose and says which one is missing,
+instead of letting podman-compose wait forever. After upgrading, run `fy host restart` so the
+supervisor's `fy mode` reconciles use the fix too.
+
+### Fixed
+
+- **`fy up` no longer hangs after a VM restart when one stopped service `depends_on` another
+  stopped one.** Before `up`, foldyard removes stopped containers that podman-compose would remove
+  and never re-create (dependents of a service whose config changed). It removed them in one
+  `podman rm`, which podman runs in parallel, so a container that another one `--requires` was
+  refused in any order, and the refusal went unseen. compose then skipped creating it and waited
+  forever for it to turn healthy: `fy up` hung with the dependent's container missing. The removal
+  now passes `--depend`, which takes dependents first. A dependent compose won't recreate
+  (another project's, or one whose service left the config) would go too, so `fy up` refuses
+  before removing anything and names it instead. If the engine still refuses, `fy up` stops
+  before compose starts and names the way out (`fy down && fy up`). The sweep of containers whose
+  service left the config now reports a refused removal too, instead of leaving the orphan
+  without a word.
+- **`fy up` no longer hangs forever when a service's dependency was never created.**
+  podman-compose starts a service only once each `depends_on` dependency meets its condition, and
+  retries that check with no limit, so a dependency whose create failed (a bad device, a removal
+  the engine refused) left `fy up`, or a `fy mode` reconcile of a running stack, waiting
+  indefinitely with no hint why. foldyard now watches the engine while compose `up` runs: once
+  compose has created or started a container (so not while it pulls or builds), a dependency with
+  no container for 90 seconds while nothing else changes stops compose and fails, naming the
+  missing container and the way out (fix the create error compose printed, then
+  `fy down && fy up`). Starting posture services on a stopped stack isn't watched yet.
+
 ## 0.9.0 — 2026-11-09
 
 Two fixes for the VM firewall, a fixed engine socket path for compose services on lima, and,
