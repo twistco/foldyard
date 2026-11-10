@@ -746,35 +746,37 @@ class _DependencyWatch:
             clock,
         )
         self.stuck: list[str] = []
-        self._baseline: dict[str, object] | None = None
+        self._baseline: dict[str, tuple[object, bool]] | None = None
         self._armed = False
         self._ids: frozenset[str] | None = None
         self._still_since = clock()
         self._missing_since: dict[str, float] = {}
 
-    def set_baseline(self, containers: Sequence[tuple[str, str, object]] | None) -> None:
+    def set_baseline(self, containers: Sequence[tuple[str, str, object, bool]] | None) -> None:
         """The project's containers before compose runs. None (no answer) never trips."""
-        self._baseline = None if containers is None else {c[0]: c[2] for c in containers}
+        self._baseline = None if containers is None else {c[0]: (c[2], c[3]) for c in containers}
 
-    def observe(self, containers: Sequence[tuple[str, str, object]] | None) -> list[str]:
+    def observe(self, containers: Sequence[tuple[str, str, object, bool]] | None) -> list[str]:
         """The depended-on services missing for ``grace`` with the container set unchanged.
-        ``containers`` are (id, service, started at). Counted only once compose has created or
-        started a container: before that it is pulling or building, which can take any time.
+        ``containers`` are (id, service, started at, running). Counted only once compose has
+        created a container or started one that wasn't running: before that it is pulling or
+        building, which can take any time (a running one the engine restarts doesn't count).
         None (no answer) never trips."""
         if containers is None or self._baseline is None:
             return []
         if not self._armed:
             base = self._baseline
             self._armed = any(
-                cid not in base or base[cid] != started for cid, _, started in containers
+                cid not in base or (not base[cid][1] and base[cid][0] != started)
+                for cid, _, started, _ in containers
             )
             if not self._armed:
                 return []
         now = self.clock()
-        ids = frozenset(cid for cid, _, _ in containers)
+        ids = frozenset(c[0] for c in containers)
         if ids != self._ids:
             self._ids, self._still_since = ids, now
-        present = {svc for _, svc, _ in containers}
+        present = {c[1] for c in containers}
         for svc in self.depended:
             if svc in present:
                 self._missing_since.pop(svc, None)
@@ -786,7 +788,7 @@ class _DependencyWatch:
             if now - max(since, self._still_since) >= self.grace
         )
 
-    def probe(self) -> list[tuple[str, str, object]] | None:
+    def probe(self) -> list[tuple[str, str, object, bool]] | None:
         try:
             ps = _run(
                 [
@@ -804,7 +806,12 @@ class _DependencyWatch:
             if ps.returncode != 0:
                 return None
             return [
-                (c["Id"], _podman_compose_service(c.get("Labels") or {}), c.get("StartedAt", 0))
+                (
+                    c["Id"],
+                    _podman_compose_service(c.get("Labels") or {}),
+                    c.get("StartedAt", 0),
+                    c.get("State") == "running",
+                )
                 for c in json.loads(ps.stdout or "[]")
             ]
         except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):

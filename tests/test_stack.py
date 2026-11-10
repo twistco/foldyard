@@ -2877,7 +2877,7 @@ def _watch(clock: _Clock, grace: float = 90.0) -> stack._DependencyWatch:
 def test_a_dependency_missing_while_nothing_changes_is_stuck_after_the_grace():
     clock = _Clock()
     watch = _watch(clock)
-    still = [("a1", "app", 0)]
+    still = [("a1", "app", 0, False)]
     assert watch.observe(still) == []
     clock.now = 89.0
     assert watch.observe(still) == []
@@ -2889,23 +2889,23 @@ def test_containers_coming_and_going_restart_the_wait():
     # A recreate's teardown and creates move the container set; only a still stack is a hang.
     clock = _Clock()
     watch = _watch(clock)
-    watch.observe([("a1", "app", 0)])
+    watch.observe([("a1", "app", 0, False)])
     clock.now = 80.0
-    watch.observe([("a2", "app", 0)])
+    watch.observe([("a2", "app", 0, False)])
     clock.now = 160.0
-    assert watch.observe([("a2", "app", 0)]) == []
+    assert watch.observe([("a2", "app", 0, False)]) == []
     clock.now = 170.0
-    assert watch.observe([("a2", "app", 0)]) == ["sim"]
+    assert watch.observe([("a2", "app", 0, False)]) == ["sim"]
 
 
 def test_a_dependency_that_appears_is_no_longer_waited_on():
     clock = _Clock()
     watch = _watch(clock)
-    watch.observe([("a1", "app", 0)])
+    watch.observe([("a1", "app", 0, False)])
     clock.now = 50.0
-    watch.observe([("a1", "app", 0), ("s1", "sim", 0)])
+    watch.observe([("a1", "app", 0, False), ("s1", "sim", 0, False)])
     clock.now = 500.0
-    assert watch.observe([("a1", "app", 0), ("s1", "sim", 0)]) == []
+    assert watch.observe([("a1", "app", 0, False), ("s1", "sim", 0, False)]) == []
 
 
 def test_nothing_counts_while_compose_pulls_or_builds():
@@ -2917,14 +2917,16 @@ def test_nothing_counts_while_compose_pulls_or_builds():
         {"sim": "p-sim"},
         clock=clock,
     )
-    before = [("a1", "app", 5)]
+    before = [("a1", "app", 5, False)]
     watch.set_baseline(before)
     for t in (0.0, 100.0, 1000.0):
         clock.now = t
         assert watch.observe(before) == []
-    assert watch.observe([("a1", "app", 5), ("w1", "worker", 0)]) == []  # a create: armed
+    assert (
+        watch.observe([("a1", "app", 5, False), ("w1", "worker", 0, False)]) == []
+    )  # a create: armed
     clock.now = 1090.0
-    assert watch.observe([("a1", "app", 5), ("w1", "worker", 0)]) == ["sim"]
+    assert watch.observe([("a1", "app", 5, False), ("w1", "worker", 0, False)]) == ["sim"]
 
 
 def test_a_restarted_container_arms_the_watch():
@@ -2934,10 +2936,25 @@ def test_a_restarted_container_arms_the_watch():
         {"sim": "p-sim"},
         clock=clock,
     )
-    watch.set_baseline([("a1", "app", 5)])
-    assert watch.observe([("a1", "app", 9)]) == []
+    watch.set_baseline([("a1", "app", 5, False)])
+    assert watch.observe([("a1", "app", 9, False)]) == []
     clock.now = 90.0
-    assert watch.observe([("a1", "app", 9)]) == ["sim"]
+    assert watch.observe([("a1", "app", 9, False)]) == ["sim"]
+
+
+def test_a_running_container_restarting_on_its_own_does_not_arm_the_watch():
+    # `restart: always` crash-looping while compose still pulls: the engine's restarts aren't
+    # compose's start phase, which starts containers that weren't running.
+    clock = _Clock()
+    watch = stack._DependencyWatch(
+        stack.Context(Path("/r"), {}, ["podman", "compose"], "app", "p", ""),
+        {"sim": "p-sim"},
+        clock=clock,
+    )
+    watch.set_baseline([("a1", "app", 5, True)])
+    for t, started in ((0.0, 6), (100.0, 7), (1000.0, 8)):
+        clock.now = t
+        assert watch.observe([("a1", "app", started, True)]) == []
 
 
 def test_without_a_baseline_the_watch_never_trips():
@@ -2950,7 +2967,7 @@ def test_without_a_baseline_the_watch_never_trips():
     watch.set_baseline(None)
     for t in (0.0, 100.0, 1000.0):
         clock.now = t
-        assert watch.observe([("a1", "app", t)]) == []
+        assert watch.observe([("a1", "app", t, False)]) == []
 
 
 def test_a_failed_engine_probe_never_trips_the_watch():
@@ -2966,7 +2983,12 @@ def test_the_watch_probe_maps_containers_to_services_by_label(monkeypatch):
 
     ps = [
         {"Id": "a1", "Labels": _pc_labels("app", "h")},
-        {"Id": "s1", "StartedAt": 7, "Labels": {"com.docker.compose.service": "sim"}},
+        {
+            "Id": "s1",
+            "StartedAt": 7,
+            "State": "running",
+            "Labels": {"com.docker.compose.service": "sim"},
+        },
     ]
     seen: list[list[str]] = []
 
@@ -2975,7 +2997,7 @@ def test_the_watch_probe_maps_containers_to_services_by_label(monkeypatch):
         return types.SimpleNamespace(returncode=0, stdout=json.dumps(ps), stderr="")
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
-    assert _watch(_Clock()).probe() == [("a1", "app", 0), ("s1", "sim", 7)]
+    assert _watch(_Clock()).probe() == [("a1", "app", 0, False), ("s1", "sim", 7, True)]
     assert "label=io.podman.compose.project=p" in seen[0]
 
     monkeypatch.setattr(
@@ -3008,7 +3030,7 @@ def _stuck_watch(monkeypatch, stopped: list[_HangingProc]) -> None:
     def watch_for(ctx, args, rendered):
         watch = stack._DependencyWatch(ctx, {"sim": "p-sim"}, grace=0.0, interval=0.01, clock=clock)
         answers = iter([[]])  # the baseline, before compose has created anything
-        monkeypatch.setattr(watch, "probe", lambda: next(answers, [("a1", "app", 0)]))
+        monkeypatch.setattr(watch, "probe", lambda: next(answers, [("a1", "app", 0, False)]))
         return watch
 
     def stop(proc):
