@@ -1180,6 +1180,7 @@ def run_stream(
     env: dict[str, str] | None = None,
     cwd: str | None = None,
     stdin: bytes | None = None,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
 ) -> int:
     """Run ``cmd`` to completion, calling ``on_line(text)`` for each output line (stdout+stderr
     merged, ANSI-stripped), and return its exit code. For long-running, NON-INTERACTIVE
@@ -1187,8 +1188,10 @@ def run_stream(
     reconcile's compose — unlike ``_run`` (which buffers and has a short timeout). A watchdog
     kills the process after ``timeout`` seconds so a wedged command can't hang the worker
     forever. ``stdin``, when given, is written to it and closed (the guest compose client's
-    payload). Deliberately NOT logged to the command log: the live stream is the record, and
-    double-logging would duplicate it under the fix output in the Doctor pane."""
+    payload). ``on_spawn`` gets the process, started in a process group of its own so the
+    caller can stop it with what it started. Deliberately NOT logged to the command log: the
+    live stream is the record, and double-logging would duplicate it under the fix output in the
+    Doctor pane."""
     import threading
 
     try:
@@ -1201,12 +1204,15 @@ def run_stream(
             bufsize=1 if stdin is None else -1,
             env=env,
             cwd=cwd,
+            process_group=0 if on_spawn else None,
         )
     except Exception as e:
         on_line(f"✗ {e}")
         return 127
+    if on_spawn:
+        on_spawn(proc)
     if stdin is not None:
-        return _run_stream_fed(proc, stdin, on_line, timeout)
+        return _run_stream_fed(proc, stdin, on_line, timeout, own_group=on_spawn is not None)
     timer = threading.Timer(timeout, proc.kill)
     timer.start()
     rc = 127
@@ -1215,6 +1221,10 @@ def run_stream(
         for line in proc.stdout:
             on_line(_strip_ansi(line.rstrip("\n")))
         rc = proc.wait()
+    except BaseException:
+        if on_spawn:  # its own group: the terminal's Ctrl-C didn't reach it
+            stop_group(proc)
+        raise
     finally:
         timer.cancel()
     if rc < 0:
@@ -1223,7 +1233,12 @@ def run_stream(
 
 
 def _run_stream_fed(
-    proc: subprocess.Popen, stdin: bytes, on_line: Callable[[str], None], timeout: float
+    proc: subprocess.Popen,
+    stdin: bytes,
+    on_line: Callable[[str], None],
+    timeout: float,
+    *,
+    own_group: bool = False,
 ) -> int:
     """:func:`run_stream`'s loop for a process fed ``stdin`` from a thread: a payload bigger than a
     pipe's buffer must not block the read of what the process says about it."""
@@ -1247,11 +1262,31 @@ def _run_stream_fed(
         for raw in proc.stdout:
             on_line(_strip_ansi(raw.decode(errors="replace").rstrip("\r\n")))
         rc = proc.wait()
+    except BaseException:
+        if own_group:
+            stop_group(proc)
+        raise
     finally:
         timer.cancel()
     if rc < 0:
         on_line(f"✗ process killed after {int(timeout)}s (timeout)")
     return rc
+
+
+def stop_group(proc: subprocess.Popen) -> None:
+    """End a process started in a process group of its own, with what it started."""
+    import signal
+
+    for sig, patience in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            return
+        try:
+            proc.wait(patience)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def host_command() -> list[str]:

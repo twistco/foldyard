@@ -2838,6 +2838,7 @@ def _stranded_stack(
         "_render_config",
         lambda *a, **k: {"services": {"app": {}, "sim": {"depends_on": {"app": {}}}}},
     )
+    monkeypatch.setattr(stack, "_watch_for", lambda *a, **k: None)  # not what these test
     return calls
 
 
@@ -2943,6 +2944,266 @@ def test_up_renders_the_config_once_for_the_sweep_and_the_guard(fake_repo, captu
     assert stack.up() == 0
     renders = [c for c in capture_run if "compose" in c and c[-1] == "config"]
     assert len(renders) == 2
+
+
+# ── the dependency watch (podman-compose 1.6.0 waits forever on a missing dependency) ───────
+# Its `up` starts a service only once each dependency meets its condition, retrying `podman wait`
+# every second with no limit. A dependency whose create failed has no container, so `up` hangs.
+
+
+def test_only_services_another_one_requires_are_watched():
+    rendered = {
+        "services": {
+            "app": {"container_name": "p-app"},
+            "sim": {"depends_on": {"app": {"condition": "service_healthy"}}},
+            "worker": {"depends_on": {"sim": {}, "opt": {"required": False}, "gone": {}}},
+            "opt": {},
+        }
+    }
+    assert stack._depended_on(rendered) == {"app": "p-app", "sim": "sim"}
+    assert stack._depended_on({"services": {"app": {}}}) == {}
+    assert stack._depended_on(None) == {}
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _watch(clock: _Clock, grace: float = 90.0) -> stack._DependencyWatch:
+    ctx = stack.Context(Path("/r"), {}, ["podman", "compose"], "app", "p", "")
+    watch = stack._DependencyWatch(ctx, {"sim": "p-sim"}, grace=grace, clock=clock)
+    watch.set_baseline([])  # compose's creates and starts all count as progress
+    return watch
+
+
+def test_a_dependency_missing_while_nothing_changes_is_stuck_after_the_grace():
+    clock = _Clock()
+    watch = _watch(clock)
+    still = [("a1", "app", 0, 0)]
+    assert watch.observe(still) == []
+    clock.now = 89.0
+    assert watch.observe(still) == []
+    clock.now = 90.0
+    assert watch.observe(still) == ["sim"]
+
+
+def test_containers_coming_and_going_restart_the_wait():
+    # A recreate's teardown and creates move the container set; only a still stack is a hang.
+    clock = _Clock()
+    watch = _watch(clock)
+    watch.observe([("a1", "app", 0, 0)])
+    clock.now = 80.0
+    watch.observe([("a2", "app", 0, 0)])
+    clock.now = 160.0
+    assert watch.observe([("a2", "app", 0, 0)]) == []
+    clock.now = 170.0
+    assert watch.observe([("a2", "app", 0, 0)]) == ["sim"]
+
+
+def test_a_dependency_that_appears_is_no_longer_waited_on():
+    clock = _Clock()
+    watch = _watch(clock)
+    watch.observe([("a1", "app", 0, 0)])
+    clock.now = 50.0
+    watch.observe([("a1", "app", 0, 0), ("s1", "sim", 0, 0)])
+    clock.now = 500.0
+    assert watch.observe([("a1", "app", 0, 0), ("s1", "sim", 0, 0)]) == []
+
+
+def test_nothing_counts_while_compose_pulls_or_builds():
+    # podman-compose pulls and builds before it creates anything, so a still stack with the
+    # dependency missing is just a slow image until compose creates or starts a container.
+    clock = _Clock()
+    watch = stack._DependencyWatch(
+        stack.Context(Path("/r"), {}, ["podman", "compose"], "app", "p", ""),
+        {"sim": "p-sim"},
+        clock=clock,
+    )
+    before = [("a1", "app", 5, 0)]
+    watch.set_baseline(before)
+    for t in (0.0, 100.0, 1000.0):
+        clock.now = t
+        assert watch.observe(before) == []
+    assert watch.observe([("a1", "app", 5, 0), ("w1", "worker", 0, 0)]) == []  # a create: armed
+    clock.now = 1090.0
+    assert watch.observe([("a1", "app", 5, 0), ("w1", "worker", 0, 0)]) == ["sim"]
+
+
+def test_a_restarted_container_arms_the_watch():
+    clock = _Clock()
+    watch = stack._DependencyWatch(
+        stack.Context(Path("/r"), {}, ["podman", "compose"], "app", "p", ""),
+        {"sim": "p-sim"},
+        clock=clock,
+    )
+    watch.set_baseline([("a1", "app", 5, 0)])
+    assert watch.observe([("a1", "app", 9, 0)]) == []
+    clock.now = 90.0
+    assert watch.observe([("a1", "app", 9, 0)]) == ["sim"]
+
+
+def test_an_engine_restart_does_not_arm_the_watch():
+    # `restart: always` crash-looping while compose still pulls: the engine's restarts bump
+    # `Restarts`, compose's `podman start` doesn't (podman 5.8, measured), whatever state the
+    # baseline caught the container in.
+    clock = _Clock()
+    watch = stack._DependencyWatch(
+        stack.Context(Path("/r"), {}, ["podman", "compose"], "app", "p", ""),
+        {"sim": "p-sim"},
+        clock=clock,
+    )
+    watch.set_baseline([("a1", "app", 5, 0)])
+    for t, n in ((0.0, 1), (100.0, 2), (1000.0, 3)):
+        clock.now = t
+        assert watch.observe([("a1", "app", 5 + n, n)]) == []
+
+
+def test_without_a_baseline_the_watch_never_trips():
+    clock = _Clock()
+    watch = stack._DependencyWatch(
+        stack.Context(Path("/r"), {}, ["podman", "compose"], "app", "p", ""),
+        {"sim": "p-sim"},
+        clock=clock,
+    )
+    watch.set_baseline(None)
+    for t in (0.0, 100.0, 1000.0):
+        clock.now = t
+        assert watch.observe([("a1", "app", t, 0)]) == []
+
+
+def test_a_failed_engine_probe_never_trips_the_watch():
+    clock = _Clock()
+    watch = _watch(clock)
+    for t in (0.0, 100.0, 1000.0):
+        clock.now = t
+        assert watch.observe(None) == []
+
+
+def test_the_watch_probe_maps_containers_to_services_by_label(monkeypatch):
+    import types
+
+    ps = [
+        {"Id": "a1", "Labels": _pc_labels("app", "h")},
+        {
+            "Id": "s1",
+            "StartedAt": 7,
+            "Restarts": 2,
+            "Labels": {"com.docker.compose.service": "sim"},
+        },
+    ]
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(ps), stderr="")
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    assert _watch(_Clock()).probe() == [("a1", "app", 0, 0), ("s1", "sim", 7, 2)]
+    assert "label=io.podman.compose.project=p" in seen[0]
+
+    monkeypatch.setattr(
+        stack.subprocess,
+        "run",
+        lambda cmd, **kw: types.SimpleNamespace(returncode=125, stdout="", stderr="no engine"),
+    )
+    assert _watch(_Clock()).probe() is None
+
+
+class _HangingProc:
+    """A compose client that never exits on its own, only when it is stopped."""
+
+    pid = 4242
+
+    def __init__(self) -> None:
+        import threading
+
+        self.stopped = threading.Event()
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.stopped.wait(timeout or 10)
+        return -15
+
+
+def _stuck_watch(monkeypatch, stopped: list[_HangingProc]) -> None:
+    """Every `up` gets a watch that trips on its first poll, and stopping a client ends it."""
+    clock = _Clock()
+
+    def watch_for(ctx, args, rendered):
+        watch = stack._DependencyWatch(ctx, {"sim": "p-sim"}, grace=0.0, interval=0.01, clock=clock)
+        answers = iter([[]])  # the baseline, before compose has created anything
+        monkeypatch.setattr(watch, "probe", lambda: next(answers, [("a1", "app", 0, 0)]))
+        return watch
+
+    def stop(proc):
+        stopped.append(proc)
+        proc.stopped.set()
+
+    monkeypatch.setattr(stack, "_watch_for", watch_for)
+    monkeypatch.setattr(stack, "_stop_group", stop)
+
+
+def test_a_hung_host_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys):
+    proc = _HangingProc()
+    stopped: list[_HangingProc] = []
+    _stuck_watch(monkeypatch, stopped)
+    monkeypatch.setattr(stack, "_spawn_compose", lambda cmd, env, cwd: proc)
+    ctx = _fake_ctx(fake_repo, {})
+    assert stack._compose(ctx, ["up", "-d"], rendered={}) == stack.DEPENDENCY_HANG
+    assert stopped == [proc]
+    err = capsys.readouterr().err
+    assert "p-sim" in err
+    assert "fy down && fy up" in err
+
+
+def test_a_hung_guest_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys):
+    from foldyard import guestcompose
+
+    proc = _HangingProc()
+    stopped: list[_HangingProc] = []
+    _stuck_watch(monkeypatch, stopped)
+    monkeypatch.setattr(guestcompose, "wanted", lambda: True)
+
+    def stream(ctx, args, on_spawn=None):
+        assert on_spawn is not None
+        on_spawn(proc)
+        return proc.wait()
+
+    monkeypatch.setattr(guestcompose, "stream", stream)
+    assert stack._compose(_fake_ctx(fake_repo, {}), ["up", "-d"], rendered={}) == (
+        stack.DEPENDENCY_HANG
+    )
+    assert stopped == [proc]
+    assert "p-sim" in capsys.readouterr().err
+
+
+def test_a_hung_reconcile_up_is_stopped_and_explained(fake_repo, monkeypatch):
+    proc = _HangingProc()
+    stopped: list[_HangingProc] = []
+    _stuck_watch(monkeypatch, stopped)
+
+    def run_stream(cmd, on_line, **kw):
+        kw["on_spawn"](proc)
+        return proc.wait()
+
+    monkeypatch.setattr(devmode, "run_stream", run_stream)
+    lines: list[str] = []
+    rc = stack._compose_captured(_fake_ctx(fake_repo, {}), ["up", "-d"], lines.append, rendered={})
+    assert rc == stack.DEPENDENCY_HANG
+    assert stopped == [proc]
+    assert any("p-sim" in ln and "fy down && fy up" in "\n".join(lines) for ln in lines)
+
+
+def test_only_up_with_a_dependency_is_watched(fake_repo):
+    ctx = _fake_ctx(fake_repo, {})
+    rendered = {"services": {"app": {}, "sim": {"depends_on": {"app": {}}}}}
+    assert stack._watch_for(ctx, ["up", "-d"], rendered) is not None
+    assert stack._watch_for(ctx, ["logs", "-f"], rendered) is None
+    assert stack._watch_for(ctx, ["up", "-d"], {"services": {"app": {}}}) is None
+    assert stack._watch_for(ctx, ["up", "-d"], None) is None
 
 
 # ── the compose argv contract: what the bundled podman-compose UNDERSTANDS ─────────────────

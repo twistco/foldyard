@@ -730,6 +730,55 @@ def test_run_stream_feeds_a_large_stdin_and_merges_the_output():
     assert "err line" in lines
 
 
+_GROUP = b"import os\nprint(os.getpgid(0) == os.getpid())\n"
+
+
+def test_a_watched_relay_hands_over_its_process_in_a_group_of_its_own():
+    # The dependency watch stops a hung `up` by its process group: the client and what it started.
+    spawned: list[subprocess.Popen] = []
+    out: list[str] = []
+    rc = guestcompose.run_relayed(
+        [sys.executable, "-I", "-"], _GROUP, out.append, lambda _: None, on_spawn=spawned.append
+    )
+    assert rc == 0
+    assert len(spawned) == 1
+    assert out == ["True"]
+
+
+def test_a_watched_stream_hands_over_its_process_in_a_group_of_its_own():
+    from foldyard import devmode
+
+    spawned: list[subprocess.Popen] = []
+    lines: list[str] = []
+    rc = devmode.run_stream(
+        [sys.executable, "-I", "-"], lines.append, stdin=_GROUP, on_spawn=spawned.append
+    )
+    assert rc == 0
+    assert len(spawned) == 1
+    assert lines == ["True"]
+
+
+_CHATTY_SLEEPER = b"import time\nprint('started', flush=True)\ntime.sleep(60)\n"
+
+
+@pytest.mark.parametrize("fed", [False, True])
+def test_an_interrupted_watched_stream_stops_its_process_group(fed: bool):
+    # Its own group means the terminal's Ctrl-C no longer reaches it: the interrupt must.
+    from foldyard import devmode
+
+    spawned: list[subprocess.Popen] = []
+
+    def interrupt(_line: str) -> None:
+        raise KeyboardInterrupt
+
+    cmd = [sys.executable, "-I", *(["-"] if fed else ["-c", _CHATTY_SLEEPER.decode()])]
+    with pytest.raises(KeyboardInterrupt):
+        devmode.run_stream(
+            cmd, interrupt, stdin=_CHATTY_SLEEPER if fed else None, on_spawn=spawned.append
+        )
+    assert spawned[0].poll() is not None
+
+
 def test_a_stream_with_no_route_says_so_and_runs_nothing(vm, tmp_path, monkeypatch, capfd):
     vm.BACKEND = _Backend(None)
     monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)

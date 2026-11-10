@@ -22,8 +22,9 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -687,9 +688,196 @@ def _compose(
 
     full = [*_profile_flags(ctx, extra_profiles), *args]
     _err(_shown(ctx, full))
+    watch = _watch_for(ctx, args, rendered)
     if guestcompose.wanted():
-        return guestcompose.stream(ctx, full)
-    return subprocess.run([*ctx.compose, *full], env=ctx.env, cwd=str(ctx.main)).returncode
+        if watch is None:
+            return guestcompose.stream(ctx, full)
+        return _watching(watch, _err, lambda spawned: guestcompose.stream(ctx, full, spawned))
+    if watch is None:
+        return subprocess.run([*ctx.compose, *full], env=ctx.env, cwd=str(ctx.main)).returncode
+    return _watching(
+        watch,
+        _err,
+        lambda spawned: _wait_spawned(
+            _spawn_compose([*ctx.compose, *full], ctx.env, str(ctx.main)), spawned
+        ),
+    )
+
+
+# podman-compose (1.6.0, and main as of 2026-11) starts a service only once each dependency meets
+# its condition, retrying `podman wait` every second with no limit: a dependency whose create
+# failed has no container, and `up` hangs. Missing that long while the project's containers stand
+# still is that, not a slow create.
+_DEP_GRACE = 90.0
+_DEP_POLL = 5.0
+DEPENDENCY_HANG = 124
+
+
+def _depended_on(rendered: dict | None) -> dict[str, str]:
+    """Service → container name, for each service another one ``depends_on`` (unless
+    ``required: false``)."""
+    services = (rendered or {}).get("services") or {}
+    out: dict[str, str] = {}
+    for svc in services.values():
+        deps = (svc or {}).get("depends_on") or {}
+        for name, spec in deps.items() if isinstance(deps, dict) else ((d, {}) for d in deps):
+            if name in services and (spec or {}).get("required", True) is not False:
+                out[name] = (services[name] or {}).get("container_name") or name
+    return out
+
+
+class _DependencyWatch:
+    """Polls the engine while compose `up` runs; ``observe`` is the verdict, ``run`` the loop."""
+
+    def __init__(
+        self,
+        ctx: Context,
+        depended: dict[str, str],
+        *,
+        grace: float = _DEP_GRACE,
+        interval: float = _DEP_POLL,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.ctx, self.depended, self.grace, self.interval, self.clock = (
+            ctx,
+            depended,
+            grace,
+            interval,
+            clock,
+        )
+        self.stuck: list[str] = []
+        self._baseline: dict[str, tuple[object, object]] | None = None
+        self._armed = False
+        self._ids: frozenset[str] | None = None
+        self._still_since = clock()
+        self._missing_since: dict[str, float] = {}
+
+    def set_baseline(self, containers: Sequence[tuple[str, str, object, object]] | None) -> None:
+        """The project's containers before compose runs. None (no answer) never trips."""
+        self._baseline = None if containers is None else {c[0]: (c[2], c[3]) for c in containers}
+
+    def observe(self, containers: Sequence[tuple[str, str, object, object]] | None) -> list[str]:
+        """The depended-on services missing for ``grace`` with the container set unchanged.
+        ``containers`` are (id, service, started at, restarts). Counted only once compose has
+        created or started a container: before that it is pulling or building, which can take
+        any time. A start the engine's restart policy made bumps ``restarts`` and doesn't count.
+        None (no answer) never trips."""
+        if containers is None or self._baseline is None:
+            return []
+        if not self._armed:
+            base = self._baseline
+            self._armed = any(
+                cid not in base or (base[cid][0] != started and base[cid][1] == restarts)
+                for cid, _, started, restarts in containers
+            )
+            if not self._armed:
+                return []
+        now = self.clock()
+        ids = frozenset(c[0] for c in containers)
+        if ids != self._ids:
+            self._ids, self._still_since = ids, now
+        present = {c[1] for c in containers}
+        for svc in self.depended:
+            if svc in present:
+                self._missing_since.pop(svc, None)
+            else:
+                self._missing_since.setdefault(svc, now)
+        return sorted(
+            svc
+            for svc, since in self._missing_since.items()
+            if now - max(since, self._still_since) >= self.grace
+        )
+
+    def probe(self) -> list[tuple[str, str, object, object]] | None:
+        try:
+            ps = _run(
+                [
+                    config.engine(),
+                    "ps",
+                    "-a",
+                    "--filter",
+                    _provider_signature_filter(self.ctx),
+                    "--format",
+                    "json",
+                ],
+                env=self.ctx.env,
+                timeout=30,
+            )
+            if ps.returncode != 0:
+                return None
+            return [
+                (
+                    c["Id"],
+                    _podman_compose_service(c.get("Labels") or {}),
+                    c.get("StartedAt", 0),
+                    # Absent on a podman that doesn't report it: arming then falls back to any
+                    # StartedAt change, which is deliberate.
+                    c.get("Restarts", 0),
+                )
+                for c in json.loads(ps.stdout or "[]")
+            ]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            return None
+
+    def run(self, stop: Callable[[], None], done: threading.Event) -> None:
+        while not done.wait(self.interval):
+            if stuck := self.observe(self.probe()):
+                self.stuck = stuck
+                stop()
+                return
+
+
+def _watch_for(ctx: Context, args: list[str], rendered: dict | None) -> _DependencyWatch | None:
+    if args[:1] != ["up"] or not (depended := _depended_on(rendered)):
+        return None
+    return _DependencyWatch(ctx, depended)
+
+
+def _spawn_compose(cmd: list[str], env: dict, cwd: str) -> subprocess.Popen:
+    return subprocess.Popen(cmd, env=env, cwd=cwd, stdin=subprocess.DEVNULL, process_group=0)
+
+
+def _wait_spawned(proc: subprocess.Popen, spawned: Callable[[subprocess.Popen], None]) -> int:
+    spawned(proc)
+    try:
+        return proc.wait()
+    except BaseException:  # its own process group: an interrupt here doesn't reach it
+        _stop_group(proc)
+        raise
+
+
+def _stop_group(proc: subprocess.Popen) -> None:
+    devmode.stop_group(proc)
+
+
+def _watching(
+    watch: _DependencyWatch,
+    emit: Callable[[str], None],
+    launch: Callable[[Callable[[subprocess.Popen], None]], int],
+) -> int:
+    """Run ``launch`` (handed the spawn hook) with ``watch`` stopping it if it hangs."""
+    watch.set_baseline(watch.probe())
+    done = threading.Event()
+
+    def spawned(proc: subprocess.Popen) -> None:
+        threading.Thread(
+            target=watch.run, args=(lambda: _stop_group(proc), done), daemon=True
+        ).start()
+
+    try:
+        rc = launch(spawned)
+    finally:
+        done.set()
+    if not watch.stuck or rc == 0:  # finished as the watch tripped: not a hang
+        return rc
+    names = ", ".join(watch.depended[s] for s in watch.stuck)
+    emit(
+        f"✗ compose was waiting for {names}, which has no container ({int(watch.grace)}s with "
+        "nothing changing), so fy stopped it: podman-compose waits for a missing dependency "
+        "forever."
+    )
+    emit("  Its create failed (compose's error above says why). Fix that, then `fy down && fy up`.")
+    return DEPENDENCY_HANG
 
 
 def _redact_build_args(cmd: list[str]) -> list[str]:
@@ -1929,9 +2117,22 @@ def _compose_captured(
 
     full = [*_profile_flags(ctx, extra_profiles), *args]
     emit(_shown(ctx, full))
+    watch = _watch_for(ctx, args, rendered)
     if guestcompose.wanted():
-        return guestcompose.stream_to(ctx, full, emit)
-    return devmode.run_stream([*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main))
+        if watch is None:
+            return guestcompose.stream_to(ctx, full, emit)
+        return _watching(
+            watch, emit, lambda spawned: guestcompose.stream_to(ctx, full, emit, spawned)
+        )
+    if watch is None:
+        return devmode.run_stream([*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main))
+    return _watching(
+        watch,
+        emit,
+        lambda spawned: devmode.run_stream(
+            [*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main), on_spawn=spawned
+        ),
+    )
 
 
 def stack_declared(verb: str, box_verb: str | None) -> int | None:
