@@ -1125,6 +1125,13 @@ def _reconcile_foreign_containers(ctx: Context, emit: Callable[[str], None] | No
     _run(cmd, env=ctx.env)
 
 
+def _engine_says(proc: subprocess.CompletedProcess) -> str:
+    """An engine's stderr as one printable line: it can carry box-influenced names."""
+    from .guestcompose import printable
+
+    return printable(" ".join((proc.stderr or "").split()))
+
+
 def _remove_orphan_containers(
     ctx: Context, emit: Callable[[str], None], extra_profiles: list[str] | None = None
 ) -> None:
@@ -1194,7 +1201,7 @@ def _remove_orphan_containers(
         if rm.returncode != 0:
             emit(
                 f"⚠ the engine refused to remove some of them (exit {rm.returncode}), so they "
-                f"stay: {(rm.stderr or '').strip()}"
+                f"stay: {_engine_says(rm)}"
             )
     except Exception:
         return  # best-effort: an orphan left running is recoverable, a bad sweep is not
@@ -1304,7 +1311,7 @@ def _remove_stranded_dependents(
         if rm.returncode != 0:
             emit(
                 f"⚠ the engine refused that removal (exit {rm.returncode}): "
-                f"{(rm.stderr or '').strip()}\n"
+                f"{_engine_says(rm)}\n"
                 "  compose may now skip re-creating them and wait forever on one's health; if "
                 "`up` hangs, interrupt it and run `fy down && fy up`."
             )

@@ -2801,7 +2801,8 @@ def _stranded_stack(
             return types.SimpleNamespace(returncode=0, stdout=json.dumps(ps), stderr="")
         if rm_fails and cmd[1:2] == ["rm"]:
             refusal = (
-                "Error: container 1a2b has dependent containers which must be removed before it"
+                "\x1b[31mError: container 1a2b has dependent containers\n"
+                "which must be removed before it\x1b[0m\n"
             )
             return types.SimpleNamespace(returncode=125, stdout="", stderr=refusal)
         return _FakeProc()
@@ -2817,31 +2818,25 @@ def _stranded_stack(
 
 
 def test_up_removes_stranded_dependents_before_compose_up(fake_repo, monkeypatch):
+    # `--depend`: podman removes the names one `rm` lists in parallel, so a stranded sim whose
+    # stranded worker `--requires` it is refused in either order (podman 5.8.9, measured), and
+    # the sim then strands for real: compose's `up` skips creating it and waits forever on its
+    # health. Its dependents are all downstream of a recreated service, so compose's own `down`
+    # would remove them anyway.
     calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"})
     assert stack.up() == 0
     rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
-    assert rm[-1:] == ["tangible-podman-sim"]
+    assert rm == ["podman", "rm", "-f", "--depend", "tangible-podman-sim"]
     up_idx = next(i for i, c in enumerate(calls) if "compose" in c and "up" in c)
     assert calls.index(rm) < up_idx
-
-
-def test_stranded_dependents_are_removed_with_their_own_dependents(fake_repo, monkeypatch):
-    # podman removes the names one `rm` lists in parallel, so a stranded sim whose stranded
-    # worker `--requires` it is refused in either order (podman 5.8.9, measured), and the sim
-    # then strands for real: compose's `up` skips creating it and waits forever on its health.
-    # `--depend` removes dependents first. They're all downstream of a recreated service, so
-    # compose's own `down` would remove them anyway.
-    calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"})
-    assert stack.up() == 0
-    rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
-    assert "--depend" in rm
 
 
 def test_a_refused_stranded_removal_is_reported_not_swallowed(fake_repo, monkeypatch, capsys):
     calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"}, rm_fails=True)
     assert stack.up() == 0
     err = capsys.readouterr().err
-    assert "has dependent containers" in err
+    assert "has dependent containers which must be removed before it" in err
+    assert "\x1b" not in err  # engine-relayed text reaches the terminal stripped
     assert "fy down && fy up" in err
     assert any("compose" in c and "up" in c for c in calls)
 
@@ -2872,7 +2867,7 @@ def test_up_removes_a_stranded_dependent_carrying_only_the_docker_service_label(
     )
     assert stack.up() == 0
     rm = next(c for c in calls if c[:3] == ["podman", "rm", "-f"])
-    assert rm[-1:] == ["tangible-podman-sim"]
+    assert rm == ["podman", "rm", "-f", "--depend", "tangible-podman-sim"]
 
 
 def test_up_removes_nothing_when_the_hashes_are_unavailable(fake_repo, monkeypatch):
