@@ -1204,6 +1204,7 @@ _WALL_PROTECTED = tuple(
         "::/127",
         "::ffff:0:0/96",
         "64:ff9b::/96",
+        "64:ff9b:1::/48",  # local-use NAT64: Python before 3.11.10 calls it global
         "fc00::/7",
         "fe80::/10",
         "ff00::/8",

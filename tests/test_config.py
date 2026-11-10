@@ -607,6 +607,18 @@ def test_firewall_allow_refuses_a_malformed_entry(fresh_config, tmp_path, entrie
         config.machine_firewall_allow()
 
 
+def test_firewall_allow_refuses_local_use_nat64_without_the_proxys_predicate(
+    fresh_config, tmp_path, monkeypatch
+):
+    # Python before 3.11.10 calls 64:ff9b:1::/48 global, so local_key can't be relied on for it.
+    from foldyard import allowlist
+
+    monkeypatch.setattr(allowlist, "local_key", lambda _key: False)
+    _allow(tmp_path, fresh_config, '[{ to = "64:ff9b:1::c0a8:502", port = 3307, why = "x" }]')
+    with pytest.raises(SystemExit, match="firewall_allow"):
+        config.machine_firewall_allow()
+
+
 def test_firewall_allow_refuses_dns(fresh_config, tmp_path):
     # The wall lets :53 reach local resolvers only: a public-IP :53 stream is an exfil tunnel.
     _allow(tmp_path, fresh_config, '[{ to = "34.147.131.70", port = 53, why = "x" }]')
