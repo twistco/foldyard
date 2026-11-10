@@ -538,13 +538,13 @@ def test_firewall_allow_reads_addresses_as_networks(fresh_config, tmp_path):
         tmp_path,
         fresh_config,
         '[{ to = "34.147.131.70", port = 3307, why = "Cloud SQL" },'
-        ' { to = "203.0.113.0/24", port = 5432, why = "a db fleet" },'
+        ' { to = "34.147.131.0/24", port = 5432, why = "a db fleet" },'
         ' { to = "2600:1900:4000::1", port = 3307, why = "Cloud SQL v6" },'
         ' { to = "34.147.131.70/32", port = 3307, why = "the same, again" }]',
     )
     assert config.machine_firewall_allow() == [
         config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL"),
-        config.FirewallOpening("203.0.113.0/24", 5432, "a db fleet"),
+        config.FirewallOpening("34.147.131.0/24", 5432, "a db fleet"),
         config.FirewallOpening("2600:1900:4000::1/128", 3307, "Cloud SQL v6"),
     ]
 
@@ -567,9 +567,15 @@ def test_firewall_allow_reads_addresses_as_networks(fresh_config, tmp_path):
         "fe80::1",  # link-local
         "ff02::1",  # multicast
         "::ffff:10.0.0.1",  # a v4-mapped private address
+        "2002:c0a8:502::/120",  # 6to4 wrapping 192.168.5.2: judged as the proxy judges it
+        "64:ff9b:1::c0a8:502",  # RFC 8215 local-use NAT64
+        "2001:0:4136:e378:8000:63bf:3f57:fdfd",  # Teredo: a client address wrapped in v6
+        "203.0.113.0/24",  # documentation ranges aren't global either
+        "2001:db8::/120",
         "34.0.0.0/8",  # far wider than one service
         "8.8.0.0/16",
         "2600:1900::/32",
+        "2600:1900:4000::/64",  # a whole v6 LAN segment, your computer's maybe
         "34.147.131.71/24",  # host bits set: say the network you mean
         "34.147.131.70/33",
     ],

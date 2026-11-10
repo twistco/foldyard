@@ -1132,6 +1132,22 @@ def test_wall_posture_lists_each_opening_with_its_why(monkeypatch, capsys):
     assert rep.fails == 0
     assert "34.147.131.70/32 tcp/3307" in out
     assert "Cloud SQL instance" in out
+    assert "checkout" not in out
+
+
+def test_in_the_box_openings_are_named_as_the_checkouts_not_the_vms(monkeypatch, capsys):
+    # The box reads the working tree; the VM applied what the host adopted, which may differ.
+    _wall_net(monkeypatch)
+    monkeypatch.setattr(verify.config, "in_box", lambda: True)
+    monkeypatch.setattr(
+        verify.config,
+        "machine_firewall_allow",
+        lambda: [verify.config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL instance")],
+    )
+    verify._wall_posture(verify._Report())
+    out = capsys.readouterr().out
+    assert "34.147.131.70/32 tcp/3307" in out
+    assert "this checkout declares" in out
 
 
 def test_wall_posture_offline_box_does_not_certify_the_wall(monkeypatch, capsys):

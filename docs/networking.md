@@ -286,8 +286,9 @@ firewall_allow = [
 ```
 
 That traffic leaves the VM directly: the proxy doesn't see it, log it or apply the allowlist to it,
-so keep the list short. An opening can't point at your computer or your network (below), and it
-comes from the adopted config, so the box can't add one. `fy verify` lists each opening and its
+so keep the list short. An opening can't name a local address, judged as the proxy judges one
+(below), though your computer's own public address isn't one foldyard can know. It comes from the
+adopted config, so the box can't add one. `fy verify` lists each opening and its
 reason. The firewall's refusals are in the VM's `/run/fy-wall/denies.jsonl`, which is where a
 missing opening shows up: the address and port the client tried.
 

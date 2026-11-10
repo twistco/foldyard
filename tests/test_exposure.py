@@ -442,6 +442,26 @@ def test_compose_env_names_are_reported_as_host_env_the_box_can_read(checkout):
     assert "compose_env" not in rendered(cfg)
 
 
+def test_firewall_openings_are_reported_as_bypassing_the_proxy(checkout):
+    # The widest thing config can ask for: traffic that skips the proxy, its log and the allowlist.
+    machine = (
+        '\n[machine]\nbackend = "lima"\nfirewall = true\nfirewall_allow = '
+        '[{ to = "34.147.131.70", port = 3307, why = "Cloud SQL" }]\n'
+    )
+    cfg = checkout(BASE + "passthrough = []\n" + machine)
+    exp = collect(cfg)
+    assert exp.openings == [("34.147.131.70/32", 3307, "Cloud SQL")]
+    assert exp.openings_origin == exposure.SHARED
+    out = rendered(cfg)
+    assert "[machine] firewall_allow" in out and "34.147.131.70/32 tcp/3307" in out
+    assert "Cloud SQL" in out and "bypass" in out
+    assert "1 direct opening" in out  # on the Context line too
+
+    cfg = checkout(BASE + "passthrough = []\n")
+    assert collect(cfg).openings == []
+    assert "firewall_allow" not in rendered(cfg)
+
+
 def test_a_shared_agent_prompt_says_it_steers_everyone(checkout):
     cfg = checkout(BASE + 'passthrough = []\n\n[claude]\nsystem_prompt = "one\\ntwo\\n"\n')
     assert collect(cfg).prompts == [("[claude].system_prompt", 2, exposure.SHARED)]

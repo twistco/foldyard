@@ -1185,7 +1185,8 @@ class FirewallOpening:
 
 
 # What an opening may never reach: your computer and LAN (0.8.0's guarantee), a tailnet, a
-# cloud's metadata service, multicast, and v4 hidden in v6. The proxy refuses the same.
+# cloud's metadata service, multicast, and v4 hidden in v6. Checked alongside the proxy's own
+# predicate (allowlist.local_key), which is the authority; this list only adds to it.
 _WALL_PROTECTED = tuple(
     ipaddress.ip_network(n)
     for n in (
@@ -1208,8 +1209,8 @@ _WALL_PROTECTED = tuple(
         "ff00::/8",
     )
 )
-# An opening names one service's addresses; wider than a /24 (or a v6 /64) is a hole, not that.
-_WALL_PREFIX_FLOOR = {4: 24, 6: 64}
+# An opening names one service's addresses: at most 256 of them, so never a whole v6 LAN segment.
+_WALL_PREFIX_FLOOR = {4: 24, 6: 120}
 
 
 def machine_firewall_allow() -> list[FirewallOpening]:
@@ -1235,7 +1236,13 @@ def machine_firewall_allow() -> list[FirewallOpening]:
             raise bad(f"to = {to!r} must be an IP address or CIDR network (no host names)")
         if net.prefixlen < _WALL_PREFIX_FLOOR[net.version]:
             raise bad(f"to = {to!r} is wider than /{_WALL_PREFIX_FLOOR[net.version]}")
-        if any(net.overlaps(p) for p in _WALL_PROTECTED if p.version == net.version):
+        from .allowlist import local_key
+
+        # The proxy's own predicate too (non-global, and v4 wrapped in 6to4/Teredo/mapped v6), on
+        # both ends: every non-global block is aligned and at least as wide as the floor allows.
+        if any(net.overlaps(p) for p in _WALL_PROTECTED if p.version == net.version) or any(
+            local_key(str(a)) for a in (net.network_address, net.broadcast_address)
+        ):
             raise bad(f"to = {to!r} reaches a private, local or reserved range")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
             raise bad(f"port = {port!r} for {to} must be one TCP port, 1-65535")

@@ -1021,8 +1021,14 @@ def _wall_posture(rep: _Report) -> None:
     except SystemExit as e:
         rep.warn(f"{e} (the VM applies only what was adopted)")
         return
+    # In the box this is the working tree; the VM applied what the host adopted.
+    source = (
+        "this checkout declares [machine] firewall_allow"
+        if config.in_box()
+        else "opened by [machine] firewall_allow"
+    )
     for o in openings:
-        rep.info(f"opened by [machine] firewall_allow: {o.to} tcp/{o.port} — {o.why}")
+        rep.info(f"{source}: {o.to} tcp/{o.port} — {o.why}")
 
 
 class _Listener:
