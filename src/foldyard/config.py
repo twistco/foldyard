@@ -1210,14 +1210,12 @@ _WALL_PROTECTED = tuple(
         "ff00::/8",
     )
 )
-# An opening names one service's addresses: at most 256 of them, so never a whole v6 LAN segment.
-_WALL_PREFIX_FLOOR = {4: 24, 6: 120}
 
 
 def machine_firewall_allow() -> list[FirewallOpening]:
     """``[machine] firewall_allow`` — direct TCP openings in the VM firewall, for a client that
-    can't use an HTTP proxy (cloud-sql-proxy's instance dial). Each is ``{ to, port, why }``: an
-    IP or CIDR literal (never a name: nothing resolves at boot), one TCP port, and a reason. On
+    can't use an HTTP proxy (cloud-sql-proxy's instance dial). Each is ``{ to, port, why }``: one
+    IP address (never a range or a name: nothing resolves at boot), one TCP port, and a reason. On
     your computer this is the adopted config, so the box can't widen it. Refuses a bad entry."""
     raw = _table("machine").get("firewall_allow", [])
 
@@ -1234,15 +1232,16 @@ def machine_firewall_allow() -> list[FirewallOpening]:
         try:
             net = ipaddress.ip_network(str(to), strict=True)
         except ValueError:
-            raise bad(f"to = {to!r} must be an IP address or CIDR network (no host names)")
-        if net.prefixlen < _WALL_PREFIX_FLOOR[net.version]:
-            raise bad(f"to = {to!r} is wider than /{_WALL_PREFIX_FLOOR[net.version]}")
+            raise bad(f"to = {to!r} must be an IP address (no host names)")
+        # One address each: every one opened is somewhere the box can send unseen, and cloud
+        # neighbours are other tenants. Loosening later breaks nobody; tightening would.
+        if net.num_addresses != 1:
+            raise bad(f"to = {to!r} is a range: list each address as its own entry")
         from .allowlist import local_key
 
-        # The proxy's own predicate too (non-global, and v4 wrapped in 6to4/Teredo/mapped v6), on
-        # both ends: every non-global block is aligned and at least as wide as the floor allows.
-        if any(net.overlaps(p) for p in _WALL_PROTECTED if p.version == net.version) or any(
-            local_key(str(a)) for a in (net.network_address, net.broadcast_address)
+        # The proxy's own predicate too (non-global, and v4 wrapped in 6to4/Teredo/mapped v6).
+        if any(net.overlaps(p) for p in _WALL_PROTECTED if p.version == net.version) or local_key(
+            str(net.network_address)
         ):
             raise bad(f"to = {to!r} reaches a private, local or reserved range")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:

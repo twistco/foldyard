@@ -538,13 +538,13 @@ def test_firewall_allow_reads_addresses_as_networks(fresh_config, tmp_path):
         tmp_path,
         fresh_config,
         '[{ to = "34.147.131.70", port = 3307, why = "Cloud SQL" },'
-        ' { to = "34.147.131.0/24", port = 5432, why = "a db fleet" },'
+        ' { to = "35.234.1.2", port = 5432, why = "a second database" },'
         ' { to = "2600:1900:4000::1", port = 3307, why = "Cloud SQL v6" },'
         ' { to = "34.147.131.70/32", port = 3307, why = "the same, again" }]',
     )
     assert config.machine_firewall_allow() == [
         config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL"),
-        config.FirewallOpening("34.147.131.0/24", 5432, "a db fleet"),
+        config.FirewallOpening("35.234.1.2/32", 5432, "a second database"),
         config.FirewallOpening("2600:1900:4000::1/128", 3307, "Cloud SQL v6"),
     ]
 
@@ -573,6 +573,9 @@ def test_firewall_allow_reads_addresses_as_networks(fresh_config, tmp_path):
         "203.0.113.0/24",  # documentation ranges aren't global either
         "2001:db8::/120",
         "34.0.0.0/8",  # far wider than one service
+        "34.147.131.0/24",  # a range at all: name each address
+        "34.147.131.70/31",
+        "2600:1900:4000::/127",
         "8.8.0.0/16",
         "2600:1900::/32",
         "2600:1900:4000::/64",  # a whole v6 LAN segment, your computer's maybe

@@ -254,7 +254,7 @@ disk_gib = 60
   `MACHINE_FIREWALL` (`1`/`true`/`on`/`yes`).
 - **`firewall_allow`** — direct openings in the VM firewall, for a client that can't use an HTTP
   proxy (cloud-sql-proxy dials its instance on TCP 3307, say). A list of `{ to, port, why }`:
-  `to` an IP address or CIDR network (never a host name: nothing resolves at boot), `port` one
+  `to` one IP address (never a range or a host name: nothing resolves at boot), `port` one
   TCP port other than 53 (DNS stays with local resolvers), `why` the reason, which `fy verify`
   shows beside the opening. Default: none.
 
@@ -266,7 +266,7 @@ disk_gib = 60
 
   An opening can't name an address the proxy treats as local: anything private, loopback,
   link-local, CGNAT, multicast or reserved, including a v4 address wrapped in v6 (mapped, 6to4,
-  Teredo, NAT64), is refused, and so is anything wider than a `/24` (`/120` for IPv6). Your
+  Teredo, NAT64), is refused, and so is a range: list each address as its own entry. Your
   computer's own public address can't be known here: don't open one, or use `host_firewall`.
   It is applied at boot like the rest of the firewall, so a change takes
   `fy machine stop && fy up`. With `host_firewall`, the host's rules carry the openings too, and
