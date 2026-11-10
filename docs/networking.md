@@ -540,8 +540,10 @@ Dockerfile the box can edit, upload to any bucket there. So foldyard reports the
 1. **On your computer, with a terminal,** it asks about each refused host: once (15 minutes, long
    enough for the build), session, permanent, or no. When the requests it refused share one first
    directory, it offers that path grant (`storage.googleapis.com/chrome-for-testing-public/`)
-   and `h` grants the whole host instead. With nothing to go on (several directories, or a step
-   that didn't trust the CA), it offers the host.
+   and `h` grants the whole host instead. With nothing to go on (several directories, a write, or
+   a step that didn't trust the CA), it offers the host. On a host the build already holds a path
+   grant for, it never does: a write, or a request with a body, under that path is reported and
+   not offered, since all of the host is the upload channel the path grant left out.
 2. It builds again. The layer cache makes that cheap. A redirect chain reveals one more hop per
    attempt, up to 4 attempts.
 3. It offers to add what you granted to `foldyard.toml`'s `[proxy] recommend` as `when = "build"`

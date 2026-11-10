@@ -439,6 +439,38 @@ def test_without_a_terminal_the_printed_command_is_the_path(env, capsys):
     assert f"fy allow add {_CFT} --build" in capsys.readouterr().out
 
 
+def test_a_write_beyond_a_build_path_grant_is_reported_never_offered(env, capsys):
+    # The PR-review finding: with the path granted for builds, a build step's PUT under it used
+    # to fall back to "allow storage.googleapis.com for builds?" — the whole-host upload channel.
+    allowlist.grant(_CFT, "permanent", build=True)
+    put = {**_path_row("/chrome-for-testing-public/x"), "method": "PUT", "outside": True}
+    build = _Build(env["log"], [(1, [put])])
+    prompt, asked = _answers("o")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 1
+    assert asked == [] and build.calls == 1  # nothing offered, so nothing to retry
+    out = capsys.readouterr().out
+    assert "refused PUT /chrome-for-testing-public/x — beyond the paths it is granted" in out
+    assert allowlist.effective()["build_allow"] == [_CFT]
+
+
+def test_without_a_terminal_a_write_beyond_a_path_grant_prints_no_grant(env, capsys):
+    allowlist.grant(_CFT, "permanent", build=True)
+    put = {**_path_row("/chrome-for-testing-public/x"), "method": "PUT", "outside": True}
+    buildgate.run(_Build(env["log"], [(1, [put])]), what="box image", interactive=False)
+    out = capsys.readouterr().out
+    assert "--level once" not in out and "No terminal here" not in out
+    assert "beyond the paths it is granted" in out
+
+
+def test_a_refused_write_offers_the_host_and_says_it_is_a_write(env):
+    put = {**_path_row("/upload/x"), "method": "PUT"}
+    build = _Build(env["log"], [(1, [put])])
+    prompt, asked = _answers()
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (1× · node · PUT)")
+    assert "[h]ost" not in asked[0]
+
+
 def test_concurrent_token_updates_are_serialized(env):
     # Two builds (fy up in two worktrees) issue and revoke against one project-wide file: without
     # a lock a token is lost (that build can't use its grants) or a revoked one is written back.

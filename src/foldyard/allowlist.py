@@ -648,19 +648,33 @@ def refused_hosts(rows: list[dict]) -> list[str]:
     return out
 
 
+_READS = ("GET", "HEAD")  # what a path grant lets through (the proxy's `_PATH_METHODS`)
+
+
 def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     """The hosts the wall REFUSED an image build since ``since``, still not granted:
-    ``{host, count, uas, paths, more_paths}`` in first-seen order (the ``learned_hosts`` shape, so
-    :func:`recommend_why` reads it). Only rows the proxy attributed to a build (its ``build`` flag,
-    set only for a live build secret) count — a box session refused in the same minute is not the
-    build's, even one presenting the public marker.
+    ``{host, count, uas, paths, more_paths, scopes, whole, writes, beyond}`` in first-seen order
+    (the ``learned_hosts`` shape, so :func:`recommend_why` reads it). Only rows the proxy
+    attributed to a build (its ``build`` flag, set only for a live build secret) count — a box
+    session refused in the same minute is not the build's, even one presenting the public marker.
+
     A refused host is decrypted for a build that trusts the proxy CA (ADR-0029), so its row names
-    the path it asked for: ``paths`` samples them (for :func:`recommend_why`) and ``scopes`` lists
-    the path grant each would be answered with — its first directory (:func:`path_scopes`),
-    distinct, first-seen. ``whole`` says some refusal had no path to shape one on (a client that
-    didn't trust the CA leaves only its CONNECT), so only the host answers it. Box-originated
-    text, handled as in :func:`learned_hosts`."""
+    the request. A refused READ (GET/HEAD) shapes a path grant: ``scopes`` lists the first
+    directory each would be answered with (:func:`path_scopes`), distinct, first-seen, and
+    ``paths`` samples them (for :func:`recommend_why`). Anything else — another method (named in
+    ``writes``), or no path at all (a client that didn't trust the CA leaves only its CONNECT) —
+    sets ``whole``: only the host answers it.
+
+    Except on a host already granted for some paths (to builds or the box): there the operator
+    chose how much of it a build gets, so only a read under a NEW directory is offered, never the
+    host. Every other refusal there (an upload or a body under a granted path, a raw tunnel) is
+    sampled in ``beyond`` and offers nothing — a build step's Dockerfile is the box's to edit, and
+    a prompt for the whole host would hand it the upload channel the path grant was made to
+    avoid. :func:`unanswered` holds the box's side to the same rule. An entry with neither
+    ``scopes`` nor ``whole`` is reported, not offered. Box-originated text, handled as in
+    :func:`learned_hosts`."""
     granted = live_hosts() + build_hosts()  # either answers a build
+    scoped_hosts = {parsed[0] for parsed in map(path_grant, granted) if parsed is not None}
     out: dict[str, dict] = {}
     for row in rows:
         ts, key = _parse(row.get("ts")), row.get("host")
@@ -680,16 +694,28 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
                 "more_paths": 0,
                 "scopes": [],
                 "whole": False,
+                "writes": [],
+                "beyond": [],
             },
         )
         entry["count"] += 1
         ua = _printable(row.get("ua"))
         if ua and ua not in entry["uas"] and len(entry["uas"]) < 3:
             entry["uas"].append(ua)
-        path = row.get("path") if row.get("method") != "CONNECT" else None
-        scopes = path_scopes(key, path)
+        raw = row.get("method")
+        method = raw if isinstance(raw, str) else ""
+        path = row.get("path") if method and method != "CONNECT" else None
+        scopes = path_scopes(key, path) if method in _READS else []
+        if key in scoped_hosts and not (scopes and not covered(scopes[0], granted)):
+            what = _printable(f"{method or 'CONNECT'} {_sample_path(path)}".strip(), 80)
+            if what not in entry["beyond"] and len(entry["beyond"]) < _PATH_EXAMPLES:
+                entry["beyond"].append(what)
+            continue
         if not scopes:
             entry["whole"] = True
+            write = _why_safe(method)[:10]
+            if method and method not in _READS and write and write not in entry["writes"]:
+                entry["writes"].append(write)
             continue
         if scopes[0] not in entry["scopes"] and not covered(scopes[0], granted):
             entry["scopes"].append(scopes[0])

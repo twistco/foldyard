@@ -227,7 +227,11 @@ belongs in the middle — but *one* middle, not a switch between two.
     path grant, with the whole host one answer away. A step that doesn't trust the CA (Java,
     GnuTLS, the gVisor posture's runtime, which the crun wrapper doesn't front) fails its
     handshake and leaves the CONNECT's row, as before — the gate then offers the host. The cost
-    is that tool's error: a certificate failure where it used to read a 403.
+    is that tool's error: a certificate failure where it used to read a 403. Only a read shapes a
+    path; anything else falls back to the host, except on a host already granted for some paths
+    (to builds or the box), where a refusal beyond them is reported and never offered as the
+    host: that fallback was the whole-host upload channel again, behind one keypress (PR review,
+    #177).
   - `[proxy] recommend` takes `host/path/` entries, `when = "build"` included, and a whole-host
     grant answers one. An entry that is neither a host nor a path grant is named by
     `fy config widenings` instead of dropped silently.

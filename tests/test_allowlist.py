@@ -1022,10 +1022,40 @@ def test_a_build_refusal_offers_its_first_directory(env):
     # A client that didn't trust the CA left only its CONNECT: nothing to shape a path on.
     (entry,) = allowlist.build_refusals([row(zip_), row("", method="CONNECT")], since)
     assert entry["whole"] is True
+    # A refused write shapes no path grant (a path grant allows reads only): only the host
+    # answers it, and the entry says it was a write.
+    (entry,) = allowlist.build_refusals([row("/upload/x", method="PUT")], since)
+    assert entry["scopes"] == [] and entry["whole"] is True and entry["writes"] == ["PUT"]
     # A path already granted for builds isn't offered again; another directory on the host is.
     allowlist.grant(_GCS_PATH, "session", build=True)
     (entry,) = allowlist.build_refusals([row(zip_), row("/other-bucket/x")], since)
     assert entry["scopes"] == ["storage.googleapis.com/other-bucket/"]
+    assert entry["whole"] is False
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("PUT", "/chrome-for-testing-public/x"),  # an upload under the granted path
+        ("GET", "/chrome-for-testing-public/x"),  # a read refused there (a body, an Upgrade)
+        ("POST", "/another-bucket/x"),  # a write elsewhere on the host
+        ("CONNECT", ""),  # no request to go on
+        ("TCP", ""),  # raw bytes in the decrypted tunnel
+    ],
+)
+@pytest.mark.parametrize("build", [True, False])
+def test_a_path_granted_host_is_never_offered_whole_to_a_build(env, method, path, build):
+    # The build gate falls back to the host when nothing narrower answers a refusal. On a host
+    # already granted for some paths that fallback would hand a build step (whose Dockerfile the
+    # box can edit) the upload channel the path grant was made to avoid: such a refusal is
+    # reported, never offered. Whoever the path grant is for — builds or the box.
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None
+    allowlist.grant(_GCS_PATH, "session", build=build)
+    row = {"ts": "2026-09-22T10:01:00+00:00", "host": "storage.googleapis.com", "method": method,
+           "path": path, "status": 403, "blocked": True, "build": True, "outside": True}  # fmt: skip
+    (entry,) = allowlist.build_refusals([row], since)
+    assert entry["scopes"] == [] and entry["whole"] is False and entry["beyond"]
 
 
 @pytest.mark.parametrize(

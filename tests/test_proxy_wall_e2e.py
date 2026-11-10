@@ -537,16 +537,22 @@ def test_a_build_path_grant_reads_under_it_and_nothing_else(build_scoped):
     resp = _as(proxy, SCOPED, f"{PREFIX}chrome.zip", build=True)
     assert resp.status_code == 200, proxy.mitm_log.read_text()
     assert any(r.startswith(f"GET {PREFIX}chrome.zip".encode()) for r in recorder.received)
-    read = [r for r in _log_entries(proxy.log) if r.get("host") == SCOPED and r.get("status")]
-    assert read and read[-1]["build"] is True and read[-1]["path"] == f"{PREFIX}chrome.zip"
+
+    def read() -> list[dict]:
+        rows = _log_entries(proxy.log)
+        return [r for r in rows if r.get("host") == SCOPED and r.get("status") == 200]
+
+    # The row is written once the response is done, which can be after the client has it.
+    _wait(lambda: read(), 5, "the read's row", proxy.mitm_log.read_text())
+    assert read()[-1]["build"] is True and read()[-1]["path"] == f"{PREFIX}chrome.zip"
 
     for method, path in (("GET", "/other/secret"), ("PUT", f"{PREFIX}upload")):
         resp = _as(proxy, SCOPED, path, build=True, method=method)
         assert resp.status_code == 403, (method, path)
     _settle()
     assert not any(b"/other/" in r or b"PUT" in r for r in recorder.received), recorder.received
-    rows = _rows_for(proxy, SCOPED)
-    assert rows and all(r.get("build") and r.get("outside") for r in rows)
+    _wait(lambda: len(_rows_for(proxy, SCOPED)) >= 2, 5, "both refusals' rows", "")
+    assert all(r.get("build") and r.get("outside") for r in _rows_for(proxy, SCOPED))
 
 
 def test_a_build_path_grant_is_nothing_to_the_box(build_scoped):
@@ -566,14 +572,15 @@ def test_a_refused_build_request_is_decrypted_and_logged_with_its_path(build_sco
     assert resp.status_code == 403
     _settle()
     assert counter.accepted == 0, proxy.mitm_log.read_text()
-    rows = _rows_for(proxy, REFUSED)
-    assert rows and rows[-1]["build"] is True
-    assert rows[-1]["path"] == "/chrome-for-testing-public/1/chrome.zip"
+    _wait(lambda: _rows_for(proxy, REFUSED), 5, "the refusal's row", proxy.mitm_log.read_text())
+    row = _rows_for(proxy, REFUSED)[-1]
+    assert row["build"] is True and row["path"] == "/chrome-for-testing-public/1/chrome.zip"
 
 
 def test_a_build_client_without_the_ca_still_leaves_a_build_row(build_scoped):
     proxy, _recorder, counter = build_scoped
     ctx = ssl.create_default_context()  # the system store: no proxy CA, like a Java step
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     import base64
 
     auth = base64.b64encode(f"fy-build:{_SECRET}".encode()).decode()

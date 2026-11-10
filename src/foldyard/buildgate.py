@@ -204,14 +204,32 @@ def _report_bypasses(bypassed: list[dict], what: str, echo: Callable[[str], None
 
 def _describe(entry: dict, key: str | None = None) -> str:
     tool = f" · {entry['uas'][0]}" if entry["uas"] else ""
-    return f"{key or entry['host']} ({entry['count']}×{tool})"
+    # A write is the one refusal a whole-host grant answers that a read never needs: say so.
+    writes = f" · {', '.join(entry['writes'])}" if entry.get("writes") else ""
+    return f"{key or entry['host']} ({entry['count']}×{tool}{writes})"
 
 
-def _key(entry: dict) -> str:
+def _key(entry: dict) -> str | None:
     """What a refusal is offered as: the one path grant its requests share (the narrowest grant
-    that answers them all), else — several directories, or a refusal with no path — the host."""
+    that answers them all), else — several directories, or a refusal with no path or not a read —
+    the host. None when there is nothing to offer: every refusal fell beyond a path grant the host
+    already holds (``allowlist.build_refusals``), which the host is never offered over."""
     scopes = entry.get("scopes") or []
+    if not scopes and not entry.get("whole"):
+        return None
     return scopes[0] if len(scopes) == 1 and not entry.get("whole") else entry["host"]
+
+
+def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
+    """A host refused only beyond the paths it is granted: said, never offered. Widening it to
+    the whole host is a decision to type, not a keypress in the middle of a build."""
+    host = entry["host"]
+    echo(
+        f"  ✗ {host}: refused {', '.join(entry['beyond'])} — beyond the paths it is granted, "
+        "which allow reads (GET/HEAD, no body) only. Not offered: all of the host would let a "
+        "build step upload there. If a build really needs it, on your computer: "
+        f"`fy allow add {host} --build`"
+    )
 
 
 _LEVELS = f"[o]nce ({ONCE_TTL_SECONDS // 60} min) · [s]ession · [p]ermanent"
@@ -223,6 +241,9 @@ def _offer(refused: list[dict], prompt: Callable[[str], str], echo: Callable[[st
     for entry in refused:
         host = entry["host"]
         key = _key(entry)
+        if key is None:
+            _report_beyond(entry, echo)
+            continue
         known = whys.get(key) or whys.get(host)
         why = f" — {known}" if known else ""
         wider = f" · [h]ost: all of {host}" if key != host else ""
@@ -306,9 +327,14 @@ def _run(
         hosts = ", ".join(e["host"] for e in refused)
         echo(f"✗ the allowlist refused {hosts} during the {what}")
         if not interactive:
+            offered = [(e, key) for e in refused if (key := _key(e)) is not None]
             for e in refused:
-                echo(f"    fy allow add {_key(e)} --build --level once --ttl {ONCE_TTL_SECONDS}")
-            echo("  No terminal here — grant with the commands above, then build again.")
+                if _key(e) is None:
+                    _report_beyond(e, echo)
+            for _e, key in offered:
+                echo(f"    fy allow add {key} --build --level once --ttl {ONCE_TTL_SECONDS}")
+            if offered:
+                echo("  No terminal here — grant with the commands above, then build again.")
             break
         granted = _offer(refused, prompt, echo)
         if not granted:
