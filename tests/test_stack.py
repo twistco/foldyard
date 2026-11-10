@@ -2880,14 +2880,15 @@ def test_a_dependent_outside_the_project_stops_up_before_any_removal(
     assert "elsewhere-tool" in capsys.readouterr().err
 
 
-def test_a_refused_stranded_removal_is_reported_not_swallowed(fake_repo, monkeypatch, capsys):
+def test_a_refused_stranded_removal_stops_up_before_compose(fake_repo, monkeypatch, capsys):
+    # Starting compose with the sim still there is the hang this sweep exists to prevent.
     calls = _stranded_stack(monkeypatch, {"app": "new", "sim": "same"}, rm_fails=True)
-    assert stack.up() == 0
+    assert stack.up() != 0
     err = capsys.readouterr().err
     assert "has dependent containers which must be removed before it" in err
     assert "\x1b" not in err  # engine-relayed text reaches the terminal stripped
     assert "fy down && fy up" in err
-    assert any("compose" in c and "up" in c for c in calls)
+    assert not any("compose" in c and "up" in c for c in calls)
 
 
 @pytest.mark.parametrize(

@@ -1261,7 +1261,8 @@ def _remove_stranded_dependents(
     after a posture change. podman-compose only; fail-safe — any probe that can't answer
     removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
     shared with the path guard so the sweep adds no host-side parse of the compose files.
-    False means ``up`` must not run: another project's container depends on one of them."""
+    False means ``up`` must not run: the removal was refused, or would take another project's
+    container with it."""
     emit = emit or _err
     try:
         from . import confighash
@@ -1324,11 +1325,12 @@ def _remove_stranded_dependents(
         rm = _run(cmd, env=ctx.env)
         if rm.returncode != 0:
             emit(
-                f"⚠ the engine refused that removal (exit {rm.returncode}): "
+                f"✗ the engine refused that removal (exit {rm.returncode}): "
                 f"{_engine_says(rm)}\n"
-                "  compose may now skip re-creating them and wait forever on one's health; if "
-                "`up` hangs, interrupt it and run `fy down && fy up`."
+                "  Not starting compose: it would skip re-creating them and wait forever on "
+                "one's health. Run `fy down && fy up`."
             )
+            return False
     except Exception:
         pass  # best-effort: a probe that can't answer removes nothing
     return True
