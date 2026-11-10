@@ -409,9 +409,17 @@ def _engine_sock_name() -> str:
     return sandbox.FILTER_SOCKET if sandbox.wanted() else "podman.sock"
 
 
+def _wall_openings() -> str:
+    """``[machine] firewall_allow`` as the wall reads it: ``<network>@<port>``, space-separated."""
+    return " ".join(f"{o.to}@{o.port}" for o in config.machine_firewall_allow())
+
+
 def _provision_want() -> str:
-    """What the guest must report after boot: the wall state, port set included."""
-    return f"wall on {_wall_ports()}" if config.machine_wall() else "wall off"
+    """What the guest must report after boot: the wall state, port set and openings included."""
+    if not config.machine_wall():
+        return "wall off"
+    opened = _wall_openings()
+    return f"wall on {_wall_ports()}" + (f"; open {opened}" if opened else "")
 
 
 def _guest_ca() -> str | None:
@@ -478,16 +486,18 @@ def _stack_no_proxy() -> str:
 
 def _render_provisioning() -> tuple[str, str]:
     """The boot script for the CURRENT config and its id (a hash of the rendered content, so a
-    flipped wall, a moved band, a changed asset, a new proxy CA, a changed ``[proxy] no_proxy``
-    or ``[machine] runtime`` all read as a different recording)."""
+    flipped wall, a moved band, a changed asset, a new proxy CA, a changed ``[proxy] no_proxy``,
+    ``[machine] firewall_allow`` or ``[machine] runtime`` all read as a different recording)."""
     ca = None
     no_proxy = ""
+    opened = ""
     if config.machine_wall():
         args = ["install", config.LIMA_HOST_GATEWAY, _wall_ports(), config.wall_proxy_url()]
         ca = _guest_ca()
         if ca is not None:
             args.append(_GUEST_CA_PATH)
         no_proxy = _stack_no_proxy()
+        opened = _wall_openings()
     else:
         args = ["uninstall"]
     ca_step = (
@@ -502,6 +512,7 @@ def _render_provisioning() -> tuple[str, str]:
         .replace("@@WALL_PATH@@", _WALL_SCRIPT_PATH)
         .replace("@@WALL_ARGS@@", " ".join(shlex.quote(a) for a in args))
         .replace("@@WALL_NO_PROXY@@", shlex.quote(no_proxy))
+        .replace("@@WALL_OPEN@@", shlex.quote(opened))
         .replace("@@PROXY_CA_STEP@@", ca_step)
         .replace("@@ENGINE_LINK@@", ENGINE_SOCK_IN_VM)
         .replace("@@ENGINE_SOCK@@", _engine_sock_name())
@@ -645,8 +656,9 @@ def _record_provisioning() -> None:
         return
     if state() == "running":
         _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the VM")
-        _err("  firewall, its port range, the proxy CA, [proxy] no_proxy or [machine] runtime")
-        _err("  changed (or the VM predates boot provisioning, or foldyard was upgraded).")
+        _err("  firewall, its port range, [machine] firewall_allow, the proxy CA, [proxy]")
+        _err("  no_proxy or [machine] runtime changed (or the VM predates boot provisioning,")
+        _err("  or foldyard was upgraded).")
         _err("  It applies at boot, as root, from the recorded config, so restart:")
         _err("      fy machine stop && fy up")
         raise SystemExit(1)

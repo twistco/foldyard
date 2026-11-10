@@ -65,8 +65,8 @@ mv -f @@WALL_PATH@@.tmp @@WALL_PATH@@
 @@PROXY_CA_STEP@@
 
 # 3. Apply the VM firewall state the host recorded (`[machine] firewall` + this project's port
-#    band, and the in-stack names every container's NO_PROXY gets).
-FY_WALL_UID="$uid" FY_WALL_NO_PROXY=@@WALL_NO_PROXY@@ @@WALL_PATH@@ @@WALL_ARGS@@
+#    band, `[machine] firewall_allow`, and the in-stack names every container's NO_PROXY gets).
+FY_WALL_UID="$uid" FY_WALL_NO_PROXY=@@WALL_NO_PROXY@@ FY_WALL_OPEN=@@WALL_OPEN@@ @@WALL_PATH@@ @@WALL_ARGS@@
 
 # 4. Report, LAST: an absent report means "not applied", which the host fails closed on.
 printf '%s\n' '@@WANT@@' >/run/fy-wall/state.tmp

@@ -98,6 +98,24 @@ def test_render_names_no_per_boot_or_per_network_fact(bands):
     assert numbers == {"41000", "41089", "41100", "41189"}, numbers
 
 
+def test_render_carries_the_vm_firewalls_openings(bands, monkeypatch):
+    # The host firewall walls the same traffic again, so an opening the VM firewall has must be
+    # here too, before the rejects, or `firewall_allow` silently does nothing on a Linux host.
+    monkeypatch.setattr(
+        config,
+        "machine_firewall_allow",
+        lambda: [
+            config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL"),
+            config.FirewallOpening("2600:1900:4000::1/128", 3307, "Cloud SQL v6"),
+        ],
+    )
+    rs = hostwall.render("acme", _SLICE)
+    vm = rs[rs.index("  chain vm {") : rs.index("  chain input {")]
+    v4 = vm.index("ip daddr 34.147.131.70/32 tcp dport 3307 accept")
+    v6 = vm.index("ip6 daddr 2600:1900:4000::1/128 tcp dport 3307 accept")
+    assert max(v4, v6) < vm.index("reject")
+
+
 def test_ct_mark_is_the_projects_band_under_foldyards_byte(bands, monkeypatch):
     """Two projects' tables both hook INPUT, each jumping on ITS mark — a shared value would let
     project A's table judge project B's loopback flows (and reject them: B's slice is not A's,

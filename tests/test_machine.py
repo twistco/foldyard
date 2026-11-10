@@ -769,6 +769,105 @@ def test_provisioning_refuses_a_no_proxy_entry_no_host_name_has(lima_env, stack_
         machine.guest_provision_script()
 
 
+# ── [machine] firewall_allow: narrow direct openings, baked into the boot provisioning ──────
+
+_CLOUD_SQL = machine.config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL instance")
+_CLOUD_SQL_V6 = machine.config.FirewallOpening("2600:1900:4000::1/128", 3307, "Cloud SQL v6")
+
+
+@pytest.fixture
+def openings(monkeypatch):
+    def set_openings(listed: list) -> None:
+        monkeypatch.setattr(machine.config, "machine_firewall_allow", lambda: listed)
+
+    set_openings([])
+    return set_openings
+
+
+def test_provision_script_hands_the_wall_its_openings(lima_env, openings):
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    openings([_CLOUD_SQL, _CLOUD_SQL_V6])
+    line = _wall_invocation(machine.guest_provision_script())
+    assert "FY_WALL_OPEN='34.147.131.70/32@3307 2600:1900:4000::1/128@3307' " in line
+    assert "open 34.147.131.70/32@3307 2600:1900:4000::1/128@3307" in machine._provision_want()
+
+
+def test_provision_id_changes_with_the_openings(lima_env, openings):
+    # Applied at boot as root, like the port band: a changed list is stale provisioning.
+    _, _, set_wall, _ = lima_env
+    set_wall(True)
+    before = machine.provision_id()
+    openings([_CLOUD_SQL])
+    assert machine.provision_id() != before
+
+
+def test_an_unwalled_vm_gets_no_openings(lima_env, openings):
+    _, _, set_wall, _ = lima_env
+    set_wall(False)
+    openings([_CLOUD_SQL])
+    assert "34.147.131.70" not in machine.guest_provision_script()
+
+
+def test_the_stale_provisioning_refusal_names_the_openings(lima_env, tmp_path, capsys):
+    be, _, set_wall, _ = lima_env
+    be._provision = "stale"
+    set_wall(False)
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    assert "[machine] firewall_allow" in capsys.readouterr().err
+
+
+def _openings_fn() -> str:
+    text = machine._wall_asset().read_text()
+    start = text.index("\n_openings() {\n")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+@pytest.mark.spawns("bash")  # the REAL function under bash; nothing else runs
+@pytest.mark.parametrize(
+    ("given", "family", "expected"),
+    [
+        ("", "ip", []),
+        ("34.147.131.70/32@3307", "ip", ["ip daddr 34.147.131.70/32 tcp dport 3307 accept"]),
+        ("34.147.131.70/32@3307", "ip6", []),
+        (
+            "2600:1900:4000::1/128@3307",
+            "ip6",
+            ["ip6 daddr 2600:1900:4000::1/128 tcp dport 3307 accept"],
+        ),
+        ("2600:1900:4000::1/128@3307", "ip", []),
+        (
+            "1.2.3.4/32@22 5.6.7.0/24@5432",
+            "ip",
+            [
+                "ip daddr 1.2.3.4/32 tcp dport 22 accept",
+                "ip daddr 5.6.7.0/24 tcp dport 5432 accept",
+            ],
+        ),
+        ("1.2.3.4/32@22;x 5.6.7.8/32@x 1.2.3.4@ @22 1.2.3.4/32@2@2", "ip", []),  # never trusted
+    ],
+)
+def test_the_wall_turns_the_hosts_openings_into_accept_rules(tmp_path, given, family, expected):
+    calls = _stubbed_bash(
+        tmp_path, _openings_fn() + f"FY_WALL_OPEN={shlex.quote(given)} _openings {family}", ()
+    )
+    rules = [c.strip().split(" comment ")[0] for c in calls[:-1]]
+    assert rules == expected
+
+
+def test_the_openings_come_before_the_walls_deny_in_both_tables():
+    install = _wall_section("install")
+    inet_open = install.index("$(_openings ip)")
+    assert install.index("$(_openings ip6)", inet_open) < install.index(
+        'log prefix "fy-wall-deny "'
+    )
+    six = install.index("table ip6 fy_wall6")
+    assert (
+        six < install.index("$(_openings ip6)", six) < install.index('log prefix "fy-wall-deny6 "')
+    )
+
+
 def _no_proxy_fn() -> str:
     text = machine._wall_asset().read_text()
     start = text.index("\n_no_proxy() {\n")

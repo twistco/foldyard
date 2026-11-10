@@ -114,6 +114,10 @@ class _Report:
         print(f"  {_WARN}  {msg}")
         self.warns += 1
 
+    def info(self, msg: str) -> None:
+        """Worth seeing, nothing to judge: no exit effect and not a warning."""
+        print(f"  ℹ  {msg}")
+
     def na(self, msg: str) -> None:
         """Not applicable HERE — the check is fulfilled at another layer and there is nothing to
         act on in this context. Neutral: no exit effect and not a warning (unlike `warn`, which
@@ -1012,6 +1016,13 @@ def _wall_posture(rep: _Report) -> None:
                 )
         except OSError:
             rep.ok(f"direct egress to a public IP:{what} rejected")
+    try:
+        openings = config.machine_firewall_allow()
+    except SystemExit as e:
+        rep.warn(f"{e} (the VM applies only what was adopted)")
+        return
+    for o in openings:
+        rep.info(f"opened by [machine] firewall_allow: {o.to} tcp/{o.port} — {o.why}")
 
 
 class _Listener:

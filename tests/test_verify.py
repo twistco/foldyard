@@ -1118,6 +1118,22 @@ def test_wall_posture_direct_egress_refused_passes(monkeypatch, capsys):
     assert "rejected" in capsys.readouterr().out
 
 
+def test_wall_posture_lists_each_opening_with_its_why(monkeypatch, capsys):
+    # Informational: an opening is a decision someone made, not a failure — but it must be seen.
+    _wall_net(monkeypatch)
+    monkeypatch.setattr(
+        verify.config,
+        "machine_firewall_allow",
+        lambda: [verify.config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL instance")],
+    )
+    rep = verify._Report()
+    verify._wall_posture(rep)
+    out = capsys.readouterr().out
+    assert rep.fails == 0
+    assert "34.147.131.70/32 tcp/3307" in out
+    assert "Cloud SQL instance" in out
+
+
 def test_wall_posture_offline_box_does_not_certify_the_wall(monkeypatch, capsys):
     """The docstring already admitted this: with NO egress at all, both refusal probes fail and
     the wall reads as enforcing. An offline box must not certify a fail-closed claim."""

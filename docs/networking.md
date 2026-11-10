@@ -272,6 +272,25 @@ software and ignored by anything else:
 - **QUIC/HTTP-3 (UDP/443)** bypasses a CONNECT proxy entirely. With the VM firewall, it is
   refused. Without it, it is not captured at all.
 
+**A client that can't use a proxy gets a narrow opening, not the firewall off.** Some protocols
+aren't HTTP: cloud-sql-proxy authenticates over HTTPS through the proxy, then dials the database
+instance on TCP 3307 itself, and the firewall refuses that. `[machine] firewall_allow` opens one
+TCP port to one address or small network, with the reason written down
+([configuration](./configuration.md)):
+
+```toml
+[machine]
+firewall_allow = [
+  { to = "34.147.131.70", port = 3307, why = "Cloud SQL instance: cloud-sql-proxy dials it directly" },
+]
+```
+
+That traffic leaves the VM directly: the proxy doesn't see it, log it or apply the allowlist to it,
+so keep the list short. An opening can't point at your computer or your network (below), and it
+comes from the adopted config, so the box can't add one. `fy verify` lists each opening and its
+reason. The firewall's refusals are in the VM's `/run/fy-wall/denies.jsonl`, which is where a
+missing opening shows up: the address and port the client tried.
+
 ### The host firewall
 
 `[machine] host_firewall = true` (Linux only; needs `firewall = true`) enforces the same rules
@@ -287,7 +306,8 @@ the box, and stays out of its reach in two ways:
 
 - **Directly.** Lima gives the VM your computer's loopback at `192.168.5.2`. With the VM firewall,
   a container reaches only this project's proxy ports there. Without it, a container reaches every
-  service on your loopback that way.
+  service on your loopback that way. A `firewall_allow` opening can't change that: foldyard
+  refuses one that points at `192.168.5.2`, loopback or any other private or local range.
 - **Through the proxy.** The proxy runs on your computer, so whatever it dials, it dials from
   there. It refuses loopback, the private ranges, CGNAT (a tailnet) and link-local (a cloud's
   metadata service), in every mode, learning included. That holds whether the box names an

@@ -519,6 +519,88 @@ def test_machine_wall_env_overrides_toml_both_ways(fresh_config, tmp_path):
     assert config.machine_wall() is True
 
 
+# ── [machine].firewall_allow — narrow openings in the VM firewall ─────────────────────
+
+
+def _allow(tmp_path, fresh_config, entries: str) -> None:
+    (tmp_path / "foldyard.toml").write_text(f"[machine]\nfirewall_allow = {entries}\n")
+    fresh_config(FOLDYARD_REPO=tmp_path)
+
+
+def test_firewall_allow_defaults_to_no_openings(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text("[machine]\nfirewall = true\n")
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.machine_firewall_allow() == []
+
+
+def test_firewall_allow_reads_addresses_as_networks(fresh_config, tmp_path):
+    _allow(
+        tmp_path,
+        fresh_config,
+        '[{ to = "34.147.131.70", port = 3307, why = "Cloud SQL" },'
+        ' { to = "203.0.113.0/24", port = 5432, why = "a db fleet" },'
+        ' { to = "2600:1900:4000::1", port = 3307, why = "Cloud SQL v6" },'
+        ' { to = "34.147.131.70/32", port = 3307, why = "the same, again" }]',
+    )
+    assert config.machine_firewall_allow() == [
+        config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL"),
+        config.FirewallOpening("203.0.113.0/24", 5432, "a db fleet"),
+        config.FirewallOpening("2600:1900:4000::1/128", 3307, "Cloud SQL v6"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "to",
+    [
+        "db.example.com",  # a name: nothing resolves at boot
+        "127.0.0.1",  # loopback
+        "10.1.2.3",  # RFC 1918
+        "172.16.0.9",
+        "192.168.5.2",  # Lima's host gateway: your computer
+        "100.64.0.1",  # CGNAT, i.e. a tailnet
+        "169.254.169.254",  # link-local: a cloud's metadata service
+        "224.0.0.1",  # multicast
+        "0.0.0.0",
+        "255.255.255.255",
+        "::1",
+        "fd00::1",  # unique-local
+        "fe80::1",  # link-local
+        "ff02::1",  # multicast
+        "::ffff:10.0.0.1",  # a v4-mapped private address
+        "34.0.0.0/8",  # far wider than one service
+        "8.8.0.0/16",
+        "2600:1900::/32",
+        "34.147.131.71/24",  # host bits set: say the network you mean
+        "34.147.131.70/33",
+    ],
+)
+def test_firewall_allow_refuses_what_the_wall_protects(fresh_config, tmp_path, to):
+    _allow(tmp_path, fresh_config, f'[{{ to = "{to}", port = 3307, why = "x" }}]')
+    with pytest.raises(SystemExit, match="firewall_allow"):
+        config.machine_firewall_allow()
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        '{ to = "34.147.131.70", port = 3307, why = "x" }',  # a table, not a list
+        '["34.147.131.70:3307"]',  # not a table
+        '[{ to = "34.147.131.70", port = 0, why = "x" }]',
+        '[{ to = "34.147.131.70", port = 70000, why = "x" }]',
+        '[{ to = "34.147.131.70", port = "3307", why = "x" }]',
+        '[{ to = "34.147.131.70", port = true, why = "x" }]',
+        '[{ to = "34.147.131.70", port = 3307 }]',  # no why
+        '[{ to = "34.147.131.70", port = 3307, why = "  " }]',
+        '[{ to = "34.147.131.70", port = 3307, why = "x", proto = "udp" }]',  # unknown key
+        '[{ port = 3307, why = "x" }]',
+    ],
+)
+def test_firewall_allow_refuses_a_malformed_entry(fresh_config, tmp_path, entries):
+    _allow(tmp_path, fresh_config, entries)
+    with pytest.raises(SystemExit, match="firewall_allow"):
+        config.machine_firewall_allow()
+
+
 # ── [machine].runtime — the gVisor posture ───────────────────────────────────────────
 
 
