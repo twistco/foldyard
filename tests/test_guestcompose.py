@@ -758,6 +758,27 @@ def test_a_watched_stream_hands_over_its_process_in_a_group_of_its_own():
     assert lines == ["True"]
 
 
+_CHATTY_SLEEPER = b"import time\nprint('started', flush=True)\ntime.sleep(60)\n"
+
+
+@pytest.mark.parametrize("fed", [False, True])
+def test_an_interrupted_watched_stream_stops_its_process_group(fed: bool):
+    # Its own group means the terminal's Ctrl-C no longer reaches it: the interrupt must.
+    from foldyard import devmode
+
+    spawned: list[subprocess.Popen] = []
+
+    def interrupt(_line: str) -> None:
+        raise KeyboardInterrupt
+
+    cmd = [sys.executable, "-I", *(["-"] if fed else ["-c", _CHATTY_SLEEPER.decode()])]
+    with pytest.raises(KeyboardInterrupt):
+        devmode.run_stream(
+            cmd, interrupt, stdin=_CHATTY_SLEEPER if fed else None, on_spawn=spawned.append
+        )
+    assert spawned[0].poll() is not None
+
+
 def test_a_stream_with_no_route_says_so_and_runs_nothing(vm, tmp_path, monkeypatch, capfd):
     vm.BACKEND = _Backend(None)
     monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)

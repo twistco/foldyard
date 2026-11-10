@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -746,20 +746,35 @@ class _DependencyWatch:
             clock,
         )
         self.stuck: list[str] = []
+        self._baseline: dict[str, object] | None = None
+        self._armed = False
         self._ids: frozenset[str] | None = None
         self._still_since = clock()
         self._missing_since: dict[str, float] = {}
 
-    def observe(self, containers: list[tuple[str, str]] | None) -> list[str]:
+    def set_baseline(self, containers: Sequence[tuple[str, str, object]] | None) -> None:
+        """The project's containers before compose runs. None (no answer) never trips."""
+        self._baseline = None if containers is None else {c[0]: c[2] for c in containers}
+
+    def observe(self, containers: Sequence[tuple[str, str, object]] | None) -> list[str]:
         """The depended-on services missing for ``grace`` with the container set unchanged.
-        ``containers`` are (id, service); None (no answer) never trips."""
-        if containers is None:
+        ``containers`` are (id, service, started at). Counted only once compose has created or
+        started a container: before that it is pulling or building, which can take any time.
+        None (no answer) never trips."""
+        if containers is None or self._baseline is None:
             return []
+        if not self._armed:
+            base = self._baseline
+            self._armed = any(
+                cid not in base or base[cid] != started for cid, _, started in containers
+            )
+            if not self._armed:
+                return []
         now = self.clock()
-        ids = frozenset(cid for cid, _ in containers)
+        ids = frozenset(cid for cid, _, _ in containers)
         if ids != self._ids:
             self._ids, self._still_since = ids, now
-        present = {svc for _, svc in containers}
+        present = {svc for _, svc, _ in containers}
         for svc in self.depended:
             if svc in present:
                 self._missing_since.pop(svc, None)
@@ -771,7 +786,7 @@ class _DependencyWatch:
             if now - max(since, self._still_since) >= self.grace
         )
 
-    def probe(self) -> list[tuple[str, str]] | None:
+    def probe(self) -> list[tuple[str, str, object]] | None:
         try:
             ps = _run(
                 [
@@ -789,7 +804,7 @@ class _DependencyWatch:
             if ps.returncode != 0:
                 return None
             return [
-                (c["Id"], _podman_compose_service(c.get("Labels") or {}))
+                (c["Id"], _podman_compose_service(c.get("Labels") or {}), c.get("StartedAt", 0))
                 for c in json.loads(ps.stdout or "[]")
             ]
         except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
@@ -823,19 +838,7 @@ def _wait_spawned(proc: subprocess.Popen, spawned: Callable[[subprocess.Popen], 
 
 
 def _stop_group(proc: subprocess.Popen) -> None:
-    """End a compose client started in a process group of its own, with what it started."""
-    import signal
-
-    for sig, patience in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
-        try:
-            os.killpg(proc.pid, sig)
-        except OSError:
-            return
-        try:
-            proc.wait(patience)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+    devmode.stop_group(proc)
 
 
 def _watching(
@@ -844,6 +847,7 @@ def _watching(
     launch: Callable[[Callable[[subprocess.Popen], None]], int],
 ) -> int:
     """Run ``launch`` (handed the spawn hook) with ``watch`` stopping it if it hangs."""
+    watch.set_baseline(watch.probe())
     done = threading.Event()
 
     def spawned(proc: subprocess.Popen) -> None:
