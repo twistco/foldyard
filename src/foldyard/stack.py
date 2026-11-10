@@ -810,6 +810,8 @@ class _DependencyWatch:
                     c["Id"],
                     _podman_compose_service(c.get("Labels") or {}),
                     c.get("StartedAt", 0),
+                    # Absent on a podman that doesn't report it: arming then falls back to any
+                    # StartedAt change, which is deliberate.
                     c.get("Restarts", 0),
                 )
                 for c in json.loads(ps.stdout or "[]")
