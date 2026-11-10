@@ -462,6 +462,20 @@ def test_firewall_openings_are_reported_as_bypassing_the_proxy(checkout):
     assert "firewall_allow" not in rendered(cfg)
 
 
+def test_an_invalid_opening_is_a_concern_not_an_exit(checkout):
+    # `fy doctor` must finish: a bad entry (which the VM never applies) becomes a warn row.
+    machine = (
+        '\n[machine]\nbackend = "lima"\nfirewall = true\nfirewall_allow = '
+        '[{ to = "10.0.0.1", port = 5432, why = "x" }]\n'
+    )
+    cfg = checkout(BASE + "passthrough = []\n" + machine)
+    exp = collect(cfg)
+    assert exp.openings == []
+    assert any("firewall_allow" in c for c in exp.concerns)
+    assert exposure.doctor_row(exp)[0] is not True
+    assert "firewall_allow" in rendered(cfg)
+
+
 def test_a_shared_agent_prompt_says_it_steers_everyone(checkout):
     cfg = checkout(BASE + 'passthrough = []\n\n[claude]\nsystem_prompt = "one\\ntwo\\n"\n')
     assert collect(cfg).prompts == [("[claude].system_prompt", 2, exposure.SHARED)]
