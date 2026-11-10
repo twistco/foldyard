@@ -2855,17 +2855,27 @@ def test_up_removes_stranded_dependents_before_compose_up(fake_repo, monkeypatch
     assert calls.index(rm) < up_idx
 
 
-def test_outside_dependents_follow_the_engines_graph_transitively():
+def test_unrecreated_dependents_follow_the_engines_graph_transitively():
     # The engine's own `.Dependencies` (`--requires` and `--network container:` alike), so an
     # edge the rendered config doesn't model still counts.
     containers = [
-        {"id": "s", "name": "p-sim", "project": "p", "deps": []},
-        {"id": "w", "name": "p-worker", "project": "p", "deps": ["s"]},
-        {"id": "x", "name": "x-tool", "project": "x", "deps": ["w"]},
-        {"id": "n", "name": "loose", "project": "", "deps": []},
+        {"id": "s", "name": "p-sim", "project": "p", "service": "sim", "deps": []},
+        {"id": "w", "name": "p-worker", "project": "p", "service": "worker", "deps": ["s"]},
+        {"id": "x", "name": "x-tool", "project": "x", "service": "tool", "deps": ["w"]},
+        {"id": "n", "name": "loose", "project": "", "service": "", "deps": []},
     ]
-    assert stack._outside_dependents({"s"}, containers, "p") == ["x-tool"]
-    assert stack._outside_dependents({"s"}, containers[:2], "p") == []
+    services = {"sim", "worker"}
+    assert stack._unrecreated_dependents({"s"}, containers, "p", services) == ["x-tool"]
+    assert stack._unrecreated_dependents({"s"}, containers[:2], "p", services) == []
+
+
+def test_a_dependent_whose_service_left_the_config_is_not_recreated():
+    # Same project, but compose has no service to recreate it from (an orphan).
+    containers = [
+        {"id": "s", "name": "p-sim", "project": "p", "service": "sim", "deps": []},
+        {"id": "o", "name": "p-gone", "project": "p", "service": "gone", "deps": ["s"]},
+    ]
+    assert stack._unrecreated_dependents({"s"}, containers, "p", {"sim"}) == ["p-gone"]
 
 
 def test_a_dependent_outside_the_project_stops_up_before_any_removal(

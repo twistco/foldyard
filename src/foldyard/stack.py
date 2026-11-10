@@ -1261,8 +1261,8 @@ def _remove_stranded_dependents(
     after a posture change. podman-compose only; fail-safe — any probe that can't answer
     removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
     shared with the path guard so the sweep adds no host-side parse of the compose files.
-    False means ``up`` must not run: the removal was refused, or would take another project's
-    container with it."""
+    False means ``up`` must not run: the removal was refused, or would take a container with it
+    that compose won't recreate."""
     emit = emit or _err
     try:
         from . import confighash
@@ -1305,11 +1305,11 @@ def _remove_stranded_dependents(
         if engine_graph is None:
             return True
         ids = {c["id"] for c in engine_graph if c["name"] in stranded}
-        if outside := _outside_dependents(ids, engine_graph, ctx.project):
+        if kept := _unrecreated_dependents(ids, engine_graph, ctx.project, set(desired)):
             emit(
-                f"✗ {', '.join(outside)} (outside {ctx.project}) depend on "
-                f"{', '.join(stranded)}, which `up` needs removed first, and removing them would "
-                "take those too with nothing to recreate them. Remove them or their "
+                f"✗ {', '.join(kept)} depend on {', '.join(stranded)}, which `up` needs removed "
+                "first, but compose won't recreate them (another project's, or a service no "
+                "longer in the config), so removing them too isn't safe. Remove them or their "
                 "dependency, then `fy up` again."
             )
             return False
@@ -1318,8 +1318,8 @@ def _remove_stranded_dependents(
             f"re-creating ({', '.join(stranded)}) — recreated on `up`; named volumes are kept…"
         )
         # podman removes the listed names in parallel, so one that another `--requires` is
-        # refused in any order. `--depend` takes dependents first; checked above to be all this
-        # project's, so downstream of a recreated service, which compose's `down` removes anyway.
+        # refused in any order. `--depend` takes dependents first; checked above to be ones
+        # compose recreates, downstream of a recreated service its `down` removes anyway.
         cmd = [config.engine(), "rm", "-f", "--depend", *stranded]
         emit("+ " + " ".join(cmd))
         rm = _run(cmd, env=ctx.env)
@@ -1363,14 +1363,18 @@ def _engine_dependencies(ctx: Context) -> list[dict] | None:
             "id": c["Id"],
             "name": c["Names"][0],
             "project": (c.get("Labels") or {}).get("io.podman.compose.project", ""),
+            "service": _podman_compose_service(c.get("Labels") or {}),
             "deps": deps.get(c["Id"], []),
         }
         for c in listed
     ]
 
 
-def _outside_dependents(ids: set[str], containers: list[dict], project: str) -> list[str]:
-    """Names of the containers outside ``project`` that depend on ``ids``, transitively."""
+def _unrecreated_dependents(
+    ids: set[str], containers: list[dict], project: str, services: set[str]
+) -> list[str]:
+    """Names of the containers that depend on ``ids``, transitively, and that compose won't
+    recreate: outside ``project``, or of a service not in ``services`` (the render's)."""
     dependents: dict[str, list[dict]] = {}
     for c in containers:
         for dep in c["deps"]:
@@ -1382,7 +1386,11 @@ def _outside_dependents(ids: set[str], containers: list[dict], project: str) -> 
             if c["id"] not in seen:
                 seen.add(c["id"])
                 todo.append(c["id"])
-    return sorted(c["name"] for c in containers if c["id"] in seen and c["project"] != project)
+    return sorted(
+        c["name"]
+        for c in containers
+        if c["id"] in seen and (c["project"] != project or c["service"] not in services)
+    )
 
 
 def _stack_is_up(ctx: Context, ignore_services: set[str] | frozenset[str] = frozenset()) -> bool:
