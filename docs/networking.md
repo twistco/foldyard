@@ -567,6 +567,15 @@ own HTTP client, or a program opening raw sockets.
 - **A build fails at the network and nothing was refused at the proxy.** The tool connected
   directly and the VM firewall refused it. See "A tool that ignores the proxy settings" under
   image builds above. The build's output lists what the firewall refused.
+- **A client using a `firewall_allow` opening fails.** The firewall's refusals are in the VM's
+  `/run/fy-wall/denies.jsonl` (one JSON line each, with `ts` in UTC to line up with the client's
+  log), and `fy verify` on your computer lists them. Three cases:
+  - `fy up` refused the VM, naming `[machine] firewall_allow`: the list changed since the VM
+    booted. Run `fy machine stop && fy up`.
+  - `fy verify` warns about a refusal on the opening's port at another address: the service's
+    address changed. Update the entry, adopt it, and restart the VM.
+  - Nothing was refused: the connection left the VM, so the trouble is at the far end (the service
+    is down, or its login failed, an expired access grant, say). Read the client's own logs.
 - **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate
   it once (`fy box down && fy box up`). The log only shows a request once it gets a response, so
   a failing TLS handshake (CA not trusted) shows nothing.

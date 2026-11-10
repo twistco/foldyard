@@ -1150,6 +1150,84 @@ def test_in_the_box_openings_are_named_as_the_checkouts_not_the_vms(monkeypatch,
     assert "this checkout declares" in out
 
 
+def _deny(dst: str, port: int | None, proto: str = "tcp", seq: int = 1, ts: str | None = None):
+    row: dict = {"boot": "b1", "seq": seq, "chain": "out", "dst": dst, "proto": proto}
+    row["port"] = port
+    if ts:
+        row["ts"] = ts
+    return row
+
+
+def _refusals(monkeypatch, rows, openings=()):
+    monkeypatch.setattr(verify.machine, "wall_denies", lambda: rows)
+    monkeypatch.setattr(verify.config, "machine_firewall_allow", lambda: list(openings))
+    rep = verify._Report()
+    verify._wall_refusals(rep)
+    return rep
+
+
+def test_wall_refusals_are_grouped_newest_first_with_chatter_folded(monkeypatch, capsys):
+    rows = [
+        _deny("104.16.8.34", 443, seq=1, ts="2026-11-10T11:30:08Z"),
+        _deny("224.0.0.22", None, proto="2", seq=2),  # IGMP
+        _deny("ff02:0000:0000:0000:0000:0000:0000:0016", None, proto="icmpv6", seq=3),
+        _deny("104.16.8.34", 443, seq=4, ts="2026-11-10T13:33:05Z"),
+        _deny("20.26.156.215", 22, seq=5),  # a row from a reporter without ts
+    ]
+    rep = _refusals(monkeypatch, rows)
+    out = capsys.readouterr().out
+    assert rep.fails == rep.warns == 0
+    assert out.index("20.26.156.215 tcp/22") < out.index("104.16.8.34 tcp/443")
+    assert "104.16.8.34 tcp/443 ×2, last 2026-11-10T13:33:05Z" in out
+    assert "2 more: local-network chatter" in out
+    assert "224.0.0.22" not in out
+
+
+def test_a_refused_address_on_an_opened_port_warns_that_the_address_may_have_changed(
+    monkeypatch, capsys
+):
+    opening = verify.config.FirewallOpening("34.147.131.70/32", 3307, "Cloud SQL instance")
+    rep = _refusals(monkeypatch, [_deny("35.1.2.3", 3307)], [opening])
+    out = capsys.readouterr().out
+    assert rep.warns == 1 and rep.fails == 0
+    assert "firewall_allow opens tcp/3307 only to 34.147.131.70 (Cloud SQL instance)" in out
+    assert "something tried 35.1.2.3: has the address changed?" in out
+
+
+def test_wall_refusals_are_capped(monkeypatch, capsys):
+    rows = [_deny(f"1.1.1.{i}", 443, seq=i) for i in range(1, 13)]
+    _refusals(monkeypatch, rows)
+    out = capsys.readouterr().out
+    assert out.count("tcp/443 ×1") == 10 and "2 more destinations" in out
+
+
+def test_unreadable_wall_refusals_say_so(monkeypatch, capsys):
+    rep = _refusals(monkeypatch, None)
+    assert rep.warns == rep.fails == 0
+    assert "couldn't read the firewall's refusals" in capsys.readouterr().out
+
+
+def test_no_wall_refusals_says_so(monkeypatch, capsys):
+    _refusals(monkeypatch, [])
+    assert "nothing refused since the VM booted" in capsys.readouterr().out
+
+
+def test_the_host_lists_wall_refusals_and_the_box_points_there(secure_engine, monkeypatch, capsys):
+    monkeypatch.setattr(verify, "_walled", lambda: True)
+    monkeypatch.setattr(verify, "_host_loopback", lambda *a: None)
+    listed: list[int] = []
+    monkeypatch.setattr(verify, "_wall_refusals", lambda rep: listed.append(1))
+    verify.verify()
+    assert listed == [1]
+
+    # In the box the guest's log isn't visible: say where to look instead.
+    _wall_net(monkeypatch)
+    monkeypatch.setattr(verify.config, "in_box", lambda: True)
+    monkeypatch.setattr(verify.config, "machine_firewall_allow", lambda: [])
+    verify._wall_posture(verify._Report())
+    assert "run `fy verify` on your computer" in capsys.readouterr().out
+
+
 def test_wall_posture_offline_box_does_not_certify_the_wall(monkeypatch, capsys):
     """The docstring already admitted this: with NO egress at all, both refusal probes fail and
     the wall reads as enforcing. An offline box must not certify a fail-closed claim."""

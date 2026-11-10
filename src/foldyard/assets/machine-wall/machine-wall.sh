@@ -269,11 +269,13 @@ _denies_reporter() {
 lines in /run/fy-wall/denies.jsonl (world-readable). Runs as root under fy-wall-denies.service."""
 
 import collections
+import datetime
 import json
 import os
 import re
 import select
 import sys
+import time
 
 OUT = "/run/fy-wall/denies.jsonl"
 KEEP = 200
@@ -286,8 +288,9 @@ def boot_id():
         return fh.read().strip()
 
 
-def parse(record, boot):
-    """One /dev/kmsg record (``pri,seq,usec,flags;message``) → a row, or None."""
+def parse(record, boot, offset=None):
+    """One /dev/kmsg record (``pri,seq,usec,flags;message``) → a row, or None. ``offset`` (wall
+    clock minus monotonic) adds ``ts``, the refusal's UTC time."""
     head, sep, message = record.partition(";")
     if not sep:
         return None
@@ -295,15 +298,17 @@ def parse(record, boot):
     prefix = message.split(" ", 1)[0]
     if prefix not in CHAINS:
         return None
+    parts = head.split(",")
     try:
-        seq = int(head.split(",")[1])
+        seq = int(parts[1])
     except (IndexError, ValueError):
         return None
+    usec = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
     fields = dict(FIELD.findall(message))
     if "DST" not in fields:
         return None
     port = fields.get("DPT")
-    return {
+    row = {
         "boot": boot,
         "seq": seq,
         "chain": CHAINS[prefix],
@@ -311,6 +316,10 @@ def parse(record, boot):
         "proto": fields.get("PROTO", "").lower(),
         "port": int(port) if port and port.isdigit() else None,
     }
+    if offset is not None and usec is not None:
+        at = datetime.datetime.fromtimestamp(offset + usec / 1e6, datetime.timezone.utc)
+        row["ts"] = at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return row
 
 
 def write(rows):
@@ -325,6 +334,9 @@ def write(rows):
 def drain(fd, rows, boot):
     """Every record the kernel has for us now; True when one was a refusal."""
     new = False
+    # Taken per batch, not once at start: the guest's clock is synced after boot, so an offset
+    # read then (or /proc/stat's btime) can be off by however far the sync moved it.
+    offset = time.time() - time.monotonic()
     while True:
         try:
             record = os.read(fd, 8192)
@@ -332,7 +344,7 @@ def drain(fd, rows, boot):
             return new
         except BrokenPipeError:
             continue  # records were overwritten before we read them: carry on from the next
-        row = parse(record.decode("utf-8", "replace"), boot)
+        row = parse(record.decode("utf-8", "replace"), boot, offset)
         if row is not None:
             rows.append(row)
             new = True

@@ -2382,6 +2382,32 @@ def test_the_reporter_reads_a_refusal_off_the_kernel_log():
     assert mod.parse(fwd, "b1")["chain"] == "fwd"
 
 
+def test_the_reporter_stamps_each_refusal_with_wall_clock_time():
+    # usec is since boot; the offset (wall clock minus monotonic, taken when the record is read)
+    # turns it into a time a person can line up with a client's own log.
+    row = _denies().parse(_KMSG_TCP, "b1", offset=1_000.0)
+    assert row is not None and row["ts"] == "1970-01-01T00:31:52Z"  # 1000 s + 912.3 s
+
+
+def test_the_reporter_reads_the_offset_when_it_drains(monkeypatch):
+    mod = _denies()
+    reads: list[bytes | BaseException] = [_KMSG_TCP.encode(), BlockingIOError()]
+
+    def read(fd, n):
+        r = reads.pop(0)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    monkeypatch.setattr(mod, "os", types.SimpleNamespace(read=read))
+    monkeypatch.setattr(
+        mod, "time", types.SimpleNamespace(time=lambda: 5_000.0, monotonic=lambda: 4_000.0)
+    )
+    rows: list[dict] = []
+    assert mod.drain(3, rows, "b1")
+    assert rows[0]["ts"] == "1970-01-01T00:31:52Z"
+
+
 @pytest.mark.parametrize(
     "record",
     [

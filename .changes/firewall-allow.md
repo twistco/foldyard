@@ -13,4 +13,6 @@ bump: minor
   DNS stays with local resolvers. Your computer's own public address is the one case foldyard
   can't detect. It is read from the adopted config and applied at boot, so a change takes
   `fy machine stop && fy up`; with `host_firewall`, install the host rules again too. Traffic
-  through an opening bypasses the proxy, its log and the allowlist.
+  through an opening bypasses the proxy, its log and the allowlist. The firewall's refusals now
+  carry a UTC time, and `fy verify` lists them, warning when a port an opening names was refused
+  at another address.
