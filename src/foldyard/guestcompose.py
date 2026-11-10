@@ -283,10 +283,11 @@ def _print_to(file_name: str) -> Callable[[str], None]:
     return sink
 
 
-def stream(ctx, args: list[str]) -> int:
+def stream(ctx, args: list[str], on_spawn: Callable[[subprocess.Popen], None] | None = None) -> int:
     """Like :func:`compose`, its output relayed live to your stdout and stderr (a line at a time,
-    :func:`printable`). For the verbs a person watches: ``up``, ``down``, ``ps``, ``logs -f``."""
-    return _stream("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main))
+    :func:`printable`). For the verbs a person watches: ``up``, ``down``, ``ps``, ``logs -f``.
+    ``on_spawn``: as :func:`run_relayed`'s."""
+    return _stream("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main), on_spawn)
 
 
 def stream_podman(argv: list[str], env: dict[str, str], cwd: str) -> int:
@@ -295,27 +296,41 @@ def stream_podman(argv: list[str], env: dict[str, str], cwd: str) -> int:
     return _stream("podman", argv, env, cwd)
 
 
-def _stream(op: str, argv: list[str], env: dict[str, str], cwd: str) -> int:
+def _stream(
+    op: str,
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
+) -> int:
     command = _command(op, argv, env, cwd)
     if command is None:
         print(f"✗ {_no_route()}", file=sys.stderr)
         return NO_ROUTE
     cmd, stdin = command
-    return run_relayed(cmd, stdin, _print_to("stdout"), _print_to("stderr"))
+    return run_relayed(cmd, stdin, _print_to("stdout"), _print_to("stderr"), on_spawn=on_spawn)
 
 
 def run_relayed(
-    cmd: list[str], stdin: bytes, out: Callable[[str], None], err: Callable[[str], None]
+    cmd: list[str],
+    stdin: bytes,
+    out: Callable[[str], None],
+    err: Callable[[str], None],
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
 ) -> int:
     """Run ``cmd`` with ``stdin`` as its input, its two streams relayed line by line. An interrupt
-    ends ssh, and the guest's client with it (the runner watches its session)."""
+    ends ssh, and the guest's client with it (the runner watches its session). ``on_spawn`` gets
+    the process, started in a process group of its own so the caller can stop it."""
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=_ssh_env(),
+        process_group=0 if on_spawn else None,
     )
+    if on_spawn:
+        on_spawn(proc)
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
     def feed() -> None:
@@ -344,7 +359,12 @@ def run_relayed(
     return rc
 
 
-def stream_to(ctx, args: list[str], emit: Callable[[str], None]) -> int:
+def stream_to(
+    ctx,
+    args: list[str],
+    emit: Callable[[str], None],
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
+) -> int:
     """Like :func:`stream`, its two streams merged and handed to ``emit`` a line at a time (the
     posture reconcile, whose output must not bleed over the TUI)."""
     from . import devmode
@@ -354,4 +374,10 @@ def stream_to(ctx, args: list[str], emit: Callable[[str], None]) -> int:
         emit(f"✗ {_no_route()}")
         return NO_ROUTE
     cmd, stdin = command
-    return devmode.run_stream(cmd, lambda line: emit(printable(line)), env=_ssh_env(), stdin=stdin)
+    return devmode.run_stream(
+        cmd,
+        lambda line: emit(printable(line)),
+        env=_ssh_env(),
+        stdin=stdin,
+        on_spawn=on_spawn,
+    )

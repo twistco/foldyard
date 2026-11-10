@@ -730,6 +730,34 @@ def test_run_stream_feeds_a_large_stdin_and_merges_the_output():
     assert "err line" in lines
 
 
+_GROUP = b"import os\nprint(os.getpgid(0) == os.getpid())\n"
+
+
+def test_a_watched_relay_hands_over_its_process_in_a_group_of_its_own():
+    # The dependency watch stops a hung `up` by its process group: the client and what it started.
+    spawned: list[subprocess.Popen] = []
+    out: list[str] = []
+    rc = guestcompose.run_relayed(
+        [sys.executable, "-I", "-"], _GROUP, out.append, lambda _: None, on_spawn=spawned.append
+    )
+    assert rc == 0
+    assert len(spawned) == 1
+    assert out == ["True"]
+
+
+def test_a_watched_stream_hands_over_its_process_in_a_group_of_its_own():
+    from foldyard import devmode
+
+    spawned: list[subprocess.Popen] = []
+    lines: list[str] = []
+    rc = devmode.run_stream(
+        [sys.executable, "-I", "-"], lines.append, stdin=_GROUP, on_spawn=spawned.append
+    )
+    assert rc == 0
+    assert len(spawned) == 1
+    assert lines == ["True"]
+
+
 def test_a_stream_with_no_route_says_so_and_runs_nothing(vm, tmp_path, monkeypatch, capfd):
     vm.BACKEND = _Backend(None)
     monkeypatch.setattr(guestcompose.subprocess, "Popen", _never)

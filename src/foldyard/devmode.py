@@ -1180,6 +1180,7 @@ def run_stream(
     env: dict[str, str] | None = None,
     cwd: str | None = None,
     stdin: bytes | None = None,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
 ) -> int:
     """Run ``cmd`` to completion, calling ``on_line(text)`` for each output line (stdout+stderr
     merged, ANSI-stripped), and return its exit code. For long-running, NON-INTERACTIVE
@@ -1187,8 +1188,10 @@ def run_stream(
     reconcile's compose — unlike ``_run`` (which buffers and has a short timeout). A watchdog
     kills the process after ``timeout`` seconds so a wedged command can't hang the worker
     forever. ``stdin``, when given, is written to it and closed (the guest compose client's
-    payload). Deliberately NOT logged to the command log: the live stream is the record, and
-    double-logging would duplicate it under the fix output in the Doctor pane."""
+    payload). ``on_spawn`` gets the process, started in a process group of its own so the
+    caller can stop it with what it started. Deliberately NOT logged to the command log: the
+    live stream is the record, and double-logging would duplicate it under the fix output in the
+    Doctor pane."""
     import threading
 
     try:
@@ -1201,10 +1204,13 @@ def run_stream(
             bufsize=1 if stdin is None else -1,
             env=env,
             cwd=cwd,
+            process_group=0 if on_spawn else None,
         )
     except Exception as e:
         on_line(f"✗ {e}")
         return 127
+    if on_spawn:
+        on_spawn(proc)
     if stdin is not None:
         return _run_stream_fed(proc, stdin, on_line, timeout)
     timer = threading.Timer(timeout, proc.kill)
