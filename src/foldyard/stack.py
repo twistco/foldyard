@@ -1039,7 +1039,8 @@ def up() -> int:
         # can't see — it would die on name conflicts instead of adopting them.
         _reconcile_foreign_containers(ctx)
         rendered = _render_config(ctx, extra)
-        _remove_stranded_dependents(ctx, rendered, extra_profiles=extra)
+        if not _remove_stranded_dependents(ctx, rendered, extra_profiles=extra):
+            return 1
         # Build has already selected the engine-appropriate implementation; compose only starts
         # the resulting images, never re-enters a provider build path.
         rc = _compose(ctx, ["up", "-d", "--no-build"], extra_profiles=extra, rendered=rendered)
@@ -1125,6 +1126,13 @@ def _reconcile_foreign_containers(ctx: Context, emit: Callable[[str], None] | No
     _run(cmd, env=ctx.env)
 
 
+def _engine_says(proc: subprocess.CompletedProcess) -> str:
+    """An engine's stderr as one printable line: it can carry box-influenced names."""
+    from .guestcompose import printable
+
+    return printable(" ".join((proc.stderr or "").split()))
+
+
 def _remove_orphan_containers(
     ctx: Context, emit: Callable[[str], None], extra_profiles: list[str] | None = None
 ) -> None:
@@ -1186,9 +1194,16 @@ def _remove_orphan_containers(
             f"▶ removing {len(orphans)} container(s) whose service left the rendered config "
             f"({names}); named volumes are kept…"
         )
+        # No `--depend`: a live container that still `--requires` an orphan would go with it,
+        # after `up`, with nothing to recreate it. A refusal leaves the orphan, and says so.
         cmd = [config.engine(), "rm", "-f"] + [cid for cid, _ in orphans]
         emit("+ " + " ".join(cmd))
-        _run(cmd, env=ctx.env)
+        rm = _run(cmd, env=ctx.env)
+        if rm.returncode != 0:
+            emit(
+                f"⚠ the engine refused to remove some of them (exit {rm.returncode}), so they "
+                f"stay: {_engine_says(rm)}"
+            )
     except Exception:
         return  # best-effort: an orphan left running is recoverable, a bad sweep is not
 
@@ -1240,19 +1255,21 @@ def _remove_stranded_dependents(
     rendered: dict | None,
     emit: Callable[[str], None] | None = None,
     extra_profiles: list[str] | None = None,
-) -> None:
+) -> bool:
     """Remove the containers :func:`_stranded_dependents` finds, BEFORE ``up``, so ``up`` sees
     them as missing and creates them. Typical trigger: a stopped stack (VM restart) brought up
     after a posture change. podman-compose only; fail-safe — any probe that can't answer
     removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
-    shared with the path guard so the sweep adds no host-side parse of the compose files."""
+    shared with the path guard so the sweep adds no host-side parse of the compose files.
+    False means ``up`` must not run: the removal was refused, or would take a container with it
+    that compose won't recreate."""
     emit = emit or _err
     try:
         from . import confighash
 
         desired, _ = confighash.desired(ctx, extra_profiles)
         if not desired or not rendered:
-            return
+            return True
         graph: dict[str, set[str]] = {}
         for name, svc in (rendered.get("services") or {}).items():
             deps = svc.get("depends_on") or {}
@@ -1271,7 +1288,7 @@ def _remove_stranded_dependents(
             env=ctx.env,
         )
         if ps.returncode != 0:
-            return
+            return True
         containers = [
             {
                 "name": c["Names"][0],
@@ -1283,16 +1300,97 @@ def _remove_stranded_dependents(
         ]
         stranded = _stranded_dependents(graph, containers, desired)
         if not stranded:
-            return
+            return True
+        engine_graph = _engine_dependencies(ctx)
+        if engine_graph is None:
+            return True
+        ids = {c["id"] for c in engine_graph if c["name"] in stranded}
+        if kept := _unrecreated_dependents(ids, engine_graph, ctx.project, set(desired)):
+            emit(
+                f"✗ {', '.join(kept)} depend on {', '.join(stranded)}, which `up` needs removed "
+                "first, but compose won't recreate them (another project's, or a service no "
+                "longer in the config), so removing them too isn't safe. Remove them or their "
+                "dependency, then `fy up` again."
+            )
+            return False
         emit(
             f"▶ removing {len(stranded)} stopped container(s) compose would drop without "
             f"re-creating ({', '.join(stranded)}) — recreated on `up`; named volumes are kept…"
         )
-        cmd = [config.engine(), "rm", "-f", *stranded]
+        # podman removes the listed names in parallel, so one that another `--requires` is
+        # refused in any order. `--depend` takes dependents first; checked above to be ones
+        # compose recreates, downstream of a recreated service its `down` removes anyway.
+        cmd = [config.engine(), "rm", "-f", "--depend", *stranded]
         emit("+ " + " ".join(cmd))
-        _run(cmd, env=ctx.env)
+        rm = _run(cmd, env=ctx.env)
+        if rm.returncode != 0:
+            emit(
+                f"✗ the engine refused that removal (exit {rm.returncode}): "
+                f"{_engine_says(rm)}\n"
+                "  Not starting compose: it would skip re-creating them and wait forever on "
+                "one's health. Run `fy down && fy up`."
+            )
+            return False
     except Exception:
-        return  # best-effort: compose then fails loudly, exactly as it would have anyway
+        pass  # best-effort: a probe that can't answer removes nothing
+    return True
+
+
+def _engine_dependencies(ctx: Context) -> list[dict] | None:
+    """Every container on the engine as ``{id, name, project, deps}``, ``deps`` being the ids it
+    depends on as podman records them (``--requires`` and ``--network container:``), which is
+    the graph ``rm --depend`` follows. None when the engine can't say."""
+    eng = config.engine()
+    ps = _run([eng, "ps", "-a", "--format", "json"], env=ctx.env)
+    if ps.returncode != 0:
+        return None
+    listed = json.loads(ps.stdout or "[]")
+    if not listed:
+        return []
+    insp = _run(
+        [eng, "inspect", "--format", "{{.Id}} {{json .Dependencies}}", *[c["Id"] for c in listed]],
+        env=ctx.env,
+    )
+    if insp.returncode != 0:
+        return None
+    deps: dict[str, list[str]] = {}
+    for line in insp.stdout.splitlines():
+        cid, _, raw = line.strip().partition(" ")
+        if cid:
+            deps[cid] = json.loads(raw or "null") or []
+    return [
+        {
+            "id": c["Id"],
+            "name": c["Names"][0],
+            "project": (c.get("Labels") or {}).get("io.podman.compose.project", ""),
+            "service": _podman_compose_service(c.get("Labels") or {}),
+            "deps": deps.get(c["Id"], []),
+        }
+        for c in listed
+    ]
+
+
+def _unrecreated_dependents(
+    ids: set[str], containers: list[dict], project: str, services: set[str]
+) -> list[str]:
+    """Names of the containers that depend on ``ids``, transitively, and that compose won't
+    recreate: outside ``project``, or of a service not in ``services`` (the render's)."""
+    dependents: dict[str, list[dict]] = {}
+    for c in containers:
+        for dep in c["deps"]:
+            dependents.setdefault(dep, []).append(c)
+    seen: set[str] = set()
+    todo = list(ids)
+    while todo:
+        for c in dependents.get(todo.pop(), []):
+            if c["id"] not in seen:
+                seen.add(c["id"])
+                todo.append(c["id"])
+    return sorted(
+        c["name"]
+        for c in containers
+        if c["id"] in seen and (c["project"] != project or c["service"] not in services)
+    )
 
 
 def _stack_is_up(ctx: Context, ignore_services: set[str] | frozenset[str] = frozenset()) -> bool:
@@ -1432,8 +1530,12 @@ def reconcile_posture(
             # bundled-podman-compose switch).
             _reconcile_foreign_containers(ctx, emit)
             rendered = _render_config(ctx, extra)
-            _remove_stranded_dependents(ctx, rendered, emit, extra)
-            rc = _compose_captured(ctx, ["up", "-d"], emit, extra_profiles=extra, rendered=rendered)
+            if _remove_stranded_dependents(ctx, rendered, emit, extra):
+                rc = _compose_captured(
+                    ctx, ["up", "-d"], emit, extra_profiles=extra, rendered=rendered
+                )
+            else:
+                rc = 1
             if rc != 0:
                 emit(
                     f"✗ reconcile failed (compose exited {rc}) — the stack may still be "
