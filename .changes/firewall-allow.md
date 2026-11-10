@@ -10,6 +10,6 @@ bump: minor
   `{ to, port, why }`: an IP or CIDR (never a host name), one port, and the reason, which
   `fy verify` lists. An opening can't reach your computer or network: private, loopback,
   link-local, CGNAT, multicast and reserved ranges are refused, and so is anything wider than a
-  `/24` (`/64` for IPv6). It is read from the adopted config and applied at boot, so a change
+  `/24` (`/64` for IPv6), and port 53, since DNS stays with local resolvers. It is read from the adopted config and applied at boot, so a change
   takes `fy machine stop && fy up`; with `host_firewall`, install the host rules again too.
   Traffic through an opening bypasses the proxy, its log and the allowlist.

@@ -255,7 +255,7 @@ disk_gib = 60
 - **`firewall_allow`** — direct openings in the VM firewall, for a client that can't use an HTTP
   proxy (cloud-sql-proxy dials its instance on TCP 3307, say). A list of `{ to, port, why }`:
   `to` an IP address or CIDR network (never a host name: nothing resolves at boot), `port` one
-  TCP port, `why` the reason, which `fy verify` shows beside the opening. Default: none.
+  TCP port other than 53 (DNS stays with local resolvers), `why` the reason, which `fy verify` shows beside the opening. Default: none.
 
   ```toml
   firewall_allow = [

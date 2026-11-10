@@ -1239,6 +1239,8 @@ def machine_firewall_allow() -> list[FirewallOpening]:
             raise bad(f"to = {to!r} reaches a private, local or reserved range")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
             raise bad(f"port = {port!r} for {to} must be one TCP port, 1-65535")
+        if port == 53:
+            raise bad(f"{to} port 53: the wall lets DNS reach local resolvers only")
         if not isinstance(why, str) or not why.strip():
             raise bad(f"{to} port {port} needs a why")
         opening = FirewallOpening(str(net), port, why.strip())
