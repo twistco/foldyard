@@ -69,7 +69,7 @@ Everything that holds a credential stays on your computer. The VM gets the repo 
 token services and the egress proxy, and holds the config you approve, the allowlist and the
 access modes; the VM ("the yard") is a throwaway Linux VM running rootless Podman that mounts
 only the repo and holds the compose stack, the dev box, the coding agent and worktrees side by
-side, with `fy verify` auditing the boundary from inside; traffic from the VM reaches upstream
+side, with fy verify auditing the boundary from inside; traffic from the VM reaches upstream
 APIs only through the proxy.](./docs/assets/foldyard-architecture.svg)
 
 Isolation comes in layers, not as one switch. You can harden the same setup one step at a
@@ -81,7 +81,7 @@ Each step is one line in `foldyard.toml`, and the credentials never move:
 firewall inside the VM; gVisor (experimental) under the dev box, reached through a narrowed engine socket;
 and the host-side firewall on Linux — then the egress dial from open through observe and
 enforce to fail-closed, and what never moves: the credentials stay on your computer, the
-engine socket is the one deliberate opening, and `fy verify` checks the layer you are
+engine socket is the one deliberate opening, and fy verify checks the layer you are
 in.](./docs/assets/foldyard-isolation-layers.svg)
 
 Which layer carries the weight depends on your operating system —

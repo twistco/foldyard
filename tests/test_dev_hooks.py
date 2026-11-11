@@ -14,9 +14,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.skipif(not (ROOT / ".git").exists(), reason="not a git checkout (an unpacked sdist)")
 def test_the_pre_commit_hook_is_recorded_executable():
     out = subprocess.run(
         ["git", "-C", str(ROOT), "ls-tree", "HEAD", "--", ".githooks/pre-commit"],
