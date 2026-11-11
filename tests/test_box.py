@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -2570,6 +2571,32 @@ def _harden_with_stub_nohup(home: Path) -> None:
         env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
     )
     assert out.returncode == 0, out.stderr
+    _await_reaper(home)
+
+
+def _await_reaper(home: Path, timeout: float = 10.0) -> None:
+    """Wait until the pidfile's process carries the reaper's name, as the snippet's own check
+    reads it. `nohup … &` launches in the BACKGROUND and the snippet returns at once, so under
+    load the test read `launched` before the stub had written it (CI, 2026-11-11), and a second
+    harden could find the pid still bash, not yet exec'd into the reaper, and start another."""
+    probe = (
+        'p=$(cat "$HOME/.config/foldyard/bridge-reaper.pid")\n'
+        '{ cat "/proc/$p/cmdline" 2>/dev/null || ps -ww -o args= -p "$p"; } | tr "\\0" " "'
+    )
+    deadline = time.monotonic() + timeout
+    args = ""
+    while time.monotonic() < deadline:
+        args = subprocess.run(
+            ["bash", "-c", probe],
+            capture_output=True,
+            text=True,
+            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        ).stdout
+        # Before the exec the pid is a fork of `bash -c <snippet>`, whose argv holds the name too.
+        if args.split()[:2] == ["sh", "-c"] and args.split()[-1] == box._REAPER_NAME:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"no reaper running after {timeout}s: {args!r}")
 
 
 _SH_ENV = {"PATH": "/usr/bin:/bin"}  # the suite scrubs PATH; these stand-ins need `sleep`
