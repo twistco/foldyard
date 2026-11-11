@@ -1210,7 +1210,7 @@ def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
     print(f"  An install in '{name}' from one of them would land on your computer's disk. Either")
     print(f"  run it in '{name}''s own box — `WORKTREE={name} fy box up`, then `fy box exec` or")
     print(f"  `fy box shell` with WORKTREE={name} — or recreate a box so it masks '{name}':")
-    print("  `fy box down && fy box up` (prefixed WORKTREE=<its name> for a worktree's box).")
+    print("  `fy box recreate` (prefixed WORKTREE=<its name> for a worktree's box).")
 
 
 def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) -> int:

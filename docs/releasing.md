@@ -119,8 +119,8 @@ would not fail a recording: it would put the error on the front page.
   the packages you changed changed version — the rest of the diff is uv simplifying markers.
 - **`pyright` needs a Node runtime in the box.** The PyPI package is a wrapper that prefers a global
   `node` and otherwise fetches one from nodejs.org — which the allowlist refuses. Our
-  `[box].packages` installs Debian's `nodejs`; a box created before that needs
-  `fy box down && fy box up` to pick it up. `ty` runs regardless. If pyright could not run, **say
-  so** rather than reporting a green typecheck — CI is what actually gates it.
+  `[box].packages` installs Debian's `nodejs`; a box created before that needs `fy box recreate` to
+  pick it up. `ty` runs regardless. If pyright could not run, **say so** rather than reporting a
+  green typecheck — CI is what actually gates it.
 - **A version, once published, is burned.** PyPI refuses re-uploads of a version even after you
   delete it. A botched release is fixed by releasing again, never by re-cutting the same number.

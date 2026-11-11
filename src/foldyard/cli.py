@@ -1009,6 +1009,21 @@ def box_up() -> None:
     raise typer.Exit(box.main("up"))
 
 
+@box_app.command("recreate")
+@box_app.command("restart", hidden=True)  # alias: what people reach for first
+def box_recreate(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="don't ask before stopping agents still running in the box"
+    ),
+) -> None:
+    """Recreate the dev box (`fy box down` then `fy box up`), which is how a box picks up what is
+    fixed when it is created: env, mounts, its foldyard, the image. Everything that can refuse
+    runs before the old box is removed; agents still running in it are named first, as by `down`."""
+    from . import box
+
+    raise typer.Exit(box.main("recreate", ["--yes"] if yes else []))
+
+
 @box_app.command("shell")
 def box_shell() -> None:
     """Attach a shell to the running dev box (repeatable for multiple sessions)."""

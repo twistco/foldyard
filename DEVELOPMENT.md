@@ -46,9 +46,9 @@ reflow prose by hand. Not formatted: the Marp talk sources and `CHANGELOG.md` (w
 suite. Boxes have it: `[box].bootstrap` in our `foldyard.toml` sets `core.hooksPath` in the box's
 own git config, scoped to this checkout and its worktrees (`includeIf`), so other repos in the box
 keep their own hooks. Bootstrap runs only when a box is created: a box from before it gets the hook
-by `fy box down && fy box up`, or by running that bootstrap line in it once. On your computer it's
-opt-in, with `just hooks`, which sets it in the shared `.git/config` (and is refused in a box, where
-it would do that for you). There it is code from this box-writable checkout like any repo hook
+by `fy box recreate`, or by running that bootstrap line in it once. On your computer it's opt-in,
+with `just hooks`, which sets it in the shared `.git/config` (and is refused in a box, where it
+would do that for you). There it is code from this box-writable checkout like any repo hook
 (docs/security.md): an edit to the hook or the `lint` recipe, committed or not, runs at your next
 commit. Turn it on only where you'd run the checkout's `just lint` anyway.
 

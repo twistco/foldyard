@@ -149,7 +149,7 @@ def test_fix_command_in_the_box_is_a_box_recreate():
     # reader here is by definition someone whose in-box fy is already too old to trust.
     msg, _ = compat.version_gate("0.1.0", minimum="0.4.0", recommended=None, in_box=True)
     assert msg is not None
-    assert "fy box down && fy box up" in msg
+    assert "fy box recreate" in msg
     assert "uv tool install" not in msg
 
 
@@ -274,7 +274,7 @@ def test_doctor_row_in_the_box_says_recreate(repo_declaring, monkeypatch):
     # no-op on a running box. The row and the gate must name the same fix.
     monkeypatch.setenv("IN_DEVBOX", "1")
     (_, _, detail) = _row(repo_declaring, min_foldyard_version="99.0.0")[0]
-    assert "fy box down && fy box up" in detail
+    assert "fy box recreate" in detail
     assert "uv tool install" not in detail
 
 

@@ -78,7 +78,7 @@ def test_state_passes_with_a_warning_when_only_your_computers_clock_moved(
     out = capsys.readouterr().out
     assert rc == 0
     assert "⚠" in out and "TZ: Europe/London → Asia/Tokyo" in out
-    assert "fy box down && fy box up" in out and "✗" not in out
+    assert "fy box recreate" in out and "✗" not in out
 
 
 def test_state_fails_when_the_clock_moved_beside_another_name(

@@ -120,7 +120,7 @@ OpenAI Codex — including its `keyless` line. Then:
 ```bash
 fy config diff              # read the change your computer would start running…
 fy config adopt             # …and adopt it (`fy box up`'s own prompt defaults to ignore)
-fy box down && fy box up    # recreate it with the agent; asks once (hidden) for your key
+fy box recreate             # recreate it with the agent; asks once (hidden) for your key
 fy mode claude=on           # switch on the proxy's key swap for the agent
 fy claude                   # Claude Code, running inside the box
 ```
@@ -209,7 +209,7 @@ git pull                      # 2. pull the repo (and its foldyard.toml)
 fy doctor                     # 3. expect ✓ foldyard version, ✓ mitmproxy, ○ adopted config
 fy config diff                # 4. read what your computer would start running…
 fy config adopt               #    …and adopt it
-fy box down && fy box up      # 5. recreate the box on the new version
+fy box recreate               # 5. recreate the box on the new version
 ```
 
 Why each step is the way it is:
@@ -229,10 +229,10 @@ Why each step is the way it is:
   change — including where credentials are injected and which traffic is decrypted — and
   `fy config adopt` is the one step that applies it (see
   [configuration.md](./configuration.md#the-adopted-config-what-the-host-actually-runs)).
-- **`fy box down` then `fy box up`, not `fy box up` alone.** On a running box, `fy box up` says
-  "already up" and changes nothing. Recreating the box is what installs the new `fy` inside it and
-  restarts the supervisor on the new code. Finish or park agent sessions in the box first:
-  `fy box down` archives their transcripts, but an agent mid-task is interrupted.
+- **`fy box recreate`, not `fy box up`.** On a running box, `fy box up` says "already up" and
+  changes nothing. Recreating the box is what installs the new `fy` inside it and restarts the
+  supervisor on the new code. Finish or park agent sessions in the box first: the recreate archives
+  their transcripts, but an agent mid-task is interrupted.
 - **Run `fy code` again** if the release changed anything under `[vscode]`: the VS Code attach
   config is written from the adopted config, so it's out of date until regenerated.
 - **Moving the repo itself onto a newer foldyard?** `fy changelog` prints the releases between the

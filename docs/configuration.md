@@ -314,7 +314,7 @@ disk_gib = 60
     gVisor, and refuses a create it can't parse. A box that came up under another runtime is removed
     before bootstrap. On lima, `/run/foldyard/engine.sock` (the engine socket a stack service
     mounts, [gcp.md](./gcp.md#in-your-compose-file)) is that filtered socket too.
-  - Changing it means `fy box down && fy box up`. On lima, also restart the VM first
+  - Changing it means `fy box recreate`. On lima, also restart the VM first
     (`fy machine stop && fy up`): its boot script points `/run/foldyard/engine.sock` at the socket
     for the runtime, so `fy up` refuses the running VM until it restarts.
   - Cost: about 1.2× on a Python test suite, 2–4× on sub-second git/lint calls.
@@ -739,19 +739,18 @@ Every kind takes:
   needs to see before it sends the header the proxy then overwrites. They're baked whenever the box
   routes through the proxy, whatever the switch's level, so turning the switch on needs no box
   recreate; a dummy grants nothing. Adding a row, or changing or removing its `box_env`, does need
-  one: the box's environment is fixed when it's created, so run `fy box down && fy box up`.
-  `fy box up` on a running box and `fy mode` name a dummy the box lacks, or one it still holds after
-  its row is gone (that one would shadow a real login made in the box). `fy verify` checks each
-  still holds its dummy (anything else is a possible real credential in the box). A name foldyard
-  sets in the box itself (`FY_*`, `FOLDYARD_*`, the proxy and CA variables, `CONTAINER_HOST`,
-  `DOCKER_HOST`, …) is refused, and two rows can't give one name different dummies. While the switch
-  is off, the proxy answers a request that carries the dummy where the row would inject (its host,
-  `path_prefix`, and header or `query_param`) with a 401 whose JSON `message` names the switch and
-  the command that turns it on, instead of sending the dummy upstream. In a header the dummy may
-  stand alone or follow one auth scheme (`token x`, `Bearer x`), whichever the client writes.
-  Requests without the dummy go on as usual, so a public call to the same API still works. The
-  Network Log marks the answered requests as held, and the first one raises a notification on your
-  computer.
+  one: the box's environment is fixed when it's created, so run `fy box recreate`. `fy box up` on a
+  running box and `fy mode` name a dummy the box lacks, or one it still holds after its row is gone
+  (that one would shadow a real login made in the box). `fy verify` checks each still holds its
+  dummy (anything else is a possible real credential in the box). A name foldyard sets in the box
+  itself (`FY_*`, `FOLDYARD_*`, the proxy and CA variables, `CONTAINER_HOST`, `DOCKER_HOST`, …) is
+  refused, and two rows can't give one name different dummies. While the switch is off, the proxy
+  answers a request that carries the dummy where the row would inject (its host, `path_prefix`, and
+  header or `query_param`) with a 401 whose JSON `message` names the switch and the command that
+  turns it on, instead of sending the dummy upstream. In a header the dummy may stand alone or
+  follow one auth scheme (`token x`, `Bearer x`), whichever the client writes. Requests without the
+  dummy go on as usual, so a public call to the same API still works. The Network Log marks the
+  answered requests as held, and the first one raises a notification on your computer.
 - **`replay_on_401`** — re-mint and replay once on a 401. Default: `false` for `static`, `true` for
   the GitHub kinds.
 - **`label`** — shown in daemon status.
@@ -976,8 +975,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   or by `fy box build`. The layer uses whichever package manager the image has (`apt-get`, `apk`,
   `dnf`, `microdnf`, `yum`, `zypper`, `pacman`) and fails the build if it has none; the names are
   that manager's, for the image you chose (the packaged box is Debian). Order doesn't matter. A box
-  already running from the bare image keeps it until `fy box down && fy box up`. Packages are frozen
-  at build time, so run `fy box build` to pick up the distro's updates. Default: `[]`.
+  already running from the bare image keeps it until `fy box recreate`. Packages are frozen at build
+  time, so run `fy box build` to pick up the distro's updates. Default: `[]`.
 
 - **`sock_in_vm`** — the rootless podman socket inside the VM, mounted as the box's
   `/var/run/docker.sock`. Default: the backend's own. Env: `PODMAN_SOCK_IN_VM`. Rarely needed.
@@ -992,9 +991,9 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   dir, `RUN-IT-IN-ITS-OWN-BOX`, says how to run the command in that checkout's own box
   ([git.md](./git.md#worktrees)). Podman creates a missing mountpoint, so a declared dir that
   doesn't exist yet appears empty in each checkout once a box is created. A box's mounts are fixed
-  when it's created: a dir added here needs `fy box down && fy box up`. A worktree added while a box
-  runs gets its masks in that box without a recreate (`fy worktree add`, and `fy box up` on a
-  running box, add them where the VM allows — see [git.md](./git.md#worktrees)), and `fy doctor`'s
+  when it's created: a dir added here needs `fy box recreate`. A worktree added while a box runs
+  gets its masks in that box without a recreate (`fy worktree add`, and `fy box up` on a running
+  box, add them where the VM allows — see [git.md](./git.md#worktrees)), and `fy doctor`'s
   `box shadowing` row says when a running box lacks one. Default: `[]`.
 
 - **`caches`** — shared cache volumes: `[{ volume, path }]`, `path` relative to the box's `HOME`.
@@ -1018,16 +1017,16 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   never under an `LC_ALL` (the image's or this table's), which would override it. Debian images add
   it with the `locales` package and `localedef -i en_GB -f UTF-8 en_GB.UTF-8`. `date` and `ls -l`
   need `tzdata` in the image; the packaged box has it, and Claude Code doesn't need it. Both are
-  read when the box is created, so `fy box down && fy box up` picks up a change. So is the rest of
-  this table: the box's environment is fixed when it's created, so adding, changing or removing an
-  entry needs `fy box down && fy box up` too. `fy box up` on a running box and `fy mode` name each
-  variable that no longer matches; they print the values only for `TZ` and `LC_TIME`. Only
-  `fy box up` judges an `LC_TIME` copied from your computer, by asking the box's image which locales
-  it has, as the create did; one this table pins is judged everywhere. `fy state` counts a different
-  `TZ` or `LC_TIME` as a warning, not drift: your computer's clock settings moved (you travelled,
-  say) and the box still works, so it passes and shows the old → new value. Any other variable that
-  no longer matches makes it exit non-zero, and so does a `TZ` or `LC_TIME` this table pins, since
-  changing the pin is a config change.
+  read when the box is created, so `fy box recreate` picks up a change. So is the rest of this
+  table: the box's environment is fixed when it's created, so adding, changing or removing an entry
+  needs `fy box recreate` too. `fy box up` on a running box and `fy mode` name each variable that no
+  longer matches; they print the values only for `TZ` and `LC_TIME`. Only `fy box up` judges an
+  `LC_TIME` copied from your computer, by asking the box's image which locales it has, as the create
+  did; one this table pins is judged everywhere. `fy state` counts a different `TZ` or `LC_TIME` as
+  a warning, not drift: your computer's clock settings moved (you travelled, say) and the box still
+  works, so it passes and shows the old → new value. Any other variable that no longer matches makes
+  it exit non-zero, and so does a `TZ` or `LC_TIME` this table pins, since changing the pin is a
+  config change.
 
   The box also commits as you. Its home directory is new with every box, so it has no global git
   config of its own: a new box gets your computer's `user.name` and `user.email` (from your global

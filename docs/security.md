@@ -315,7 +315,7 @@ Each row names *what* failed. What it usually means, and what to do:
   - `the to-box write probe did not run — read-only UNPROVEN` — the probe container failed; the same
     causes as the probe-image row above.
   - `/run/foldyard/to-box took a write` (in the box) — the box's own bind isn't `:ro`: recreate the
-    box (`fy box down && fy box up`).
+    box (`fy box recreate`).
 - **`SSH_AUTH_SOCK set` / `git-credential bridge to the host` /
   `git has a credential helper that asks the host` / `editor-attach bridge sockets`** — a VS Code
   attach forwarded your computer's credentials into the box. See

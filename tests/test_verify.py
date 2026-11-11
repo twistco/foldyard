@@ -1550,11 +1550,11 @@ def test_a_box_from_before_the_two_directories_fails_with_the_recreate_hint(
     results["pid1_mounts"] = f"mount3 {_to_box()} virtiofs ro,relatime 0 0\n"
     assert verify.verify() == 1
     out = capsys.readouterr().out
-    assert "VM exposes host paths" in out and "fy box down && fy box up" in out
+    assert "VM exposes host paths" in out and "fy box recreate" in out
     # …while a real leak gets no such hint
     results["pid1_mounts"] = f"mount3 {pathlib.Path.home()} virtiofs rw 0 0\n"
     assert verify.verify() == 1
-    assert "fy box down && fy box up" not in capsys.readouterr().out
+    assert "fy box recreate" not in capsys.readouterr().out
 
 
 def test_a_write_that_lands_and_cant_be_removed_still_names_the_file(with_to_box, capsys):

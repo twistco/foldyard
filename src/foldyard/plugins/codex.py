@@ -233,7 +233,7 @@ class CodexPlugin(Plugin):
         # Both keyless steps below are AMBIENT with the proxy substrate whenever keyless is
         # CONFIGURED (mirroring box_args' dummy) — never gated on the rung. Box-side state that
         # tracked the rung could only be built at CREATE time, so `fy mode codex=on` couldn't take
-        # effect without `fy box down && fy box up`; ambient means the flip is purely host-side
+        # effect without `fy box recreate`; ambient means the flip is purely host-side
         # (does the proxy inject?) and the box is already shaped for it either way.
         keyless_on = bool(env.get("FY_PROXY") and config.codex_keyless())
         # Keyless: the `apps`/codex_apps MCP (chatgpt.com/backend-api/ps/mcp) needs full ChatGPT-

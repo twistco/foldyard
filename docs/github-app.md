@@ -91,7 +91,7 @@ answer the prompt at your next `fy up`, or read `fy config diff` and run `fy con
 made in the box changes nothing until you do.
 
 `box_env` is baked in when the box is created. If the box was already running, recreate it once:
-`fy box down && fy box up`. After that, turning the switch on or off needs no recreate.
+`fy box recreate`. After that, turning the switch on or off needs no recreate.
 
 Installing `gh` in the box is your box image's job.
 

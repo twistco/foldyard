@@ -163,7 +163,7 @@ def _warn_stale_runtime(engine: str, box: str, env: dict) -> None:
     want = wanted or "the VM engine's own runtime"
     print(
         f"⚠ dev box {box} runs under {have}, but [machine].runtime now asks for {want}. "
-        "The runtime is fixed at create: `fy box down && fy box up`."
+        "The runtime is fixed at create: `fy box recreate`."
     )
 
 
@@ -184,7 +184,7 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
         print(
             f"⚠ dev box {box} was built for proxy port {baked.strip()}, but this project's proxy "
             f"now serves :{current} (its port range moved). The box's egress — including keyless "
-            f"agent auth — will connection-refuse until you recreate it: `fy box down && fy box up`."
+            f"agent auth — will connection-refuse until you recreate it: `fy box recreate`."
         )
         return
     # The range held, but this worktree's offset moved: it had shared one with a sibling (their
@@ -196,7 +196,7 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
             f"⚠ dev box {box} was built for proxy port {was}, but this worktree's proxy now serves "
             f":{now} (its port offset moved: it had shared one with another worktree, or a pin "
             f"changed). The box's egress will connection-refuse until you recreate it: "
-            f"`fy box down && fy box up`."
+            f"`fy box recreate`."
         )
 
 
@@ -242,7 +242,7 @@ def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
     print(
         f"⚠ dev box {box} has {was} installed, but your computer now runs foldyard {__version__}. The "
         "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
-        "won't move it: `fy box down && fy box up`."
+        "won't move it: `fy box recreate`."
     )
 
 
@@ -259,7 +259,7 @@ def _warn_predates_box_dirs(engine: str, box: str, env: dict) -> None:
         f"⚠ dev box {box} predates foldyard's to-box and from-box: it has no "
         f"{boxmounts.TO_BOX_IN_BOX}"
         + (" and binds its transcripts into the checkout" if agents else "")
-        + ". Recreate it: `fy box down && fy box up`."
+        + ". Recreate it: `fy box recreate`."
     )
 
 
@@ -437,7 +437,7 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
         print(
             f"⚠ dev box {box} doesn't shadow {', '.join(own)} (declared in [box].shadow_volumes "
             "after it was created), so an install there lands on your computer's disk. "
-            "Recreate it: `fy box down && fy box up`."
+            "Recreate it: `fy box recreate`."
         )
     why = ""
     if others and not config.in_box():
@@ -453,7 +453,7 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
             + (f" (not while it runs: {why})" if why else "")
             + ". An install there from this box lands on your computer's disk — run it in that "
             "checkout's own box (`WORKTREE=<name> fy box exec '<command>'`), or recreate this one "
-            "to mask them: `fy box down && fy box up`."
+            "to mask them: `fy box recreate`."
         )
     if unregistered:  # only ever in a box: on your computer the registry is the whole list
         print(
@@ -1225,7 +1225,7 @@ def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] =
         print(
             f"⚠ dev box {box}'s environment no longer matches {source} "
             f"({', '.join(map(str, drift))}). "
-            "A box's environment is fixed when it's created: `fy box down && fy box up`."
+            "A box's environment is fixed when it's created: `fy box recreate`."
         )
 
 
@@ -2222,7 +2222,12 @@ def _capture_secrets() -> None:
     )
 
 
-def _up(ctx, engine: str, box: str, net: str) -> int:
+def _up(
+    ctx, engine: str, box: str, net: str, *, recreate: bool = False, args: list[str] | None = None
+) -> int:
+    """`fy box up`, and with ``recreate`` `fy box recreate`: everything that can refuse runs
+    first (the gates, the captures, the supervisor's readiness), so a restart that can't go
+    ahead leaves the running box as it was."""
     env = ctx.env
     img = config.box_image()["tag"]
     main = ctx.main
@@ -2263,6 +2268,15 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
     expected_fingerprint = _box_image_fingerprint(main)
 
+    if recreate and _running(engine, box, env):
+        # What `box down` does, after everything above had its chance to refuse — then on to
+        # the create below, as if the box had never been there.
+        if not _agents_may_stop(engine, box, env, args or []):
+            print("Aborted — the box is still running.")
+            return 1
+        _remove(engine, box, env)
+        print(f"✓ dev box {box} removed (login/CLI volumes kept) — creating it again…")
+
     if _running(engine, box, env):
         _warn_stale_proxy_port(engine, box, env)  # a pre-band box strands on a dead proxy port
         _warn_stale_runtime(engine, box, env)  # [machine].runtime is create-time too
@@ -2270,7 +2284,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         if _fingerprint(engine, "container", box, env) != run_fingerprint:
             print(
                 f"⚠ dev box {box} was built from an older image definition. Recreate it to pick "
-                "up the current tools: `fy box down && fy box up`."
+                "up the current tools: `fy box recreate`."
             )
         # Config drift a running box CANNOT pick up live: the Claude install, volumes and dummy
         # credential are all create-time (claude.py box_args/box_bootstrap), so a box created
@@ -2281,7 +2295,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
             quiet.add("claude")
             print(
                 "⚠ [claude] is declared but this box was created without it (no Claude install, "
-                "volumes or dummy credential). Recreate to add them: `fy box down && fy box up`."
+                "volumes or dummy credential). Recreate to add them: `fy box recreate`."
             )
         # Same drift, same signal, for codex: a box created WITH [codex] bakes CODEX_HOME. Without
         # this row the failure is SILENT and reads as an auth bug — the box has no codex, `fy codex`
@@ -2290,7 +2304,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
             quiet.add("codex")
             print(
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
-                "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
+                "~/.codex volume or keyless seed). Recreate to add them: `fy box recreate`."
             )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
         _warn_mask_gaps(engine, box, ctx)  # and its mounts: shadows + other checkouts' masks
@@ -2299,7 +2313,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
             print(
                 "⚠ couldn't (re)apply the in-box editor-attach hygiene (bash in the box failed) — "
-                "`fy verify` in the box says what is exposed; `fy box down && fy box up` rebuilds it."
+                "`fy verify` in the box says what is exposed; `fy box recreate` rebuilds it."
             )
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
@@ -2546,10 +2560,16 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
 
 def main(cmd: str = "shell", args: list[str] | None = None) -> int:
-    if cmd == "up":  # fail fast on unmet host prereqs before _ctx() creates the machine (host-only)
+    if cmd == "recreate" and config.in_box():
+        # From in here the removal would end this very process half-way, with nothing left to
+        # create the box again.
+        _err("✗ `fy box recreate` removes the box it runs in — run it from your computer.")
+        return 1
+    # Fail fast on unmet host prereqs before _ctx() creates the machine.
+    if cmd in ("up", "recreate"):
         from . import preflight
 
-        preflight.check_or_abort("fy box up")
+        preflight.check_or_abort(f"fy box {cmd}")
         # After the gate (it reads the adopted config), before _ctx() can start the VM: a
         # `[box].env` that sets a name foldyard owns is refused before anything is started,
         # removed or built.
@@ -2558,7 +2578,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         except SystemExit as e:
             _err(str(e))
             return 1
-    if cmd in ("up", "build"):  # a malformed [box].packages, before anything is built
+    if cmd in ("up", "recreate", "build"):  # a malformed [box].packages, before anything is built
         try:
             config.box_packages()
         except SystemExit as e:
@@ -2602,8 +2622,8 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if rc == 0:
             print(f"✓ built {tag}. Start the box: fy box up")
         return rc
-    if cmd == "up":
-        return _up(ctx, engine, box, net)
+    if cmd in ("up", "recreate"):
+        return _up(ctx, engine, box, net, recreate=cmd == "recreate", args=args or [])
     if cmd == "shell":
         if not _running(engine, box, env):
             _err(f"dev box {box} not running — {_start_it(ctx.worktree)}")
@@ -2622,15 +2642,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if _running(engine, box, env) and not _agents_may_stop(engine, box, env, args or []):
             print("Aborted — the box is still running.")
             return 1
-        # Belt-and-suspenders: promote this box's transcripts to the durable host store before
-        # we drop the container. The bound-out dir survives `box down`, but archiving here keeps
-        # the host's `claude --resume` in sync. Best-effort — never block a teardown. Lazy import
-        # avoids a stack↔transcripts cycle.
-        from . import transcripts
-
-        transcripts.sync_current(env)
-        if _exists(engine, box, env):
-            subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL)
+        if _remove(engine, box, env):
             print(f"✓ dev box {box} stopped (login/CLI volumes kept).")
         else:
             print(f"(no dev box {box})")
@@ -2652,8 +2664,24 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
             ],
             env=env,
         ).returncode
-    _err("usage: foldyard box {build|up|shell|exec|down|ps}")
+    _err("usage: foldyard box {build|up|recreate|shell|exec|down|ps}")
     return 2
+
+
+def _remove(engine: str, box: str, env: dict) -> bool:
+    """Remove the box's container (its login/CLI volumes stay); False when there was none.
+
+    Belt-and-suspenders: promote this box's transcripts to the durable host store before we drop
+    the container. The bound-out dir survives the removal, but archiving here keeps the host's
+    `claude --resume` in sync. Best-effort — never block a teardown. Lazy import avoids a
+    stack↔transcripts cycle."""
+    from . import transcripts
+
+    transcripts.sync_current(env)
+    if not _exists(engine, box, env):
+        return False
+    subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL)
+    return True
 
 
 def _agents_may_stop(engine: str, box: str, env: dict, args: list[str]) -> bool:

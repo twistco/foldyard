@@ -80,7 +80,7 @@ So:
 
 A box created before a project's range moved has the old proxy port baked into its env; `fy box up`
 on such a running box prints a recreate warning (`_warn_stale_proxy_port`). Recreate it with
-`fy box down && fy box up`.
+`fy box recreate`.
 
 <a id="2-enforcement--machinewall--true"></a>
 

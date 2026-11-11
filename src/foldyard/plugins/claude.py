@@ -167,7 +167,7 @@ class ClaudePlugin(Plugin):
         # flight. AMBIENT with the proxy substrate (FY_PROXY) whenever keyless is CONFIGURED, like
         # an [[inject]] row's box_env — NOT keyed to the rung, which is a host-side decision (does
         # the proxy inject?) while box env is create-time; keying them together made `fy mode
-        # claude=on` land with nothing changed in the box until `fy box down && fy box up`. A BARE
+        # claude=on` land with nothing changed in the box until `fy box recreate`. A BARE
         # [claude] box still gets no dummy, because `claude_keyless()` is empty there — that box
         # logs in for real and a dummy would take precedence over the token it obtains.
         if env.get("FY_PROXY") and config.claude_keyless():

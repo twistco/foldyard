@@ -355,7 +355,7 @@ def _predates_box_dirs_hint(leaks: list[str]) -> str:
     if all(_mountpoint(ln).endswith(("/to-box", "/from-box")) for ln in leaks):
         return (
             " — if that is foldyard's to-box/from-box, this box was created before them and "
-            "doesn't know their paths: `fy box down && fy box up`"
+            "doesn't know their paths: `fy box recreate`"
         )
     return ""
 

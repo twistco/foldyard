@@ -1067,6 +1067,13 @@ def box_down(name: str) -> tuple[int, str]:
     return _fy(["box", "down"], timeout=120, env_extra=env_extra)
 
 
+def box_recreate(name: str) -> tuple[int, str]:
+    """Recreate a workspace's dev box via `fy box recreate` (host only). ``--yes``: the TUI asked
+    about the agents it ends before calling this. A create, so `box_up`'s timeout."""
+    env_extra = {"WORKTREE": "" if name == "main" else name}
+    return _fy(["box", "recreate", "--yes"], timeout=600, env_extra=env_extra)
+
+
 def machine_state() -> str:
     """The rootless machine's state: 'running' | 'stopped' | 'unknown' (via the active
     backend — podman or Lima)."""
@@ -1466,7 +1473,7 @@ def doctor(deep: bool = False):
             "egress proxy CA",
             "mounted + trusted (ambient — routing follows a declared [proxy])",
             "not mounted — there was no CA on your computer when this box was created: `fy host "
-            "restart` there, then `fy box down && fy box up` (the CA is mounted at create)",
+            "restart` there, then `fy box recreate` (the CA is mounted at create)",
         )
         yield from _git_shim_check()
         yield ("running", "engine socket", "")
@@ -1693,7 +1700,7 @@ def _box_shadow_check():
         )
     pin = f"WORKTREE={shlex.quote(worktree)} " if worktree else ""
     where = " on your computer" if in_box() else ""
-    recreate = f"`{pin}fy box down && {pin}fy box up`"
+    recreate = f"`{pin}fy box recreate`"
     if unregistered and (hint := box._register_hint(unregistered)):
         # Registering comes first: a recreate before it masks them no better than this box does.
         fix = (
@@ -1840,7 +1847,7 @@ def _version_window_check():
     # list. The row says WHERE you are; `fy up` says what you would gain by moving.
     message, blocked = version_gate(__version__, minimum, recommended, in_box=in_box())
     # The recreate, not a bare `fy box up` — see compat._fix for why the latter does nothing.
-    fix = "`fy box down && fy box up` from the host" if in_box() else f"`{upgrade_hint()}`"
+    fix = "`fy box recreate` from the host" if in_box() else f"`{upgrade_hint()}`"
     if blocked:
         yield ("fail", "foldyard version", f"{__version__} — repo needs >= {minimum}; run {fix}")
     elif message:
@@ -1945,7 +1952,7 @@ _HOOK_NAMES = re.compile(r'^FY_HOOK_NAMES="([^"]*)"', re.M)
 # by root, and writable by no one else (a group-write bit only for root's own group).
 _ROOT_UID = 0
 _ROOT_GID = 0
-_SHIM_RECREATE = "`fy box down && fy box up` on your computer re-runs the bootstrap"
+_SHIM_RECREATE = "`fy box recreate` on your computer re-runs the bootstrap"
 
 
 def _git_on_path() -> str | None:
@@ -2750,7 +2757,7 @@ def _box_env_drift(project: str | None = None) -> list[EnvDrift]:
 def _box_env_hint_text(drift: Iterable[object]) -> str:
     """The one-line nag for ``drift``: `fy box up` alone keeps a running box, hence the recreate."""
     names = ", ".join(map(str, drift))
-    return f"⚠ dev box env out of date ({names}) — apply with: fy box down && fy box up"
+    return f"⚠ dev box env out of date ({names}) — apply with: fy box recreate"
 
 
 def _box_env_hint(project: str | None = None) -> str | None:
