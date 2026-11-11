@@ -218,10 +218,13 @@ env = { UV_LINK_MODE = "copy", UV_FROZEN = "1" }
 caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is under HOME
 # Lint before every commit made in a box: .githooks/pre-commit runs `just lint`. Set in the box's
 # OWN git config (its home), not the shared .git/config, so git on your computer runs no hook
-# unless you turn it on there yourself (`just hooks`). One setting either way: never twice. A box
+# unless you turn it on there yourself (`just hooks`). One setting either way: never twice. And
+# for this checkout and its worktrees only, by `includeIf` on their git dirs: a global
+# core.hooksPath would replace every other repo's .git/hooks in the box. (`gitdir:` with a
+# trailing slash matches what is INSIDE .git, not .git itself: hence the two entries.) A box
 # created before this line has no hook until it is recreated (`fy box down && fy box up`), or
-# until that `git config` line is run in it once.
-bootstrap = "git config --global core.hooksPath .githooks"
+# until this line is run in it once.
+bootstrap = 'c=$(git rev-parse --path-format=absolute --git-common-dir) && f="$HOME/.gitconfig-foldyard-hooks" && git config --file "$f" core.hooksPath .githooks && git config --global "includeIf.gitdir:$c.path" "$f" && git config --global "includeIf.gitdir:$c/worktrees/.path" "$f"'
 #
 # System packages, baked ONCE into a cached layer on the box image (`<tag>-packages`) rather
 # than reinstalled by every fresh box's bootstrap. Each, and why:
