@@ -1,16 +1,16 @@
 # ADR-0009 — Monitoring is cooperative, enforcement is not: don't market filtering until it's the locked kind
 
 - **Status:** Accepted (2026-06-13; layers landed through 2026-07-05) — capture shipped; addon
-  default-deny shipped (config-gated); VM-level wall built, Mac-unvalidated. **Amended
-  2026-09-24:** the VM-level wall is validated on real Lima VMs — on a Linux host (2026-09-11)
-  and in CI on every `lima-host-e2e` run since 2026-09-17 (`tests/test_wall_e2e.py`); it still
-  ships opt-in and Lima-only. The `capture` axis is gone
-  ([ADR-0029](./0029-the-proxy-always-decrypts.md)). The rejected "host-side interception"
-  alternative is partly reversed on Linux: the *host wall* matches the VM's own process by
-  cgroup on the host ([ADR-0028](./0028-no-elevation-on-the-host-operator-applies.md)) — still
-  no per-container packet path, and still not on macOS or WSL2. Renamed keys: `[machine].wall`
-  → `[machine] firewall` (the *VM firewall*), `[proxy] default_deny` → `[proxy] enforce` (the
-  *allowlist*), `host_wall` → `host_firewall`; the old names still work as aliases.
+  default-deny shipped (config-gated); VM-level wall built, Mac-unvalidated. **Amended 2026-09-24:**
+  the VM-level wall is validated on real Lima VMs — on a Linux host (2026-09-11) and in CI on every
+  `lima-host-e2e` run since 2026-09-17 (`tests/test_wall_e2e.py`); it still ships opt-in and
+  Lima-only. The `capture` axis is gone ([ADR-0029](./0029-the-proxy-always-decrypts.md)). The
+  rejected "host-side interception" alternative is partly reversed on Linux: the *host wall* matches
+  the VM's own process by cgroup on the host
+  ([ADR-0028](./0028-no-elevation-on-the-host-operator-applies.md)) — still no per-container packet
+  path, and still not on macOS or WSL2. Renamed keys: `[machine].wall` → `[machine] firewall` (the
+  *VM firewall*), `[proxy] default_deny` → `[proxy] enforce` (the *allowlist*), `host_wall` →
+  `host_firewall`; the old names still work as aliases.
 - **Sources:** PLAN.md §6 (honesty rules), docs/history/network-capture.md,
   docs/history/lima-network-forcing-spike.md, docs/lima-wall-machine-integration.md
 
@@ -20,22 +20,22 @@ foldyard routes the dev box's egress through a host-side mitmproxy (the same dae
 credential injection — ADR-0007). Routing works by environment variables: the box is created with
 `HTTPS_PROXY` pointing at the host proxy and a mounted CA it trusts. That is **cooperative**
 capture: any process that honours proxy env is logged; any process that doesn't — a Go static
-binary, gRPC, raw sockets, or simply malicious code that unsets `HTTPS_PROXY` — goes direct out
-of the VM's NAT and is invisible. On macOS the rootless-podman network path (pasta inside the VM,
-gvproxy on the Mac) offers no netfilter chokepoint on the default network, so there is no cheap
-way to *force* traffic to the proxy from outside.
+binary, gRPC, raw sockets, or simply malicious code that unsets `HTTPS_PROXY` — goes direct out of
+the VM's NAT and is invisible. On macOS the rootless-podman network path (pasta inside the VM,
+gvproxy on the Mac) offers no netfilter chokepoint on the default network, so there is no cheap way
+to *force* traffic to the proxy from outside.
 
-A security tool that blurs this line is selling snake oil. The temptation is real: once a proxy,
-a CA, a per-request JSONL log, and an allowlist exist, "egress filtering" is one README sentence
-away — but an allowlist enforced only on traffic that *chooses* to route through the proxy stops
-no attacker.
+A security tool that blurs this line is selling snake oil. The temptation is real: once a proxy, a
+CA, a per-request JSONL log, and an allowlist exist, "egress filtering" is one README sentence away
+— but an allowlist enforced only on traffic that *chooses* to route through the proxy stops no
+attacker.
 
 ## Decision
 
 **State the honesty rule as a design principle and hold every layer — and every doc — to it:
 monitoring is cooperative, enforcement is not. Filtering is not marketed until it is the locked
-kind, where the proxy is the *only* way out.** The network story is built as three explicit
-layers, each labelled with what it actually guarantees:
+kind, where the proxy is the *only* way out.** The network story is built as three explicit layers,
+each labelled with what it actually guarantees:
 
 1. **Phase A/A′ capture (shipped, cooperative).** The box **always** routes through the always-on
    proxy (`ProxyPlugin.derive_env` in `src/foldyard/plugins/proxy.py` always sets `FY_PROXY`;
@@ -49,41 +49,39 @@ layers, each labelled with what it actually guarantees:
    (`once`/`session`/`permanent`, `src/foldyard/allowlist.py`) and **host-side only** — the store
    lives outside the repo mount, so nothing in the box can grant its own egress — and the daemon
    re-reads the resolved `allow-effective.json` per request (mtime-cached), so a grant lands live
-   with no restart. This is a *wall on the proxy path*: honest policy for cooperative traffic,
-   zero guarantee against a client that skips the proxy.
+   with no restart. This is a *wall on the proxy path*: honest policy for cooperative traffic, zero
+   guarantee against a client that skips the proxy.
 3. **`[machine].wall = true` — the locked kind (BUILT, Mac-unvalidated).** For the Lima backend
    (ADR-0011), an nftables default-deny wall is provisioned into the real machine VM
-   (`src/foldyard/assets/machine-wall/machine-wall.sh`; *amended 2026-09-11:* provisioned at
-   BOOT as root from a script recorded in the instance config — `guest-boot.sh`, which also
-   drops the VM user's passwordless sudo — where before it was reconciled by
-   `machine.wall_sync()` over `sudo` on every ensure/recreate/start): default-deny the VM user's
-   uid **and its rootless subuid range**,
-   open only loopback, DNS to local resolvers, and the host gateway (`config.host_alias()` →
-   Lima's `192.168.5.2`) on this project's allocated daemon port band (`src/foldyard/ports.py`).
-   Egress that ignores the proxy env is REJECTED, not silently missed — fail-closed. `fy verify`
-   probes it from the box (direct `1.1.1.1:443` *and* `:53` must be refused). Status is stated
-   plainly: code-complete, unit/golden-covered, wall provisioning seen on one real Mac
-   (2026-07-05), but the rule battery (`example-lima-wall/test_network.sh`) still wants a real
-   Lima VM run — so it ships **opt-in, default off**.
+   (`src/foldyard/assets/machine-wall/machine-wall.sh`; *amended 2026-09-11:* provisioned at BOOT as
+   root from a script recorded in the instance config — `guest-boot.sh`, which also drops the VM
+   user's passwordless sudo — where before it was reconciled by `machine.wall_sync()` over `sudo` on
+   every ensure/recreate/start): default-deny the VM user's uid **and its rootless subuid range**,
+   open only loopback, DNS to local resolvers, and the host gateway (`config.host_alias()` → Lima's
+   `192.168.5.2`) on this project's allocated daemon port band (`src/foldyard/ports.py`). Egress
+   that ignores the proxy env is REJECTED, not silently missed — fail-closed. `fy verify` probes it
+   from the box (direct `1.1.1.1:443` *and* `:53` must be refused). Status is stated plainly:
+   code-complete, unit/golden-covered, wall provisioning seen on one real Mac (2026-07-05), but the
+   rule battery (`example-lima-wall/test_network.sh`) still wants a real Lima VM run — so it ships
+   **opt-in, default off**.
 
-The corollary rules: README/marketing language must track layer 3's *validated* status, never
-layer 1–2's feature list; and the spike's own conclusion is kept — no in-VM wall holds against
-VM-root, so real credentials stay on the host regardless (the wall is enforcement for the
-unprivileged agent, defense-in-depth against escalation; the outside-the-VM backstop is that
-tokens are injected in flight and never enter the box — ADR-0007).
+The corollary rules: README/marketing language must track layer 3's *validated* status, never layer
+1–2's feature list; and the spike's own conclusion is kept — no in-VM wall holds against VM-root, so
+real credentials stay on the host regardless (the wall is enforcement for the unprivileged agent,
+defense-in-depth against escalation; the outside-the-VM backstop is that tokens are injected in
+flight and never enter the box — ADR-0007).
 
 ## Consequences
 
-- Users get an accurate threat model: the Network Log and the allowlist are audit/UX surfaces;
-  only lima + wall turns them into enforcement. `fy doctor`/`fy verify` claims are scoped
-  accordingly (verify's wall probes run only under lima+wall).
-- Capture became always-on plumbing rather than a bolted-on mode — routing is fixed at box
-  create, policy flips host-side — which is exactly the shape the wall reuses (routing stays
-  fixed; only proxy policy and nft rules change).
-- The wall is Lima-only by construction: podman machine's immutable Fedora-CoreOS appliance
-  can't be provisioned this way (the finding of the 2026-06-24 spike — the enabler is VM
-  *provisioning ownership*, not any network stack). Preflight enforces `wall = true` ⇒
-  `backend = "lima"`.
+- Users get an accurate threat model: the Network Log and the allowlist are audit/UX surfaces; only
+  lima + wall turns them into enforcement. `fy doctor`/`fy verify` claims are scoped accordingly
+  (verify's wall probes run only under lima+wall).
+- Capture became always-on plumbing rather than a bolted-on mode — routing is fixed at box create,
+  policy flips host-side — which is exactly the shape the wall reuses (routing stays fixed; only
+  proxy policy and nft rules change).
+- The wall is Lima-only by construction: podman machine's immutable Fedora-CoreOS appliance can't be
+  provisioned this way (the finding of the 2026-06-24 spike — the enabler is VM *provisioning
+  ownership*, not any network stack). Preflight enforces `wall = true` ⇒ `backend = "lima"`.
 - An earlier packaged proof rig (`fy wall` verb + `assets/wall/`) was retired in PR #36 when the
   real-machine integration landed — foldyard no longer ships a separate proof VM; the standalone
   red-team kit stays under `docs/archive/lima-network-forcing-kit/`.
@@ -93,17 +91,17 @@ tokens are injected in flight and never enter the box — ADR-0007).
 
 ## Rejected alternatives
 
-- **Market the addon allowlist as egress filtering.** It filters only proxy-routed traffic;
-  claiming enforcement would be exactly the dishonesty this ADR exists to prevent.
+- **Market the addon allowlist as egress filtering.** It filters only proxy-routed traffic; claiming
+  enforcement would be exactly the dishonesty this ADR exists to prevent.
 - **Host-side (macOS) interception instead of an in-VM wall.** gvproxy emits plain host sockets;
-  there is no per-container packet path on the Mac to hook — observation (pcap) or DNS games
-  only. Confirmed in the network-capture investigation.
-- **Run the proxy inside the VM** (earlier draft of the lima integration): drags creds, minters,
-  and the CA lifecycle into the very VM the agent lives in, breaking creds-never-leave-the-host.
-  Routing to the host gateway fixes every consumer at once; the proxy never moved.
+  there is no per-container packet path on the Mac to hook — observation (pcap) or DNS games only.
+  Confirmed in the network-capture investigation.
+- **Run the proxy inside the VM** (earlier draft of the lima integration): drags creds, minters, and
+  the CA lifecycle into the very VM the agent lives in, breaking creds-never-leave-the-host. Routing
+  to the host gateway fixes every consumer at once; the proxy never moved.
 - **Wrap the agent process with a kernel connect() lock (Nono-style Landlock/Seatbelt).**
-  Per-process, same-kernel — cannot wrap a VM from outside, and covers only one process tree,
-  not the stack. The VM-boundary analogue *is* nftables default-deny.
-- **The other forcing designs** — a gateway container sharing its network, a redirect inside a
-  named podman network, a rootful transparent wall, passive packet capture — are weighed in the
+  Per-process, same-kernel — cannot wrap a VM from outside, and covers only one process tree, not
+  the stack. The VM-boundary analogue *is* nftables default-deny.
+- **The other forcing designs** — a gateway container sharing its network, a redirect inside a named
+  podman network, a rootful transparent wall, passive packet capture — are weighed in the
   [egress-forcing study](https://github.com/twistco/foldyard/blob/main/docs/archive/egress-forcing-study.md).

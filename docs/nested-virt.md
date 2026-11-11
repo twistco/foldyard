@@ -1,12 +1,12 @@
 # Nested virtualisation — rigs for what CI can't reach
 
-A contributor recipe. The host-only verbs (`fy machine …`, `fy box up`/`build`, `fy host`,
-`fy mode` — the ones that refuse to run inside a dev box) need a real host with a VM. Most of that
-is now covered by CI; this page says what isn't, and how to test it on a rig with nested KVM.
+A contributor recipe. The host-only verbs (`fy machine …`, `fy box up`/`build`, `fy host`, `fy mode`
+— the ones that refuse to run inside a dev box) need a real host with a VM. Most of that is now
+covered by CI; this page says what isn't, and how to test it on a rig with nested KVM.
 
 > **This is a test rig, not a recommendation.** The hypervisors here are chosen only for whether
-> they expose `/dev/kvm` to a guest. Nothing on this page bears on which VMM a consumer's VM
-> should run (`[machine] vmtype`); that is weighed in [isolation-layers.md](./isolation-layers.md).
+> they expose `/dev/kvm` to a guest. Nothing on this page bears on which VMM a consumer's VM should
+> run (`[machine] vmtype`); that is weighed in [isolation-layers.md](./isolation-layers.md).
 
 ## What CI covers now
 
@@ -21,7 +21,7 @@ firewalls, worktrees and `fy reclaim`. The in-box topology (the proxy and box e2
 ## What still needs a rig
 
 | gap | why CI can't | rig |
-| --- | --- | --- |
+| -- | -- | -- |
 | gVisor as the box runtime (`[machine] runtime = "gvisor"`) end to end, and its overhead | no CI job runs it; the measurements need a stable, sized host | x86 nested KVM (below) |
 | krun / libkrun experiments (a microVM per container inside the VM) | needs `/dev/kvm` *inside* the VM guest — a third level on a runner | x86 nested KVM, or an Apple M3+ (untested with the GIC traps below) |
 | arm64 Linux hosts | `ubuntu-24.04-arm` runners have no KVM | Apple M3+ (below): the host tier passes there |
@@ -43,12 +43,12 @@ Any x86 Linux VM with nested virtualisation enabled works the same way (x86 nest
 4. Run the host tier: `FOLDYARD_E2E=1 just test tests/test_box_e2e.py` (or any
    `tests/test_*_e2e.py`). The modules drive the example consumer's own VM, never a consumer's.
 5. For gVisor, set `[machine] runtime = "gvisor"` in a throwaway copy of `example/`, adopt it,
-   `fy up` (`machine ensure` provisions runsc in the VM), then `fy box down` and `fy box up`,
-   and run `fy verify` inside the box. The measurements from
-   this rig are in [isolation-layers.md](./isolation-layers.md#the-sandbox-layer-gvisor).
+   `fy up` (`machine ensure` provisions runsc in the VM), then `fy box down` and `fy box up`, and
+   run `fy verify` inside the box. The measurements from this rig are in
+   [isolation-layers.md](./isolation-layers.md#the-sandbox-layer-gvisor).
 
-The rig is one hypervisor level deeper than a laptop, so its timings are upper bounds;
-correctness results transfer as they are.
+The rig is one hypervisor level deeper than a laptop, so its timings are upper bounds; correctness
+results transfer as they are.
 
 ## Rig 2: Apple Silicon M3+ with nested virtualisation
 
@@ -57,9 +57,8 @@ virtualisation, and Lima exposes it with `.nestedVirtualization = true` on the `
 drivers. M1 and M2 have no nested virtualisation.
 
 **The Linux host tier runs on this rig, provided the L1 kernel traps the guest's GIC registers.**
-Without that setting no L2 gets past early boot. Measured 2026-11-04: M3 Max, macOS 27.0.1,
-Lima 2.1.3 on your computer and 2.2.0 in the L1, Fedora 44 as L1 and L2 (kernel 6.19.10),
-QEMU 10.2.2.
+Without that setting no L2 gets past early boot. Measured 2026-11-04: M3 Max, macOS 27.0.1, Lima
+2.1.3 on your computer and 2.2.0 in the L1, Fedora 44 as L1 and L2 (kernel 6.19.10), QEMU 10.2.2.
 
 ### The GIC traps are required
 
@@ -71,8 +70,8 @@ These go on the **L1** kernel's command line. They make the L1's KVM emulate the
 accesses itself. Without them an L2 hangs about 5 s into boot, at 1, 2 and 4 vCPUs, on `vz` and
 `krunkit`, and with L1 kernels 6.19.10 and 7.2.15:
 
-- interrupts aimed at an idle vCPU never land: one CPU soft-locks in `kick_all_cpus_sync` waiting
-  on another that shows `0 ticks`, followed by RCU stalls;
+- interrupts aimed at an idle vCPU never land: one CPU soft-locks in `kick_all_cpus_sync` waiting on
+  another that shows `0 ticks`, followed by RCU stalls;
 - KVM takes about 24,000 WFI exits a second, all of them `halt_successful_poll`, so it sees the
   interrupt pending and re-enters a guest that never takes it.
 
@@ -150,7 +149,7 @@ so one run's code could affect the next's result. `just nested-down --delete` st
 With an 8 vCPU, 16 GiB L1 on `vz`, and `MACHINE_CPUS=2` as in CI:
 
 | test | result |
-| --- | --- |
+| -- | -- |
 | raw QEMU boot to a login prompt, 2 vCPUs | 6/6 at about 25 s (TCG, as a control: 84 s) |
 | Lima L2 from `template:podman` | 37 s |
 | L1 response during a 60 s CPU and disk burn in the L2 | 8–11 ms, no stalls in either kernel |
@@ -193,27 +192,27 @@ disposable, and recreate an L1 that goes sluggish.
 
 ## Network tests don't need nesting
 
-The VM firewall (`[machine] firewall`) is the same nftables rules however the VM is made, so test
-it in an ordinary Lima VM (the `test_wall_e2e.py` host tier), not in a nested one: an extra level
-only burns CPU. The standalone proof kit is in
+The VM firewall (`[machine] firewall`) is the same nftables rules however the VM is made, so test it
+in an ordinary Lima VM (the `test_wall_e2e.py` host tier), not in a nested one: an extra level only
+burns CPU. The standalone proof kit is in
 [archive/lima-network-forcing-kit/](./archive/lima-network-forcing-kit/).
 
 ## `tests/test_proxy_box_e2e.py` — the adapted topology
 
 This e2e drives the real `ProxyPlugin` (its daemon spec, and the CA mount + proxy environment from
-`box_args`) to start a real dev-box container over the socket, with a fake token service and a
-fake TLS upstream. It checks that requests are rewritten in flight, that the CA mount is needed,
-and that a 401 re-mint reaches the box as a 200.
+`box_args`) to start a real dev-box container over the socket, with a fake token service and a fake
+TLS upstream. It checks that requests are rewritten in flight, that the CA mount is needed, and that
+a 401 re-mint reaches the box as a 200.
 
 It is *adapted* because in production the box reaches the proxy on the host through the Lima host
-gateway (`192.168.5.2`) at the project's proxy port, which needs foldyard to run as the host —
-and the `in_box()` guards forbid that inside a dev box. So the test runs the proxy and the upstream
-in-process and points `FY_PROXY` at its own container's IP. That address is the only difference
-from production. Two constraints for any sibling-container test:
+gateway (`192.168.5.2`) at the project's proxy port, which needs foldyard to run as the host — and
+the `in_box()` guards forbid that inside a dev box. So the test runs the proxy and the upstream
+in-process and points `FY_PROXY` at its own container's IP. That address is the only difference from
+production. Two constraints for any sibling-container test:
 
-- `-v` mount sources resolve on the VM, not in the test container: mount repo-relative paths,
-  not `tmp_path`.
+- `-v` mount sources resolve on the VM, not in the test container: mount repo-relative paths, not
+  `tmp_path`.
 - `box_args` reads the CA path from the ambient `MITMPROXY_CA`, not from its `env` argument.
 
-The faithful path — `fy box up` with a real supervisor — is covered by `test_box_e2e.py` in the
-host tier.
+The faithful path — `fy box up` with a real supervisor — is covered by `test_box_e2e.py` in the host
+tier.

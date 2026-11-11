@@ -1,26 +1,25 @@
 # Networking — the proxy, the allowlist, and the firewalls
 
-The box sends its internet traffic through a proxy on your computer. This page covers how that
-works day to day: what gets logged, how to watch and control it, and — the part that matters for
-trust — which guarantees are cooperative and which are enforced. Terms are defined in the
+The box sends its internet traffic through a proxy on your computer. This page covers how that works
+day to day: what gets logged, how to watch and control it, and — the part that matters for trust —
+which guarantees are cooperative and which are enforced. Terms are defined in the
 [glossary](./glossary.md).
 
 ## How traffic leaves the box
 
 ![How traffic leaves the box: from the box or a stack container, through the VM firewall, to the egress proxy on your computer, which logs each request, decrypts it unless the host is passthrough, checks it against the allowlist and adds any credential, before it reaches the internet. Traffic that tries to skip the proxy is refused by the VM firewall, and on Linux also by the host firewall.](https://github.com/twistco/foldyard/raw/main/docs/assets/foldyard-network.svg)
 
-The box routes through an always-on `mitmdump` proxy on your computer, configured by the
-`[proxy]` table. `fy up` / `fy box up` start the supervisor that runs it; `fy host` shows its
-status.
+The box routes through an always-on `mitmdump` proxy on your computer, configured by the `[proxy]`
+table. `fy up` / `fy box up` start the supervisor that runs it; `fy host` shows its status.
 
-Routing uses the standard proxy environment variables (`HTTPS_PROXY` etc.) plus a CA certificate
-the box trusts, both set when the box is created:
+Routing uses the standard proxy environment variables (`HTTPS_PROXY` etc.) plus a CA certificate the
+box trusts, both set when the box is created:
 
-- the proxy's CA is added to the box's **system trust store** (curl, wget and apt all verify
-  against it), and `NODE_EXTRA_CA_CERTS` adds it to Node's roots;
+- the proxy's CA is added to the box's **system trust store** (curl, wget and apt all verify against
+  it), and `NODE_EXTRA_CA_CERTS` adds it to Node's roots;
 - `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE`
-  (gcloud's own transports: `gsutil`, `bq`) point at a **combined** bundle (system roots + the
-  proxy CA), so both decrypted and passed-through connections verify.
+  (gcloud's own transports: `gsutil`, `bq`) point at a **combined** bundle (system roots + the proxy
+  CA), so both decrypted and passed-through connections verify.
 - `NODE_USE_ENV_PROXY=1` makes Node's `fetch()` use the proxy, and `npm_config_https_proxy` /
   `npm_config_proxy` cover install scripts that bring their own HTTP client
   ([Node and npm](#node-and-npm)).
@@ -28,48 +27,46 @@ the box trusts, both set when the box is created:
   once (`certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n foldyard-proxy -i /etc/dev-proxy-ca.pem`)
   or the page fails with `ERR_CERT_AUTHORITY_INVALID`.
 
-How strong "routes" is depends on your setup. Only the lima backend with `[machine] firewall =
-true` **enforces** that all traffic goes through the proxy. Without the VM firewall, routing is
-**cooperative**: well-behaved software honours the proxy variables, anything that ignores them
-goes around. See [Blocking, not just watching](#blocking-not-just-watching).
+How strong "routes" is depends on your setup. Only the lima backend with `[machine] firewall = true`
+**enforces** that all traffic goes through the proxy. Without the VM firewall, routing is
+**cooperative**: well-behaved software honours the proxy variables, anything that ignores them goes
+around. See [Blocking, not just watching](#blocking-not-just-watching).
 
-Each project gets its own port range from a cross-project port registry
-(`~/.foldyard/ports.json`), and each worktree its own port in it: your computer records an offset
-for every worktree it knows (`fy worktree add`), and never gives two the same one. Two stacks
-don't share a listener, and a token meant for one worktree can't be read through another's proxy.
-If a pin or `WT_OFFSET` puts two worktrees on one port anyway, only one proxy runs there, and
-`fy host logs` names the other.
+Each project gets its own port range from a cross-project port registry (`~/.foldyard/ports.json`),
+and each worktree its own port in it: your computer records an offset for every worktree it knows
+(`fy worktree add`), and never gives two the same one. Two stacks don't share a listener, and a
+token meant for one worktree can't be read through another's proxy. If a pin or `WT_OFFSET` puts two
+worktrees on one port anyway, only one proxy runs there, and `fy host logs` names the other.
 
-Traffic between your services stays inside the VM only when the client making it skips the
-proxy: the name is on `NO_PROXY`, or the client ignores the proxy variables (Node's `fetch()`
-does, by default). List your stack's service names in `[proxy] no_proxy`: the box gets them, and
-with the VM firewall on so does every stack container
-([Stack containers trust the proxy too](#stack-containers-trust-the-proxy-too)). A name missing
-from it is sent to the proxy, which can't resolve it.
+Traffic between your services stays inside the VM only when the client making it skips the proxy:
+the name is on `NO_PROXY`, or the client ignores the proxy variables (Node's `fetch()` does, by
+default). List your stack's service names in `[proxy] no_proxy`: the box gets them, and with the VM
+firewall on so does every stack container
+([Stack containers trust the proxy too](#stack-containers-trust-the-proxy-too)). A name missing from
+it is sent to the proxy, which can't resolve it.
 
 ## The log
 
-Every proxied request is logged to `egress.jsonl` in that worktree's state folder on your
-computer (`~/.foldyard/<project>/main/logs/` for the main checkout). It is outside the repo on
-purpose, so nothing in the VM can read or rewrite it. Watch it in the **Network Log** tab of
-`fy tui` (grouped by host), or `tail -f` the file.
+Every proxied request is logged to `egress.jsonl` in that worktree's state folder on your computer
+(`~/.foldyard/<project>/main/logs/` for the main checkout). It is outside the repo on purpose, so
+nothing in the VM can read or rewrite it. Watch it in the **Network Log** tab of `fy tui` (grouped
+by host), or `tail -f` the file.
 
 The log is bounded:
 
 - past `PROXY_LOG_MAX_BYTES` (default 5 MiB) it rotates into dated backups;
 - the newest `PROXY_LOG_BACKUPS` (default 5) backups are kept;
-- the TUI's Network Log covers everything kept: every host, with its tallies over the whole
-  history and its newest 50 requests (plus any older refusal), hosts with a refusal you haven't
-  answered first. It reads the files once, then only what was appended, so a big log never slows
-  it down.
+- the TUI's Network Log covers everything kept: every host, with its tallies over the whole history
+  and its newest 50 requests (plus any older refusal), hosts with a refusal you haven't answered
+  first. It reads the files once, then only what was appended, so a big log never slows it down.
 
 ### Who asked *(experimental)*
 
-Without help, the proxy can't tell one container in the VM from another: by the time a
-connection reaches your computer it has been re-made twice, and every one looks like the VM. With
+Without help, the proxy can't tell one container in the VM from another: by the time a connection
+reaches your computer it has been re-made twice, and every one looks like the VM. With
 `[machine] attribution = "record"` (lima, `firewall = true`), a forwarder in the VM stands where
-each container still has its own address and becomes the only way from the VM to the proxy. It
-adds a signed note to each request saying where it came from, and each row of the log keeps it as
+each container still has its own address and becomes the only way from the VM to the proxy. It adds
+a signed note to each request saying where it came from, and each row of the log keeps it as
 `origin`:
 
 - a container on a bridge network: its address and the bridge, which your computer matches to a
@@ -78,50 +75,49 @@ adds a signed note to each request saying where it came from, and each row of th
   and for a container its id.
 
 The Network Log then shows who used each host and who was refused, and each row who sent it;
-`fy allow learn` names the service that asked for each host it offers. A
-row without a note says `unattributed` (it didn't come through the forwarder), one whose note
-didn't check out says `forged`. The note is bound to the connection, so every request on it —
-keep-alive, a retry, everything inside a `CONNECT` — is that connection's, and a note a client
-writes itself is removed and never trusted. No note ever leaves the proxy.
+`fy allow learn` names the service that asked for each host it offers. A row without a note says
+`unattributed` (it didn't come through the forwarder), one whose note didn't check out says
+`forged`. The note is bound to the connection, so every request on it — keep-alive, a retry,
+everything inside a `CONNECT` — is that connection's, and a note a client writes itself is removed
+and never trusted. No note ever leaves the proxy.
 
 The forwarder also works round a freeze in Lima's user-mode network on macOS (`vz`): a new
 connection that reuses one the proxy's side closed less than 60 s earlier can hang for up to a
 minute, for every client of that proxy port at once. The forwarder closes such connections with a
-reset rather than a normal close, so the freeze doesn't arise, and re-dials a connection that
-hasn't answered in 2 s.
+reset rather than a normal close, so the freeze doesn't arise, and re-dials a connection that hasn't
+answered in 2 s.
 
-The note says where a request came from, not who steered it: the box holds the engine socket, so
-it can act from inside another container. Nothing is decided on the note yet — no grant or
-credential depends on it. Details:
-[ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md),
+The note says where a request came from, not who steered it: the box holds the engine socket, so it
+can act from inside another container. Nothing is decided on the note yet — no grant or credential
+depends on it. Details: [ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md),
 [configuration](./configuration.md#machine).
 
 ## What gets decrypted: everything but the trusted toolchain
 
 The proxy decrypts and logs every request — method, host, path, status — *except* hosts on your
-`[proxy] passthrough` list. Those are tunnelled with their real certificates and logged as one
-row per connection (the hostname, no path).
+`[proxy] passthrough` list. Those are tunnelled with their real certificates and logged as one row
+per connection (the hostname, no path).
 
 Entries are exact hosts, `*.suffix` globs, or `@bundle` names (`@anthropic`, `@vcs`, `@node`, …;
 `@all` is every bundle). The default is `["@jvm", "@linux"]`: only what still breaks under
 decryption — Java's own trust store (Maven, Gradle) and `apt` over HTTPS, which reads only the
 image's store. Everything else is decrypted and logged: the box, your stack's containers, image
 build steps and the VM's image pulls all trust the proxy's CA, and decrypting a toolchain install
-measured within a few per cent of tunnelling it. (One exception: a build started on your computer
-is tunnelled to a host granted as a whole, whatever the list says, and logged as `tls tunnel` rows;
-a host it may reach only under a path grant, or one the allowlist refuses, is decrypted, so a
-build step that doesn't trust the CA fails there — see
+measured within a few per cent of tunnelling it. (One exception: a build started on your computer is
+tunnelled to a host granted as a whole, whatever the list says, and logged as `tls tunnel` rows; a
+host it may reach only under a path grant, or one the allowlist refuses, is decrypted, so a build
+step that doesn't trust the CA fails there — see
 [Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the
-box is decrypted like the box.)
-Set `passthrough = ["@all"]` to tunnel the whole toolchain as before, or add only the bundle a tool
-needs. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is always
-decrypted, whatever the list says, so its auth header can be replaced.
+box is decrypted like the box.) Set `passthrough = ["@all"]` to tunnel the whole toolchain as
+before, or add only the bundle a tool needs. A host whose credential the proxy injects (say
+`api.github.com` with `github=on`) is always decrypted, whatever the list says, so its auth header
+can be replaced.
 
 Decryption can't be switched off ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)): it costs
-about 3 ms per new connection and caps one checkout's decrypted throughput around 600 MB/s,
-and seeing paths is what makes the log useful. A host that breaks
-under decryption (it pins its certificate, needs a client certificate, or ships its own trust
-roots) goes on the `passthrough` list instead.
+about 3 ms per new connection and caps one checkout's decrypted throughput around 600 MB/s, and
+seeing paths is what makes the log useful. A host that breaks under decryption (it pins its
+certificate, needs a client certificate, or ships its own trust roots) goes on the `passthrough`
+list instead.
 
 Because a `passthrough` host escapes this monitoring, your computer doesn't read the list from the
 checkout while the VM runs. Like the rest of `foldyard.toml`, it uses the copy you **adopted**. An
@@ -133,9 +129,9 @@ Decryption involves no credential. It works alongside the credential switches (s
 
 **A token service never fetches through the proxy it feeds.** If the shell that started the
 supervisor exports `HTTPS_PROXY` pointing at foldyard's own proxy, the GitHub App token service
-would send its request through the very rule it is making a token for, and the proxy would
-replace the App's sign-in header on `api.github.com` with the token being asked for. So foldyard
-tells it its own proxy port, which it skips. Any other proxy your computer exports (a corporate one) is still
+would send its request through the very rule it is making a token for, and the proxy would replace
+the App's sign-in header on `api.github.com` with the token being asked for. So foldyard tells it
+its own proxy port, which it skips. Any other proxy your computer exports (a corporate one) is still
 used, since it may be the only way out.
 
 ## Blocking, not just watching
@@ -143,29 +139,29 @@ used, since it may be the only way out.
 Three separate controls, often confused:
 
 | control | where it runs | what it does | set by |
-| --- | --- | --- | --- |
+| -- | -- | -- | -- |
 | **the allowlist** | the proxy, on your computer | refuses hosts you haven't granted | `fy allow enforce on\|off\|learn` (`[proxy] enforce` seeds it) |
 | **the VM firewall** | inside the VM | refuses any traffic not going through the proxy | `[machine] firewall = true` (lima backend) |
 | **the host firewall** | on your computer (Linux) | refuses the VM process's own traffic, except to the proxy | `[machine] host_firewall = true` |
 
 ### The allowlist
 
-When enforcement is on, the proxy refuses any host that isn't granted. `fy allow enforce
-on|off|learn` is the switch. `[proxy] enforce` in `foldyard.toml` only sets the answer for the
-first run, before your computer has one of its own.
+When enforcement is on, the proxy refuses any host that isn't granted.
+`fy allow enforce on|off|learn` is the switch. `[proxy] enforce` in `foldyard.toml` only sets the
+answer for the first run, before your computer has one of its own.
 
 A refused HTTPS request still shows what was asked. The proxy answers the box's `CONNECT` itself,
 decrypts the tunnel, and returns the `403` to the request inside, so the Network Log names its
-method, path and User-Agent. No connection to the refused host is ever opened: the proxy refuses
-any connection to a host nothing grants, whichever part of it asks. An image build started on your
+method, path and User-Agent. No connection to the refused host is ever opened: the proxy refuses any
+connection to a host nothing grants, whichever part of it asks. An image build started on your
 computer is answered the same way, and its refused request is logged with its path too. Two cases
 still see only `CONNECT host:port`, with no path:
 
 - another port than `:443` (`github.com:22`): the tunnel isn't HTTPS, so there is no request to
   read;
-- a client that doesn't trust the proxy's CA (a pinned certificate, its own CA bundle; in a build,
-  a Java or GnuTLS step): its TLS handshake fails, with a certificate error rather than the
-  readable `403`.
+- a client that doesn't trust the proxy's CA (a pinned certificate, its own CA bundle; in a build, a
+  Java or GnuTLS step): its TLS handshake fails, with a certificate error rather than the readable
+  `403`.
 
 **Learn first, then enforce.** `fy init` sets `enforce = "learn"`. The first `fy box up` / `fy up`
 opens a one-hour window where:
@@ -176,11 +172,11 @@ opens a one-hour window where:
 - when the window ends, enforcement turns on **by itself**.
 
 Then `fy allow learn` lists what was recorded, grants it in one go, and prints `[proxy] recommend`
-lines you can commit to share the hosts with your team. Each line's `why` is what the box was
-*seen* doing (`observed: npm/10.8.2 GET /react, /@types/node (+4) — edit me`), taken from the
-User-Agent and the first path segments of the requests (never a query string). That text comes
-from box traffic: replace it with the real reason before committing, since teammates read it
-when asked to grant the host.
+lines you can commit to share the hosts with your team. Each line's `why` is what the box was *seen*
+doing (`observed: npm/10.8.2 GET /react, /@types/node (+4) — edit me`), taken from the User-Agent
+and the first path segments of the requests (never a query string). That text comes from box
+traffic: replace it with the real reason before committing, since teammates read it when asked to
+grant the host.
 
 For a new dependency, open another window with `fy allow enforce learn --for 30m`. Prefer that to
 `fy allow enforce off`, which also only watches but stays off until someone remembers to turn it
@@ -193,9 +189,9 @@ back on.
 - one keypress in `fy tui`'s Network Log: `a` on a host grants the host, and `a` on a refused
   request first asks how much of the host to grant: one of the request's directories, the path
   itself, or the whole host (see [path grants](#path-grants-one-path-of-a-shared-host)). `l` copies
-  the log row under the cursor as JSON (on a host, its listed requests), say for a bug report.
-  The copy goes through your terminal's clipboard support (OSC 52), which some terminals turn
-  off. The footer names what each key does on the row the cursor is on.
+  the log row under the cursor as JSON (on a host, its listed requests), say for a bug report. The
+  copy goes through your terminal's clipboard support (OSC 52), which some terminals turn off. The
+  footer names what each key does on the row the cursor is on.
 
 Both the grants and the enforcement switch live on your computer for the same reason: the box can
 write repo config, so an allowlist in the repo is one the box could widen or switch off. Keyless
@@ -204,12 +200,11 @@ agent hosts are always allowed — never list them.
 ### Path grants: one path of a shared host
 
 Sometimes the host you'd have to grant is much bigger than what the box needs from it. The usual
-case is a **redirect**: you grant `cdn.playwright.dev`, and it answers a browser download with a
-302 to `storage.googleapis.com/chrome-for-testing-public/…`. The tool follows the redirect itself,
-so that's a new request to a host you haven't granted, and the allowlist refuses it. Granting
-`storage.googleapis.com` would let the box reach every bucket on it, other people's included,
-and a signed upload URL needs no credentials in the box. A **path grant** names just the part you
-mean:
+case is a **redirect**: you grant `cdn.playwright.dev`, and it answers a browser download with a 302
+to `storage.googleapis.com/chrome-for-testing-public/…`. The tool follows the redirect itself, so
+that's a new request to a host you haven't granted, and the allowlist refuses it. Granting
+`storage.googleapis.com` would let the box reach every bucket on it, other people's included, and a
+signed upload URL needs no credentials in the box. A **path grant** names just the part you mean:
 
 ```bash
 fy allow add storage.googleapis.com/chrome-for-testing-public/ --level once --ttl 900
@@ -217,37 +212,37 @@ fy allow add storage.googleapis.com/chrome-for-testing-public/ --level once --tt
 
 A path grant lets the box **read** under that prefix and nothing else on the host:
 
-- `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket). Over HTTP/2 a request
-  can send a body its headers don't announce, and trailers after it; the proxy drops both, so
-  only the read goes out;
-- at or under the prefix, on a segment boundary (`/bucket/` doesn't cover `/bucket-two/`), judged
-  on the path before the query;
-- never a path a server could resolve to somewhere else: a `.` or `..` segment (`..;` too), `//`,
-  a backslash, or a percent-encoded `/`, `\`, `.` or `%` is refused;
-- the ports a host grant covers (HTTPS `:443`, plain HTTP `:80`). The host has to be exact: no
-  `*.` glob and no port. On an [address on your computer](#services-on-your-computer)
-  (`127.0.0.1/repo/`) it covers requests to that address, never a granted name that resolves
-  there.
+- `GET` and `HEAD` only, with no body and no `Upgrade` (so no WebSocket). Over HTTP/2 a request can
+  send a body its headers don't announce, and trailers after it; the proxy drops both, so only the
+  read goes out;
+- at or under the prefix, on a segment boundary (`/bucket/` doesn't cover `/bucket-two/`), judged on
+  the path before the query;
+- never a path a server could resolve to somewhere else: a `.` or `..` segment (`..;` too), `//`, a
+  backslash, or a percent-encoded `/`, `\`, `.` or `%` is refused;
+- the ports a host grant covers (HTTPS `:443`, plain HTTP `:80`). The host has to be exact: no `*.`
+  glob and no port. On an [address on your computer](#services-on-your-computer) (`127.0.0.1/repo/`)
+  it covers requests to that address, never a granted name that resolves there.
 
-A read still sends something: the URL. The path under the prefix and the query reach the host,
-and whoever reads its logs. For a public bucket that doesn't matter. For a host you don't trust,
-it's a small way out, so grant a path there the way you'd grant the host.
+A read still sends something: the URL. The path under the prefix and the query reach the host, and
+whoever reads its logs. For a public bucket that doesn't matter. For a host you don't trust, it's a
+small way out, so grant a path there the way you'd grant the host.
 
 The proxy has to see each request to check its path, so a path-granted host is always decrypted,
-even if `[proxy] passthrough` lists it, and even for an [image build](#image-builds-trusted-still-behind-the-allowlist),
-which is otherwise tunnelled. `fy allow add <host>/<path>/ --build` makes a path grant for builds
-only. The proxy only opens a connection to the host once the client's TLS handshake shows the
-request will be decrypted, so a raw TCP tunnel through the grant is refused. Bytes in a decrypted tunnel that don't parse as HTTP are
-dropped, never relayed. A refused request names the paths the host *is* granted, and the
-Network Log marks it `outside the paths this host is granted for`.
+even if `[proxy] passthrough` lists it, and even for an
+[image build](#image-builds-trusted-still-behind-the-allowlist), which is otherwise tunnelled.
+`fy allow add <host>/<path>/ --build` makes a path grant for builds only. The proxy only opens a
+connection to the host once the client's TLS handshake shows the request will be decrypted, so a raw
+TCP tunnel through the grant is refused. Bytes in a decrypted tunnel that don't parse as HTTP are
+dropped, never relayed. A refused request names the paths the host *is* granted, and the Network Log
+marks it `outside the paths this host is granted for`.
 
-**After a redirect, the refusal says so.** When a granted host redirects the box to a host it
-can't reach, the proxy remembers the target for two minutes. If the box's request to it is then
-refused, the `403` names the host that redirected and suggests the path grant (`fy allow add
-storage.googleapis.com/chrome-for-testing-public/`), and the Network Log row says `redirected from
-cdn.playwright.dev`. The proxy doesn't follow redirects for the box, because then a host you
-granted would decide where the box can go. Any host with an open redirect (a `?next=` login, a
-link shortener) would send a request, and whatever it carries, anywhere.
+**After a redirect, the refusal says so.** When a granted host redirects the box to a host it can't
+reach, the proxy remembers the target for two minutes. If the box's request to it is then refused,
+the `403` names the host that redirected and suggests the path grant
+(`fy allow add storage.googleapis.com/chrome-for-testing-public/`), and the Network Log row says
+`redirected from cdn.playwright.dev`. The proxy doesn't follow redirects for the box, because then a
+host you granted would decide where the box can go. Any host with an open redirect (a `?next=`
+login, a link shortener) would send a request, and whatever it carries, anywhere.
 
 In `fy tui`, put the cursor on the refused request in the Network Log and press `a`. It offers the
 request's first three directories (`storage.googleapis.com/chrome-for-testing-public/`, then one
@@ -255,11 +250,11 @@ level deeper, and so on), the path it asked for, and the whole host. Then you ch
 grant lasts. A path with anything a grant would refuse (a `..`, an encoded separator) offers only
 the host.
 
-A path grant is a grant like any other: `fy allow list` shows it, `fy allow remove
-<host>/<path>/` revokes it, and a repo can ask for one in [`[proxy] recommend`](configuration.md#proxy)
-(`{ host = "storage.googleapis.com/chrome-for-testing-public/", why = "…" }`), which a grant of
-the whole host also answers. Making it answers the host in the Network Log, so a refusal outside
-the path doesn't ask about the whole host again.
+A path grant is a grant like any other: `fy allow list` shows it, `fy allow remove <host>/<path>/`
+revokes it, and a repo can ask for one in [`[proxy] recommend`](configuration.md#proxy)
+(`{ host = "storage.googleapis.com/chrome-for-testing-public/", why = "…" }`), which a grant of the
+whole host also answers. Making it answers the host in the Network Log, so a refusal outside the
+path doesn't ask about the whole host again.
 
 ### The VM firewall
 
@@ -272,15 +267,15 @@ instead of a direct route.
 software and ignored by anything else:
 
 - `backend = "lima"` + `firewall = true` — traffic control is **enforced**. This is the default.
-- `backend = "podman"` (one shared VM) — no VM firewall is possible. The proxy sees everything
-  that cooperates: a *monitoring* guarantee, not a filtering one.
-- **QUIC/HTTP-3 (UDP/443)** bypasses a CONNECT proxy entirely. With the VM firewall, it is
-  refused. Without it, it is not captured at all.
+- `backend = "podman"` (one shared VM) — no VM firewall is possible. The proxy sees everything that
+  cooperates: a *monitoring* guarantee, not a filtering one.
+- **QUIC/HTTP-3 (UDP/443)** bypasses a CONNECT proxy entirely. With the VM firewall, it is refused.
+  Without it, it is not captured at all.
 
 **A client that can't use a proxy gets a narrow opening, not the firewall off.** Some protocols
 aren't HTTP: cloud-sql-proxy authenticates over HTTPS through the proxy, then dials the database
-instance on TCP 3307 itself, and the firewall refuses that. `[machine] firewall_allow` opens one
-TCP port to one address or small network, with the reason written down
+instance on TCP 3307 itself, and the firewall refuses that. `[machine] firewall_allow` opens one TCP
+port to one address or small network, with the reason written down
 ([configuration](./configuration.md)):
 
 ```toml
@@ -293,16 +288,16 @@ firewall_allow = [
 That traffic leaves the VM directly: the proxy doesn't see it, log it or apply the allowlist to it,
 so keep the list short. An opening can't name a local address, judged as the proxy judges one
 (below), though your computer's own public address isn't one foldyard can know. It comes from the
-adopted config, so the box can't add one. `fy verify` lists each opening and its
-reason. The firewall's refusals are in the VM's `/run/fy-wall/denies.jsonl`, which is where a
-missing opening shows up: the address and port the client tried.
+adopted config, so the box can't add one. `fy verify` lists each opening and its reason. The
+firewall's refusals are in the VM's `/run/fy-wall/denies.jsonl`, which is where a missing opening
+shows up: the address and port the client tried.
 
 ### The host firewall
 
-`[machine] host_firewall = true` (Linux only; needs `firewall = true`) enforces the same rules
-again on your computer, around the VM process itself — so even someone who took over the VM's
-kernel still can't get out. foldyard never installs it for you: `fy machine host-firewall` prints
-the rules and the `sudo` commands, you run them once, and every `fy up` checks they are in effect
+`[machine] host_firewall = true` (Linux only; needs `firewall = true`) enforces the same rules again
+on your computer, around the VM process itself — so even someone who took over the VM's kernel still
+can't get out. foldyard never installs it for you: `fy machine host-firewall` prints the rules and
+the `sudo` commands, you run them once, and every `fy up` checks they are in effect
 ([ADR-0028](./adrs/0028-no-elevation-on-the-host-operator-applies.md)).
 
 ### Services on your computer
@@ -310,16 +305,16 @@ the rules and the `sudo` commands, you run them once, and every `fy up` checks t
 A dev server, database or model server listening on your computer's loopback was never offered to
 the box, and stays out of its reach in two ways:
 
-- **Directly.** Lima gives the VM your computer's loopback at `192.168.5.2`. With the VM firewall,
-  a container reaches only this project's proxy ports there. Without it, a container reaches every
-  service on your loopback that way. A `firewall_allow` opening can't change that: foldyard
-  refuses one that points at `192.168.5.2`, loopback or any other private or local range.
-- **Through the proxy.** The proxy runs on your computer, so whatever it dials, it dials from
-  there. It refuses loopback, the private ranges, CGNAT (a tailnet) and link-local (a cloud's
-  metadata service), in every mode, learning included. That holds whether the box names an
-  address or a name that resolves to one. Names are judged by the answer the proxy then connects
-  to, so a name that resolves somewhere public for a check and to `127.0.0.1` for the connection
-  (DNS rebinding) gets nowhere.
+- **Directly.** Lima gives the VM your computer's loopback at `192.168.5.2`. With the VM firewall, a
+  container reaches only this project's proxy ports there. Without it, a container reaches every
+  service on your loopback that way. A `firewall_allow` opening can't change that: foldyard refuses
+  one that points at `192.168.5.2`, loopback or any other private or local range.
+- **Through the proxy.** The proxy runs on your computer, so whatever it dials, it dials from there.
+  It refuses loopback, the private ranges, CGNAT (a tailnet) and link-local (a cloud's metadata
+  service), in every mode, learning included. That holds whether the box names an address or a name
+  that resolves to one. Names are judged by the answer the proxy then connects to, so a name that
+  resolves somewhere public for a check and to `127.0.0.1` for the connection (DNS rebinding) gets
+  nowhere.
 
 `fy verify`, run on your computer with the VM firewall on, proves both: a probe container tries a
 throwaway service on your loopback each way, and the service must see no connection.
@@ -330,9 +325,9 @@ throwaway service on your loopback each way, and the service must see no connect
 fy allow add 127.0.0.1:8123
 ```
 
-Only this command makes such a grant. The Network Log's allow key, `fy allow learn` and `[proxy]
-recommend` never offer one, because a grant here opens a service on your computer to the box.
-A wildcard or the name the box asked by never counts, and an IPv6 address can't be granted. The
+Only this command makes such a grant. The Network Log's allow key, `fy allow learn` and
+`[proxy] recommend` never offer one, because a grant here opens a service on your computer to the
+box. A wildcard or the name the box asked by never counts, and an IPv6 address can't be granted. The
 box's `NO_PROXY` keeps `127.0.0.1` local to the box, so a client there has to send the request
 through the proxy explicitly:
 
@@ -352,99 +347,103 @@ included, so a DNS server on your computer's loopback is reachable from the box.
 ### Stack containers trust the proxy too
 
 **Only with the VM firewall on** (`[machine] firewall = true`, lima backend). Everything in this
-section is set up by the firewall's boot setup. Without the firewall, your stack's containers
-get neither the proxy settings nor the CA.
+section is set up by the firewall's boot setup. Without the firewall, your stack's containers get
+neither the proxy settings nor the CA.
 
 With it, podman hands the VM's proxy settings (`HTTP_PROXY`, `HTTPS_PROXY` and their lowercase
-forms, with a `NO_PROXY` described below) to every container it creates — your stack's services,
-and anything the box starts — so their traffic is decrypted like the box's.
-They trust the proxy's CA the same way, without any change to your compose files: the VM's boot
-setup installs the CA and a podman default that mounts it into every container
-(`/etc/fy-proxy-ca.pem`, plus `/etc/fy-proxy-ca-combined.pem` = the VM's trusted roots and the CA)
-and sets `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`. A
-second default sets npm's own proxy settings, `npm_config_https_proxy` and `npm_config_proxy`
-([Node and npm](#node-and-npm)).
+forms, with a `NO_PROXY` described below) to every container it creates — your stack's services, and
+anything the box starts — so their traffic is decrypted like the box's. They trust the proxy's CA
+the same way, without any change to your compose files: the VM's boot setup installs the CA and a
+podman default that mounts it into every container (`/etc/fy-proxy-ca.pem`, plus
+`/etc/fy-proxy-ca-combined.pem` = the VM's trusted roots and the CA) and sets `NODE_EXTRA_CA_CERTS`,
+`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO`. A second default sets npm's own proxy
+settings, `npm_config_https_proxy` and `npm_config_proxy` ([Node and npm](#node-and-npm)).
 
 **Pointing a container at the proxy yourself needs the firewall too.** The proxy always decrypts
 ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)), but only the firewall gives containers its
 CA. A container you route through the proxy yourself (`HTTPS_PROXY` in a compose file) on a VM
-without the firewall fails TLS on every host not on `passthrough`, unless its image already
-trusts the proxy's CA.
+without the firewall fails TLS on every host not on `passthrough`, unless its image already trusts
+the proxy's CA.
 
 - **`NO_PROXY` names your stack.** It holds `localhost`, `127.0.0.1`, the host gateway
-  (`192.168.5.2` on lima), foldyard's own services (the gcp metadata emulator, when configured)
-  and your `[proxy] no_proxy`, in both cases. Without that, a service calling a sibling by name
-  through a client that honours the proxy variables (curl, Python's `requests`, Google's Node
-  clients) sends the call to the proxy, which can't resolve the name and refuses it: the
-  Network Log shows `fake-gcs:8000`, say, as a blocked host. Three things to know:
-  - **One list for the whole VM, set at boot.** After changing `[proxy] no_proxy` (and after
-    the foldyard upgrade that brought this), `fy up` refuses the running VM until you restart
-    it, `fy machine stop && fy up`. Then recreate the stack, `fy down && fy up`: a container
-    keeps the environment it was created with.
+  (`192.168.5.2` on lima), foldyard's own services (the gcp metadata emulator, when configured) and
+  your `[proxy] no_proxy`, in both cases. Without that, a service calling a sibling by name through
+  a client that honours the proxy variables (curl, Python's `requests`, Google's Node clients) sends
+  the call to the proxy, which can't resolve the name and refuses it: the Network Log shows
+  `fake-gcs:8000`, say, as a blocked host. Three things to know:
+
+  - **One list for the whole VM, set at boot.** After changing `[proxy] no_proxy` (and after the
+    foldyard upgrade that brought this), `fy up` refuses the running VM until you restart it,
+    `fy machine stop && fy up`. Then recreate the stack, `fy down && fy up`: a container keeps the
+    environment it was created with.
   - **`{project}` is the main checkout's.** Every worktree's stack runs in the same VM, so a
     worktree's prefixed container names (`myapp-feature-postgres`) aren't on it; listing each
     worktree would make every `fy worktree add` need a VM restart. Bare service names cover every
-    worktree, and inside a stack a service reaches its siblings by service name anyway. A
-    service that calls a sibling by its prefixed container name sets its own `NO_PROXY`.
-  - **Your stack's service names aren't added for you.** foldyard would have to read them from
-    the compose files at boot, so renaming a service would need a VM restart. List the ones
-    your services call each other by.
+    worktree, and inside a stack a service reaches its siblings by service name anyway. A service
+    that calls a sibling by its prefixed container name sets its own `NO_PROXY`.
+  - **Your stack's service names aren't added for you.** foldyard would have to read them from the
+    compose files at boot, so renaming a service would need a VM restart. List the ones your
+    services call each other by.
+
 - **Your settings win, even stale ones.** A variable your image or compose file already sets keeps
   its value, so don't restate what foldyard provides: a proxy address copied into a compose file
-  stops working when the port band moves, and a mount of `.devbox-ca` (the copy of the CA
-  foldyard puts in the checkout for the box) isn't needed by stack containers. An empty value
-  isn't an override: blanking the proxy variables is how a service that only talks to the rest of
-  the stack stays off the proxy (blank `npm_config_https_proxy` and `npm_config_proxy` too if it
-  runs npm). `fy doctor` has two rows for this, both advisory:
-  - `stack env overrides` reads the rendered compose config and names each of these a service
-    sets, even to foldyard's own value, since a restated value goes stale when the port band
-    moves.
-  - `stack container env` reads what each running container actually has, whatever set it. It
-    names a CA variable an image sets for itself (an `SSL_CERT_FILE` of its own), a different proxy
+  stops working when the port band moves, and a mount of `.devbox-ca` (the copy of the CA foldyard
+  puts in the checkout for the box) isn't needed by stack containers. An empty value isn't an
+  override: blanking the proxy variables is how a service that only talks to the rest of the stack
+  stays off the proxy (blank `npm_config_https_proxy` and `npm_config_proxy` too if it runs npm).
+  `fy doctor` has two rows for this, both advisory:
+
+  - `stack env overrides` reads the rendered compose config and names each of these a service sets,
+    even to foldyard's own value, since a restated value goes stale when the port band moves.
+  - `stack container env` reads what each running container actually has, whatever set it. It names
+    a CA variable an image sets for itself (an `SSL_CERT_FILE` of its own), a different proxy
     address, and a container that uses the proxy but lacks the CA or npm settings. podman adds
     foldyard's settings when it creates a container, so one created before the VM had them (or
     before a foldyard upgrade added one) lacks them until it's recreated: `fy down`, then `fy up`
     (named volumes are kept). A container that blanks the proxy variables isn't flagged.
 
   To undo an image's `ENV`, set foldyard's value in the service's compose `environment` (an image
-  can't be told to drop it). The container row is then clean, and the compose row notes the
-  restated value. That's expected; a restated CA path stays right, while a restated proxy address
-  needs updating if the port band moves.
+  can't be told to drop it). The container row is then clean, and the compose row notes the restated
+  value. That's expected; a restated CA path stays right, while a restated proxy address needs
+  updating if the port band moves.
+
 - **An image that trusts a private CA of its own** (a corporate root baked into its system store)
-  keeps it only where the connection goes through the proxy decrypted: the proxy presents its
-  own certificate there. A connection that bypasses decryption (a `passthrough` host, or TLS
-  between your stack's services) reaches the private CA's certificate directly, and
-  `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO` *replace* the store a client reads
-  (`NODE_EXTRA_CA_CERTS` adds to it). Set those variables in the image or compose file to a
-  bundle holding both your CA and `/etc/fy-proxy-ca.pem`, built at container start, and yours
-  win.
-- **Build steps too.** podman gives a build's `RUN` step the CA files but not those variables,
-  so the VM's boot setup puts a small wrapper in front of the container runtime that adds them
-  when a container (a build step included) has the CA mounted and doesn't set them itself. A
-  `RUN` step's `curl`, `apk`, `pip`, `uv`, `npm` and `git` then work against a decrypted host,
-  and installing `ca-certificates` in a step still works (nothing is mounted over the system
-  store). Nothing is written into the image: the variables exist only while the step runs. An
-  `ENV` in your Dockerfile wins, as it does for running containers. A build step also gets
-  `NODE_USE_ENV_PROXY=1` ([Node and npm](#node-and-npm)), so Node 24's corepack reaches the
-  registry with no `ARG` for it. npm's proxy settings aren't added: a build gets its own proxy
-  URL ([below](#image-builds-trusted-still-behind-the-allowlist)), so a step whose install script
-  needs npm's spelling writes
-  `RUN npm_config_https_proxy="$HTTPS_PROXY" npm install`.
-- **Clients with their own trust store** ignore those variables, in the box as in a container.
-  Add the CA to that store in your image, or put the host on `passthrough`:
+  keeps it only where the connection goes through the proxy decrypted: the proxy presents its own
+  certificate there. A connection that bypasses decryption (a `passthrough` host, or TLS between
+  your stack's services) reaches the private CA's certificate directly, and `SSL_CERT_FILE`,
+  `REQUESTS_CA_BUNDLE` and `GIT_SSL_CAINFO` *replace* the store a client reads
+  (`NODE_EXTRA_CA_CERTS` adds to it). Set those variables in the image or compose file to a bundle
+  holding both your CA and `/etc/fy-proxy-ca.pem`, built at container start, and yours win.
+
+- **Build steps too.** podman gives a build's `RUN` step the CA files but not those variables, so
+  the VM's boot setup puts a small wrapper in front of the container runtime that adds them when a
+  container (a build step included) has the CA mounted and doesn't set them itself. A `RUN` step's
+  `curl`, `apk`, `pip`, `uv`, `npm` and `git` then work against a decrypted host, and installing
+  `ca-certificates` in a step still works (nothing is mounted over the system store). Nothing is
+  written into the image: the variables exist only while the step runs. An `ENV` in your Dockerfile
+  wins, as it does for running containers. A build step also gets `NODE_USE_ENV_PROXY=1`
+  ([Node and npm](#node-and-npm)), so Node 24's corepack reaches the registry with no `ARG` for it.
+  npm's proxy settings aren't added: a build gets its own proxy URL
+  ([below](#image-builds-trusted-still-behind-the-allowlist)), so a step whose install script needs
+  npm's spelling writes `RUN npm_config_https_proxy="$HTTPS_PROXY" npm install`.
+
+- **Clients with their own trust store** ignore those variables, in the box as in a container. Add
+  the CA to that store in your image, or put the host on `passthrough`:
+
   - a Java keystore, or a browser's NSS database;
-  - a GnuTLS client (Debian's `apt` over HTTPS, `wget`), which reads only the image's system
-    store;
+  - a GnuTLS client (Debian's `apt` over HTTPS, `wget`), which reads only the image's system store;
   - a Rust binary with its CA roots compiled in. Turbopack is one: `next build` fetching Google
-    Fonts fails with ``Failed to fetch `<font>` from Google Fonts`` even though the host is
+    Fonts fails with `` Failed to fetch `<font>` from Google Fonts `` even though the host is
     allowed, because it ignores `NODE_EXTRA_CA_CERTS`.
-    `NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS=1` makes it read the system's roots
-    instead, which honour `SSL_CERT_FILE` (the combined bundle). Set it in the service's compose
+    `NEXT_TURBOPACK_EXPERIMENTAL_USE_SYSTEM_TLS_CERTS=1` makes it read the system's roots instead,
+    which honour `SSL_CERT_FILE` (the combined bundle). Set it in the service's compose
     `environment` and in `[box].env`; foldyard doesn't set it for you, since it belongs to one
     framework and its name says experimental.
-- **Image pulls trust it too.** The same boot setup adds the CA to the VM's own trust store,
-  which podman checks image pulls against, so a registry the proxy decrypts still works. Turning
-  the VM firewall off takes it out again.
+
+- **Image pulls trust it too.** The same boot setup adds the CA to the VM's own trust store, which
+  podman checks image pulls against, so a registry the proxy decrypts still works. Turning the VM
+  firewall off takes it out again.
+
 - **A new CA needs a restart.** The CA is part of the VM's boot setup, so after it changes run
   `fy machine stop && fy up`. The old CA is replaced, not kept beside the new one. Without the VM
   firewall nothing is routed through the proxy, so nothing is needed.
@@ -454,10 +453,10 @@ trusts the proxy's CA.
 Node needs more than the standard proxy variables, and every Node project runs into it:
 
 - **`fetch()` ignores `HTTPS_PROXY`.** Node's built-in `fetch()` (undici) goes direct unless
-  `NODE_USE_ENV_PROXY=1` is set. Under the VM firewall a direct request is refused, and the error
-  is an `ECONNREFUSED` against a raw IP address, with nothing naming a proxy. The variable needs
-  Node 24.0 or 22.21 and later; older Node ignores it, so `fetch()` still goes direct. There,
-  upgrade Node, or have the app route undici through the proxy itself
+  `NODE_USE_ENV_PROXY=1` is set. Under the VM firewall a direct request is refused, and the error is
+  an `ECONNREFUSED` against a raw IP address, with nothing naming a proxy. The variable needs Node
+  24.0 or 22.21 and later; older Node ignores it, so `fetch()` still goes direct. There, upgrade
+  Node, or have the app route undici through the proxy itself
   (`setGlobalDispatcher(new EnvHttpProxyAgent())` from the `undici` package).
 - **Install scripts bring their own HTTP client.** One that fetches with node-fetch (supabase's
   postinstall downloading its CLI) reads only npm's `npm_config_https_proxy`.
@@ -465,39 +464,38 @@ Node needs more than the standard proxy variables, and every Node project runs i
 What foldyard sets:
 
 | where | `NODE_USE_ENV_PROXY=1` | `npm_config_https_proxy`, `npm_config_proxy` |
-| --- | --- | --- |
+| -- | -- | -- |
 | the box | yes | yes |
 | stack containers (VM firewall on) | **no** | yes |
 | image build steps | yes | no |
 
-In the box, all three are defaults: `[box].env` may override any of them. With
-`NODE_USE_ENV_PROXY`, Node honours `NO_PROXY` like curl does, so a stack service the box calls by
-name has to be in `[proxy] no_proxy` (it already had to be for curl and Python).
+In the box, all three are defaults: `[box].env` may override any of them. With `NODE_USE_ENV_PROXY`,
+Node honours `NO_PROXY` like curl does, so a stack service the box calls by name has to be in
+`[proxy] no_proxy` (it already had to be for curl and Python).
 
-**Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY`
-naming, besides loopback and the host gateway, only what `[proxy] no_proxy` lists and foldyard's
-own in-stack services (the `metadata-emulator`, whenever `[plugins.gcp-metadata]` is configured,
-whatever the gcp mode)
-([above](#stack-containers-trust-the-proxy-too)). Node
-ignoring it is what lets one Node service reach a sibling that isn't listed (Supabase Studio
-calling `http://kong:8000`). Set everywhere, those calls would go to the proxy, which runs on
-your computer and can't resolve a stack name.
+**Why not in stack containers.** podman gives every container `HTTP_PROXY` with a `NO_PROXY` naming,
+besides loopback and the host gateway, only what `[proxy] no_proxy` lists and foldyard's own
+in-stack services (the `metadata-emulator`, whenever `[plugins.gcp-metadata]` is configured,
+whatever the gcp mode) ([above](#stack-containers-trust-the-proxy-too)). Node ignoring it is what
+lets one Node service reach a sibling that isn't listed (Supabase Studio calling
+`http://kong:8000`). Set everywhere, those calls would go to the proxy, which runs on your computer
+and can't resolve a stack name.
 
-**An app container that calls the internet from Node** sets it itself. If `[proxy] no_proxy`
-lists every stack service it calls, that is all it needs:
+**An app container that calls the internet from Node** sets it itself. If `[proxy] no_proxy` lists
+every stack service it calls, that is all it needs:
 
 ```yaml
 environment:
   NODE_USE_ENV_PROXY: "1"
 ```
 
-Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers the lowercase
-one). That replaces the list podman hands it, so keep every entry podman's has: loopback, the
-host gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` while
+Otherwise it also sets a `NO_PROXY` naming them, in both cases (undici prefers the lowercase one).
+That replaces the list podman hands it, so keep every entry podman's has: loopback, the host
+gateway, your `[proxy] no_proxy`, and foldyard's own services (`metadata-emulator` while
 `[plugins.gcp-metadata]` is configured, even with gcp off: turning it on doesn't rebuild the VM's
 list). Start from the VM's own copy, which no client's environment can colour:
-`limactl shell <machine> sh -c 'cat ~/.config/environment.d/90-fy-wall-proxy.conf'` (`<machine>`
-is `[machine] name`, else the project name; the `sh -c` keeps `~` the guest's home, not yours). A
+`limactl shell <machine> sh -c 'cat ~/.config/environment.d/90-fy-wall-proxy.conf'` (`<machine>` is
+`[machine] name`, else the project name; the `sh -c` keeps `~` the guest's home, not yours). A
 running service's `printenv` won't do: one that already overrides `NO_PROXY` shows its own.
 
 ```yaml
@@ -505,34 +503,34 @@ running service's `printenv` won't do: one that already overrides `NO_PROXY` sho
   no_proxy: localhost,127.0.0.1,192.168.5.2,metadata-emulator,kong,db
 ```
 
-These are copies: when `[proxy] no_proxy` or a plugin's configuration changes, the VM's list
-follows after a restart but these don't, so update them alongside.
+These are copies: when `[proxy] no_proxy` or a plugin's configuration changes, the VM's list follows
+after a restart but these don't, so update them alongside.
 
 Leave the proxy address, the CA and npm's settings out: foldyard provides them, and a copy goes
 stale when the port band moves.
 
 ### Image builds: trusted, still behind the allowlist
 
-With the VM firewall on, image builds (`fy box build`, and the stack build `fy up` runs) also go
-out through the proxy. How that works:
+With the VM firewall on, image builds (`fy box build`, and the stack build `fy up` runs) also go out
+through the proxy. How that works:
 
 - **Tunnelled, not decrypted, when started on your computer**, to a host granted as a whole.
-  foldyard gives the build a proxy URL carrying a secret it creates for that build (user
-  `fy-build`, the secret as the password), and the proxy tunnels those connections. The log
-  shows them as `tls tunnel` rows flagged `build`.
+  foldyard gives the build a proxy URL carrying a secret it creates for that build (user `fy-build`,
+  the secret as the password), and the proxy tunnels those connections. The log shows them as
+  `tls tunnel` rows flagged `build`.
 - **Decrypted where the proxy must read the path:** a host the build may reach only under a
-  [path grant](#path-grants-one-path-of-a-shared-host), and a host the allowlist refuses (so its
-  row names what was asked for). The build's steps trust the proxy's CA (below), so this works
-  like it does for the box. A step that doesn't trust it (Java, `apt` over HTTPS, the gVisor
-  posture's runtime) fails the handshake instead: a host it needs is granted whole, and a refusal
-  is logged with the host alone, as before.
-- **The allowlist still applies.** Being a build changes what is decrypted, never what the
-  runtime allowlist allows ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
-- **Only a build started on your computer is one.** The `fy-build` user without a live secret
-  counts for nothing, so a program in the box can't use it to hide what it fetches. A build you
-  start *inside* the box (`fy up` there, or `podman build`) is the box as far as the proxy is
-  concerned: decrypted and logged like any box request. Its steps trust the proxy's CA (below),
-  so it works the same either way.
+  [path grant](#path-grants-one-path-of-a-shared-host), and a host the allowlist refuses (so its row
+  names what was asked for). The build's steps trust the proxy's CA (below), so this works like it
+  does for the box. A step that doesn't trust it (Java, `apt` over HTTPS, the gVisor posture's
+  runtime) fails the handshake instead: a host it needs is granted whole, and a refusal is logged
+  with the host alone, as before.
+- **The allowlist still applies.** Being a build changes what is decrypted, never what the runtime
+  allowlist allows ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
+- **Only a build started on your computer is one.** The `fy-build` user without a live secret counts
+  for nothing, so a program in the box can't use it to hide what it fetches. A build you start
+  *inside* the box (`fy up` there, or `podman build`) is the box as far as the proxy is concerned:
+  decrypted and logged like any box request. Its steps trust the proxy's CA (below), so it works the
+  same either way.
 
 When the allowlist refuses a build, the tool's error names the URL it *asked* for, which is often
 not the host that was refused: a CDN can redirect inside the tunnel (Playwright's
@@ -542,43 +540,43 @@ for the box: granting all of `storage.googleapis.com` to builds would let a buil
 Dockerfile the box can edit, upload to any bucket there. So foldyard reports the refusals itself:
 
 1. **On your computer, with a terminal,** it asks about each refused host: once (15 minutes, long
-   enough for the build), session, permanent, or no. A refused read is offered as the path grant
-   for its first directory (`storage.googleapis.com/chrome-for-testing-public/`); reads in several
-   directories are offered together, each granted at the level you choose, and `h` grants the
-   whole host instead, as a choice you make. On a host with no grant yet, the gate offers the host
-   itself in three cases, and the prompt says which: a write (`· PUT`) or a step that didn't trust
-   the CA (`· no usable path`), where nothing narrower would answer, and reads under more than 3
+   enough for the build), session, permanent, or no. A refused read is offered as the path grant for
+   its first directory (`storage.googleapis.com/chrome-for-testing-public/`); reads in several
+   directories are offered together, each granted at the level you choose, and `h` grants the whole
+   host instead, as a choice you make. On a host with no grant yet, the gate offers the host itself
+   in three cases, and the prompt says which: a write (`· PUT`) or a step that didn't trust the CA
+   (`· no usable path`), where nothing narrower would answer, and reads under more than 3
    directories (`refused under N directories`), where a first directory is likely a version or a
-   hash rather than a bucket. Path grants still answer those reads: answer `n` and add the ones
-   you mean with `fy allow add <host>/<path>/ --build`, then build again. On a host the build already holds a path grant for, it never offers
-   the host, not even as `h`: past 3 directories it offers the first 3 and asks about the rest at
-   the next attempt, and a write or a request with a body under a granted path is reported with
-   the command to type, never offered, since all of the host is the upload channel the path grant
-   left out.
+   hash rather than a bucket. Path grants still answer those reads: answer `n` and add the ones you
+   mean with `fy allow add <host>/<path>/ --build`, then build again. On a host the build already
+   holds a path grant for, it never offers the host, not even as `h`: past 3 directories it offers
+   the first 3 and asks about the rest at the next attempt, and a write or a request with a body
+   under a granted path is reported with the command to type, never offered, since all of the host
+   is the upload channel the path grant left out.
 2. It builds again. The layer cache makes that cheap. A redirect chain reveals one more hop per
    attempt, up to 4 attempts.
 3. It offers to add what you granted to `foldyard.toml`'s `[proxy] recommend` as `when = "build"`
-   entries (keeping the file's comments). If the checkout matched the config your computer runs,
-   the edit is adopted at once; otherwise it waits for the adoption prompt at the next `fy up`.
-   Each `why` records what was *seen*: reword it before you commit.
+   entries (keeping the file's comments). If the checkout matched the config your computer runs, the
+   edit is adopted at once; otherwise it waits for the adoption prompt at the next `fy up`. Each
+   `why` records what was *seen*: reword it before you commit.
 4. **Without a terminal,** it prints the `fy allow add … --build` commands instead.
 5. **Inside the box,** it does nothing: grants are made on your computer.
 
-**Build grants are for builds only.** The box can't use them, so the box's allowlist stays as
-narrow as before. A build proves it is one with a secret foldyard creates for that build (the
-password in its proxy URL, stored on your computer only as a hash, revoked when the build ends).
-The public `fy-build` user alone unlocks no build grant, so neither the box nor a build started
-inside it can use one. `fy allow add <host> --build` makes
-the same kind of grant by hand, and `fy allow list` shows build grants separately.
+**Build grants are for builds only.** The box can't use them, so the box's allowlist stays as narrow
+as before. A build proves it is one with a secret foldyard creates for that build (the password in
+its proxy URL, stored on your computer only as a hash, revoked when the build ends). The public
+`fy-build` user alone unlocks no build grant, so neither the box nor a build started inside it can
+use one. `fy allow add <host> --build` makes the same kind of grant by hand, and `fy allow list`
+shows build grants separately.
 
-`when = "build"` recommendations aren't offered at `fy up` (every launch would ask about a host
-only a build needs). A teammate is offered them, with their `why`, when their own build is
-refused, and `fy allow sync --yes` grants them for builds. A path in one works as it does for the
-box: `{ host = "storage.googleapis.com/chrome-for-testing-public/", when = "build", why = "…" }`.
+`when = "build"` recommendations aren't offered at `fy up` (every launch would ask about a host only
+a build needs). A teammate is offered them, with their `why`, when their own build is refused, and
+`fy allow sync --yes` grants them for builds. A path in one works as it does for the box:
+`{ host = "storage.googleapis.com/chrome-for-testing-public/", when = "build", why = "…" }`.
 
-**A tool that ignores the proxy settings** never reaches the proxy at all. It connects directly,
-the VM firewall refuses it, and the Network Log has no row for it, so there is no host to grant.
-Node's built-in `fetch` is the common case, which foldyard covers in build steps
+**A tool that ignores the proxy settings** never reaches the proxy at all. It connects directly, the
+VM firewall refuses it, and the Network Log has no row for it, so there is no host to grant. Node's
+built-in `fetch` is the common case, which foldyard covers in build steps
 ([Node and npm](#node-and-npm)): Node 24's corepack (0.35 and later) uses it.
 
 When a build fails, foldyard also reads the VM firewall's recent refusals. It lists any made while
@@ -589,42 +587,41 @@ own HTTP client, or a program opening raw sockets.
 
 ## When something's off
 
-- **A build fails at the network and nothing was refused at the proxy.** The tool connected
-  directly and the VM firewall refused it. See "A tool that ignores the proxy settings" under
-  image builds above. The build's output lists what the firewall refused.
+- **A build fails at the network and nothing was refused at the proxy.** The tool connected directly
+  and the VM firewall refused it. See "A tool that ignores the proxy settings" under image builds
+  above. The build's output lists what the firewall refused.
 - **A client using a `firewall_allow` opening fails.** The firewall's refusals are in the VM's
   `/run/fy-wall/denies.jsonl` (one JSON line each, with `ts` in UTC to line up with the client's
   log), and `fy verify` on your computer lists them. Three cases:
-  - `fy up` refused the VM, naming `[machine] firewall_allow`: the list changed since the VM
-    booted. Run `fy machine stop && fy up`.
+  - `fy up` refused the VM, naming `[machine] firewall_allow`: the list changed since the VM booted.
+    Run `fy machine stop && fy up`.
   - `fy verify` warns about a refusal on the opening's port at another address: the service's
     address changed. Update the entry, adopt it, and restart the VM.
   - Nothing was refused: the connection left the VM, so the trouble is at the far end (the service
     is down, or its login failed, an expired access grant, say). Read the client's own logs.
-- **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate
-  it once (`fy box down && fy box up`). The log only shows a request once it gets a response, so
-  a failing TLS handshake (CA not trusted) shows nothing.
-- **Node fails with `ECONNREFUSED` against a raw IP address.** Its `fetch()` went direct instead
-  of through the proxy, and the VM firewall refused it. The box sets `NODE_USE_ENV_PROXY=1`; a
-  stack container has to set it itself ([Node and npm](#node-and-npm)).
-- **Every request in the box suddenly refuses to connect.** The box routes through the proxy, so
-  a dead proxy means no traffic out. `fy doctor` has an "egress proxy" check for this, and `fy up`
+- **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate it
+  once (`fy box down && fy box up`). The log only shows a request once it gets a response, so a
+  failing TLS handshake (CA not trusted) shows nothing.
+- **Node fails with `ECONNREFUSED` against a raw IP address.** Its `fetch()` went direct instead of
+  through the proxy, and the VM firewall refused it. The box sets `NODE_USE_ENV_PROXY=1`; a stack
+  container has to set it itself ([Node and npm](#node-and-npm)).
+- **Every request in the box suddenly refuses to connect.** The box routes through the proxy, so a
+  dead proxy means no traffic out. `fy doctor` has an "egress proxy" check for this, and `fy up`
   restarting the supervisor is the usual fix.
-- **Requests in the box time out connecting to the proxy, then work again.** The proxy was
-  running but not answering. `fy host logs` says when: the supervisor asks it for a reserved
-  address (`http://foldyard-liveness.invalid/`) every tick, and logs `stopped answering` after two
-  misses in a row, with the share of a CPU the proxy used since the first miss, then
-  `answering again` with how long it lasted. A proxy near 100% was overloaded (fewer parallel
-  builds help); an idle one was stuck on something else. No such line while the box saw timeouts
-  points at the VM's network instead.
-- **A request gets a 502 from foldyard rather than from the service.** The proxy answers a
-  request itself, without sending it, when the credential it should carry can't be had: the
-  token service on your computer failed (`mint failed` in the Network Log; the message quotes
-  its reason, and the same answer is repeated for 15 seconds rather than re-running it), or two
-  switches both claim that host and path (`credential overlap`; the message names the
-  `fy mode` command that ends it). Both are fixed on your computer, never in the box
-  ([modes.md](./modes.md)). Only that credential's requests are affected; a slow token service
-  doesn't hold up the box's other traffic.
+- **Requests in the box time out connecting to the proxy, then work again.** The proxy was running
+  but not answering. `fy host logs` says when: the supervisor asks it for a reserved address
+  (`http://foldyard-liveness.invalid/`) every tick, and logs `stopped answering` after two misses in
+  a row, with the share of a CPU the proxy used since the first miss, then `answering again` with
+  how long it lasted. A proxy near 100% was overloaded (fewer parallel builds help); an idle one was
+  stuck on something else. No such line while the box saw timeouts points at the VM's network
+  instead.
+- **A request gets a 502 from foldyard rather than from the service.** The proxy answers a request
+  itself, without sending it, when the credential it should carry can't be had: the token service on
+  your computer failed (`mint failed` in the Network Log; the message quotes its reason, and the
+  same answer is repeated for 15 seconds rather than re-running it), or two switches both claim that
+  host and path (`credential overlap`; the message names the `fy mode` command that ends it). Both
+  are fixed on your computer, never in the box ([modes.md](./modes.md)). Only that credential's
+  requests are affected; a slow token service doesn't hold up the box's other traffic.
 - **A build or tool needs a host you haven't allowed.** Watch the TUI's blocked rows and grant from
   there (`a`), or run `fy allow add <host> --level permanent`. Grants live on your computer, never
   in repo config, so the box can't widen its own allowlist.
@@ -633,10 +630,10 @@ own HTTP client, or a program opening raw sockets.
   `fy allow add <host>/<path>/` ([path grants](#path-grants-one-path-of-a-shared-host)), or press
   `a` on that row in `fy tui`, rather than granting the whole host.
 - **A long, quiet request to a Google API dies at about 60 seconds.** That's Google's front ends
-  (`*.googleapis.com`), not the VM or the proxy: they close any connection that has carried no
-  bytes for about 60 s, idle or mid-request, and TCP keepalives don't reset the timer. It measures
-  the same from an ordinary client on the internet with no foldyard involved. Stream the response
-  (or ask for progress output, such as a model's thought summaries) so bytes keep flowing.
+  (`*.googleapis.com`), not the VM or the proxy: they close any connection that has carried no bytes
+  for about 60 s, idle or mid-request, and TCP keepalives don't reset the timer. It measures the
+  same from an ordinary client on the internet with no foldyard involved. Stream the response (or
+  ask for progress output, such as a model's thought summaries) so bytes keep flowing.
 - **`fy up` fails with `proxy already running` (podman backend).** That's podman machine's port
   forwarder (gvproxy), not the egress proxy: it still holds a forward for a host port from a stack
   that wasn't torn down cleanly (a crash, or `rm -f` on a container that publishes a port). The

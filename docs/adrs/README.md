@@ -2,15 +2,15 @@
 
 One file per decision, `NNNN-slug.md`, each with **Status / Context / Decision / Consequences**
 (and, where useful, **Rejected alternatives**). The spun-out repo started from a squash commit
-([ADR-0013](./0013-in-repo-carve-out-until-extraction.md)), so these ADRs are the public record
-of the "why" — distilled from the historical docs (PLAN.md, SPIKE.md, HANDOVER.md, the plans and
+([ADR-0013](./0013-in-repo-carve-out-until-extraction.md)), so these ADRs are the public record of
+the "why" — distilled from the historical docs (PLAN.md, SPIKE.md, HANDOVER.md, the plans and
 spikes) while both still existed side by side. The Tangible monorepo keeps the full archaeology.
 
 A new decision gets the next number. Supersede, don't rewrite: flip the old ADR's Status to
-`Superseded by ADR-NNNN` and say why in the new one. Where only part of an ADR has been overtaken
-(a renamed key, a retired backend, a verb that changed shape), add a dated `Amended YYYY-MM-DD:`
-line to its Status instead and leave the body as the record. The ADRs keep the vocabulary of
-their day (posture, axis, rung, wall); [../glossary.md](../glossary.md) maps it to today's.
+`Superseded by ADR-NNNN` and say why in the new one. Where only part of an ADR has been overtaken (a
+renamed key, a retired backend, a verb that changed shape), add a dated `Amended YYYY-MM-DD:` line
+to its Status instead and leave the body as the record. The ADRs keep the vocabulary of their day
+(posture, axis, rung, wall); [../glossary.md](../glossary.md) maps it to today's.
 
 **On the `Sources:` lines.** They cite the working documents a decision was distilled from, and
 several of those (`PLAN.md`, `SPIKE.md`, `HANDOVER.md`, the run-logs) are pre-extraction internal
@@ -22,7 +22,7 @@ ADR) as links, and internal working notes by name only.
 ## Index
 
 | ADR | Decision |
-| --- | --- |
+| -- | -- |
 | [0001](./0001-rootless-podman-vm-isolation-boundary.md) | Rootless Podman VM as the isolation boundary; repo-only mounts; escape-test-refused as the credibility gate (its opt-in `native` backend retired by [0027](./0027-always-a-vm-native-backend-retired.md)) |
 | [0002](./0002-stack-colocation-project-as-isolation-unit.md) | Stack colocation: the project (whole compose stack), not the agent, is the unit of isolation |
 | [0003](./0003-name-foldyard.md) | The name "foldyard" — metaphor, rejected alternatives, availability |

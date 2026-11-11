@@ -4,8 +4,8 @@
   `nested-test` and `nested-down`. **Decided:** a box does not get `/dev/kvm`. **Designed, not
   built:** a box asking your computer for a run, to build when the round trip through the operator
   gets in the way.
-- **Sources:** the 2026-11-04 spike and the recipe (docs/nested-virt.md, Rig 2); `tests/tools/nested.py`;
-  [ADR-0017](./0017-nested-virt-validation-strategy.md) (the nested rig);
+- **Sources:** the 2026-11-04 spike and the recipe (docs/nested-virt.md, Rig 2);
+  `tests/tools/nested.py`; [ADR-0017](./0017-nested-virt-validation-strategy.md) (the nested rig);
   [ADR-0023](./0023-no-host-executed-code-from-the-repo-mount.md) (no host code from the mount);
   [ADR-0032](./0032-a-root-collector-in-the-guest.md) (the guest monitor);
   [ADR-0033](./0033-a-to-box-and-a-from-box-beside-the-checkout.md) (the to-box and from-box).
@@ -55,19 +55,19 @@ hostile:
 - **What comes back** reaches the terminal with its control sequences stripped.
 
 These are recipes, not `fy` verbs: consumers never get foldyard's justfile, and the code stays out
-of the wheel, so there's no config key, no documented surface and no promise to keep. A verb gated on
-"is this foldyard's own repo?" would ship the code anyway, behind a check a project could satisfy
+of the wheel, so there's no config key, no documented surface and no promise to keep. A verb gated
+on "is this foldyard's own repo?" would ship the code anyway, behind a check a project could satisfy
 by naming itself.
 
 ### 2. A box does not get `/dev/kvm` (decided)
 
-It works: a rootless container with box-style flags plus `--device /dev/kvm` booted a Lima L2 in
-46 s. The objection isn't feasibility.
+It works: a rootless container with box-style flags plus `--device /dev/kvm` booted a Lima L2 in 46
+s. The objection isn't feasibility.
 
 - **KVM would sit where the payload lands.** The box is where a dependency's install script or a
-  steered agent runs. `/dev/kvm` hands that code the VM kernel's KVM ioctls and, behind them, Apple's
-  nested layer, a large surface exposed for one test tier's benefit. A bug there turns "code in a
-  box" into "code in the VM". Tokens stay on your computer, but the VM holds every box of the
+  steered agent runs. `/dev/kvm` hands that code the VM kernel's KVM ioctls and, behind them,
+  Apple's nested layer, a large surface exposed for one test tier's benefit. A bug there turns "code
+  in a box" into "code in the VM". Tokens stay on your computer, but the VM holds every box of the
   project, each checkout mounted writable, and the route to the proxy that injects those tokens.
 - **It is a VM-wide switch.** Nesting is set on the VM, and a box holds the engine socket, so any
   box on that VM should be able to start a sibling with `--device /dev/kvm` whatever its own flags
@@ -79,8 +79,8 @@ It works: a rootless container with box-style flags plus `--device /dev/kvm` boo
   and the L2 has to trust the proxy's CA. Not tried.
 - **It can't stay a recipe.** The traps need root in a VM where root is boot-time only: the
   firewall's boot script narrows the VM user's `sudo`, so a later `limactl shell … sudo` is refused.
-  So this means a recorded boot script and a `[machine]` key: shipped code for one project. `fy
-  verify` has no `/dev/kvm` check today, and would need one.
+  So this means a recorded boot script and a `[machine]` key: shipped code for one project.
+  `fy verify` has no `/dev/kvm` check today, and would need one.
 - **The tests expect a host.** They'd need the `in_box()` guards and the tier's gate on `IN_DEVBOX`
   bypassed, a non-root user (`limactl` refuses root; the box is `--user 0`), and for some modules
   `systemd --user` and `nft` in a container.
@@ -91,8 +91,9 @@ When an agent needs its own test results, keep the VM of part 1 and add a narrow
 
 1. The agent commits, and writes a request to the from-box: a commit id and a list of modules.
 2. `just nested-serve`, in a terminal the operator opened, reads it through the no-follow walk the
-   transcript sync uses. It accepts a 40-hex commit and names matching `tests/test_*_e2e.py`, nothing
-   else: no shell string, no flags, no path, and `--with-sudo` is never on offer. One run at a time.
+   transcript sync uses. It accepts a 40-hex commit and names matching `tests/test_*_e2e.py`,
+   nothing else: no shell string, no flags, no path, and `--with-sudo` is never on offer. One run at
+   a time.
 3. It runs them as part 1 does, and writes the log and JUnit to the to-box, which the box can read
    and not write.
 
@@ -105,7 +106,8 @@ commit, and a test could send it out. There's no credential at rest in a box to 
 exposed is the checkout and the transcripts, not the keys. Routing the L1 through an allowlist would
 close it, and it wants deciding when this is built. Also:
 
-- The result is text an agent will read, written by code it asked to run, so it stays untrusted data.
+- The result is text an agent will read, written by code it asked to run, so it stays untrusted
+  data.
 - A verdict from the L1 is what the code under test reports. It's a test result, not an attestation.
 
 Rejected for the path itself: giving the box SSH into the L1. It needs no server, but it needs a
@@ -119,8 +121,8 @@ run anything rather than the tier.
 - An agent in a box still can't run the tier itself until part 3 is built. Someone runs it for them.
 - The arm64 Linux host tier gets a way to run, by hand; CI's arm runners have no KVM.
 - It isn't a boundary against a hypervisor escape from the L1, and doesn't try to be. Nor does it
-  bound what leaves the L1 over the public internet, or cover a VPN that gives your computer a public
-  address.
+  bound what leaves the L1 over the public internet, or cover a VPN that gives your computer a
+  public address.
 - **The recipes read from the box-writable checkout.** With an editable `fy` that is true of `fy`
   itself on foldyard's own project ([security.md](../security.md) names the exception), so these add
   no new exposure, and don't remove it. A steered agent could edit `tests/tools/nested.py` before
