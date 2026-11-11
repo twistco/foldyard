@@ -19,7 +19,7 @@ just pin <hash>  # freeze `fy` at a commit, pushed or not; branch switches here 
 just test [args] # the suite (add -n auto to parallelise)
 just run <verb>  # run the CLI from source without installing
 just lint        # ruff check + format --check, mdformat --check   (auto-fix: just format)
-just hooks       # opt-in: run `just lint` before every commit (.githooks/pre-commit)
+just hooks       # on your computer, opt-in: lint before every commit (boxes do already)
 just typecheck   # pyright + ty (both, run together)
 just check       # lint + typecheck + suite — what CI gates on
 just prune       # list merged .claude/worktrees, local branches, orphaned dev venvs (--apply removes)
@@ -42,11 +42,13 @@ reflow prose by hand. Not formatted: the Marp talk sources and `CHANGELOG.md` (w
 `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes local `git blame` skip it too
 (GitHub's does on its own).
 
-**The pre-commit hook is opt-in** (`just hooks`, which sets `core.hooksPath` to `.githooks/`): it
-runs `just lint`, a few seconds, never the whole suite. It runs wherever you commit, the box
-included, and on your computer it is code from this box-writable checkout like any repo hook
-(docs/security.md): an edit to the hook or the `lint` recipe, committed or not, runs at your next
-commit there. Turn it on only where you'd run the checkout's `just lint` anyway.
+**The pre-commit hook** (`.githooks/pre-commit`) runs `just lint`, a few seconds, never the whole
+suite. Every box has it: `[box].bootstrap` in our `foldyard.toml` sets `core.hooksPath` in the box's
+own git config. On your computer it's opt-in, with `just hooks`, which sets it in the shared
+`.git/config` (and is refused in a box, where it would do that for you). There it is code from this
+box-writable checkout like any repo hook (docs/security.md): an edit to the hook or the `lint`
+recipe, committed or not, runs at your next commit. Turn it on only where you'd run the checkout's
+`just lint` anyway.
 
 ## Module map — `src/foldyard/`
 
