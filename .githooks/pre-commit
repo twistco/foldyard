@@ -2,9 +2,10 @@
 # foldyard's pre-commit hook: `just lint` (ruff, and mdformat over the Markdown) — a few seconds,
 # where `just check` takes a minute. Skip it for one commit with `git commit --no-verify`.
 #
-# Where it runs: every box, from its own git config (foldyard.toml's `[box].bootstrap` sets
-# core.hooksPath there); on your computer only if you opt in with `just hooks`, which sets it in
-# the shared .git/config. Both point here, and core.hooksPath is one setting, so it runs once.
+# Where it runs: every box created since foldyard.toml's `[box].bootstrap` set it up — in the
+# box's own git config, for this checkout and its worktrees only (an older box: recreate it, or
+# run that line once) — and on your computer only if you opt in with `just hooks`, which sets it
+# in the shared .git/config. Both point here, and core.hooksPath is one setting, so it runs once.
 #
 # It lints the working tree, not just what is staged, so an unstaged edit can fail a commit that
 # doesn't include it: format it, or stash it first.
