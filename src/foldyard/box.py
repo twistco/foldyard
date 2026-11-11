@@ -2505,12 +2505,20 @@ def _up(
         def _slot(enabled: bool, override: str, out: str) -> Path | None:
             return Path(out) if enabled and not os.environ.get(override) else None
 
-        transcripts.migrate_legacy(
-            Path(checkout),
-            here,
-            claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
-            codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
-        )
+        try:
+            transcripts.migrate_legacy(
+                Path(checkout),
+                here,
+                claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
+                codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
+            )
+        except OSError as e:
+            # A link in the slot, planted by the old box after the slot was checked and before it
+            # was removed: nothing can race this check, and the create would bind through it.
+            gone = " The old box has been removed." if replacing else ""
+            _err(f"✗ Not creating dev box {box}: its from-box slot refused a write ({e}).{gone}")
+            _err("  Look at what is in that slot on your computer, remove it, then `fy box up`.")
+            return 1
     print(f"▶ starting long-lived dev box {box} (network {net})…")
     if config.claude_enabled():
         print(

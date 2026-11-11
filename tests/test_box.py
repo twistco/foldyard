@@ -2520,6 +2520,28 @@ def test_recreate_removes_the_old_box_right_before_the_new_one_is_created(
     assert order == ["box args", "rm", "migrate", "create"]
 
 
+def test_recreate_refuses_to_create_through_a_link_planted_in_the_slot(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # Only the old box can plant it, after the slot was checked and before its own removal. The
+    # move after the removal is the check nothing can race: it refuses, and the create never binds
+    # through the link (CodeRabbit on #181 asked to carry on; that would bind where it points).
+    _running_box(fake, monkeypatch)
+    (tmp_path / "from-box").mkdir()
+    monkeypatch.setattr(box.boxmounts, "from_box_dir", lambda: tmp_path / "from-box")
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    from foldyard import transcripts
+
+    def planted(*a, **k):
+        raise OSError(40, "Too many levels of symbolic links", "slot")
+
+    monkeypatch.setattr(transcripts, "migrate_legacy", planted)
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["run", "-d"])
+    err = capsys.readouterr().err
+    assert "slot" in err and "fy box up" in err
+
+
 def test_recreate_fails_when_the_old_box_wont_go(fake, monkeypatch, capsys):
     # `rm -f` refused: the old box still runs, with its old env and mounts. Saying "removed" and
     # then "already up" would be a recreate that did nothing and reported success.
