@@ -34,7 +34,10 @@ BRANCH = "main"
 # site is served from GitHub raw). The text may span lines and hold bracketed spans one or two
 # deep — alt texts name TOML tables (`[machine] firewall`, `[[inject]]`).
 _TEXT = r"(?:[^\[\]]|\[\[?[^\[\]]*\]\]?)*"
-_LINK = re.compile(rf"(!?\[{_TEXT}\]\()([^)\s]+)(\))")
+# The target as written, or `<…>` — CommonMark's spelling for one holding `(`, `)` or a space,
+# which mdformat writes (`<https://…/init(url:readonly:)>`); `fix` unwraps it, rewrites the
+# inside and wraps it again.
+_LINK = re.compile(rf"(!?\[{_TEXT}\]\()(<[^<>\n]*>|[^)\s]+)(\))")
 _OWN_DOCS = re.compile(rf"^{re.escape(REPO)}/(?:raw|blob|tree)/{BRANCH}/docs/([^#?]*?)/?(#.*)?$")
 
 
@@ -101,19 +104,25 @@ def on_page_markdown(markdown, page, config, files):
     repo_root = docs_root.parent
 
     def fix(m: re.Match) -> str:
-        own = _OWN_DOCS.match(m.group(2))
+        target = m.group(2)
+        if target.startswith("<"):
+            inner = fix_target(m.group(1), target[1:-1])
+            return m.group(1) + f"<{inner}>" + m.group(3)
+        return m.group(1) + fix_target(m.group(1), target) + m.group(3)
+
+    def fix_target(opening: str, target: str) -> str:
+        own = _OWN_DOCS.match(target)
         if own:
             path, frag = own.group(1), own.group(2) or ""
             if not _on_site(files, path):
                 path = posixpath.join(path, "README.md")  # a directory: its index page
             if _on_site(files, path):
                 rel = posixpath.relpath(path, posixpath.dirname(page.file.src_uri) or ".")
-                return m.group(1) + rel + frag + m.group(3)
-        if not _is_relative(m.group(2)):
-            return m.group(0)
-        image = m.group(1).startswith("!")
-        new = _rewrite(m.group(2), page.file.src_uri, docs_root, repo_root, files, image)
-        return m.group(1) + new + m.group(3)
+                return rel + frag
+        if not _is_relative(target):
+            return target
+        image = opening.startswith("!")
+        return _rewrite(target, page.file.src_uri, docs_root, repo_root, files, image)
 
     # Split on fences and rewrite only the prose between them (even indices).
     parts = re.split(r"(^(?:```|~~~).*?^(?:```|~~~)[^\n]*$)", markdown, flags=re.M | re.S)

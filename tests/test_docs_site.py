@@ -45,6 +45,9 @@ def test_heading_ids_are_githubs(heading, github_id):
         # Alt text that wraps and names TOML tables, as the diagrams' alt texts do.
         ("![one [[inject]] row\nbecomes a switch](https://x/a.svg)", "https://x/a.svg"),
         ("see [`[machine] firewall`](../c.md)", "../c.md"),
+        # `<…>`: how mdformat writes a target holding parentheses — read whole, not cut at `)`.
+        ("[`V`](<https://x/init(url:readonly:)>)", "<https://x/init(url:readonly:)>"),
+        ("[a](<./b c.md>)", "<./b c.md>"),
     ],
 )
 def test_the_link_pattern_reads_the_manuals_links(markdown, target):

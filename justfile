@@ -141,14 +141,35 @@ lint:
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     uv run --project "{{_dir}}" ruff check "{{_dir}}"
     uv run --project "{{_dir}}" ruff format --check "{{_dir}}"
+    cd "{{_dir}}"
+    {{_md_files}} | xargs -0 uv run --project "{{_dir}}" {{_mdformat}} --check
 
-# Auto-format + apply safe lint fixes (ruff).
+# Lint before every commit: point this clone's git at the tracked hooks in .githooks/ (one
+# setting in .git/config, shared by every worktree and by the box). Undo: `git config --unset
+# core.hooksPath`. The hook runs from the checkout on your computer too — see .githooks/pre-commit.
+hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git -C "{{_dir}}" config core.hooksPath .githooks
+    echo "✓ pre-commit runs \`just lint\` now (skip once: git commit --no-verify)"
+
+# Auto-format + apply safe lint fixes (ruff), and wrap the Markdown (mdformat).
 format:
     #!/usr/bin/env bash
     set -euo pipefail
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     uv run --project "{{_dir}}" ruff format "{{_dir}}"
     uv run --project "{{_dir}}" ruff check "{{_dir}}" --fix
+    cd "{{_dir}}"
+    {{_md_files}} | xargs -0 uv run --project "{{_dir}}" {{_mdformat}}
+
+# The Markdown formatter, a dev dependency (locked in uv.lock with ruff). Settings: .mdformat.toml;
+# --compact-tables here, since the gfm plugin reads it from the command line only.
+_mdformat := "mdformat --compact-tables"
+# What it formats: the tracked Markdown, NUL-separated, but not the Marp talk sources (their slide
+# separators and directives aren't paragraphs) nor CHANGELOG.md (written by `just release` from
+# the .changes/ fragments, which are formatted).
+_md_files := "git ls-files -z -- '*.md' ':!:docs/talks/*.md' ':!:CHANGELOG.md'"
 
 # Type-check with both pyright (Microsoft) and ty (Astral). The `e2e` group is installed so the
 # opt-in proxy/box e2e tests typecheck too (they import cryptography/requests — e2e-only deps; a

@@ -1,47 +1,46 @@
 # Releasing foldyard
 
-Contributor-facing, like [DEVELOPMENT.md](../DEVELOPMENT.md) — deliberately **not** in the
-`fy docs` set a consumer install ships (see `docs.py`). Nothing here is a consumer's problem.
+Contributor-facing, like [DEVELOPMENT.md](../DEVELOPMENT.md) — deliberately **not** in the `fy docs`
+set a consumer install ships (see `docs.py`). Nothing here is a consumer's problem.
 
 ## The mechanism, which is already automated
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 
-1. **build** — asserts the tag matches `[project].version`, that `CHANGELOG.md` has a section
-   for it, and that `uv.lock`'s own `foldyard` entry agrees; then `uv build`, uploading
-   `dist/` as an artifact, and the version's CHANGELOG section as a second one.
+1. **build** — asserts the tag matches `[project].version`, that `CHANGELOG.md` has a section for
+   it, and that `uv.lock`'s own `foldyard` entry agrees; then `uv build`, uploading `dist/` as an
+   artifact, and the version's CHANGELOG section as a second one.
 2. **publish** — downloads that artifact and runs `uv publish` into the `pypi` environment.
-3. **github-release** — once PyPI has it, creates the GitHub Release from the notes, with the
-   same wheel and sdist attached. It holds `contents: write` and runs no project code.
-4. **demo** — records the README's GIF and attaches it to that release (below). Advisory:
-   nothing waits on it.
+3. **github-release** — once PyPI has it, creates the GitHub Release from the notes, with the same
+   wheel and sdist attached. It holds `contents: write` and runs no project code.
+4. **demo** — records the README's GIF and attaches it to that release (below). Advisory: nothing
+   waits on it.
 
-Publishing uses PyPI **trusted publishing**: PyPI is configured to trust this workflow in this
-repo, and `uv publish` exchanges the job's OIDC token for a short-lived upload token. **No API
-token exists anywhere** — not in the repo, not in Actions secrets, not on anyone's laptop. The
-two jobs are split so the publish job holds `id-token: write` and nothing else, and never runs
-project code.
+Publishing uses PyPI **trusted publishing**: PyPI is configured to trust this workflow in this repo,
+and `uv publish` exchanges the job's OIDC token for a short-lived upload token. **No API token
+exists anywhere** — not in the repo, not in Actions secrets, not on anyone's laptop. The two jobs
+are split so the publish job holds `id-token: write` and nothing else, and never runs project code.
 
-`just publish` is the manual escape hatch (needs `UV_PUBLISH_TOKEN`). It exists for the day
-GitHub is down. Reach for the tag first.
+`just publish` is the manual escape hatch (needs `UV_PUBLISH_TOKEN`). It exists for the day GitHub
+is down. Reach for the tag first.
 
 ## Cutting a release
 
-Between releases, the unreleased changelog lives in [`.changes/`](../.changes/README.md): every
-PR a consumer would notice adds one file there. `just release <version>` turns them into a
-release, where `<version>` is `X.Y.Z` or `patch` / `minor` / `major` (the next one from
-`pyproject.toml`). It runs on `main` and:
+Between releases, the unreleased changelog lives in [`.changes/`](../.changes/README.md): every PR a
+consumer would notice adds one file there. `just release <version>` turns them into a release, where
+`<version>` is `X.Y.Z` or `patch` / `minor` / `major` (the next one from `pyproject.toml`). It runs
+on `main` and:
 
-1. **Refuses before writing anything** unless the tree is clean (bar `foldyard.toml`, below),
-   there is at least one fragment, the version is a step up that isn't tagged yet, and our own
+1. **Refuses before writing anything** unless the tree is clean (bar `foldyard.toml`, below), there
+   is at least one fragment, the version is a step up that isn't tagged yet, and our own
    `foldyard.toml` already names it (step 0). It warns when you ask for a smaller step than a
    fragment's `bump:` says — `patch` with a `minor` change pending.
 2. **Bumps the version in both places**: `[project].version` in `pyproject.toml`, *and* the
    `foldyard` entry in `uv.lock`. The lock records the workspace package's own version; bump
    pyproject alone and the lock silently disagrees. (CI catches this too — it did not always.)
-3. **Folds `.changes/` into `CHANGELOG.md`** as `## X.Y.Z — YYYY-MM-DD`: any `Summary` prose
-   first, then sections in the order Security, Removed, Deprecated, Changed, Added, Fixed, and
-   each section's entries in the order they were merged. The fragments are deleted.
+3. **Folds `.changes/` into `CHANGELOG.md`** as `## X.Y.Z — YYYY-MM-DD`: any `Summary` prose first,
+   then sections in the order Security, Removed, Deprecated, Changed, Added, Fixed, and each
+   section's entries in the order they were merged. The fragments are deleted.
 4. **Runs `just check`, then `just build`.**
 5. **Commits** (`release: X.Y.Z`) and **tags** `vX.Y.Z` — locally. Nothing has left your machine.
 
@@ -50,9 +49,9 @@ Then it stops and prints the push. Before running it:
 0. **Add a reasons entry to our own `foldyard.toml`.** We dogfood the version window, so
    `[project.foldyard_version_reasons]` gets a one-line summary of the release, and
    `recommended_foldyard_version` moves to it — `just release` refuses until both name the new
-   version, and carries the edit in the release commit (it is the one sentence only you can
-   write). Raise `min_foldyard_version` only when the checkout genuinely stops working below it
-   — a floor is a refusal, not a preference.
+   version, and carries the edit in the release commit (it is the one sentence only you can write).
+   Raise `min_foldyard_version` only when the checkout genuinely stops working below it — a floor is
+   a refusal, not a preference.
 
 And before pushing, **inspect what will ship**, especially the docs:
 `unzip -l dist/*.whl | grep assets/docs`. A `fy docs <topic>` that a bundled skill cites but
@@ -69,57 +68,59 @@ git push --atomic origin main vX.Y.Z
 
 `--atomic` means both or neither: a tag pushed without its commit would name one `main` doesn't
 have. The tag runs the `release` workflow: PyPI, then a **GitHub Release** whose notes are the
-version's CHANGELOG section, with the wheel and sdist attached. Watch it, and confirm the version
-on [PyPI](https://pypi.org/project/foldyard/).
+version's CHANGELOG section, with the wheel and sdist attached. Watch it, and confirm the version on
+[PyPI](https://pypi.org/project/foldyard/).
 
 Until the push everything is local, so a mistake is undone with
-`git tag -d vX.Y.Z && git reset --hard HEAD~1`. If `check` or `build` fails partway, fix it and
-run `just release X.Y.Z` again **by number**: it recognises the prepared, untagged release and
-resumes (a keyword would step past it, so it refuses and says so).
+`git tag -d vX.Y.Z && git reset --hard HEAD~1`. If `check` or `build` fails partway, fix it and run
+`just release X.Y.Z` again **by number**: it recognises the prepared, untagged release and resumes
+(a keyword would step past it, so it refuses and says so).
 
 ## The demo GIF
 
 The README's demo is [`docs/demo/foldyard.tape`](./demo/foldyard.tape), a
-[VHS](https://github.com/charmbracelet/vhs) script that types the quick start into a real shell
-on a real host: `foldyard init`, `fy config diff` and `fy config adopt`, `fy allow sync --yes`
-for the egress the scaffold recommends, `fy box up`, `fy verify` in the box, the box appending a
+[VHS](https://github.com/charmbracelet/vhs) script that types the quick start into a real shell on a
+real host: `foldyard init`, `fy config diff` and `fy config adopt`, `fy allow sync --yes` for the
+egress the scaffold recommends, `fy box up`, `fy verify` in the box, the box appending a
 `[box].packages` line to `foldyard.toml`, and the next `fy box up` showing that diff and asking
 before your computer runs it. Nothing is mocked; the VM boot and the image builds are cut out with
 `Hide`/`Show`, and a typed `#` comment says so at each cut.
 
-The tape answers every prompt the path raises, and VHS gives up on a `Wait` after 15 minutes, so
-a new prompt on that path fails the recording rather than hanging it. When one does, the log's
-last line is the prompt it stopped at, and the tape needs a command that answers it. (The first
-run met exactly that: the first `fy box up` offers each recommended egress host in turn, which is
-why the tape grants them with `fy allow sync --yes` first.)
+The tape answers every prompt the path raises, and VHS gives up on a `Wait` after 15 minutes, so a
+new prompt on that path fails the recording rather than hanging it. When one does, the log's last
+line is the prompt it stopped at, and the tape needs a command that answers it. (The first run met
+exactly that: the first `fy box up` offers each recommended egress host in turn, which is why the
+tape grants them with `fy allow sync --yes` first.)
 
-[`.github/workflows/demo.yml`](../.github/workflows/demo.yml) records it on `ubuntu-24.04` with
-KVM and Lima, the same setup as the host-tier e2e. The release workflow calls it once the GitHub
-Release exists. It installs the version PyPI now serves, records it, checks that the box it left
-behind still passes `fy verify` and has the adopted package, then attaches `foldyard-demo.gif`
-to the release. The README and the docs site's home page (`docs/README.md`) embed the latest
-release's copy, `https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif`,
-so it changes only when a release does, and no bot commits a binary. A failed recording leaves
-that one release without a GIF (and both images broken until it has one), never the release
-itself. To fill it, dispatch the `demo` workflow with the tag. Dispatched with no tag, it records
-the checkout and only uploads a run artifact, which is how to iterate on the tape. `just demo`
-records the same tape on your own computer, against the `fy` on your PATH.
+[`.github/workflows/demo.yml`](../.github/workflows/demo.yml) records it on `ubuntu-24.04` with KVM
+and Lima, the same setup as the host-tier e2e. The release workflow calls it once the GitHub Release
+exists. It installs the version PyPI now serves, records it, checks that the box it left behind
+still passes `fy verify` and has the adopted package, then attaches `foldyard-demo.gif` to the
+release. The README and the docs site's home page (`docs/README.md`) embed the latest release's
+copy, `https://github.com/twistco/foldyard/releases/latest/download/foldyard-demo.gif`, so it
+changes only when a release does, and no bot commits a binary. A failed recording leaves that one
+release without a GIF (and both images broken until it has one), never the release itself. To fill
+it, dispatch the `demo` workflow with the tag. Dispatched with no tag, it records the checkout and
+only uploads a run artifact, which is how to iterate on the tape. `just demo` records the same tape
+on your own computer, against the `fy` on your PATH.
 
-`tests/test_agent_guide.py` checks that every `fy …` the tape types is a real verb. A renamed
-verb would not fail a recording: it would put the error on the front page.
+`tests/test_agent_guide.py` checks that every `fy …` the tape types is a real verb. A renamed verb
+would not fail a recording: it would put the error on the front page.
 
 ## Things that have bitten
 
-- **A dev box cannot push.** No credential in a box reaches origin, by design — that is the
-  product working. `just release` is fine in a box; the push is a host command.
+- **A dev box cannot push.** No credential in a box reaches origin, by design — that is the product
+  working. `just release` is fine in a box; the push is a host command.
 - **`uv run` inside a box rewrites `uv.lock`.** It re-resolves against the box's interpreter and
   leaves ~90 lines of marker churn that then rides along in the next commit. Our `foldyard.toml`
-  sets `UV_FROZEN=1` in `[box].env` to stop it; if you hit it anyway, `git restore uv.lock` and
-  redo the version line with `sed`, not `uv`.
-- **`pyright` needs a Node runtime in the box.** The PyPI package is a wrapper that prefers a
-  global `node` and otherwise fetches one from nodejs.org — which the allowlist refuses. Our
+  sets `UV_FROZEN=1` in `[box].env` so that an ordinary `uv run` never relocks; if a stray one does
+  anyway, `git restore uv.lock` and redo the version line with `sed`, not `uv`. A relock you MEAN (a
+  dependency added or bumped) is fine from the box: `env -u UV_FROZEN uv lock`, then check that only
+  the packages you changed changed version — the rest of the diff is uv simplifying markers.
+- **`pyright` needs a Node runtime in the box.** The PyPI package is a wrapper that prefers a global
+  `node` and otherwise fetches one from nodejs.org — which the allowlist refuses. Our
   `[box].packages` installs Debian's `nodejs`; a box created before that needs
-  `fy box down && fy box up` to pick it up. `ty` runs regardless. If pyright could not
-  run, **say so** rather than reporting a green typecheck — CI is what actually gates it.
+  `fy box down && fy box up` to pick it up. `ty` runs regardless. If pyright could not run, **say
+  so** rather than reporting a green typecheck — CI is what actually gates it.
 - **A version, once published, is burned.** PyPI refuses re-uploads of a version even after you
   delete it. A botched release is fixed by releasing again, never by re-cutting the same number.

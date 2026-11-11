@@ -26,7 +26,9 @@ from foldyard import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "src" / "foldyard" / "assets" / "skills"
-_LINK = re.compile(r"\]\((?!https?:|mailto:)([^)\s#]*)(?:#[^)\s]*)?\)")
+# A relative link's path: `](path#frag)`, or `](<path#frag>)` — CommonMark's spelling for a target
+# holding `(`, `)` or a space, which mdformat writes. Absolute URLs either way are not pages.
+_LINK = re.compile(r"\]\(<?(?!https?:|mailto:)([^)\s#<>]*)(?:#[^)\s<>]*)?>?\)")
 _MAC = re.compile(r"\bMacs?\b")
 
 
