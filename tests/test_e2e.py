@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+import e2e_adoptions
+
 EXAMPLE = Path(__file__).resolve().parent.parent / "example"
 
 # The autouse `scrubbed_box_session_env` fixture (conftest) strips IN_DEVBOX from every test's
@@ -122,6 +124,7 @@ def _adopt_on_host(repo: Path, env_extra: dict[str, str] | None = None) -> None:
         return
     adopted = _foldyard(["config", "adopt"], repo, timeout=60, env_extra=env_extra)
     assert adopted.returncode == 0, f"fy config adopt failed:\n{adopted.stdout}\n{adopted.stderr}"
+    e2e_adoptions.record(repo)  # forgotten when the module ends (conftest)
 
 
 @pytest.fixture
