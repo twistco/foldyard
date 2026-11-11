@@ -260,7 +260,17 @@ def _speaks_first(port: int) -> socket.socket:
     return srv
 
 
-def test_a_raw_tunnel_to_a_granted_address_is_logged_and_closed_on_revoke(rig):
+def _read_until(sock: socket.socket, marker: bytes, what: str, diag: str) -> bytes:
+    got = b""
+    while marker not in got:
+        chunk = sock.recv(4096)
+        assert chunk, f"closed before {what}: {got!r}\n{diag}"
+        got += chunk
+    return got
+
+
+@pytest.mark.parametrize("target", ["127.0.0.1", "localhost"])
+def test_a_raw_tunnel_to_a_granted_address_is_logged_and_closed_on_revoke(rig, target):
     # SSH to a machine on your network through `fy allow add <address>:22`: the server speaks
     # first, no TLS, no request. It must flow, leave a row, and end when the grant goes, with
     # the wall only observing (the SSH spike, 2026-11-11).
@@ -272,15 +282,13 @@ def test_a_raw_tunnel_to_a_granted_address_is_logged_and_closed_on_revoke(rig):
         )
         time.sleep(1.5)  # the addon's poll
         raw = socket.create_connection((HOST, rig["pport"]), timeout=5)
-        raw.sendall(f"CONNECT {HOST}:{tport} HTTP/1.1\r\nHost: {HOST}\r\n\r\n".encode())
-        got = b""
-        while b"SSH-2.0-foldyard-e2e" not in got:  # sent nothing: the server spoke first
-            chunk = raw.recv(4096)
-            assert chunk, f"closed before the banner: {got!r}\n{rig['diag']()}"
-            got += chunk
+        # By name too: `localhost` lands on the granted address, and only where it landed says so.
+        raw.sendall(f"CONNECT {target}:{tport} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode())
+        # Sent nothing yet: the server speaks first. Read through the banner's line end.
+        got = _read_until(raw, b"SSH-2.0-foldyard-e2e\r\n", "the banner", rig["diag"]())
         assert got.startswith(b"HTTP/1.1 200"), got
         raw.sendall(b"ping")
-        assert raw.recv(4096) == b"ping"
+        assert _read_until(raw, b"ping", "the echo", rig["diag"]()) == b"ping"
 
         def row() -> dict | None:
             rows = (
@@ -295,7 +303,7 @@ def test_a_raw_tunnel_to_a_granted_address_is_logged_and_closed_on_revoke(rig):
         assert found is not None
         assert (found["method"], found["host"], found.get("local")) == (
             "TCP",
-            f"{HOST}:{tport}",
+            f"{target}:{tport}",
             True,
         )
 

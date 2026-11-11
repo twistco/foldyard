@@ -3598,8 +3598,20 @@ def test_the_host_and_the_proxy_agree_on_what_is_local(gh, address):
 # a revoke only closed it with the wall enforcing (the SSH spike, 2026-11-11).
 
 
-def _tunnel(inj, closer: _Closer, host: str, port: int, client_id: str) -> None:
-    """A CONNECT the policy lets through, then mitmproxy's eager dial of its target."""
+def _server_event(host: str, port: int, client_id: str, peer: str | None) -> object:
+    return types.SimpleNamespace(
+        server=types.SimpleNamespace(
+            address=(host, port), peername=(peer or host, port), error=None
+        ),
+        client=types.SimpleNamespace(id=client_id),
+    )
+
+
+def _tunnel(
+    inj, closer: _Closer, host: str, port: int, client_id: str, *, peer: str | None = None
+) -> None:
+    """A CONNECT the policy lets through, then mitmproxy's eager dial of its target and the
+    connection landing at ``peer`` (what a name resolved to; the address itself by default)."""
     closer.track(client_id)
     connect = _Flow(host, port=port)
     connect.client_conn = types.SimpleNamespace(id=client_id)
@@ -3607,6 +3619,44 @@ def _tunnel(inj, closer: _Closer, host: str, port: int, client_id: str) -> None:
     inj.http_connect(connect)
     assert connect.response is None, f"{host}:{port} refused at CONNECT"
     assert _dial(inj, host, port, client_id) is None, f"{host}:{port} refused at the dial"
+    inj.server_connected(_server_event(host, port, client_id, peer))
+
+
+def test_a_revoke_closes_a_tunnel_opened_by_a_name_that_resolved_local(observing, closer):
+    # `localhost` on a `127.0.0.1:2222` grant: the dial is vetted at resolution, so only where the
+    # connection landed says it is local (CodeRabbit on #182).
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "localhost", 2222, "ssh", peer="127.0.0.1")
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["ssh"]
+
+
+def test_a_revoke_closes_a_cleartext_connection_to_a_local_address(observing, closer):
+    # `curl --proxy … http://127.0.0.1:8123/`: no CONNECT, so nothing but the dial knows of it.
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
+    inj.refresh()
+    closer.track("plain")
+    assert _dial(inj, "127.0.0.1", 8123, "plain") is None
+    inj.server_connected(_server_event("127.0.0.1", 8123, "plain", None))
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["plain"]
+
+
+def test_a_local_connection_that_ended_is_forgotten(observing, closer):
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
+    inj.refresh()
+    closer.track("plain")
+    inj.server_connected(_server_event("127.0.0.1", 8123, "plain", None))
+    inj.server_disconnected(_server_event("127.0.0.1", 8123, "plain", None))
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == []
 
 
 def _tcp_start(inj, host: str, port: int, client_id: str, *, tls: bool = False) -> None:

@@ -1248,6 +1248,11 @@ class Injector:
         # Every connection a CONNECT let through, by client id: what `_sweep` re-judges when the
         # policy narrows (see `refresh`). Dropped on disconnect.
         self._conns: dict[str, dict] = {}
+        # Upstream connections that LANDED on a local address, by client id → {(address, port):
+        # reached by name}: from `server_connected`'s peer, so a name that resolved there counts,
+        # and a cleartext request (no CONNECT, no `_conns` entry) too. A dial there is judged in
+        # every mode, so `_sweep` re-judges these in every mode: a revoked grant closes them.
+        self._local_dials: dict[str, dict[tuple[str, int], bool]] = {}
         # Connections whose CONNECT the proxy answered itself, with no upstream dialled (see
         # `http_connect`), by client id → the refusal row still owed for it: written when a
         # request inside is refused (its own, fuller row replaces it), or when the connection
@@ -2157,13 +2162,8 @@ class Injector:
                         f"{_LOCAL_REFUSED} can't be told apart from a public one here: this "
                         "proxy can't vet name resolution, so it dials no name"
                     )
-            elif _is_local(ip):
-                if not self._local_granted(ip, port, build):
-                    data.server.error = self._refuse_local(host, ip, port, client_id)
-                elif client_id in self._conns:
-                    # Judged in every mode, so `_sweep` re-judges it in every mode too: a revoked
-                    # grant closes the session it let through, observing or not.
-                    self._conns[client_id]["local"] = (str(ip), port)
+            elif _is_local(ip) and not self._local_granted(ip, port, build):
+                data.server.error = self._refuse_local(host, ip, port, client_id)
             return
         data.server.error = _DIAL_REFUSED
         if client_id in self._answered:
@@ -2342,7 +2342,31 @@ class Injector:
             "build": build,  # tunnelled, and may use build-scoped grants
         }
 
+    def server_connected(self, data) -> None:
+        """Remember a connection that landed on a local address (see ``_local_dials``)."""
+        client_id = getattr(getattr(data, "client", None), "id", None)
+        server = getattr(data, "server", None)
+        peer, address = getattr(server, "peername", None), getattr(server, "address", None)
+        if client_id is None or not peer or not address:
+            return
+        ip = _address(str(peer[0]))
+        if ip is None or not _is_local(ip):
+            return
+        by_name = _address(str(address[0])) is None
+        self._local_dials.setdefault(client_id, {})[(str(ip), int(peer[1]))] = by_name
+
+    def server_disconnected(self, data) -> None:
+        client_id = getattr(getattr(data, "client", None), "id", None)
+        peer = getattr(getattr(data, "server", None), "peername", None)
+        dials = self._local_dials.get(client_id) if client_id is not None else None
+        if dials is None or not peer:
+            return
+        dials.pop((str(peer[0]), int(peer[1])), None)
+        if not dials:
+            self._local_dials.pop(client_id, None)
+
     def client_disconnected(self, client) -> None:
+        self._local_dials.pop(client.id, None)
         self._settle_answered(client.id)  # its CONNECT row, if nothing inside was refused
         self._answered.pop(client.id, None)
         self._build_clients.discard(client.id)
@@ -2368,27 +2392,28 @@ class Injector:
                 or (conn["build"] and self._build_granted(host, port, _HTTPS_PORT))
             )
             decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
-            local = conn.get("local")
-            ungranted = local is not None and not self._local_granted(
-                ipaddress.ip_address(local[0]), local[1], conn["build"]
-            )
-            if not (refused or decrypt_now or ungranted):
+            if not (refused or decrypt_now):
                 continue
             key = host if port == _HTTPS_PORT else f"{host}:{port}"
-            why = (
-                "the allowlist refuses it now"
-                if refused
-                else "its local address isn't granted now"
-                if ungranted
-                else "it is decrypted now"
-            )
+            why = "the allowlist refuses it now" if refused else "it is decrypted now"
             self._close(client_id, key, why)
+        for client_id, dials in list(self._local_dials.items()):
+            if client_id not in self._local_dials:  # closed by the loop above
+                continue
+            build = client_id in self._build_clients or client_id in self._build_requesters
+            for (address, port), by_name in dials.items():
+                ip = ipaddress.ip_address(address)
+                if not self._local_granted(ip, port, build, by_name=by_name):
+                    key = address if port == _HTTPS_PORT else f"{address}:{port}"
+                    self._close(client_id, key, "its local address isn't granted now")
+                    break
 
     def _close(self, client_id: str, key: str, why: str) -> None:
         """Close one client connection (and so its upstream). mitmproxy has no public API for a
         connection without a flow — a blind tunnel is exactly that — so this reaches its
         ``proxyserver`` addon's connection table, pinned by the real-mitmdump e2e."""
         self._conns.pop(client_id, None)
+        self._local_dials.pop(client_id, None)
         self._build_clients.discard(client_id)
         try:
             handler = ctx.master.addons.get("proxyserver").connections[client_id]
@@ -2522,7 +2547,7 @@ class Injector:
             "tunnel": True,
         }  # fmt: skip
         ip = _address(str(address[0]))
-        if conn.get("local") or (ip is not None and _is_local(ip)):
+        if client.id in self._local_dials or (ip is not None and _is_local(ip)):
             entry["local"] = True
         if conn.get("build"):
             entry["build"] = True
