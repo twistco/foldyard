@@ -42,6 +42,10 @@ Start from a clean tree (`git status` shows nothing), at the top of your clone:
    fy init --with claude
    ```
 
+   Size the VM here if the project needs more than the default 4 CPUs, 8 GiB of memory and
+   60 GiB of disk: add `--cpus`, `--memory` (MiB) and `--disk` (GiB). A heavy build (a C++
+   dependency built with Bazel, say) wants twice that.
+
 2. **Move the ignore block into the exclude list, and undo `fy init`'s other edits.**
 
    ```bash
@@ -110,6 +114,15 @@ fy worktree init <name>                    # copies it into the worktree again
 WORKTREE=<name> fy config diff             # then the worktree's own review
 WORKTREE=<name> fy config adopt
 ```
+
+An edit under `[box]` (packages, tools, shadow volumes, caches) also needs each box recreated
+after the adopt, since the box installs them only when it's created: `fy box down && fy box up`,
+and `WORKTREE=<name>` in front of both for a worktree's box.
+
+`fy worktree remove <name>` doesn't count the private files as uncommitted work, so it removes the
+worktree without asking about them. That loses nothing, since they are copies of main's. It
+keeps the worktree's branch (`wt/<name>` unless you named one); delete it with `git branch -d`
+when you're done with it.
 
 ## Telling the agent
 
