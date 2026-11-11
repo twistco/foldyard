@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from pathlib import Path
 
 from foldyard import configpin
@@ -31,8 +32,9 @@ def record(repo: Path) -> None:
     """Remember the folder ``repo`` was copied into, so its adoptions are forgotten later."""
     base = repo.resolve().parent
     # A copy straight under your home would make the home the folder to clear, and every
-    # project of yours with it.
-    assert base not in (Path.home().resolve(), Path("/")), f"no copy may sit in {base}"
+    # project of yours with it; one straight in the temp folder, every other run's adoptions.
+    shared = {Path.home(), Path("/"), Path(tempfile.gettempdir()), Path("/tmp")}
+    assert base not in {p.resolve() for p in shared}, f"no copy may sit in {base}"
     _bases.add(base)
 
 

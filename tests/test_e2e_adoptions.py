@@ -72,3 +72,10 @@ def test_refuses_a_copy_straight_under_your_home(adoptions, tmp_path, monkeypatc
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     with pytest.raises(AssertionError):
         e2e_adoptions.record(tmp_path / "example")
+
+
+def test_refuses_a_copy_straight_in_the_shared_temp_folder(adoptions, tmp_path, monkeypatch):
+    # The temp folder is everyone's: clearing it would take other runs' adoptions with it.
+    monkeypatch.setattr(e2e_adoptions.tempfile, "gettempdir", lambda: str(tmp_path))
+    with pytest.raises(AssertionError):
+        e2e_adoptions.record(tmp_path / "example")
