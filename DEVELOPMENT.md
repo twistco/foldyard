@@ -261,6 +261,15 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   gets a y/N offer, made by `boxpackages.py` — a textual edit of `[box].packages` proven by
   re-parsing, the file read `O_NOFOLLOW` and written via `mountwrite`. Never added unasked. Next
   phase: docs/fleet-scope.md.
+- `projects.py` — `fy ls`: every ADOPTED project on this computer, read-only. The host-side half
+  runs in-process under `config.using(<each checkout's adopted config>)` (so `config.X()` resolves
+  per project; module constants like `machine.MACHINE` don't and aren't used): one `limactl list`
+  for every VM, the supervisor's lock/readiness/fingerprint files, the version window, config drift,
+  registered worktrees whose directory is gone. The engine half (boxes, stacks, agents) is a child
+  `fy ls --here --json` in each checkout whose VM is ALREADY running (`selfspawn`, as `fy agent ls`
+  fans out) and never one below its `min_foldyard_version`, which would only be refused. Leftovers
+  are listed, never removed: Lima VMs carrying foldyard's boot script that no adopted project names
+  (one without it isn't foldyard's and isn't listed), and adoptions of vanished checkouts.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` · `vscode.py`
   · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI, `foldyard init`,
   bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>` podman connection

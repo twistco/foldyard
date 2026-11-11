@@ -70,6 +70,8 @@ _PROJECT_FREE = (
     ("skill", "list"),
     # Every local project's agents, from anywhere on your computer (`fy agent start` needs one).
     ("agent", "ls"),
+    # Every local project, from anywhere on your computer.
+    ("ls",),
     ("agent", "attach"),
     ("agent", "stop"),
     ("agent", "clean"),
@@ -379,6 +381,20 @@ def mode(
     from . import devmode
 
     raise typer.Exit(devmode.main(["show"] if not spec else ["set", *spec]))
+
+
+@app.command("ls")
+def ls(
+    as_json: bool = typer.Option(False, "--json", help="machine-readable output"),
+    here: bool = typer.Option(False, "--here", hidden=True, help="this project's engine side"),
+) -> None:
+    """Every foldyard project on your computer: its VM (state, size, disk used), host supervisor,
+    boxes up and running agents, then what needs attention (with the command that fixes it) and
+    what's left over (VMs no project uses, adoptions of vanished checkouts). Read-only: a stopped
+    VM is reported, never started."""
+    from . import projects
+
+    raise typer.Exit(projects.ls(here_only=here, as_json=as_json))
 
 
 @app.command()
