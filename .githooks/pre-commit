@@ -8,7 +8,8 @@
 #
 # Like any hook it runs from this checkout on whichever side you commit — in the box (through its
 # git shim) or on your computer — so on your computer it is code the box can write
-# (docs/security.md). This one is tracked, so a change to it shows in the diff you review.
+# (docs/security.md): an edit to this file or to the `lint` recipe, committed or not, runs at your
+# next commit, before you have reviewed it.
 if ! command -v just >/dev/null 2>&1; then
     echo "pre-commit: \`just\` isn't on PATH here — not linted (\`just lint\` before you push)" >&2
     exit 0
