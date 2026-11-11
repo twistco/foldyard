@@ -590,6 +590,11 @@ def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address | No
         return None
 
 
+def _upstream_key(server) -> object:
+    """One upstream connection's identity: mitmproxy's own id for it, else where it landed."""
+    return getattr(server, "id", None) or tuple(getattr(server, "peername", None) or ())
+
+
 def _is_local(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Is ``ip`` somewhere other than the public internet — the proxy's own computer (loopback),
     its network (the private ranges, CGNAT's — a tailnet's — and IPv6's unique-local), link-local
@@ -1248,11 +1253,17 @@ class Injector:
         # Every connection a CONNECT let through, by client id: what `_sweep` re-judges when the
         # policy narrows (see `refresh`). Dropped on disconnect.
         self._conns: dict[str, dict] = {}
-        # Upstream connections that LANDED on a local address, by client id → {(address, port):
-        # reached by name}: from `server_connected`'s peer, so a name that resolved there counts,
-        # and a cleartext request (no CONNECT, no `_conns` entry) too. A dial there is judged in
-        # every mode, so `_sweep` re-judges these in every mode: a revoked grant closes them.
-        self._local_dials: dict[str, dict[tuple[str, int], bool]] = {}
+        # Upstream connections that LANDED on a local address, by client id → {upstream id:
+        # (address, port, reached by name)}: from `server_connected`'s peer, so a name that
+        # resolved there counts, and a cleartext request (no CONNECT, no `_conns` entry) too. By
+        # the upstream's own id: one client may hold two to the same address and port (concurrent
+        # HTTP/2 requests to an HTTP/1 upstream), and one ending must forget only itself. A dial
+        # there is judged in every mode, so `_sweep` re-judges these in every mode: a revoked
+        # grant closes them.
+        self._local_dials: dict[str, dict[object, tuple[str, int, bool]]] = {}
+        # Client connections carrying a raw TCP tunnel (`tcp_start`): bytes no request hook sees,
+        # so a path grant is no grant for them when `_sweep` re-judges them. Dropped on disconnect.
+        self._raw_clients: set[str] = set()
         # Connections whose CONNECT the proxy answered itself, with no upstream dialled (see
         # `http_connect`), by client id → the refusal row still owed for it: written when a
         # request inside is refused (its own, fuller row replaces it), or when the connection
@@ -2353,20 +2364,22 @@ class Injector:
         if ip is None or not _is_local(ip):
             return
         by_name = _address(str(address[0])) is None
-        self._local_dials.setdefault(client_id, {})[(str(ip), int(peer[1]))] = by_name
+        dials = self._local_dials.setdefault(client_id, {})
+        dials[_upstream_key(server)] = (str(ip), int(peer[1]), by_name)
 
     def server_disconnected(self, data) -> None:
         client_id = getattr(getattr(data, "client", None), "id", None)
-        peer = getattr(getattr(data, "server", None), "peername", None)
+        server = getattr(data, "server", None)
         dials = self._local_dials.get(client_id) if client_id is not None else None
-        if dials is None or not peer:
+        if dials is None or server is None:
             return
-        dials.pop((str(peer[0]), int(peer[1])), None)
+        dials.pop(_upstream_key(server), None)
         if not dials:
             self._local_dials.pop(client_id, None)
 
     def client_disconnected(self, client) -> None:
         self._local_dials.pop(client.id, None)
+        self._raw_clients.discard(client.id)
         self._settle_answered(client.id)  # its CONNECT row, if nothing inside was refused
         self._answered.pop(client.id, None)
         self._build_clients.discard(client.id)
@@ -2391,6 +2404,10 @@ class Injector:
                 self._connect_ok(host, port, conn["build"])
                 or (conn["build"] and self._build_granted(host, port, _HTTPS_PORT))
             )
+            # A raw tunnel can't be judged request by request: a host left granted only for
+            # paths is no grant for it (`tcp_message` would refuse its next bytes anyway).
+            if client_id in self._raw_clients and self._path_only(host, conn["build"]):
+                refused = self.default_deny
             decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
             if not (refused or decrypt_now):
                 continue
@@ -2401,9 +2418,11 @@ class Injector:
             if client_id not in self._local_dials:  # closed by the loop above
                 continue
             build = client_id in self._build_clients or client_id in self._build_requesters
-            for (address, port), by_name in dials.items():
+            raw = client_id in self._raw_clients
+            for address, port, by_name in list(dials.values()):
                 ip = ipaddress.ip_address(address)
-                if not self._local_granted(ip, port, build, by_name=by_name):
+                # `by_name` drops the path grants, which a raw tunnel can't use either.
+                if not self._local_granted(ip, port, build, by_name=by_name or raw):
                     key = address if port == _HTTPS_PORT else f"{address}:{port}"
                     self._close(client_id, key, "its local address isn't granted now")
                     break
@@ -2414,6 +2433,7 @@ class Injector:
         ``proxyserver`` addon's connection table, pinned by the real-mitmdump e2e."""
         self._conns.pop(client_id, None)
         self._local_dials.pop(client_id, None)
+        self._raw_clients.discard(client_id)
         self._build_clients.discard(client_id)
         try:
             handler = ctx.master.addons.get("proxyserver").connections[client_id]
@@ -2533,6 +2553,7 @@ class Injector:
         address = getattr(getattr(flow, "server_conn", None), "address", None)
         if client is None or getattr(client, "tls_established", False) or not address:
             return
+        self._raw_clients.add(client.id)
         conn = self._conns.get(client.id) or {}
         host = conn.get("host") or _norm_host(str(address[0]))
         port = conn.get("port") or int(address[1])
@@ -2566,7 +2587,10 @@ class Injector:
         host = _norm_host(str(address[0])) if address else None
         client_id = getattr(getattr(flow, "client_conn", None), "id", None)
         build = client_id is not None and client_id in self._build_clients
-        if not self.default_deny or not self._path_only(host, build):
+        ip = _address(host) if host else None
+        # A local address is judged in every mode (its dial was), so its raw bytes are too.
+        enforced = self.default_deny or (ip is not None and _is_local(ip))
+        if not enforced or not self._path_only(host, build):
             return
         if flow.messages:
             flow.messages[-1].content = b""
@@ -2577,6 +2601,8 @@ class Injector:
         if entry is not None:
             entry["method"] = "TCP"
             entry["outside"] = True
+            if ip is not None and _is_local(ip):
+                entry["local"] = True
             self._write_entry(entry, client_id)
         if client_id is not None:
             self._close(client_id, str(host), "raw bytes to a host granted only for paths")

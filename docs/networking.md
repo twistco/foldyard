@@ -343,6 +343,10 @@ A client that speaks neither TLS nor HTTP through such a grant, SSH to a machine
 example, is relayed as it is. Its Network Log row says `tcp tunnel`: where it went and when, never
 what was said.
 
+A path grant on a local address (`fy allow add 127.0.0.1/repo/`) never carries one: its requests are
+judged one by one, and raw bytes can't be, so they are refused whether the allowlist is enforcing or
+not. A grant narrowed from the whole address to a path closes such a tunnel.
+
 A host on your network or VPN reached by name (an internal registry, say) resolves to a private
 address, so it is refused the same way; the refusal names the address to grant.
 
