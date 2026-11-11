@@ -2157,8 +2157,13 @@ class Injector:
                         f"{_LOCAL_REFUSED} can't be told apart from a public one here: this "
                         "proxy can't vet name resolution, so it dials no name"
                     )
-            elif _is_local(ip) and not self._local_granted(ip, port, build):
-                data.server.error = self._refuse_local(host, ip, port, client_id)
+            elif _is_local(ip):
+                if not self._local_granted(ip, port, build):
+                    data.server.error = self._refuse_local(host, ip, port, client_id)
+                elif client_id in self._conns:
+                    # Judged in every mode, so `_sweep` re-judges it in every mode too: a revoked
+                    # grant closes the session it let through, observing or not.
+                    self._conns[client_id]["local"] = (str(ip), port)
             return
         data.server.error = _DIAL_REFUSED
         if client_id in self._answered:
@@ -2363,10 +2368,20 @@ class Injector:
                 or (conn["build"] and self._build_granted(host, port, _HTTPS_PORT))
             )
             decrypt_now = blind is not None and not self._tunnel(blind, conn["build"])
-            if not (refused or decrypt_now):
+            local = conn.get("local")
+            ungranted = local is not None and not self._local_granted(
+                ipaddress.ip_address(local[0]), local[1], conn["build"]
+            )
+            if not (refused or decrypt_now or ungranted):
                 continue
             key = host if port == _HTTPS_PORT else f"{host}:{port}"
-            why = "the allowlist refuses it now" if refused else "it is decrypted now"
+            why = (
+                "the allowlist refuses it now"
+                if refused
+                else "its local address isn't granted now"
+                if ungranted
+                else "it is decrypted now"
+            )
             self._close(client_id, key, why)
 
     def _close(self, client_id: str, key: str, why: str) -> None:
@@ -2482,6 +2497,36 @@ class Injector:
             self._log_passthrough(target, client_id=client.id if client is not None else None)
             if conn is not None:
                 conn["blind"] = target
+
+    def tcp_start(self, flow) -> None:
+        """One row for a raw TCP tunnel: a CONNECT whose client spoke neither TLS nor HTTP (SSH,
+        say), which no other hook sees, so a granted one left no trace at all. Raw bytes inside a
+        tunnel the proxy decrypted are ``tcp_message``'s, not a tunnel of their own. Keyed by what
+        the box asked for (``host:port``, the grant's spelling), marked ``local`` when it leads to
+        your computer or its network."""
+        client = getattr(flow, "client_conn", None)
+        address = getattr(getattr(flow, "server_conn", None), "address", None)
+        if client is None or getattr(client, "tls_established", False) or not address:
+            return
+        conn = self._conns.get(client.id) or {}
+        host = conn.get("host") or _norm_host(str(address[0]))
+        port = conn.get("port") or int(address[1])
+        entry = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "method": "TCP",
+            "host": host if port == _HTTPS_PORT else f"{host}:{port}",
+            "path": "",
+            "status": 0,
+            "injected": False,
+            "replayed": False,
+            "tunnel": True,
+        }  # fmt: skip
+        ip = _address(str(address[0]))
+        if conn.get("local") or (ip is not None and _is_local(ip)):
+            entry["local"] = True
+        if conn.get("build"):
+            entry["build"] = True
+        self._write_entry(entry, client.id)
 
     def tcp_message(self, flow) -> None:
         """Raw bytes inside a decrypted tunnel to a host granted only for paths are never relayed.

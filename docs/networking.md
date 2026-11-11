@@ -336,7 +336,12 @@ curl --noproxy '' --proxy "$HTTP_PROXY" http://127.0.0.1:8123/
 ```
 
 Remove the grant when you're done (`fy allow remove 127.0.0.1:8123`): until then the box reaches
-whatever listens on that port.
+whatever listens on that port. Removing it also closes every connection it let through, whether the
+allowlist is enforcing or not, so a session that's still open doesn't outlive the grant.
+
+A client that speaks neither TLS nor HTTP through such a grant, SSH to a machine on your network for
+example, is relayed as it is. Its Network Log row says `tcp tunnel`: where it went and when, never
+what was said.
 
 A host on your network or VPN reached by name (an internal registry, say) resolves to a private
 address, so it is refused the same way; the refusal names the address to grant.

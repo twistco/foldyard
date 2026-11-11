@@ -106,7 +106,8 @@ def rig(tmp_path):
         _wait((confdir / "mitmproxy-ca-cert.pem").exists, 30, "the mitm CA", diag())
         yield {
             "proc": proc, "live": live, "uport": uport, "pport": pport, "cert": cert,
-            "ca": confdir / "mitmproxy-ca-cert.pem", "diag": diag,
+            "ca": confdir / "mitmproxy-ca-cert.pem", "diag": diag, "allow": allow,
+            "log": tmp_path / "e.jsonl",
         }  # fmt: skip
     finally:
         proc.terminate()
@@ -232,3 +233,85 @@ def test_a_held_dummy_is_answered_by_the_proxy_and_nothing_else_is(rig):
     assert got.startswith(b"HTTP/1.1 401"), got
     assert b"application/json" in got.lower()
     assert _get(sock).endswith(b"ok")  # no dummy: forwarded as ever
+
+
+def _speaks_first(port: int) -> socket.socket:
+    """A TCP service that talks before the client does, as sshd does, then echoes."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((HOST, port))
+    srv.listen()
+
+    def handle(conn: socket.socket) -> None:
+        with conn:
+            conn.sendall(b"SSH-2.0-foldyard-e2e\r\n")
+            while data := conn.recv(4096):
+                conn.sendall(data)
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def test_a_raw_tunnel_to_a_granted_address_is_logged_and_closed_on_revoke(rig):
+    # SSH to a machine on your network through `fy allow add <address>:22`: the server speaks
+    # first, no TLS, no request. It must flow, leave a row, and end when the grant goes, with
+    # the wall only observing (the SSH spike, 2026-11-11).
+    tport = _free_port()
+    srv = _speaks_first(tport)
+    try:
+        rig["allow"].write_text(
+            json.dumps({"allow": [f"{HOST}:{rig['uport']}", f"{HOST}:{tport}"]})
+        )
+        time.sleep(1.5)  # the addon's poll
+        raw = socket.create_connection((HOST, rig["pport"]), timeout=5)
+        raw.sendall(f"CONNECT {HOST}:{tport} HTTP/1.1\r\nHost: {HOST}\r\n\r\n".encode())
+        got = b""
+        while b"SSH-2.0-foldyard-e2e" not in got:  # sent nothing: the server spoke first
+            chunk = raw.recv(4096)
+            assert chunk, f"closed before the banner: {got!r}\n{rig['diag']()}"
+            got += chunk
+        assert got.startswith(b"HTTP/1.1 200"), got
+        raw.sendall(b"ping")
+        assert raw.recv(4096) == b"ping"
+
+        def row() -> dict | None:
+            rows = (
+                [json.loads(x) for x in rig["log"].read_text().splitlines()]
+                if rig["log"].exists()
+                else []
+            )
+            return next((r for r in rows if r.get("tunnel")), None)
+
+        _wait(lambda: row() is not None, 10, "the tunnel's row", rig["diag"]())
+        found = row()
+        assert found is not None
+        assert (found["method"], found["host"], found.get("local")) == (
+            "TCP",
+            f"{HOST}:{tport}",
+            True,
+        )
+
+        rig["allow"].write_text(json.dumps({"allow": [f"{HOST}:{rig['uport']}"]}))  # revoked
+
+        def closed() -> bool:
+            raw.settimeout(0.2)
+            try:
+                return raw.recv(1) == b""
+            except TimeoutError:
+                return False
+            except OSError:
+                return True
+
+        _wait(closed, 5, "the tunnel to be closed", rig["diag"]())
+        assert rig["proc"].poll() is None
+        _wait(lambda: "isn't granted now" in rig["diag"](), 10, "the close log line", rig["diag"]())
+    finally:
+        srv.close()

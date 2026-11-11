@@ -3590,3 +3590,95 @@ def test_the_host_and_the_proxy_agree_on_what_is_local(gh, address):
     ip = gh.module._address(address)
     assert ip is not None
     assert gh.module._is_local(ip) is allowlist.local_key(address), address
+
+
+# ── a granted raw tunnel to a local address (SSH to a machine on your network) ─────────────────
+# `fy allow add 192.168.1.50:22` is the one way a box reaches a service on your network, and an
+# SSH session through it is a raw TCP tunnel: no TLS, no request, so no row was ever written and
+# a revoke only closed it with the wall enforcing (the SSH spike, 2026-11-11).
+
+
+def _tunnel(inj, closer: _Closer, host: str, port: int, client_id: str) -> None:
+    """A CONNECT the policy lets through, then mitmproxy's eager dial of its target."""
+    closer.track(client_id)
+    connect = _Flow(host, port=port)
+    connect.client_conn = types.SimpleNamespace(id=client_id)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None, f"{host}:{port} refused at CONNECT"
+    assert _dial(inj, host, port, client_id) is None, f"{host}:{port} refused at the dial"
+
+
+def _tcp_start(inj, host: str, port: int, client_id: str, *, tls: bool = False) -> None:
+    flow = types.SimpleNamespace(
+        client_conn=types.SimpleNamespace(id=client_id, tls_established=tls),
+        server_conn=types.SimpleNamespace(address=(host, port)),
+        metadata={},
+    )
+    inj.tcp_start(flow)
+
+
+@pytest.mark.parametrize("enforcing", [False, True])
+def test_a_revoked_local_grant_closes_its_tunnel_in_every_mode(observing, closer, enforcing):
+    inj, allow, _log = observing
+    inj.default_deny = enforcing  # the live file's switch (`fy allow enforce`)
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 2222, "ssh")
+    _tunnel(inj, closer, "granted.example.com", 443, "web")
+    _write_allow(allow, ["granted.example.com"], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["ssh"]
+
+
+def test_a_local_grant_kept_closes_nothing(observing, closer):
+    inj, allow, _log = observing
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:2222", "10.0.0.5:22"], False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 2222, "ssh")
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:2222"], False)  # another one went
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_raw_tunnel_gets_one_row_naming_where_it_went(observing, closer):
+    inj, allow, log = observing
+    inj.default_deny = True
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 2222, "ssh")
+    before = len(_rows(log))
+    _tcp_start(inj, "127.0.0.1", 2222, "ssh")
+    rows = _rows(log)[before:]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["method"], row["host"], row["tunnel"], row["local"]) == (
+        "TCP",
+        "127.0.0.1:2222",
+        True,
+        True,
+    )
+    assert not row.get("blocked") and not row.get("would_block")
+
+
+def test_raw_bytes_inside_a_decrypted_tunnel_get_no_tunnel_row(observing, closer):
+    # TLS the proxy decrypted, then not HTTP: that's `tcp_message`'s case, not a tunnel of its own.
+    inj, _allow, log = observing
+    _tunnel(inj, closer, "granted.example.com", 443, "web")
+    before = len(_rows(log))
+    _tcp_start(inj, "granted.example.com", 443, "web", tls=True)
+    assert _rows(log)[before:] == []
+
+
+def test_the_network_log_shows_a_raw_tunnel_as_one(tmp_path, monkeypatch):
+    from foldyard import allowlist
+    from foldyard.plugins import proxy
+
+    monkeypatch.setattr(allowlist, "live_hosts", lambda: [])
+    monkeypatch.setattr(allowlist, "declined", lambda: set())
+
+    row = {"ts": "2026-11-11T20:00:00+00:00", "method": "TCP", "host": "192.168.1.50:22",
+           "path": "", "status": 0, "tunnel": True, "local": True}  # fmt: skip
+    assert "tcp tunnel" in proxy._net_leaf_body(row, lambda s: s)
+    # Not offered by `fy allow learn`: it went through on a grant, and carries no path.
+    assert allowlist.learned_hosts([row], {"since": row["ts"], "until": row["ts"]}) == []
