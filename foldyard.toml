@@ -216,6 +216,10 @@ warmup = [{ dir = ".", run = "uv sync --frozen" }]
 # deliberately (`uv lock`) instead of picking it up as a side effect of running a test.
 env = { UV_LINK_MODE = "copy", UV_FROZEN = "1" }
 caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is under HOME
+# Lint before every commit made in a box: .githooks/pre-commit runs `just lint`. Set in the box's
+# OWN git config (its home), not the shared .git/config, so git on your computer runs no hook
+# unless you turn it on there yourself (`just hooks`). One setting either way: never twice.
+bootstrap = "git config --global core.hooksPath .githooks"
 #
 # System packages, baked ONCE into a cached layer on the box image (`<tag>-packages`) rather
 # than reinstalled by every fresh box's bootstrap. Each, and why:

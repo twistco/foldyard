@@ -144,14 +144,21 @@ lint:
     cd "{{_dir}}"
     {{_md_files}} | xargs -0 uv run --project "{{_dir}}" {{_mdformat}} --check
 
-# Lint before every commit: point this clone's git at the tracked hooks in .githooks/ (one
-# setting in .git/config, shared by every worktree and by the box). Undo: `git config --unset
-# core.hooksPath`. The hook runs from the checkout on your computer too — see .githooks/pre-commit.
+# Lint before every commit made ON YOUR COMPUTER too: point this clone's .git/config at the tracked
+# hooks in .githooks/. Boxes have it already, in their own git config (`[box].bootstrap`); this
+# shared setting is the opt-in for your computer, where the hook is code from the box-writable
+# checkout (see .githooks/pre-commit). Refused in a box: written from there, it would turn the
+# hook on for your computer. Undo: `git config --unset core.hooksPath`.
 hooks:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ "${IN_DEVBOX:-}" = 1 ]; then
+        echo "✗ run \`just hooks\` on your computer: boxes lint on commit already (foldyard.toml's [box].bootstrap)," >&2
+        echo "  and this setting is the shared .git/config's — from here it would turn the hook on for your computer" >&2
+        exit 1
+    fi
     git -C "{{_dir}}" config core.hooksPath .githooks
-    echo "✓ pre-commit runs \`just lint\` now (skip once: git commit --no-verify)"
+    echo "✓ commits on this computer run \`just lint\` now (skip once: git commit --no-verify)"
 
 # Auto-format + apply safe lint fixes (ruff), and wrap the Markdown (mdformat).
 format:
