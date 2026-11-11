@@ -14,6 +14,7 @@ import pytest
 from hypothesis import HealthCheck, settings
 from hypothesis.database import DirectoryBasedExampleDatabase
 
+import e2e_adoptions
 from foldyard import config, devmode, plugins
 
 # The env the session started with, before any fixture: what a live module must still see
@@ -353,6 +354,16 @@ def isolated_config_pin(tmp_path, monkeypatch):
     supervisor._held_cursor.clear()
     supervisor._held_notified.clear()
     supervisor._inject_overlaps_seen.clear()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def forget_live_adoptions(request):
+    """After a live module that drives the real CLI, forget what it adopted on your computer
+    (tests/e2e_adoptions.py): its copies' adoptions, which nothing else ever removed. Module-scoped
+    and autouse, so it is torn down after the module's own fixtures and their `fy down`."""
+    yield
+    if _runs_the_real_cli(request.module):
+        e2e_adoptions.forget_recorded()
 
 
 @pytest.fixture(autouse=True)
