@@ -2226,8 +2226,9 @@ def _up(
     ctx, engine: str, box: str, net: str, *, recreate: bool = False, args: list[str] | None = None
 ) -> int:
     """`fy box up`, and with ``recreate`` `fy box recreate`: everything that can refuse runs
-    first (the gates, the captures, the supervisor's readiness), so a restart that can't go
-    ahead leaves the running box as it was."""
+    first (the gates, the captures, the supervisor's readiness, the image build, the plugins'
+    box args, the network check), and a running box is removed only right before its
+    replacement is created, so a restart that can't go ahead leaves it as it was."""
     env = ctx.env
     img = config.box_image()["tag"]
     main = ctx.main
@@ -2269,11 +2270,12 @@ def _up(
     expected_fingerprint = _box_image_fingerprint(main)
 
     prepared = False
-    if recreate and _running(engine, box, env):
-        # What `box down` does, after everything above had its chance to refuse, and after the
-        # image is built: a changed box.Dockerfile or [box].packages is what a recreate is run for,
-        # and its build is what the egress wall can refuse. Then on to the create below, as if
-        # the box had never been there.
+    # A recreate of a running box: what `box down` does, but only once everything below that can
+    # still refuse has had its chance (the build a changed box.Dockerfile or [box].packages needs,
+    # which the egress wall can refuse; the plugins' box args; the network). `_replace` removes it
+    # right before the create.
+    replacing = recreate and _running(engine, box, env)
+    if replacing:
         if not _agents_may_stop(engine, box, env, args or []):
             print("Aborted — the box is still running.")
             return 1
@@ -2282,15 +2284,8 @@ def _up(
             print(f"✗ The box image didn't build: dev box {box} is still running, as it was.")
             return rc
         prepared = True
-        if _remove(engine, box, env) is None:
-            print(
-                f"✗ Couldn't remove dev box {box}: it's still running, as it was "
-                f"(`{engine} rm -f {box}` refused)."
-            )
-            return 1
-        print(f"✓ dev box {box} removed (login/CLI volumes kept) — creating it again…")
 
-    if _running(engine, box, env):
+    if not replacing and _running(engine, box, env):
         _warn_stale_proxy_port(engine, box, env)  # a pre-band box strands on a dead proxy port
         _warn_stale_runtime(engine, box, env)  # [machine].runtime is create-time too
         _, run_fingerprint = _box_run_image(engine, img, expected_fingerprint, env)
@@ -2330,7 +2325,7 @@ def _up(
             )
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
-    if _exists(engine, box, env):
+    if not replacing and _exists(engine, box, env):
         subprocess.run(
             [engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
@@ -2363,28 +2358,6 @@ def _up(
     env["FY_CLAUDE_HOME"] = claude_in_box
     env["FY_TRANSCRIPTS"] = transcripts_dir
     env["FY_CODEX_TRANSCRIPTS"] = os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_out
-    if from_box:
-        from . import transcripts
-
-        # The legacy bind-out is dead from here (its bind is create-time, the old box is gone):
-        # moved into the slot each agent now binds, or archived and kept where it binds elsewhere.
-        def _slot(enabled: bool, override: str, out: str) -> Path | None:
-            return Path(out) if enabled and not os.environ.get(override) else None
-
-        transcripts.migrate_legacy(
-            Path(checkout),
-            here,
-            claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
-            codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
-        )
-    print(f"▶ starting long-lived dev box {box} (network {net})…")
-    if config.claude_enabled():
-        print(
-            f"  claude home → {claude_in_box} (in box); transcripts → {transcripts_dir} (on your computer; survives nuke)"
-        )
-    if config.codex_enabled():
-        print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on your computer; survives nuke)")
-
     # Mount the MAIN repo root (a worktree's `.git` points into it) + the WORKTREES ROOT, so every
     # box sees every sibling checkout: an agent can read/edit a worktree copy (the machine already
     # mounts this root — it was only the container that couldn't see it), and `worktree init_config`
@@ -2500,6 +2473,37 @@ def _up(
             "⚠ not masked in this box, so an install there from it lands on your computer's disk: "
             + ", ".join(unmaskable)
         )
+
+    if replacing:
+        # Everything above that could refuse has passed: the old box goes now, and only now.
+        if _remove(engine, box, env) is None:
+            print(
+                f"✗ Couldn't remove dev box {box}: it's still running, as it was "
+                f"(`{engine} rm -f {box}` refused)."
+            )
+            return 1
+        print(f"✓ dev box {box} removed (login/CLI volumes kept) — creating it again…")
+    if from_box:
+        from . import transcripts
+
+        # The legacy bind-out is dead from here (its bind is create-time, the old box is gone):
+        # moved into the slot each agent now binds, or archived and kept where it binds elsewhere.
+        def _slot(enabled: bool, override: str, out: str) -> Path | None:
+            return Path(out) if enabled and not os.environ.get(override) else None
+
+        transcripts.migrate_legacy(
+            Path(checkout),
+            here,
+            claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
+            codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
+        )
+    print(f"▶ starting long-lived dev box {box} (network {net})…")
+    if config.claude_enabled():
+        print(
+            f"  claude home → {claude_in_box} (in box); transcripts → {transcripts_dir} (on your computer; survives nuke)"
+        )
+    if config.codex_enabled():
+        print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on your computer; survives nuke)")
 
     run = [
         engine,

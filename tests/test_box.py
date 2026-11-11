@@ -2414,6 +2414,71 @@ def test_recreate_builds_before_it_removes(fake, monkeypatch):
     assert order[:2] == ["build", "rm"] and order.count("build") == 1
 
 
+def test_recreate_keeps_the_box_when_a_plugins_box_args_refuse(fake, monkeypatch, capsys):
+    # The plugins' box args can refuse (a SystemExit naming what's missing): after the build,
+    # before the create, and so before the old box goes.
+    _running_box(fake, monkeypatch)
+    real = box.registry()
+
+    class _Refusing:
+        def box_args(self, env):
+            raise SystemExit("✗ a plugin refuses")
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(box, "registry", lambda: _Refusing())
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
+def test_recreate_keeps_the_box_when_its_network_is_missing(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_has_compose", lambda: True)
+    monkeypatch.setattr(box.config, "external_network", lambda: False)
+    monkeypatch.setattr(box.stack, "network_exists", lambda *a: False)
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
+def test_recreate_removes_the_old_box_right_before_the_new_one_is_created(
+    fake, monkeypatch, tmp_path
+):
+    _running_box(fake, monkeypatch)
+    (tmp_path / "from-box").mkdir()
+    monkeypatch.setattr(box.boxmounts, "from_box_dir", lambda: tmp_path / "from-box")
+    order: list = []
+    run = box.subprocess.run
+
+    def recording(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            order.append("rm")
+        elif cmd[1:3] == ["run", "-d"]:
+            order.append("create")
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", recording)
+    from foldyard import transcripts
+
+    monkeypatch.setattr(transcripts, "migrate_legacy", lambda *a, **k: order.append("migrate"))
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    real = box.registry()
+
+    class _Recording:
+        def box_args(self, env):
+            order.append("box args")
+            return real.box_args(env)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(box, "registry", lambda: _Recording())
+    assert box.main("recreate", ["--yes"]) == 0
+    # Everything that can refuse first; the legacy transcripts move only once the box that bound
+    # them is gone.
+    assert order == ["box args", "rm", "migrate", "create"]
+
+
 def test_recreate_fails_when_the_old_box_wont_go(fake, monkeypatch, capsys):
     # `rm -f` refused: the old box still runs, with its old env and mounts. Saying "removed" and
     # then "already up" would be a recreate that did nothing and reported success.
