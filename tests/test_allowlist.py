@@ -952,6 +952,16 @@ def test_a_path_grant_can_be_for_builds_only(env):
     assert allowlist.build_hosts() == []
 
 
+def test_a_path_grant_covers_the_paths_under_it_on_a_segment_boundary():
+    held = ["objects.example.com/pkg/", "objects.example.com/raw"]
+    assert allowlist.covered("objects.example.com/pkg/v2/", held)
+    assert allowlist.covered("objects.example.com/raw/x/", held)  # `raw` covers itself and below
+    assert not allowlist.covered("objects.example.com/pkgs/", held)  # a sibling, not a child
+    assert not allowlist.covered("objects.example.com/rawer/", held)
+    assert not allowlist.covered("other.example.com/pkg/v2/", held)  # another host
+    assert not allowlist.covered("objects.example.com/", held)  # not a path grant at all
+
+
 def test_a_whole_host_grant_covers_a_path_one():
     assert allowlist.covered(_GCS_PATH, ["storage.googleapis.com"])
     assert allowlist.covered(_GCS_PATH, ["*.googleapis.com"])
@@ -977,6 +987,12 @@ def test_recommend_takes_a_path_grant_as_the_store_keys_it(env):
         "'cdn.example.com/a/../b/'",
         "'*.googleapis.com/a/'",
     ]
+
+
+def test_a_recommend_that_is_not_a_list_is_reported_ignored(env):
+    _recommend(env, '"pypi.org"')
+    assert config.proxy_recommend() == []
+    assert config.proxy_recommend_dropped() == ["'pypi.org'"]
 
 
 def test_a_recommended_path_is_answered_by_its_path_or_its_whole_host(env):
@@ -1026,6 +1042,14 @@ def test_a_build_refusal_offers_its_first_directory(env):
     # answers it, and the entry says it was a write.
     (entry,) = allowlist.build_refusals([row("/upload/x", method="PUT")], since)
     assert entry["scopes"] == [] and entry["whole"] is True and entry["writes"] == ["PUT"]
+    # Box-chosen method names are capped like the other samples.
+    many = [row("/upload/x", method=f"M{i}") for i in range(10)]
+    (entry,) = allowlist.build_refusals(many, since)
+    assert len(entry["writes"]) == 3
+    # Directories past the offer limit are counted, distinct, not listed.
+    dirs = [row(f"/d{i}/x") for i in range(5)] + [row("/d4/y")]
+    (entry,) = allowlist.build_refusals(dirs, since)
+    assert len(entry["scopes"]) == allowlist.SCOPE_OFFERS and entry["more_scopes"] == 2
     # A path already granted for builds isn't offered again; another directory on the host is.
     allowlist.grant(_GCS_PATH, "session", build=True)
     (entry,) = allowlist.build_refusals([row(zip_), row("/other-bucket/x")], since)

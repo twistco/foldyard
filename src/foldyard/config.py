@@ -1044,8 +1044,10 @@ def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
     from .allowlist import grant_key  # stdlib-only, no cycle: allowlist never imports config-time
 
     raw = _table("proxy").get("recommend")
-    if not isinstance(raw, list):
+    if raw is None:
         return [], []
+    if not isinstance(raw, list):
+        return [], [repr(raw)[:80]]  # `recommend = "pypi.org"`: a value, not a list of them
     out: list[dict] = []
     dropped: list[str] = []
     for entry in raw:

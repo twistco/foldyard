@@ -743,3 +743,9 @@ def test_an_ignored_recommendation_is_named_not_dropped_silently(checkout):
     assert ok is None and "`proxy.recommend` ignores 2 entries" in detail
     body = rendered(cfg)
     assert "ignored recommendations" in body and "cdn.example.com/a/../b/" in body
+
+
+def test_a_recommend_that_is_not_a_list_is_reported_too(checkout):
+    exp = collect(checkout(BASE + 'recommend = "pypi.org"\n'))
+    assert exp.recommended == [] and exp.recommend_dropped == ["'pypi.org'"]
+    assert exposure.doctor_row(exp)[0] is None  # WARN: config that reads as an ask and isn't

@@ -228,10 +228,12 @@ belongs in the middle — but *one* middle, not a switch between two.
     GnuTLS, the gVisor posture's runtime, which the crun wrapper doesn't front) fails its
     handshake and leaves the CONNECT's row, as before — the gate then offers the host. The cost
     is that tool's error: a certificate failure where it used to read a 403. Only a read shapes a
-    path; anything else falls back to the host, except on a host already granted for some paths
-    (to builds or the box), where a refusal beyond them is reported and never offered as the
-    host: that fallback was the whole-host upload channel again, behind one keypress (PR review,
-    #177).
+    path, and reads in several directories are offered as that many path grants in one prompt:
+    falling back to the host there let a box-edited step turn a path offer into a whole-host one
+    by reading from a second bucket. The host is offered only when nothing narrower answers (a
+    write, no path, more than 3 directories), and never on a host already granted for some paths
+    (to builds or the box): a refusal beyond them is reported, not offered — that fallback was
+    the whole-host upload channel again, behind one keypress (PR review, #177).
   - `[proxy] recommend` takes `host/path/` entries, `when = "build"` included, and a whole-host
     grant answers one. An entry that is neither a host nor a path grant is named by
     `fy config widenings` instead of dropped silently.

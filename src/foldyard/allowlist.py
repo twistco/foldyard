@@ -150,12 +150,26 @@ def grant_key(key: str) -> str | None:
 
 def covered(key: str, grants: Iterable[str]) -> bool:
     """Does one of ``grants`` already answer ``key``: the same key, or — for a path grant — a
-    grant of its whole host (which covers every path on it)?"""
+    grant of its whole host (which covers every path on it), or a path grant on the same host
+    whose prefix holds it, on a segment boundary as the proxy judges one (egress_proxy's
+    ``_under``: ``host/a/`` covers ``host/a/b/``, ``host/a`` covers ``host/a/b``, neither covers
+    ``host/ab/``)."""
     grants = list(grants)
     if key in grants:
         return True
     scoped = path_grant(key)
-    return scoped is not None and _matches(scoped[0], [g for g in grants if "/" not in g])
+    if scoped is None:
+        return False
+    host, prefix = scoped
+    if _matches(host, [g for g in grants if "/" not in g]):
+        return True
+    for parsed in map(path_grant, grants):
+        if parsed is None or parsed[0] != host:
+            continue
+        held = parsed[1]
+        if prefix.startswith(held) if held.endswith("/") else prefix.startswith(held + "/"):
+            return True
+    return False
 
 
 _SCOPE_DIRS = 3  # how many directory prefixes a request offers, shallowest first
@@ -649,33 +663,39 @@ def refused_hosts(rows: list[dict]) -> list[str]:
 
 
 _READS = ("GET", "HEAD")  # what a path grant lets through (the proxy's `_PATH_METHODS`)
+# How many directories one host's refusals offer as path grants before the gate stops listing
+# them: past it, a first directory is probably a version or a hash, not a bucket.
+SCOPE_OFFERS = 3
 
 
 def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     """The hosts the wall REFUSED an image build since ``since``, still not granted:
-    ``{host, count, uas, paths, more_paths, scopes, whole, writes, beyond}`` in first-seen order
+    ``{host, count, uas, paths, more_paths, scopes, more_scopes, whole, scoped, writes, beyond}``
+    in first-seen order
     (the ``learned_hosts`` shape, so :func:`recommend_why` reads it). Only rows the proxy
     attributed to a build (its ``build`` flag, set only for a live build secret) count — a box
     session refused in the same minute is not the build's, even one presenting the public marker.
 
     A refused host is decrypted for a build that trusts the proxy CA (ADR-0029), so its row names
     the request. A refused READ (GET/HEAD) shapes a path grant: ``scopes`` lists the first
-    directory each would be answered with (:func:`path_scopes`), distinct, first-seen, and
-    ``paths`` samples them (for :func:`recommend_why`). Anything else — another method (named in
-    ``writes``), or no path at all (a client that didn't trust the CA leaves only its CONNECT) —
-    sets ``whole``: only the host answers it.
+    directory each would be answered with (:func:`path_scopes`), distinct, first-seen, up to
+    :data:`SCOPE_OFFERS` (``more_scopes`` counts the rest), and ``paths`` samples them (for
+    :func:`recommend_why`). Anything else — another method (named in ``writes``), or no path at
+    all (a client that didn't trust the CA leaves only its CONNECT) — sets ``whole``: only the
+    host answers it.
 
     Except on a host already granted for some paths (to builds or the box): there the operator
     chose how much of it a build gets, so only a read under a NEW directory is offered, never the
     host. Every other refusal there (an upload or a body under a granted path, a raw tunnel) is
     sampled in ``beyond`` and offers nothing — a build step's Dockerfile is the box's to edit, and
     a prompt for the whole host would hand it the upload channel the path grant was made to
-    avoid. :func:`unanswered` holds the box's side to the same rule. An entry with neither
-    ``scopes`` nor ``whole`` is reported, not offered. Box-originated text, handled as in
-    :func:`learned_hosts`."""
+    avoid. ``scoped`` says the host is one of those. :func:`unanswered` holds the box's side to
+    the same rule. An entry with neither ``scopes`` nor ``whole`` is reported, not offered.
+    Box-originated text, handled as in :func:`learned_hosts`."""
     granted = live_hosts() + build_hosts()  # either answers a build
     scoped_hosts = {parsed[0] for parsed in map(path_grant, granted) if parsed is not None}
     out: dict[str, dict] = {}
+    extra: dict[str, set[str]] = {}  # directories past SCOPE_OFFERS, by host: only counted
     for row in rows:
         ts, key = _parse(row.get("ts")), row.get("host")
         if not (row.get("blocked") and row.get("build")) or ts is None or ts < since:
@@ -693,7 +713,9 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
                 "paths": [],
                 "more_paths": 0,
                 "scopes": [],
+                "more_scopes": 0,
                 "whole": False,
+                "scoped": key in scoped_hosts,
                 "writes": [],
                 "beyond": [],
             },
@@ -714,17 +736,28 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
         if not scopes:
             entry["whole"] = True
             write = _why_safe(method)[:10]
-            if method and method not in _READS and write and write not in entry["writes"]:
+            if (
+                method
+                and method not in _READS
+                and write
+                and write not in entry["writes"]
+                and len(entry["writes"]) < _PATH_EXAMPLES  # box-chosen: as capped as the rest
+            ):
                 entry["writes"].append(write)
             continue
         if scopes[0] not in entry["scopes"] and not covered(scopes[0], granted):
-            entry["scopes"].append(scopes[0])
+            if len(entry["scopes"]) < SCOPE_OFFERS:
+                entry["scopes"].append(scopes[0])
+            else:
+                extra.setdefault(key, set()).add(scopes[0])
         sample = _printable(_sample_path(path))
         if sample and sample not in entry["paths"]:
             if len(entry["paths"]) < _PATH_EXAMPLES:
                 entry["paths"].append(sample)
             else:
                 entry["more_paths"] += 1
+    for host, dirs in extra.items():
+        out[host]["more_scopes"] = len(dirs)
     return list(out.values())
 
 

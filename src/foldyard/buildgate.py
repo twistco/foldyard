@@ -202,27 +202,35 @@ def _report_bypasses(bypassed: list[dict], what: str, echo: Callable[[str], None
     echo("  postinstall script with its own HTTP client, a raw socket. More: `fy docs networking`.")
 
 
-def _describe(entry: dict, key: str | None = None) -> str:
+def _describe(entry: dict, keys: list[str] | None = None) -> str:
     tool = f" · {entry['uas'][0]}" if entry["uas"] else ""
     # A write is the one refusal a whole-host grant answers that a read never needs: say so.
     writes = f" · {', '.join(entry['writes'])}" if entry.get("writes") else ""
-    return f"{key or entry['host']} ({entry['count']}×{tool}{writes})"
+    return f"{', '.join(keys or [entry['host']])} ({entry['count']}×{tool}{writes})"
 
 
-def _key(entry: dict) -> str | None:
-    """What a refusal is offered as: the one path grant its requests share (the narrowest grant
-    that answers them all), else — several directories, or a refusal with no path or not a read —
-    the host. None when there is nothing to offer: every refusal fell beyond a path grant the host
-    already holds (``allowlist.build_refusals``), which the host is never offered over."""
+def _keys(entry: dict) -> list[str]:
+    """What a host's refusals are offered as, narrowest first: the path grants its refused reads
+    ask for — one per first directory, up to ``allowlist.SCOPE_OFFERS`` — or the host, when a
+    refusal only the host answers (a write, no path) or past that many directories, where a first
+    directory is likely a version or a hash rather than a bucket.
+
+    Never the host as a fallback on a host already granted for some paths (``scoped``): past
+    the limit it offers the first directories and the next attempt asks about the rest, and a
+    refusal beyond its paths offers nothing (``_report_beyond``). Several directories used to
+    fall back to the host too, which let a box-edited build step turn a path offer into a
+    whole-host one by reading from a second bucket. ``[]``: nothing to offer."""
     scopes = entry.get("scopes") or []
-    if not scopes and not entry.get("whole"):
-        return None
-    return scopes[0] if len(scopes) == 1 and not entry.get("whole") else entry["host"]
+    if entry.get("whole"):
+        return [entry["host"]]
+    if entry.get("more_scopes") and not entry.get("scoped"):
+        return [entry["host"]]
+    return list(scopes)
 
 
 def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
-    """A host refused only beyond the paths it is granted: said, never offered. Widening it to
-    the whole host is a decision to type, not a keypress in the middle of a build."""
+    """Refusals beyond the paths a host is granted: said, never offered. Widening it to the
+    whole host is a decision to type, not a keypress in the middle of a build."""
     host = entry["host"]
     echo(
         f"  ✗ {host}: refused {', '.join(entry['beyond'])} — beyond the paths it is granted, "
@@ -232,7 +240,31 @@ def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
     )
 
 
+def _crowded(entry: dict, keys: list[str]) -> str:
+    """Why a host's directories aren't all offered, or ''."""
+    more = entry.get("more_scopes", 0)
+    if not more:
+        return ""
+    n = len(entry.get("scopes") or []) + more
+    if keys == [entry["host"]]:
+        return f" — refused under {n} directories"
+    return f" (+{more} more director{'y' if more == 1 else 'ies'}: the next attempt asks)"
+
+
+def _for_key(entry: dict, key: str) -> dict:
+    """``entry`` as the team is offered ``key``: its host, and the sampled paths under it."""
+    scoped = allowlist.path_grant(key)
+    paths = entry.get("paths") or []
+    if scoped is not None:
+        paths = [p for p in paths if f"{p}/".startswith(scoped[1])]
+    return {**entry, "host": key, "paths": paths, "more_paths": 0}
+
+
 _LEVELS = f"[o]nce ({ONCE_TTL_SECONDS // 60} min) · [s]ession · [p]ermanent"
+
+
+def _ask(question: str, prompt: Callable[[str], str]) -> str:
+    return prompt(question).strip().lower()
 
 
 def _offer(refused: list[dict], prompt: Callable[[str], str], echo: Callable[[str], None]):
@@ -240,36 +272,34 @@ def _offer(refused: list[dict], prompt: Callable[[str], str], echo: Callable[[st
     whys = allowlist.build_recommendations()
     for entry in refused:
         host = entry["host"]
-        key = _key(entry)
-        if key is None:
-            _report_beyond(entry, echo)
+        if entry.get("beyond"):
+            _report_beyond(entry, echo)  # said whatever else is offered for the host
+        keys = _keys(entry)
+        if not keys:
             continue
-        known = whys.get(key) or whys.get(host)
-        why = f" — {known}" if known else ""
-        wider = f" · [h]ost: all of {host}" if key != host else ""
-        answer = (
-            prompt(
-                f"  allow {_describe(entry, key)}{why} for builds?  {_LEVELS}{wider} · [n]o "
-                "(default): "
-            )
-            .strip()
-            .lower()
+        known = list(dict.fromkeys(w for k in [*keys, host] if (w := whys.get(k))))
+        why = f" — {'; '.join(known)}" if known else ""
+        wider = f" · [h]ost: all of {host}" if keys != [host] else ""
+        each = " each" if len(keys) > 1 else ""
+        answer = _ask(
+            f"  allow {_describe(entry, keys)}{_crowded(entry, keys)}{why} for builds?  "
+            f"{_LEVELS}{each}{wider} · [n]o (default): ",
+            prompt,
         )
         if wider and answer in ("h", "host"):
-            key = host
-            answer = (
-                prompt(f"  allow all of {host} for builds?  {_LEVELS} · [n]o (default): ")
-                .strip()
-                .lower()
+            keys = [host]
+            answer = _ask(
+                f"  allow all of {host} for builds?  {_LEVELS} · [n]o (default): ", prompt
             )
         level = _ANSWERS.get(answer)  # exact matches only; anything else is no
         if level is None:
-            echo(f"    ({key} not granted)")
+            echo(f"    ({', '.join(keys)} not granted)")
             continue
         ttl = ONCE_TTL_SECONDS if level == "once" else None
-        allowlist.grant(key, level, ttl, build=True)
-        echo(f"  ✓ {key} allowed for builds ({level})")
-        granted.append({**entry, "host": key})  # what was granted is what the team is offered
+        for key in keys:
+            allowlist.grant(key, level, ttl, build=True)
+            echo(f"  ✓ {key} allowed for builds ({level})")
+            granted.append(_for_key(entry, key))  # what was granted is what the team is offered
     return granted
 
 
@@ -327,11 +357,11 @@ def _run(
         hosts = ", ".join(e["host"] for e in refused)
         echo(f"✗ the allowlist refused {hosts} during the {what}")
         if not interactive:
-            offered = [(e, key) for e in refused if (key := _key(e)) is not None]
             for e in refused:
-                if _key(e) is None:
+                if e.get("beyond"):
                     _report_beyond(e, echo)
-            for _e, key in offered:
+            offered = [key for e in refused for key in _keys(e)]
+            for key in offered:
                 echo(f"    fy allow add {key} --build --level once --ttl {ONCE_TTL_SECONDS}")
             if offered:
                 echo("  No terminal here — grant with the commands above, then build again.")
