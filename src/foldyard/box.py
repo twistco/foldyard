@@ -2268,13 +2268,26 @@ def _up(
 
     expected_fingerprint = _box_image_fingerprint(main)
 
+    prepared = False
     if recreate and _running(engine, box, env):
-        # What `box down` does, after everything above had its chance to refuse — then on to
-        # the create below, as if the box had never been there.
+        # What `box down` does, after everything above had its chance to refuse, and after the
+        # image is built: a changed box.Dockerfile or [box].packages is what a recreate is run for,
+        # and its build is what the egress wall can refuse. Then on to the create below, as if
+        # the box had never been there.
         if not _agents_may_stop(engine, box, env, args or []):
             print("Aborted — the box is still running.")
             return 1
-        _remove(engine, box, env)
+        rc, img = _prepare_image(engine, img, main, expected_fingerprint, env)
+        if rc != 0:
+            print(f"✗ The box image didn't build: dev box {box} is still running, as it was.")
+            return rc
+        prepared = True
+        if _remove(engine, box, env) is None:
+            print(
+                f"✗ Couldn't remove dev box {box}: it's still running, as it was "
+                f"(`{engine} rm -f {box}` refused)."
+            )
+            return 1
         print(f"✓ dev box {box} removed (login/CLI volumes kept) — creating it again…")
 
     if _running(engine, box, env):
@@ -2321,15 +2334,10 @@ def _up(
         subprocess.run(
             [engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-    if _fingerprint(engine, "image", img, env) != expected_fingerprint and not _from_base_image(
-        engine, img, expected_fingerprint, env
-    ):
-        rc = _build_img(engine, main, env)
+    if not prepared:
+        rc, img = _prepare_image(engine, img, main, expected_fingerprint, env)
         if rc != 0:
             return rc
-    rc, img = _ensure_packages_layer(engine, img, expected_fingerprint, env)
-    if rc != 0:
-        return rc
 
     # Where the agents' transcripts bind out to on your computer: the checkout's own slot in the
     # from-box (ADR-0033) where the VM shares one — out of the checkout, so `git clean` and grep
@@ -2642,7 +2650,11 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if _running(engine, box, env) and not _agents_may_stop(engine, box, env, args or []):
             print("Aborted — the box is still running.")
             return 1
-        if _remove(engine, box, env):
+        removed = _remove(engine, box, env)
+        if removed is None:
+            print(f"✗ Couldn't remove dev box {box}: `{engine} rm -f {box}` refused.")
+            return 1
+        if removed:
             print(f"✓ dev box {box} stopped (login/CLI volumes kept).")
         else:
             print(f"(no dev box {box})")
@@ -2668,8 +2680,23 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
     return 2
 
 
-def _remove(engine: str, box: str, env: dict) -> bool:
-    """Remove the box's container (its login/CLI volumes stay); False when there was none.
+def _prepare_image(
+    engine: str, img: str, main: Path, expected_fingerprint: str, env: dict
+) -> tuple[int, str]:
+    """The image a create runs: built (or re-tagged from the base VM's) when its definition
+    changed, then `[box].packages` layered on. Returns the build's exit code and that image."""
+    if _fingerprint(engine, "image", img, env) != expected_fingerprint and not _from_base_image(
+        engine, img, expected_fingerprint, env
+    ):
+        rc = _build_img(engine, main, env)
+        if rc != 0:
+            return rc, img
+    return _ensure_packages_layer(engine, img, expected_fingerprint, env)
+
+
+def _remove(engine: str, box: str, env: dict) -> bool | None:
+    """Remove the box's container (its login/CLI volumes stay); False when there was none, None
+    when the engine refused (the box is still there).
 
     Belt-and-suspenders: promote this box's transcripts to the durable host store before we drop
     the container. The bound-out dir survives the removal, but archiving here keeps the host's
@@ -2680,7 +2707,8 @@ def _remove(engine: str, box: str, env: dict) -> bool:
     transcripts.sync_current(env)
     if not _exists(engine, box, env):
         return False
-    subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL)
+    if subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL).returncode:
+        return None
     return True
 
 

@@ -2376,6 +2376,77 @@ def test_recreate_passes_yes_to_the_agents_question(fake, monkeypatch):
     assert asked == [["--yes"]]
 
 
+def test_recreate_keeps_the_box_when_its_image_wont_build(fake, monkeypatch, capsys):
+    # A changed box.Dockerfile is what recreate is run for, and its build is what a wall refuses:
+    # the build runs while the old box still serves, and a failed one leaves it serving.
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_fingerprint", lambda *a: "older")
+    monkeypatch.setattr(box, "_from_base_image", lambda *a: False)
+    monkeypatch.setattr(box, "_build_img", lambda *a: 7)
+    assert box.main("recreate", ["--yes"]) == 7
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "still running" in capsys.readouterr().out
+
+
+def test_recreate_keeps_the_box_when_its_packages_wont_install(fake, monkeypatch, capsys):
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_ensure_packages_layer", lambda engine, img, *a: (5, img))
+    assert box.main("recreate", ["--yes"]) == 5
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "still running" in capsys.readouterr().out
+
+
+def test_recreate_builds_before_it_removes(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    order: list = []
+    monkeypatch.setattr(box, "_fingerprint", lambda *a: "older")
+    monkeypatch.setattr(box, "_from_base_image", lambda *a: False)
+    monkeypatch.setattr(box, "_build_img", lambda *a: order.append("build") or 0)
+    run = box.subprocess.run
+
+    def recording(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            order.append("rm")
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", recording)
+    assert box.main("recreate", ["--yes"]) == 0
+    assert order[:2] == ["build", "rm"] and order.count("build") == 1
+
+
+def test_recreate_fails_when_the_old_box_wont_go(fake, monkeypatch, capsys):
+    # `rm -f` refused: the old box still runs, with its old env and mounts. Saying "removed" and
+    # then "already up" would be a recreate that did nothing and reported success.
+    fake["state"].update(running=True, exists=True)
+    run = box.subprocess.run
+
+    def refusing(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            run(cmd, **kw)
+            return subprocess.CompletedProcess(cmd, 125)
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", refusing)
+    assert box.main("recreate", ["--yes"]) == 1
+    out = capsys.readouterr().out
+    assert "still running" in out and "removed" not in out and "already up" not in out
+    assert not _find(fake["calls"], has=["run", "-d", "sleep"])
+
+
+def test_down_says_so_when_the_box_wont_go(fake, monkeypatch, capsys):
+    fake["state"].update(running=True, exists=True)
+    run = box.subprocess.run
+    monkeypatch.setattr(
+        box.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            subprocess.CompletedProcess(cmd, 125) if cmd[1:3] == ["rm", "-f"] else run(cmd, **kw)
+        ),
+    )
+    assert box.main("down", ["--yes"]) == 1
+    assert "stopped" not in capsys.readouterr().out
+
+
 def test_recreate_refuses_in_the_box(fake, monkeypatch, capsys):
     # It would remove the container running it, half-way, with nothing left to create it again.
     monkeypatch.setattr(config, "in_box", lambda: True)
