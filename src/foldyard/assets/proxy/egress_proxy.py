@@ -2366,6 +2366,14 @@ class Injector:
         by_name = _address(str(address[0])) is None
         dials = self._local_dials.setdefault(client_id, {})
         dials[_upstream_key(server)] = (str(ip), int(peer[1]), by_name)
+        # Judged again as it lands: a revoke between the dial's check and here swept before this
+        # was recorded, and nothing sweeps again until the next policy change.
+        build = client_id in self._build_clients or client_id in self._build_requesters
+        raw = client_id in self._raw_clients
+        if not self._local_granted(ip, int(peer[1]), build, by_name=by_name or raw):
+            port = int(peer[1])
+            key = str(ip) if port == _HTTPS_PORT else f"{ip}:{port}"
+            self._close(client_id, key, "its local address isn't granted now")
 
     def server_disconnected(self, data) -> None:
         client_id = getattr(getattr(data, "client", None), "id", None)

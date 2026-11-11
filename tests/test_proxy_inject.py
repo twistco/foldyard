@@ -3654,6 +3654,32 @@ def test_a_revoke_closes_a_cleartext_connection_to_a_local_address(observing, cl
     assert closer.closed == ["plain"]
 
 
+@pytest.mark.parametrize("enforcing", [False, True])
+def test_a_revoke_while_the_dial_is_in_flight_closes_the_connection(observing, closer, enforcing):
+    # The dial was judged, the grant went before the connection landed, and the sweep ran with
+    # nothing recorded yet: the landing judges it again (the Claude review on #182).
+    inj, allow, _log = observing
+    inj.default_deny = enforcing
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    closer.track("ssh")
+    assert _dial(inj, "127.0.0.1", 2222, "ssh") is None
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    inj.server_connected(_server_event("127.0.0.1", 2222, "ssh", None))
+    assert closer.closed == ["ssh"]
+
+
+def test_a_connection_landing_on_a_kept_grant_stays_open(observing, closer):
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    closer.track("ssh")
+    assert _dial(inj, "127.0.0.1", 2222, "ssh") is None
+    inj.server_connected(_server_event("127.0.0.1", 2222, "ssh", None))
+    assert closer.closed == []
+
+
 def test_a_local_connection_that_ended_is_forgotten(observing, closer):
     inj, allow, _log = observing
     _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
