@@ -1057,6 +1057,24 @@ def test_a_build_refusal_offers_its_first_directory(env):
     assert entry["whole"] is False
 
 
+def test_a_refusal_under_a_nested_grant_offers_no_wider_path(env):
+    # Review (#177): with `host/a/b/` held, a GET under it refused for its body used to offer
+    # `host/a/` — a grant that lets no body through either. It is reported; a read elsewhere under
+    # `/a/` is still offered.
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None
+    allowlist.grant("objects.example.com/a/b/", "session", build=True)
+
+    def row(path: str) -> dict:
+        return {"ts": "2026-09-22T10:01:00+00:00", "host": "objects.example.com", "method": "GET",
+                "path": path, "status": 403, "blocked": True, "build": True}  # fmt: skip
+
+    (entry,) = allowlist.build_refusals([row("/a/b/file")], since)
+    assert entry["scopes"] == [] and entry["whole"] is False and entry["beyond"] == ["GET /a/b"]
+    (entry,) = allowlist.build_refusals([row("/a/c/file")], since)
+    assert entry["scopes"] == ["objects.example.com/a/"] and entry["beyond"] == []
+
+
 @pytest.mark.parametrize(
     "method, path",
     [

@@ -108,8 +108,11 @@ decryption — Java's own trust store (Maven, Gradle) and `apt` over HTTPS, whic
 image's store. Everything else is decrypted and logged: the box, your stack's containers, image
 build steps and the VM's image pulls all trust the proxy's CA, and decrypting a toolchain install
 measured within a few per cent of tunnelling it. (One exception: a build started on your computer
-is tunnelled whatever the list says, and logged as `tls tunnel` rows — see
-[Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the box is decrypted like the box.)
+is tunnelled to a host granted as a whole, whatever the list says, and logged as `tls tunnel` rows;
+a host it may reach only under a path grant, or one the allowlist refuses, is decrypted, so a
+build step that doesn't trust the CA fails there — see
+[Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the
+box is decrypted like the box.)
 Set `passthrough = ["@all"]` to tunnel the whole toolchain as before, or add only the bundle a tool
 needs. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is always
 decrypted, whatever the list says, so its auth header can be replaced.
@@ -154,14 +157,15 @@ first run, before your computer has one of its own.
 A refused HTTPS request still shows what was asked. The proxy answers the box's `CONNECT` itself,
 decrypts the tunnel, and returns the `403` to the request inside, so the Network Log names its
 method, path and User-Agent. No connection to the refused host is ever opened: the proxy refuses
-any connection to a host nothing grants, whichever part of it asks. Three cases still see only
-`CONNECT host:port`, with no path:
+any connection to a host nothing grants, whichever part of it asks. An image build started on your
+computer is answered the same way, and its refused request is logged with its path too. Two cases
+still see only `CONNECT host:port`, with no path:
 
 - another port than `:443` (`github.com:22`): the tunnel isn't HTTPS, so there is no request to
   read;
-- an image build: it doesn't trust the proxy's CA, so it is refused before TLS;
-- a client in the box that doesn't trust the proxy's CA (a pinned certificate, its own CA
-  bundle): its TLS handshake fails, with a certificate error rather than the readable `403`.
+- a client that doesn't trust the proxy's CA (a pinned certificate, its own CA bundle; in a build,
+  a Java or GnuTLS step): its TLS handshake fails, with a certificate error rather than the
+  readable `403`.
 
 **Learn first, then enforce.** `fy init` sets `enforce = "learn"`. The first `fy box up` / `fy up`
 opens a one-hour window where:
@@ -541,10 +545,12 @@ Dockerfile the box can edit, upload to any bucket there. So foldyard reports the
    enough for the build), session, permanent, or no. A refused read is offered as the path grant
    for its first directory (`storage.googleapis.com/chrome-for-testing-public/`); reads in several
    directories are offered together, each granted at the level you choose, and `h` grants the
-   whole host instead, as a choice you make. The gate offers the host itself only when nothing
-   narrower would answer, and the prompt says which: a write (`· PUT`), a step that didn't trust
-   the CA (`· no usable path`), or reads under more than 3 directories (a version or hash per
-   directory, not a bucket). On a host the build already holds a path grant for, it never offers
+   whole host instead, as a choice you make. On a host with no grant yet, the gate offers the host
+   itself in three cases, and the prompt says which: a write (`· PUT`) or a step that didn't trust
+   the CA (`· no usable path`), where nothing narrower would answer, and reads under more than 3
+   directories (`refused under N directories`), where a first directory is likely a version or a
+   hash rather than a bucket. Path grants still answer those reads: answer `n` and add the ones
+   you mean with `fy allow add <host>/<path>/ --build`, then build again. On a host the build already holds a path grant for, it never offers
    the host, not even as `h`: past 3 directories it offers the first 3 and asks about the rest at
    the next attempt, and a write or a request with a body under a granted path is reported with
    the command to type, never offered, since all of the host is the upload channel the path grant

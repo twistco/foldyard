@@ -729,7 +729,12 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
         method = raw if isinstance(raw, str) else ""
         path = row.get("path") if method and method != "CONNECT" else None
         scopes = path_scopes(key, path) if method in _READS else []
-        if key in scoped_hosts and not (scopes and not covered(scopes[0], granted)):
+        # Offerable there only if the request's OWN path is outside every held grant: one under
+        # a granted path was refused for what it carried (a body, an Upgrade), which no wider
+        # path grant lets through either — even when its first directory isn't granted yet
+        # (`host/a/b/` held, a refused `GET /a/b/x` would otherwise offer `host/a/`). The path
+        # itself is `path_scopes`' last key.
+        if key in scoped_hosts and not (scopes and not covered(scopes[-1], granted)):
             what = _printable(f"{method or 'CONNECT'} {_sample_path(path)}".strip(), 80)
             if what not in entry["beyond"] and len(entry["beyond"]) < _PATH_EXAMPLES:
                 entry["beyond"].append(what)
