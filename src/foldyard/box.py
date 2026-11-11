@@ -2050,12 +2050,15 @@ fy_doctor_report || true
 """
 
 
-def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
+def _bootstrap_script(
+    checkout: str, here: str, env: dict, subst: dict[str, str] | None = None
+) -> str:
     """The full one-time box bootstrap: base scaffolding + the monitored install steps (core
     foldyard + Claude, then each enabled plugin's, then the consumer's ``[[box.tools]]`` and
     free-form ``[box].bootstrap``), then a failure summary, then the in-box `fy doctor` as a
     report. Each step is reported ✓/⏭/✗."""
-    subst = _foldyard_install_subst(checkout, here)
+    if subst is None:
+        subst = _foldyard_install_subst(checkout, here)
     steps: list[tuple[str, str, str]] = []
     if shim := _git_shim_step():  # first, so the rest of the bootstrap's git is already split
         steps.append(shim)
@@ -2474,6 +2477,17 @@ def _up(
             + ", ".join(unmaskable)
         )
 
+    # Both resolved before the old box goes, since either can refuse: the gVisor create endpoint
+    # (no ssh target), and the wheel the new box installs foldyard from (a host editable install
+    # builds one).
+    create_env = sandbox.engine_env(env, machine.BACKEND, machine.MACHINE) if gvisor else env
+    fy_subst = _foldyard_install_subst(checkout, here)
+    if replacing and fy_subst.get("fy_stage_failed"):
+        print(
+            f"✗ Couldn't build foldyard for the new box (above); dev box {box} is still running, "
+            "as it was."
+        )
+        return 1
     if replacing:
         # Everything above that could refuse has passed: the old box goes now, and only now.
         if _remove(engine, box, env) is None:
@@ -2538,7 +2552,6 @@ def _up(
     # ONLY the create goes through the runsc socket (the runtime is decided by the SOCKET a
     # container is created through, never by a flag the box could omit); probes, exec and the
     # build stay on the stack env — both services share the VM's one libpod store.
-    create_env = sandbox.engine_env(env, machine.BACKEND, machine.MACHINE) if gvisor else env
     if subprocess.run(run, env=create_env, stdout=subprocess.DEVNULL).returncode != 0:
         _err("✗ dev box create failed")
         return 1
@@ -2558,7 +2571,8 @@ def _up(
     # wheel from an editable host install; else a PyPI version pin) so `fy` works even in a repo
     # that doesn't vendor foldyard (e.g. homelab) — never assumes an editable checkout on the mount.
     subprocess.run(
-        [engine, "exec", box, "bash", "-lc", _bootstrap_script(checkout, here, env)], env=env
+        [engine, "exec", box, "bash", "-lc", _bootstrap_script(checkout, here, env, fy_subst)],
+        env=env,
     )
     if not os.environ.get("DEVBOX_SKIP_DEPS") and config.box_warmup():
         print("▶ warming deps in background (log: /tmp/devbox-deps.log inside the box)…")

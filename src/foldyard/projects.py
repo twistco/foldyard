@@ -512,12 +512,19 @@ def _agents_cell(p: Project) -> str:
     return str(p.agents_live)
 
 
+_LIMA_SILENT = (
+    "⚠ `limactl list` didn't answer: Lima VMs read as unknown, and none is listed as left over."
+)
+
+
 def render(listing: Listing) -> str:
     if not listing.projects and not listing.leftovers and listing.base_vm is None:
-        return (
+        empty = (
             "No projects yet: a project is listed once its config is adopted on this computer "
             "(`fy up` in its checkout asks)."
         )
+        # Nothing found is not nothing there when the search for left-over VMs never ran.
+        return empty + (f"\n\n{_LIMA_SILENT}" if listing.lima_unavailable else "")
     head = ("PROJECT", "VM", "DISK", "SUPERVISOR", "BOXES UP", "AGENTS", "CHECKOUT")
     rows = [head] + [
         (
@@ -543,11 +550,7 @@ def render(listing: Listing) -> str:
             if p.vm.running and p.unavailable:
                 lines.append(f"    ⚠ boxes and agents unknown: {p.unavailable}")
     if listing.lima_unavailable:
-        lines += [
-            "",
-            "⚠ `limactl list` didn't answer: Lima VMs read as unknown, and none is listed as"
-            " left over.",
-        ]
+        lines += ["", _LIMA_SILENT]
     if listing.leftovers:
         lines += ["", "Left over (listed, never removed):"]
         for left in listing.leftovers:

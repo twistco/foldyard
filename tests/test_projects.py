@@ -339,3 +339,10 @@ def test_here_publishes_no_counts_when_the_engine_doesnt_answer(monkeypatch):
     monkeypatch.setattr(agents, "sessions_in", lambda b: pytest.fail("asked a box"))
     got = projects.here()
     assert got == {"unavailable": "the engine didn't answer"}
+
+
+def test_an_empty_listing_still_says_lima_didnt_answer():
+    # With nothing adopted and nothing found, "no projects" alone would hide that the search for
+    # left-over VMs never ran (CodeRabbit on #181).
+    out = projects.render(projects.Listing([], [], None, lima_unavailable=True))
+    assert "`limactl list` didn't answer" in out

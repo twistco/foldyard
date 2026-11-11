@@ -2441,6 +2441,47 @@ def test_recreate_keeps_the_box_when_its_network_is_missing(fake, monkeypatch):
     assert not _find(fake["calls"], has=["rm", "-f"])
 
 
+def test_recreate_keeps_the_box_when_foldyards_wheel_wont_build(fake, monkeypatch, capsys):
+    # A host editable install builds the wheel the new box installs foldyard from; built after
+    # the removal, a failure left a box with no `fy` and its old self gone (CodeRabbit on #181).
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(
+        box,
+        "_foldyard_install_subst",
+        lambda c, h: {"fy_wheel": "", "fy_version": "", "fy_stage_failed": "1"},
+    )
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "still running" in capsys.readouterr().out
+
+
+def test_recreate_builds_foldyards_wheel_once(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    built: list = []
+
+    def subst(c, h):
+        built.append(c)
+        return {"fy_wheel": "/w.whl", "fy_version": ""}
+
+    monkeypatch.setattr(box, "_foldyard_install_subst", subst)
+    assert box.main("recreate", ["--yes"]) == 0
+    assert len(built) == 1
+
+
+def test_recreate_keeps_the_box_when_the_gvisor_endpoint_refuses(fake, monkeypatch):
+    # Under gVisor the create goes through an ssh endpoint, which refuses with no ssh target.
+    _running_box(fake, monkeypatch)
+    _gvisor(fake, monkeypatch)
+
+    def no_target(*a, **k):
+        raise SystemExit("✗ needs ssh access to the VM")
+
+    monkeypatch.setattr(box.sandbox, "engine_env", no_target)
+    with pytest.raises(SystemExit):
+        box.main("recreate", ["--yes"])
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
 def test_recreate_removes_the_old_box_right_before_the_new_one_is_created(
     fake, monkeypatch, tmp_path
 ):
