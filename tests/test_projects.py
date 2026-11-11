@@ -213,7 +213,7 @@ def test_here_never_boots_a_stopped_vm(monkeypatch):
 
 
 def test_here_reports_boxes_stacks_and_agents(monkeypatch):
-    from foldyard import agents, box, devmode, stack
+    from foldyard import agents, devmode, stack
 
     monkeypatch.setattr(stack, "machine_down", lambda: None)
     monkeypatch.setattr(
@@ -225,7 +225,7 @@ def test_here_reports_boxes_stacks_and_agents(monkeypatch):
             {"name": "u", "project": "p-u", "registered": False, "containers": 0, "devbox": False},
         ],
     )
-    monkeypatch.setattr(box, "engine_env", lambda: ("podman", {}))
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {})
     alive = agents.Session("a", "", "claude", "", "", 0, True, None)
     dead = agents.Session("b", "", "claude", "", "", 0, False, 0)
     asked: list[str] = []
@@ -277,3 +277,65 @@ def test_size_reads_like_a_person_would_write_it():
         "31.0 GiB",
     ]
     assert projects._short(str(Path.home() / "w" / "x")) == "~/w/x"
+
+
+# --- #181 review: never guess, never write -----------------------------------------------------
+
+
+def test_a_failed_lima_listing_reads_unknown_never_missing(host, monkeypatch):
+    host.provisioned.add("old-proj")
+    monkeypatch.setattr(projects, "_lima_instances", lambda: None)
+    got = projects.collect()
+    alpha = _row(got, "alpha")
+    assert alpha.vm.status == "unknown"
+    assert not any("doesn't exist" in n.text for n in alpha.notes)
+    assert host.asked == []  # a VM that may not be running is never asked
+    assert not [lo for lo in got.leftovers if lo.what.startswith("VM ")]
+    assert "limactl list" in projects.render(got)
+
+
+def test_no_delete_advice_while_a_projects_vm_is_unknown(host, monkeypatch):
+    # beta's adopted config doesn't read, so its VM can't be named: old-proj may be it.
+    host.tomls[host.checkouts[1]] = None
+    host.instances["old-proj"] = {"name": "old-proj", "status": "Running", "dir": ""}
+    host.provisioned.add("old-proj")
+    got = projects.collect()
+    vms = [lo for lo in got.leftovers if lo.what.startswith("VM old-proj")]
+    assert len(vms) == 1 and vms[0].fix == ""
+    assert "beta" in vms[0].why
+    assert "limactl delete" not in projects.render(got)
+
+
+def test_here_reads_the_engine_without_writing_anything(monkeypatch):
+    from foldyard import agents, box, devmode, stack
+
+    monkeypatch.setattr(stack, "machine_down", lambda: None)
+    monkeypatch.setattr(
+        devmode,
+        "workspaces",
+        lambda: [{"name": "main", "project": "p", "registered": True, "containers": 1,
+                  "devbox": True}],
+    )  # fmt: skip
+    # box.engine_env resolves the stack, which pins core.fileMode into .git/config.
+    monkeypatch.setattr(box, "engine_env", lambda: pytest.fail("resolved the stack"))
+    monkeypatch.setattr(stack, "pin_filemode", lambda main: pytest.fail("wrote .git/config"))
+    monkeypatch.setattr(devmode, "_engine_env", lambda: {"CONTAINER_HOST": "unix:///nonexistent"})
+    seen: list = []
+    monkeypatch.setattr(agents, "sessions_in", lambda b: seen.append(b.env) or [])
+    got = projects.here()
+    assert got["unavailable"] == "" and seen == [{"CONTAINER_HOST": "unix:///nonexistent"}]
+
+
+def test_here_publishes_no_counts_when_the_engine_doesnt_answer(monkeypatch):
+    from foldyard import agents, devmode, stack
+
+    monkeypatch.setattr(stack, "machine_down", lambda: None)
+    monkeypatch.setattr(
+        devmode,
+        "workspaces",
+        lambda: [{"name": "main", "project": "p", "registered": True, "containers": None,
+                  "devbox": False}],
+    )  # fmt: skip
+    monkeypatch.setattr(agents, "sessions_in", lambda b: pytest.fail("asked a box"))
+    got = projects.here()
+    assert got == {"unavailable": "the engine didn't answer"}

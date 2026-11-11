@@ -540,12 +540,17 @@ class LimaBackend(Backend):
         ``list`` fail ("token too long", nothing printed) and every lookup read "no such VM"
         (Lima 2.2.0). The template is written straight out. Rows split on ``\n`` alone: Go's
         JSON leaves U+0085 unescaped, and ``str.splitlines`` breaks on it."""
+        return self._listing(name) or []
+
+    def _listing(self, name: str = "") -> list[dict] | None:
+        """:meth:`_instances`, but ``None`` when ``limactl list`` couldn't answer (missing, failed,
+        timed out): not the same as no VM, which `fy ls` must not say about a VM that exists."""
         cmd = ["limactl", "list", "--format", "{{json .}}"]
         if name:
             cmd.append(name)
         out = _run(cmd)
         if out.returncode != 0:
-            return []
+            return None
         rows = []
         for line in out.stdout.split("\n"):
             line = line.strip()

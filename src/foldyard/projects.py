@@ -96,15 +96,20 @@ class Listing:
     projects: list[Project]
     leftovers: list[Leftover]
     base_vm: dict | None  # the base VM's status, when there is one
+    lima_unavailable: bool = False  # `limactl list` didn't answer: Lima VM states are unknown
 
 
 # ── the host's own record ─────────────────────────────────────────────────────────────────────
 
 
-def _lima_instances() -> dict[str, dict]:
+def _lima_instances() -> dict[str, dict] | None:
+    """Every Lima VM by name; ``None`` when `limactl list` couldn't answer."""
     from .machine_backend import LimaBackend
 
-    return {str(row.get("name")): row for row in LimaBackend()._instances() if row.get("name")}
+    rows = LimaBackend()._listing()
+    if rows is None:
+        return None
+    return {str(row.get("name")): row for row in rows if row.get("name")}
 
 
 def _disk_used(instance_dir: object) -> int | None:
@@ -127,11 +132,13 @@ def _disk_used(instance_dir: object) -> int | None:
     return total
 
 
-def _lima_vm(name: str, row: dict | None) -> Vm:
+def _lima_vm(name: str, row: dict | None, listed: bool = True) -> Vm:
+    """``listed`` False: `limactl list` didn't answer, so a VM it didn't name is unknown, not
+    missing."""
     from .machine_backend import LimaBackend
 
     if row is None:
-        return Vm(name, "lima", "missing")
+        return Vm(name, "lima", "missing" if listed else "unknown")
     cpus, memory = row.get("cpus"), row.get("memory")
     return Vm(
         name,
@@ -144,10 +151,12 @@ def _lima_vm(name: str, row: dict | None) -> Vm:
     )
 
 
-def _vm(instances: dict[str, dict]) -> Vm:
+def _vm(instances: dict[str, dict] | None) -> Vm:
     """The bound project's VM. Lima from the one listing; podman machine by asking it."""
     name, backend = config.machine_name(), config.machine_backend()
     if backend == "lima":
+        if instances is None:
+            return _lima_vm(name, None, listed=False)
         return _lima_vm(name, instances.get(name))
     from .machine_backend import get_backend
 
@@ -232,7 +241,9 @@ def _worktree_notes(checkout: Path) -> list[Note]:
     ]
 
 
-def _describe(checkout: Path, instances: dict[str, dict], installed: str, fp: str) -> Project:
+def _describe(
+    checkout: Path, instances: dict[str, dict] | None, installed: str, fp: str
+) -> Project:
     """One adopted project, from the host's own record — no engine, no child process."""
     from . import configpin
 
@@ -303,25 +314,32 @@ def _vanished_pins() -> list[Leftover]:
     return out
 
 
-def _base_vm(instances: dict[str, dict]) -> dict | None:
+def _base_vm(instances: dict[str, dict] | None) -> dict | None:
     from . import basevm
 
-    row, stamp = instances.get(basevm.NAME), basevm.read_stamp()
+    row, stamp = (instances or {}).get(basevm.NAME), basevm.read_stamp()
     if row is None and stamp is None:
         return None
     age = basevm.age_days(stamp) if stamp else None
+    if row:
+        status = str(row.get("status"))
+    else:  # stamped, but not in the listing, or no listing at all
+        status = "missing" if instances is not None else "unknown"
     return {
         "name": basevm.NAME,
-        "status": str(row.get("status")) if row else "missing",
+        "status": status,
         "baked_days_ago": round(age, 1) if age is not None else None,
         "disk_used": _disk_used(row.get("dir")) if row else None,
     }
 
 
-def _unclaimed(instances: dict[str, dict], claimed: set[str]) -> list[Leftover]:
+def _unclaimed(
+    instances: dict[str, dict], claimed: set[str], unresolved: list[str]
+) -> list[Leftover]:
     """foldyard's Lima VMs that no adopted project names. foldyard records its boot script in
     every VM it starts (``machine._record_provisioning``), so a VM without one isn't foldyard's —
-    your own Lima VMs — and stays out of this list."""
+    your own Lima VMs — and stays out of this list. While an adopted project's VM can't be named
+    (``unresolved``: its config doesn't read), any of these may be its, so none gets a delete."""
     from . import basevm
 
     out = []
@@ -332,13 +350,17 @@ def _unclaimed(instances: dict[str, dict], claimed: set[str]) -> list[Leftover]:
         if not vm.foldyards:
             continue
         size = f", {_size(vm.disk_used)} on disk" if vm.disk_used else ""
-        out.append(
-            Leftover(
-                f"VM {name} ({vm.status.lower()}{size})",
-                "foldyard made it, and no adopted project uses it",
-                f"`limactl delete {'--force ' if vm.running else ''}{name}`",
+        if unresolved:
+            why = (
+                "foldyard made it and no project names it, but it may be the VM of "
+                + ", ".join(unresolved)
+                + ", whose adopted config can't be read"
             )
-        )
+            fix = ""
+        else:
+            why = "foldyard made it, and no adopted project uses it"
+            fix = f"`limactl delete {'--force ' if vm.running else ''}{name}`"
+        out.append(Leftover(f"VM {name} ({vm.status.lower()}{size})", why, fix))
     return out
 
 
@@ -349,12 +371,17 @@ def here() -> dict:
     """This project's engine-side facts (the child's half of `fy ls`): its workspaces' boxes and
     stacks, and the agent sessions in those boxes. Never boots the VM: a stopped one is the
     reason they're missing."""
-    from . import agents, box, devmode, stack
+    from . import agents, devmode, stack
 
     if (reason := stack.machine_down()) is not None:
         return {"unavailable": reason}
     wss = devmode.workspaces()
-    engine, env = box.engine_env()
+    if not all(ws.get("containers") is not None for ws in wss):
+        # Its boxes then read "none" and its agents 0: unknown, so nothing is said.
+        return {"unavailable": "the engine didn't answer"}
+    # devmode's read-only probe env, never `box.engine_env()`: that resolves the stack, which
+    # writes `core.fileMode` into the checkout's .git/config.
+    engine, env = config.engine(), devmode._engine_env()
     boxes = [
         agents.Box(
             f"{ws['project']}-devbox", "" if ws["name"] == "main" else ws["name"], engine, env
@@ -364,9 +391,8 @@ def here() -> dict:
     ]
     with ThreadPoolExecutor(max_workers=8) as pool:
         sessions = [s for got in pool.map(agents.sessions_in, boxes) for s in got]
-    answered = all(ws.get("containers") is not None for ws in wss)
     return {
-        "unavailable": "" if answered else "the engine didn't answer",
+        "unavailable": "",
         "workspaces": [
             {"name": ws["name"], "box": bool(ws.get("devbox")), "containers": ws.get("containers")}
             for ws in wss
@@ -439,8 +465,10 @@ def collect() -> Listing:
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(_ask, ask))
     claimed = {p.vm.name for p in projects if p.vm.backend == "lima"}
-    leftovers = _unclaimed(instances, claimed) + _vanished_pins()
-    return Listing(projects, leftovers, _base_vm(instances))
+    unresolved = [p.project for p in projects if p.vm.name == "?"]
+    unclaimed = _unclaimed(instances, claimed, unresolved) if instances is not None else []
+    leftovers = unclaimed + _vanished_pins()
+    return Listing(projects, leftovers, _base_vm(instances), lima_unavailable=instances is None)
 
 
 def _short(path: str) -> str:
@@ -514,6 +542,12 @@ def render(listing: Listing) -> str:
                 lines.append(f"    {n.level} {n.text}" + (f" — `{n.fix}`" if n.fix else ""))
             if p.vm.running and p.unavailable:
                 lines.append(f"    ⚠ boxes and agents unknown: {p.unavailable}")
+    if listing.lima_unavailable:
+        lines += [
+            "",
+            "⚠ `limactl list` didn't answer: Lima VMs read as unknown, and none is listed as"
+            " left over.",
+        ]
     if listing.leftovers:
         lines += ["", "Left over (listed, never removed):"]
         for left in listing.leftovers:
