@@ -542,12 +542,13 @@ Dockerfile the box can edit, upload to any bucket there. So foldyard reports the
    for its first directory (`storage.googleapis.com/chrome-for-testing-public/`); reads in several
    directories are offered together, each granted at the level you choose, and `h` grants the
    whole host instead, as a choice you make. The gate offers the host itself only when nothing
-   narrower would answer: a write, a step that didn't trust the CA (no path to go on), or reads
-   under more than 3 directories (a version or hash per directory, not a bucket). On a host the
-   build already holds a path grant for, it doesn't do even that: past 3 directories it offers
-   the first 3 and asks about the rest at the next attempt, and a write or a request with a body
-   under a granted path is reported, never offered, since all of the host is the upload channel
-   the path grant left out.
+   narrower would answer, and the prompt says which: a write (`· PUT`), a step that didn't trust
+   the CA (`· no usable path`), or reads under more than 3 directories (a version or hash per
+   directory, not a bucket). On a host the build already holds a path grant for, it never offers
+   the host, not even as `h`: past 3 directories it offers the first 3 and asks about the rest at
+   the next attempt, and a write or a request with a body under a granted path is reported with
+   the command to type, never offered, since all of the host is the upload channel the path grant
+   left out.
 2. It builds again. The layer cache makes that cheap. A redirect chain reveals one more hop per
    attempt, up to 4 attempts.
 3. It offers to add what you granted to `foldyard.toml`'s `[proxy] recommend` as `when = "build"`

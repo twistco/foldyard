@@ -204,9 +204,11 @@ def _report_bypasses(bypassed: list[dict], what: str, echo: Callable[[str], None
 
 def _describe(entry: dict, keys: list[str] | None = None) -> str:
     tool = f" · {entry['uas'][0]}" if entry["uas"] else ""
-    # A write is the one refusal a whole-host grant answers that a read never needs: say so.
+    # Why only the host answers, when it does: a write (a read never needs the host), or no path
+    # to shape a narrower grant on (a client that didn't trust the proxy CA left only its CONNECT).
     writes = f" · {', '.join(entry['writes'])}" if entry.get("writes") else ""
-    return f"{', '.join(keys or [entry['host']])} ({entry['count']}×{tool}{writes})"
+    pathless = " · no usable path" if entry.get("pathless") else ""
+    return f"{', '.join(keys or [entry['host']])} ({entry['count']}×{tool}{writes}{pathless})"
 
 
 def _keys(entry: dict) -> list[str]:
@@ -243,8 +245,8 @@ def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
 def _crowded(entry: dict, keys: list[str]) -> str:
     """Why a host's directories aren't all offered, or ''."""
     more = entry.get("more_scopes", 0)
-    if not more:
-        return ""
+    if not more or entry.get("whole"):
+        return ""  # with `whole`, a write or a missing path is the reason, said by `_describe`
     n = len(entry.get("scopes") or []) + more
     if keys == [entry["host"]]:
         return f" — refused under {n} directories"
@@ -279,7 +281,10 @@ def _offer(refused: list[dict], prompt: Callable[[str], str], echo: Callable[[st
             continue
         known = list(dict.fromkeys(w for k in [*keys, host] if (w := whys.get(k))))
         why = f" — {'; '.join(known)}" if known else ""
-        wider = f" · [h]ost: all of {host}" if keys != [host] else ""
+        # Never on a host already granted for some paths: one keypress there would widen it to the
+        # whole host, uploads included — what its path grant was made to leave out. Typed, it is
+        # still made (`fy allow add <host> --build`); `_report_beyond` names the command.
+        wider = f" · [h]ost: all of {host}" if keys != [host] and not entry.get("scoped") else ""
         each = " each" if len(keys) > 1 else ""
         answer = _ask(
             f"  allow {_describe(entry, keys)}{_crowded(entry, keys)}{why} for builds?  "

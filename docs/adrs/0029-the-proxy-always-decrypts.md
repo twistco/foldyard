@@ -230,10 +230,14 @@ belongs in the middle — but *one* middle, not a switch between two.
     is that tool's error: a certificate failure where it used to read a 403. Only a read shapes a
     path, and reads in several directories are offered as that many path grants in one prompt:
     falling back to the host there let a box-edited step turn a path offer into a whole-host one
-    by reading from a second bucket. The host is offered only when nothing narrower answers (a
-    write, no path, more than 3 directories), and never on a host already granted for some paths
-    (to builds or the box): a refusal beyond them is reported, not offered — that fallback was
-    the whole-host upload channel again, behind one keypress (PR review, #177).
+    by reading from a second bucket. On a host with no grant yet the host is still offered when
+    nothing narrower answers — a write, no path (a step without the CA), more than 3 directories —
+    so a box-edited step can still steer the offer there; what it can't do is hide it, since the
+    prompt names the reason (`· PUT`, `· no usable path`, `refused under N directories`) and the
+    operator answers. On a host already granted for some paths (to builds or the box) the host is
+    never offered, not as a fallback and not as the `h` choice: a refusal beyond its paths is
+    reported with the command to type, never offered — that fallback was the whole-host upload
+    channel again, behind one keypress (PR review, #177).
   - `[proxy] recommend` takes `host/path/` entries, `when = "build"` included, and a whole-host
     grant answers one. An entry that is neither a host nor a path grant is named by
     `fy config widenings` instead of dropped silently.

@@ -670,8 +670,8 @@ SCOPE_OFFERS = 3
 
 def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     """The hosts the wall REFUSED an image build since ``since``, still not granted:
-    ``{host, count, uas, paths, more_paths, scopes, more_scopes, whole, scoped, writes, beyond}``
-    in first-seen order
+    ``{host, count, uas, paths, more_paths, scopes, more_scopes, whole, pathless, scoped, writes,
+    beyond}`` in first-seen order
     (the ``learned_hosts`` shape, so :func:`recommend_why` reads it). Only rows the proxy
     attributed to a build (its ``build`` flag, set only for a live build secret) count — a box
     session refused in the same minute is not the build's, even one presenting the public marker.
@@ -680,9 +680,9 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
     the request. A refused READ (GET/HEAD) shapes a path grant: ``scopes`` lists the first
     directory each would be answered with (:func:`path_scopes`), distinct, first-seen, up to
     :data:`SCOPE_OFFERS` (``more_scopes`` counts the rest), and ``paths`` samples them (for
-    :func:`recommend_why`). Anything else — another method (named in ``writes``), or no path at
-    all (a client that didn't trust the CA leaves only its CONNECT) — sets ``whole``: only the
-    host answers it.
+    :func:`recommend_why`). Anything else — another method (named in ``writes``), or no path to
+    shape a grant on (``pathless``: a client that didn't trust the CA leaves only its CONNECT) —
+    sets ``whole``: only the host answers it.
 
     Except on a host already granted for some paths (to builds or the box): there the operator
     chose how much of it a build gets, so only a read under a NEW directory is offered, never the
@@ -715,6 +715,7 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
                 "scopes": [],
                 "more_scopes": 0,
                 "whole": False,
+                "pathless": False,
                 "scoped": key in scoped_hosts,
                 "writes": [],
                 "beyond": [],
@@ -735,6 +736,8 @@ def build_refusals(rows: list[dict], since: datetime) -> list[dict]:
             continue
         if not scopes:
             entry["whole"] = True
+            if method in ("", "CONNECT") or method in _READS:
+                entry["pathless"] = True  # no request, or one no path grant could be shaped on
             write = _why_safe(method)[:10]
             if (
                 method

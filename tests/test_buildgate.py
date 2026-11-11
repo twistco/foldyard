@@ -166,8 +166,8 @@ def test_a_redirect_chain_is_walked_one_refusal_at_a_time(env):
     assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
     assert build.calls == 3
     assert [q.split("?")[0] for q in asked[:2]] == [
-        "  allow cdn.example.com (1×) for builds",
-        "  allow storage.example.com (1×) for builds",
+        "  allow cdn.example.com (1× · no usable path) for builds",  # tunnelled: no request seen
+        "  allow storage.example.com (1× · no usable path) for builds",
     ]
 
 
@@ -439,6 +439,9 @@ def test_a_write_or_no_path_beside_the_reads_offers_the_host(env, odd):
     buildgate.run(build, what="box image", interactive=True, prompt=prompt)
     assert asked[0].startswith("  allow storage.googleapis.com (2×"), asked[0]
     assert "[h]ost" not in asked[0]
+    # The prompt says why only the host answers, and never blames the directory count for it.
+    reason = " · PUT)" if odd == "write" else " · no usable path)"
+    assert reason in asked[0] and "refused under" not in asked[0]
 
 
 def _dirs(n: int) -> list[dict]:
@@ -452,6 +455,15 @@ def test_past_the_limit_an_ungranted_host_is_offered_whole_and_says_why(env):
     assert asked[0].startswith("  allow storage.googleapis.com (5× · node) — refused under 5 ")
 
 
+def test_a_write_among_many_directories_is_named_as_the_reason(env):
+    # Reported nit: the directory count read like the reason when a write was.
+    put = {**_path_row("/upload/x"), "method": "PUT"}
+    build = _Build(env["log"], [(1, [*_dirs(allowlist.SCOPE_OFFERS + 2), put]), (0, [])])
+    prompt, asked = _answers("n")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (6× · node · PUT) for builds?")
+
+
 def test_past_the_limit_a_path_granted_host_is_still_offered_paths_only(env):
     allowlist.grant(_CFT, "permanent", build=True)
     build = _Build(env["log"], [(1, _dirs(allowlist.SCOPE_OFFERS + 2)), (0, [])])
@@ -462,6 +474,7 @@ def test_past_the_limit_a_path_granted_host_is_still_offered_paths_only(env):
         in (asked[0])
     )
     assert "(+2 more directories: the next attempt asks)" in asked[0]
+    assert "[h]ost" not in asked[0]  # a path-granted host is never one keypress from whole
     assert "storage.googleapis.com" not in allowlist.effective()["build_allow"]
 
 
@@ -472,7 +485,18 @@ def test_a_refusal_beyond_a_path_is_said_beside_a_new_directorys_offer(env, caps
     prompt, asked = _answers("o")
     buildgate.run(build, what="box image", interactive=True, prompt=prompt)
     assert asked[0].startswith("  allow storage.googleapis.com/other-bucket/ (2×")
+    assert "[h]ost" not in asked[0]
     assert "refused PUT /chrome-for-testing-public/x — beyond the paths" in capsys.readouterr().out
+
+
+def test_h_on_a_path_granted_host_widens_nothing(env):
+    # The answer `h` isn't on offer there, so typing it is an unrecognised answer: no grant.
+    allowlist.grant(_CFT, "permanent", build=True)
+    build = _Build(env["log"], [(1, [_path_row("/other-bucket/x")])])
+    prompt, asked = _answers("h", "p")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert len(asked) == 1
+    assert allowlist.effective()["build_allow"] == [_CFT]
 
 
 def test_a_build_path_recommendations_why_is_shown(env):
