@@ -218,7 +218,9 @@ env = { UV_LINK_MODE = "copy", UV_FROZEN = "1" }
 caches = [{ volume = "foldyard-uv-cache", path = ".cache/uv" }]   # path is under HOME
 # Lint before every commit made in a box: .githooks/pre-commit runs `just lint`. Set in the box's
 # OWN git config (its home), not the shared .git/config, so git on your computer runs no hook
-# unless you turn it on there yourself (`just hooks`). One setting either way: never twice.
+# unless you turn it on there yourself (`just hooks`). One setting either way: never twice. A box
+# created before this line has no hook until it is recreated (`fy box down && fy box up`), or
+# until that `git config` line is run in it once.
 bootstrap = "git config --global core.hooksPath .githooks"
 #
 # System packages, baked ONCE into a cached layer on the box image (`<tag>-packages`) rather

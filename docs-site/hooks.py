@@ -37,7 +37,9 @@ _TEXT = r"(?:[^\[\]]|\[\[?[^\[\]]*\]\]?)*"
 # The target as written, or `<…>` — CommonMark's spelling for one holding `(`, `)` or a space,
 # which mdformat writes (`<https://…/init(url:readonly:)>`); `fix` unwraps it, rewrites the
 # inside and wraps it again.
-_LINK = re.compile(rf"(!?\[{_TEXT}\]\()(<[^<>\n]*>|[^)\s]+)(\))")
+# The bare form never starts with `<`: `[a](<x>y)` must not fall back to it as `<x>y` and then be
+# unwrapped as if it were bracketed.
+_LINK = re.compile(rf"(!?\[{_TEXT}\]\()(<[^<>\n]*>|(?!<)[^)\s]+)(\))")
 _OWN_DOCS = re.compile(rf"^{re.escape(REPO)}/(?:raw|blob|tree)/{BRANCH}/docs/([^#?]*?)/?(#.*)?$")
 
 
