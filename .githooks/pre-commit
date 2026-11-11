@@ -1,0 +1,16 @@
+#!/bin/sh
+# foldyard's pre-commit hook: `just lint` (ruff, and mdformat over the Markdown) — a few seconds,
+# where `just check` takes a minute. Opt-in: `just hooks` points git here (core.hooksPath), once
+# per clone, for every worktree. Skip it for one commit with `git commit --no-verify`.
+#
+# It lints the working tree, not just what is staged, so an unstaged edit can fail a commit that
+# doesn't include it: format it, or stash it first.
+#
+# Like any hook it runs from this checkout on whichever side you commit — in the box (through its
+# git shim) or on your computer — so on your computer it is code the box can write
+# (docs/security.md). This one is tracked, so a change to it shows in the diff you review.
+if ! command -v just >/dev/null 2>&1; then
+    echo "pre-commit: \`just\` isn't on PATH here — not linted (\`just lint\` before you push)" >&2
+    exit 0
+fi
+exec just --justfile "$(git rev-parse --show-toplevel)/justfile" lint

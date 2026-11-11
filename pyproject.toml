@@ -94,6 +94,11 @@ dev = [
     "ruff==0.15.17",       # linter + formatter
     "pyright==1.1.411",    # type checker (Microsoft)
     "ty==0.0.61",          # type checker (Astral; fast, pre-release)
+    # Markdown formatter (`just format`/`just lint`): GFM tables, and the front matter the
+    # .changes/ fragments and skills carry. Settings in .mdformat.toml.
+    "mdformat==1.0.0",
+    "mdformat-gfm==1.0.0",
+    "mdformat-frontmatter==2.1.2",
 ]
 # OPT-IN, NOT default: the real egress-proxy e2e (test_proxy_e2e.py) runs an actual mitmdump +
 # the egress_proxy addon + a fake minter + a CA-trusting client — `just foldyard test-proxy-e2e`
