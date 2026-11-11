@@ -13,7 +13,9 @@ wire path — the dial counted on a real socket — is ``test_proxy_wall_e2e.py`
   a raw path that no server could normalise to somewhere else (dot segments, ``//``, encoded
   separators refused);
 - the host is never blind-tunnelled (not on ``passthrough``, not for a build): a path can only be
-  judged decrypted;
+  judged decrypted. A path grant can be BUILD-scoped too (``build_allow``): a host-started build
+  reaches it decrypted — the walled VM's build steps trust the proxy CA — while the box doesn't
+  reach it at all;
 - nothing is dialled for a connection until it has earned it — a ClientHello (so every request in
   it is decrypted and judged) or a cleartext request the grant let through — so a raw TCP tunnel
   to the host is refused its dial, and raw bytes inside a decrypted one are never relayed.
@@ -37,6 +39,7 @@ _dial = t._dial
 _answered = t._answered
 _write_allow = t._write_allow
 _rows = t._rows
+building = t.building  # `walled` while the host runs a build (its secret live)
 
 GCS = "storage.googleapis.com"
 BUCKET = "/chrome-for-testing-public/"
@@ -219,7 +222,7 @@ async def test_a_host_grant_beside_it_still_grants_the_whole_host(walled):
     assert await _judged(inj, flow)
 
 
-async def test_a_malformed_or_build_entry_grants_nothing(walled):
+async def test_a_malformed_or_build_entry_grants_the_box_nothing(walled):
     inj, allow, _log = walled
     allow.write_text(
         '{"default_deny": true, "allow": ["storage.googleapis.com/a/../b/"],'
@@ -229,6 +232,7 @@ async def test_a_malformed_or_build_entry_grants_nothing(walled):
     assert not await _judged(inj, _request(path="/b/x"))
     assert not await _judged(inj, _request())  # a build entry is never read as runtime …
     assert inj._build_patterns == []  # … nor as its host for a build
+    assert inj._build_path_grants == {GCS: (BUCKET,)}  # it is a path grant for builds
 
 
 # ── the tunnel: answered, decrypted, dialled only once earned ───────────────────────────────────
@@ -398,3 +402,141 @@ def test_the_network_log_says_outside_and_where_the_redirect_came_from():
     assert "outside the paths this host is granted for" in line
     line = proxy._net_leaf_body({**row, "via": "cdn.playwright.dev"}, lambda s: s)
     assert "not on the allowlist (redirected from cdn.playwright.dev)" in line
+
+
+# ── for builds: a build-scoped path grant, judged decrypted ───────────────────────────────────
+
+
+def _write_build_allow(allow, build: list[str], runtime: list[str] | None = None) -> None:
+    import json
+
+    allow.write_text(
+        json.dumps({"default_deny": True, "allow": runtime or [], "build_allow": build}) + "\n"
+    )
+
+
+def _build_connect(inj, host: str = GCS, client_id: str = "build-1") -> _Flow:
+    flow = t._build(_Flow(host, method="CONNECT", path=""))
+    flow.client_conn = types.SimpleNamespace(id=client_id, sni=None)
+    flow.response = None
+    inj.http_connect(flow)
+    return flow
+
+
+def _inside(host: str = GCS, path: str = ZIP, client_id: str = "build-1", **kw) -> _Flow:
+    """A request inside a decrypted connection: no Proxy-Authorization of its own."""
+    flow = _request(host, path, **kw)
+    flow.client_conn = types.SimpleNamespace(id=client_id, sni=None)
+    return flow
+
+
+async def test_a_build_path_grant_lets_the_build_read_under_it_decrypted(building):
+    inj, allow, log = building
+    _write_build_allow(allow, [GRANT])
+    connect = _build_connect(inj)
+    assert _answered(inj, connect)  # nothing dialled before a ClientHello …
+    hello = _ClientHello(GCS, client_id="build-1")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False  # … decrypted, never tunnelled, though it is a build
+    assert _dial(inj, GCS, client_id="build-1") is None
+
+    read = _inside()
+    assert await _judged(inj, read)
+    read.response = t._Resp(200)
+    await inj.response(read)
+    row = _rows(log)[-1]
+    assert row["build"] is True and row["path"] == ZIP and not row.get("blocked")
+
+    outside = _inside(path="/another-bucket/x")
+    assert not await _judged(inj, outside)
+    assert outside.response is not None and GRANT in outside.response.content.decode()
+    row = _rows(log)[-1]
+    assert row["blocked"] and row["outside"] and row["build"] is True  # the gate reads this
+    assert not await _judged(inj, _inside(method="PUT"))  # a read only, as for the box
+
+
+async def test_a_build_path_grant_is_nothing_to_the_box(building):
+    inj, allow, _log = building
+    _write_build_allow(allow, [GRANT])
+    box = _Flow(GCS, method="CONNECT", path="")
+    box.client_conn = types.SimpleNamespace(id="box-1", sni=None)
+    box.response = None
+    inj.http_connect(box)
+    inj.tls_clienthello(_ClientHello(GCS, client_id="box-1"))
+    assert _dial(inj, GCS, client_id="box-1") is not None
+    assert not await _judged(inj, _inside(client_id="box-1"))
+    # The bare marker is public: it is the box.
+    bare = t._marked(_Flow(GCS, method="CONNECT", path=""))
+    bare.client_conn = types.SimpleNamespace(id="box-2", sni=None)
+    bare.response = None
+    inj.http_connect(bare)
+    assert not await _judged(inj, _inside(client_id="box-2"))
+
+
+def test_a_builds_whole_host_grant_is_tunnelled_as_before(building):
+    # The whole host for builds wins over a path grant for the box: the build's connection is
+    # tunnelled; only a host that the build reaches by path alone is decrypted.
+    inj, allow, _log = building
+    _write_build_allow(allow, [GCS], runtime=[GRANT])
+    assert _build_connect(inj).response is None
+    hello = _ClientHello(GCS, client_id="build-1")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True
+    assert inj._tunnel(GCS, build=True) is True and inj._tunnel(GCS, build=False) is False
+
+
+def test_raw_bytes_in_a_builds_path_connection_are_never_relayed(building):
+    inj, allow, log = building
+    _write_build_allow(allow, [GRANT])
+    _build_connect(inj)
+    message = types.SimpleNamespace(content=b"\r\nPUT /other-bucket/x HTTP/1.1\r\n\r\n")
+    inj.tcp_message(
+        types.SimpleNamespace(
+            server_conn=types.SimpleNamespace(address=(GCS, 443)),
+            client_conn=types.SimpleNamespace(id="build-1"),
+            messages=[message],
+            metadata={},
+        )
+    )
+    assert message.content == b""
+    row = _rows(log)[-1]
+    assert row["method"] == "TCP" and row["outside"] and row["build"] is True
+
+
+def test_a_revoked_build_path_grant_refuses_the_next_dial(building):
+    inj, allow, _log = building
+    _write_build_allow(allow, [GRANT])
+    _build_connect(inj)
+    inj.tls_clienthello(_ClientHello(GCS, client_id="build-1"))
+    assert _dial(inj, GCS, client_id="build-1") is None
+    _write_build_allow(allow, [])
+    inj._allow_mtime = -1.0
+    assert _dial(inj, GCS, client_id="build-1") is not None
+    assert not inj._connect_ok(GCS, 443, build=True)  # and `_sweep` closes it
+
+
+async def test_a_builds_refused_request_names_its_path(building):
+    # A refused host is answered and decrypted for a build too, so the row the build gate reads
+    # carries the path it can offer a path grant from — not only the host.
+    inj, _allow, log = building
+    connect = _build_connect(inj)
+    assert _answered(inj, connect)
+    inj.tls_clienthello(_ClientHello(GCS, client_id="build-1"))
+    refused = _inside()
+    assert not await _judged(inj, refused)
+    row = _rows(log)[-1]
+    assert row["blocked"] and row["build"] is True and row["path"] == ZIP and row["host"] == GCS
+
+
+def test_a_build_path_grant_on_an_address_dials_it_for_the_build_alone(building):
+    inj, allow, _log = building
+    _write_build_allow(allow, ["127.0.0.1/repo/"])
+    _build_connect(inj, "127.0.0.1")
+    inj.tls_clienthello(_ClientHello("127.0.0.1", client_id="build-1"))
+    assert _dial(inj, "127.0.0.1", client_id="build-1") is None
+    box = _Flow("127.0.0.1", method="CONNECT", path="")
+    box.client_conn = types.SimpleNamespace(id="box-1", sni=None)
+    box.response = None
+    inj.http_connect(box)
+    inj.tls_clienthello(_ClientHello("127.0.0.1", client_id="box-1"))
+    assert _dial(inj, "127.0.0.1", client_id="box-1") is not None

@@ -27,7 +27,8 @@ when you ask. (`fy docs glossary` defines each.)
   CDN sending a download to a bucket on a shared storage host). Ask for the **path grant** the
   message names (`fy allow add <host>/<path>/`), which lets you read under that path and nothing
   else on the host, rather than the whole host. It covers reads only (GET/HEAD). An upload there
-  is a whole-host question for the human.
+  is a whole-host question for the human. `[proxy] recommend` takes the same `host/path/` form,
+  and with `when = "build"` for a download only the image build makes.
 - **`403` "refused by the foldyard proxy - the box doesn't push"** (git shows it as a `remote:`
   line) — the proxy refuses git pushes over HTTPS, whatever credential you have (an emergency
   switch that can push lifts that only on the host its own token goes to). Not a grant to ask

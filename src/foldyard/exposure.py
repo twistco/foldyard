@@ -138,6 +138,9 @@ class Exposure:
     # only ASK; the status says what THIS host's operator answered (`fy allow sync` / the gate).
     recommended: list[tuple[str, str, str]] = field(default_factory=list)
     recommend_origin: str = DEFAULT
+    # `[proxy] recommend` entries that are neither a host nor a path grant, as written: ignored,
+    # so the ask never reaches anyone — said here, or a typo'd path would silently ask for nothing.
+    recommend_dropped: list[str] = field(default_factory=list)
     # (key, values, fix, origin)
     ignored: list[tuple[str, list[str], str, str]] = field(default_factory=list)
     # (old spelling, new spelling, origin) for renamed keys still written the old way. Still
@@ -168,6 +171,9 @@ class Exposure:
             for key, values, _fix, _origin in self.ignored
         ]
         out += [f"unknown passthrough bundle @{ref}" for ref in self.unknown_refs]
+        if self.recommend_dropped:
+            n = len(self.recommend_dropped)
+            out.append(f"`proxy.recommend` ignores {_plural(n, 'entry', 'entries')}")
         out += [f"`{old}` was renamed to `{new}`" for old, new, _origin in self.renamed]
         if self.openings_error:
             out.append(self.openings_error.removeprefix("✗ "))
@@ -496,7 +502,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     """Gather ``cfg``'s widenings. Bind ``cfg`` first (``with config.using(cfg)``) — every helper
     reads through the module config functions, so the caller's binding is what selects the
     checkout."""
-    from .allowlist import build_hosts, declined, default_deny, live_hosts
+    from .allowlist import build_hosts, covered, declined, default_deny, live_hosts
     from .plugins.proxy import _resolve_passthrough
 
     drift = configpin.inspect(cfg)
@@ -505,7 +511,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     refs, unknown, literals = _passthrough_parts(entries)
     resolved = _resolve_passthrough(entries)
     proxy = cfg.toml.get("proxy")
-    runtime, for_builds, refused = set(live_hosts()), set(build_hosts()), declined()
+    runtime, for_builds, refused = live_hosts(), build_hosts(), declined()
     recommended = [
         (
             e["host"],
@@ -514,7 +520,9 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
             if "*" in refused
             else "granted"
             # A build grant lets only a host-started build through; it answers a build ask only.
-            if e["host"] in runtime or (e.get("when") == "build" and e["host"] in for_builds)
+            # A whole-host grant answers a path ask (allowlist.covered).
+            if covered(e["host"], runtime)
+            or (e.get("when") == "build" and covered(e["host"], for_builds))
             else "declined"
             if e["host"] in refused
             else "pending",
@@ -548,6 +556,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         ],
         recommended=recommended,
         recommend_origin=_origin(shared, local, "proxy", "recommend"),
+        recommend_dropped=config.proxy_recommend_dropped(),
         ignored=_ignored(cfg, shared, local),
         renamed=[
             (old, new, LOCAL if in_local else SHARED)
@@ -663,6 +672,18 @@ def render(exp: Exposure) -> list[str]:
             out.append(f"    {mark} {host}{' — ' + why if why else ''}  [{status}]")
         if any(status == "pending" for _h, _w, status in exp.recommended):
             out.append("    Answer the pending ones with `fy allow sync` (or the TUI).")
+        out.append("")
+    if exp.recommend_dropped:
+        out.append(
+            "  ignored recommendations   [proxy] recommend entries that are neither a host nor a"
+            f" path grant{_shared_note(exp.recommend_origin)}"
+        )
+        for entry in exp.recommend_dropped:
+            out.append(f"    ✗ {entry}")
+        out.append(
+            "    A host is `pypi.org` or `*.example.com`; a path grant `host/dir/` (no glob, port,"
+            " query or `..`)."
+        )
         out.append("")
 
     if exp.disabled:

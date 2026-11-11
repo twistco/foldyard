@@ -620,13 +620,18 @@ enforce = "learn"
   (permanent) / session / once (15 minutes) / not now / never; the answer is stored on your
   computer. The offer reads the *adopted* config, and a "never" is remembered.
   `when = "build"` marks a host only an image build needs: it's offered when a build is refused,
-  not at launch, and granted for builds only. Default: `[]`.
+  not at launch, and granted for builds only. `host` may be a
+  [path grant](networking.md#path-grants-one-path-of-a-shared-host), `host/path/`: reads under
+  that path only, which a grant of the whole host also answers. An entry that is neither a host
+  nor a path grant is ignored, and `fy config widenings` names it. Default: `[]`.
 
   ```toml
   [proxy]
   recommend = [
     { host = "pypi.org", why = "uv/pip — box bootstrap + deps" },
     { host = "unpkg.com", why = "vis-timeline, loaded by the generated pages under test" },
+    { host = "cdn.playwright.dev", why = "Playwright's browsers, baked into the image", when = "build" },
+    { host = "storage.googleapis.com/chrome-for-testing-public/", why = "where cdn.playwright.dev redirects", when = "build" },
   ]
   ```
 

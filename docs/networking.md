@@ -108,8 +108,11 @@ decryption — Java's own trust store (Maven, Gradle) and `apt` over HTTPS, whic
 image's store. Everything else is decrypted and logged: the box, your stack's containers, image
 build steps and the VM's image pulls all trust the proxy's CA, and decrypting a toolchain install
 measured within a few per cent of tunnelling it. (One exception: a build started on your computer
-is tunnelled whatever the list says, and logged as `tls tunnel` rows — see
-[Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the box is decrypted like the box.)
+is tunnelled to a host granted as a whole, whatever the list says, and logged as `tls tunnel` rows;
+a host it may reach only under a path grant, or one the allowlist refuses, is decrypted, so a
+build step that doesn't trust the CA fails there — see
+[Image builds](#image-builds-trusted-still-behind-the-allowlist) below. A build started inside the
+box is decrypted like the box.)
 Set `passthrough = ["@all"]` to tunnel the whole toolchain as before, or add only the bundle a tool
 needs. A host whose credential the proxy injects (say `api.github.com` with `github=on`) is always
 decrypted, whatever the list says, so its auth header can be replaced.
@@ -154,14 +157,15 @@ first run, before your computer has one of its own.
 A refused HTTPS request still shows what was asked. The proxy answers the box's `CONNECT` itself,
 decrypts the tunnel, and returns the `403` to the request inside, so the Network Log names its
 method, path and User-Agent. No connection to the refused host is ever opened: the proxy refuses
-any connection to a host nothing grants, whichever part of it asks. Three cases still see only
-`CONNECT host:port`, with no path:
+any connection to a host nothing grants, whichever part of it asks. An image build started on your
+computer is answered the same way, and its refused request is logged with its path too. Two cases
+still see only `CONNECT host:port`, with no path:
 
 - another port than `:443` (`github.com:22`): the tunnel isn't HTTPS, so there is no request to
   read;
-- an image build: it doesn't trust the proxy's CA, so it is refused before TLS;
-- a client in the box that doesn't trust the proxy's CA (a pinned certificate, its own CA
-  bundle): its TLS handshake fails, with a certificate error rather than the readable `403`.
+- a client that doesn't trust the proxy's CA (a pinned certificate, its own CA bundle; in a build,
+  a Java or GnuTLS step): its TLS handshake fails, with a certificate error rather than the
+  readable `403`.
 
 **Learn first, then enforce.** `fy init` sets `enforce = "learn"`. The first `fy box up` / `fy up`
 opens a one-hour window where:
@@ -230,10 +234,10 @@ and whoever reads its logs. For a public bucket that doesn't matter. For a host 
 it's a small way out, so grant a path there the way you'd grant the host.
 
 The proxy has to see each request to check its path, so a path-granted host is always decrypted,
-even if `[proxy] passthrough` lists it. It's never tunnelled for an image build either, which is
-why a path grant can't be `--build`. Grant the host `--build` for a build. The proxy only opens a
-connection to the host once the box's TLS handshake shows the request will be decrypted, so a raw
-TCP tunnel through the grant is refused. Bytes in a decrypted tunnel that don't parse as HTTP are
+even if `[proxy] passthrough` lists it, and even for an [image build](#image-builds-trusted-still-behind-the-allowlist),
+which is otherwise tunnelled. `fy allow add <host>/<path>/ --build` makes a path grant for builds
+only. The proxy only opens a connection to the host once the client's TLS handshake shows the
+request will be decrypted, so a raw TCP tunnel through the grant is refused. Bytes in a decrypted tunnel that don't parse as HTTP are
 dropped, never relayed. A refused request names the paths the host *is* granted, and the
 Network Log marks it `outside the paths this host is granted for`.
 
@@ -251,10 +255,11 @@ level deeper, and so on), the path it asked for, and the whole host. Then you ch
 grant lasts. A path with anything a grant would refuse (a `..`, an encoded separator) offers only
 the host.
 
-A path grant is a runtime grant like any other: `fy allow list` shows it, `fy allow remove
-<host>/<path>/` revokes it, and it doesn't come from `[proxy] recommend` (hosts only). Making it
-answers the host in the Network Log, so a refusal outside the path doesn't ask about the whole
-host again.
+A path grant is a grant like any other: `fy allow list` shows it, `fy allow remove
+<host>/<path>/` revokes it, and a repo can ask for one in [`[proxy] recommend`](configuration.md#proxy)
+(`{ host = "storage.googleapis.com/chrome-for-testing-public/", why = "…" }`), which a grant of
+the whole host also answers. Making it answers the host in the Network Log, so a refusal outside
+the path doesn't ask about the whole host again.
 
 ### The VM firewall
 
@@ -511,10 +516,16 @@ stale when the port band moves.
 With the VM firewall on, image builds (`fy box build`, and the stack build `fy up` runs) also go
 out through the proxy. How that works:
 
-- **Tunnelled, not decrypted, when started on your computer.** foldyard gives the build a
-  proxy URL carrying a secret it creates for that build (user `fy-build`, the secret as the
-  password), and the proxy tunnels those connections. The log shows them as `tls tunnel` rows
-  flagged `build`.
+- **Tunnelled, not decrypted, when started on your computer**, to a host granted as a whole.
+  foldyard gives the build a proxy URL carrying a secret it creates for that build (user
+  `fy-build`, the secret as the password), and the proxy tunnels those connections. The log
+  shows them as `tls tunnel` rows flagged `build`.
+- **Decrypted where the proxy must read the path:** a host the build may reach only under a
+  [path grant](#path-grants-one-path-of-a-shared-host), and a host the allowlist refuses (so its
+  row names what was asked for). The build's steps trust the proxy's CA (below), so this works
+  like it does for the box. A step that doesn't trust it (Java, `apt` over HTTPS, the gVisor
+  posture's runtime) fails the handshake instead: a host it needs is granted whole, and a refusal
+  is logged with the host alone, as before.
 - **The allowlist still applies.** Being a build changes what is decrypted, never what the
   runtime allowlist allows ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)).
 - **Only a build started on your computer is one.** The `fy-build` user without a live secret
@@ -525,12 +536,25 @@ out through the proxy. How that works:
 
 When the allowlist refuses a build, the tool's error names the URL it *asked* for, which is often
 not the host that was refused: a CDN can redirect inside the tunnel (Playwright's
-`cdn.playwright.dev` sends browser downloads to `storage.googleapis.com`). In the box, a
-[path grant](#path-grants-one-path-of-a-shared-host) is the narrow answer to that. A build is
-tunnelled, so its grants are whole hosts. So foldyard reports the refused hosts itself:
+`cdn.playwright.dev` sends browser downloads to `storage.googleapis.com`). A
+[path grant](#path-grants-one-path-of-a-shared-host) is the narrow answer to that, for a build as
+for the box: granting all of `storage.googleapis.com` to builds would let a build step, whose
+Dockerfile the box can edit, upload to any bucket there. So foldyard reports the refusals itself:
 
 1. **On your computer, with a terminal,** it asks about each refused host: once (15 minutes, long
-   enough for the build), session, permanent, or no.
+   enough for the build), session, permanent, or no. A refused read is offered as the path grant
+   for its first directory (`storage.googleapis.com/chrome-for-testing-public/`); reads in several
+   directories are offered together, each granted at the level you choose, and `h` grants the
+   whole host instead, as a choice you make. On a host with no grant yet, the gate offers the host
+   itself in three cases, and the prompt says which: a write (`· PUT`) or a step that didn't trust
+   the CA (`· no usable path`), where nothing narrower would answer, and reads under more than 3
+   directories (`refused under N directories`), where a first directory is likely a version or a
+   hash rather than a bucket. Path grants still answer those reads: answer `n` and add the ones
+   you mean with `fy allow add <host>/<path>/ --build`, then build again. On a host the build already holds a path grant for, it never offers
+   the host, not even as `h`: past 3 directories it offers the first 3 and asks about the rest at
+   the next attempt, and a write or a request with a body under a granted path is reported with
+   the command to type, never offered, since all of the host is the upload channel the path grant
+   left out.
 2. It builds again. The layer cache makes that cheap. A redirect chain reveals one more hop per
    attempt, up to 4 attempts.
 3. It offers to add what you granted to `foldyard.toml`'s `[proxy] recommend` as `when = "build"`
@@ -549,7 +573,8 @@ the same kind of grant by hand, and `fy allow list` shows build grants separatel
 
 `when = "build"` recommendations aren't offered at `fy up` (every launch would ask about a host
 only a build needs). A teammate is offered them, with their `why`, when their own build is
-refused.
+refused, and `fy allow sync --yes` grants them for builds. A path in one works as it does for the
+box: `{ host = "storage.googleapis.com/chrome-for-testing-public/", when = "build", why = "…" }`.
 
 **A tool that ignores the proxy settings** never reaches the proxy at all. It connects directly,
 the VM firewall refuses it, and the Network Log has no row for it, so there is no host to grant.

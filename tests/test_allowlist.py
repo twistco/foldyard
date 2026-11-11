@@ -942,10 +942,162 @@ def test_a_path_grant_lands_in_the_effective_allow_list_as_typed(env):
     assert allowlist.live_hosts() == []
 
 
-def test_a_path_grant_is_never_for_builds(env):
-    with pytest.raises(SystemExit, match="a path grant is for the box"):
-        allowlist.grant(_GCS_PATH, "session", build=True)
+def test_a_path_grant_can_be_for_builds_only(env):
+    # The proxy decrypts a build's connection to a host it holds only a path grant for (its
+    # steps trust the CA on the walled VM), so the path can be judged there too.
+    allowlist.grant("Storage.GoogleAPIs.com/chrome-for-testing-public/", "session", build=True)
+    eff = allowlist.effective()
+    assert eff["build_allow"] == [_GCS_PATH] and eff["allow"] == []
+    allowlist.revoke(_GCS_PATH)
     assert allowlist.build_hosts() == []
+
+
+def test_a_path_grant_covers_the_paths_under_it_on_a_segment_boundary():
+    held = ["objects.example.com/pkg/", "objects.example.com/raw"]
+    assert allowlist.covered("objects.example.com/pkg/v2/", held)
+    assert allowlist.covered("objects.example.com/raw/x/", held)  # `raw` covers itself and below
+    assert not allowlist.covered("objects.example.com/pkgs/", held)  # a sibling, not a child
+    assert not allowlist.covered("objects.example.com/rawer/", held)
+    assert not allowlist.covered("other.example.com/pkg/v2/", held)  # another host
+    assert not allowlist.covered("objects.example.com/", held)  # not a path grant at all
+
+
+def test_a_whole_host_grant_covers_a_path_one():
+    assert allowlist.covered(_GCS_PATH, ["storage.googleapis.com"])
+    assert allowlist.covered(_GCS_PATH, ["*.googleapis.com"])
+    assert allowlist.covered(_GCS_PATH, [_GCS_PATH])
+    assert not allowlist.covered(_GCS_PATH, ["storage.googleapis.com/other/"])
+    assert not allowlist.covered(_GCS_PATH, ["storage.googleapis.com:8443"])
+    assert not allowlist.covered("storage.googleapis.com", [_GCS_PATH])  # a path never a host
+
+
+def test_recommend_takes_a_path_grant_as_the_store_keys_it(env):
+    _recommend(
+        env,
+        '["Storage.GoogleAPIs.com/chrome-for-testing-public/", '
+        '{ host = "storage.googleapis.com/chrome-for-testing-public/", why = "dup" }, '
+        '{ host = "cdn.example.com/a/../b/" }, { host = "*.googleapis.com/a/" }, '
+        '{ host = "storage.googleapis.com/builds/", why = "chromium", when = "build" }]',
+    )
+    assert config.proxy_recommend() == [
+        {"host": _GCS_PATH, "why": "", "when": ""},
+        {"host": "storage.googleapis.com/builds/", "why": "chromium", "when": "build"},
+    ]
+    assert config.proxy_recommend_dropped() == [
+        "'cdn.example.com/a/../b/'",
+        "'*.googleapis.com/a/'",
+    ]
+
+
+def test_a_recommend_that_is_not_a_list_is_reported_ignored(env):
+    _recommend(env, '"pypi.org"')
+    assert config.proxy_recommend() == []
+    assert config.proxy_recommend_dropped() == ["'pypi.org'"]
+
+
+def test_a_recommended_path_is_answered_by_its_path_or_its_whole_host(env):
+    _recommend(env, f'["{_GCS_PATH}", "storage.googleapis.com/other/"]')
+    assert [e["host"] for e in allowlist.pending_recommendations()] == [
+        _GCS_PATH,
+        "storage.googleapis.com/other/",
+    ]
+    allowlist.grant(_GCS_PATH, "session")
+    assert [e["host"] for e in allowlist.pending_recommendations()] == [
+        "storage.googleapis.com/other/"
+    ]
+    allowlist.decline("storage.googleapis.com/other/")
+    assert allowlist.pending_recommendations() == []
+    allowlist.grant("storage.googleapis.com/other/", "once", 60)  # granting clears the decline
+    assert "storage.googleapis.com/other/" not in allowlist.declined()
+
+
+def test_a_recommended_build_path_is_granted_for_builds_by_sync_yes(env):
+    _recommend(env, f'[{{ host = "{_GCS_PATH}", why = "browsers", when = "build" }}]')
+    assert allowlist.pending_recommendations() == []  # offered by the build, not at launch
+    prompt, echo, _lines = _offer([])
+    allowlist.offer_recommendations(interactive=False, prompt=prompt, echo=echo, accept_all=True)
+    assert allowlist.effective()["build_allow"] == [_GCS_PATH]
+    assert allowlist.effective()["allow"] == []
+
+
+def test_a_build_refusal_offers_its_first_directory(env):
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None
+    ts = "2026-09-22T10:01:00+00:00"
+    zip_ = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+
+    def row(path: str, method: str = "GET", host: str = "storage.googleapis.com") -> dict:
+        return {"ts": ts, "host": host, "method": method, "path": path, "ua": "node",
+                "status": 403, "blocked": True, "build": True}  # fmt: skip
+
+    (entry,) = allowlist.build_refusals([row(zip_), row(zip_ + "?sig=1")], since)
+    assert entry["scopes"] == [_GCS_PATH] and entry["whole"] is False
+    assert entry["paths"] == ["/chrome-for-testing-public/156.0.8078.4"]
+    assert "GET /chrome-for-testing-public/156.0.8078.4" in allowlist.recommend_why(entry)
+
+    # A client that didn't trust the CA left only its CONNECT: nothing to shape a path on.
+    (entry,) = allowlist.build_refusals([row(zip_), row("", method="CONNECT")], since)
+    assert entry["whole"] is True
+    # A refused write shapes no path grant (a path grant allows reads only): only the host
+    # answers it, and the entry says it was a write.
+    (entry,) = allowlist.build_refusals([row("/upload/x", method="PUT")], since)
+    assert entry["scopes"] == [] and entry["whole"] is True and entry["writes"] == ["PUT"]
+    # Box-chosen method names are capped like the other samples.
+    many = [row("/upload/x", method=f"M{i}") for i in range(10)]
+    (entry,) = allowlist.build_refusals(many, since)
+    assert len(entry["writes"]) == 3
+    # Directories past the offer limit are counted, distinct, not listed.
+    dirs = [row(f"/d{i}/x") for i in range(5)] + [row("/d4/y")]
+    (entry,) = allowlist.build_refusals(dirs, since)
+    assert len(entry["scopes"]) == allowlist.SCOPE_OFFERS and entry["more_scopes"] == 2
+    # A path already granted for builds isn't offered again; another directory on the host is.
+    allowlist.grant(_GCS_PATH, "session", build=True)
+    (entry,) = allowlist.build_refusals([row(zip_), row("/other-bucket/x")], since)
+    assert entry["scopes"] == ["storage.googleapis.com/other-bucket/"]
+    assert entry["whole"] is False
+
+
+def test_a_refusal_under_a_nested_grant_offers_no_wider_path(env):
+    # Review (#177): with `host/a/b/` held, a GET under it refused for its body used to offer
+    # `host/a/` — a grant that lets no body through either. It is reported; a read elsewhere under
+    # `/a/` is still offered.
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None
+    allowlist.grant("objects.example.com/a/b/", "session", build=True)
+
+    def row(path: str) -> dict:
+        return {"ts": "2026-09-22T10:01:00+00:00", "host": "objects.example.com", "method": "GET",
+                "path": path, "status": 403, "blocked": True, "build": True}  # fmt: skip
+
+    (entry,) = allowlist.build_refusals([row("/a/b/file")], since)
+    assert entry["scopes"] == [] and entry["whole"] is False and entry["beyond"] == ["GET /a/b"]
+    (entry,) = allowlist.build_refusals([row("/a/c/file")], since)
+    assert entry["scopes"] == ["objects.example.com/a/"] and entry["beyond"] == []
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("PUT", "/chrome-for-testing-public/x"),  # an upload under the granted path
+        ("GET", "/chrome-for-testing-public/x"),  # a read refused there (a body, an Upgrade)
+        ("POST", "/another-bucket/x"),  # a write elsewhere on the host
+        ("CONNECT", ""),  # no request to go on
+        ("TCP", ""),  # raw bytes in the decrypted tunnel
+    ],
+)
+@pytest.mark.parametrize("build", [True, False])
+def test_a_path_granted_host_is_never_offered_whole_to_a_build(env, method, path, build):
+    # The build gate falls back to the host when nothing narrower answers a refusal. On a host
+    # already granted for some paths that fallback would hand a build step (whose Dockerfile the
+    # box can edit) the upload channel the path grant was made to avoid: such a refusal is
+    # reported, never offered. Whoever the path grant is for — builds or the box.
+    since = allowlist._parse("2026-09-22T10:00:00+00:00")
+    assert since is not None
+    allowlist.grant(_GCS_PATH, "session", build=build)
+    row = {"ts": "2026-09-22T10:01:00+00:00", "host": "storage.googleapis.com", "method": method,
+           "path": path, "status": 403, "blocked": True, "build": True, "outside": True}  # fmt: skip
+    (entry,) = allowlist.build_refusals([row], since)
+    assert entry["scopes"] == [] and entry["whole"] is False and entry["beyond"]
 
 
 @pytest.mark.parametrize(

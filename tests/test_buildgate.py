@@ -166,8 +166,8 @@ def test_a_redirect_chain_is_walked_one_refusal_at_a_time(env):
     assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
     assert build.calls == 3
     assert [q.split("?")[0] for q in asked[:2]] == [
-        "  allow cdn.example.com (1×) for builds",
-        "  allow storage.example.com (1×) for builds",
+        "  allow cdn.example.com (1× · no usable path) for builds",  # tunnelled: no request seen
+        "  allow storage.example.com (1× · no usable path) for builds",
     ]
 
 
@@ -379,6 +379,177 @@ def test_without_a_terminal_the_printed_command_is_a_build_grant(env, capsys):
     build = _Build(env["log"], [(1, [_row("storage.googleapis.com")])])
     buildgate.run(build, what="box image", interactive=False, prompt=lambda q: "")
     assert "fy allow add storage.googleapis.com --build" in capsys.readouterr().out
+
+
+# ── a refused path: decrypted for the build, so the gate offers the path, not the host ──────────
+
+_ZIP = "/chrome-for-testing-public/156.0.8078.4/linux-arm64/chrome-linux-arm64.zip"
+_CFT = "storage.googleapis.com/chrome-for-testing-public/"
+
+
+def _path_row(path: str = _ZIP, host: str = "storage.googleapis.com") -> dict:
+    return {**_row(host, ua="node"), "method": "GET", "path": path}
+
+
+def test_a_refused_path_is_offered_as_its_first_directory(env, capsys):
+    build = _Build(env["log"], [(1, [_path_row(), _path_row(_ZIP + "?sig=x")]), (0, [])])
+    prompt, asked = _answers("o")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert asked[0].startswith(f"  allow {_CFT} (2× · node)")
+    assert "[h]ost: all of storage.googleapis.com" in asked[0]
+    eff = allowlist.effective()
+    assert eff["build_allow"] == [_CFT] and eff["allow"] == []
+    out = capsys.readouterr().out
+    assert f'{{ host = "{_CFT}", why = "observed: node GET /chrome-for-testing-public/' in out
+
+
+def test_the_whole_host_is_one_answer_away(env):
+    build = _Build(env["log"], [(1, [_path_row()]), (0, [])])
+    prompt, asked = _answers("h", "s")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert "all of storage.googleapis.com for builds?" in asked[1]
+    assert allowlist.effective()["build_allow"] == ["storage.googleapis.com"]
+
+
+def test_several_directories_are_offered_each_not_the_host(env, capsys):
+    # The fallback to the whole host was the one a box-edited build step could steer: a read
+    # from a second bucket turned "allow this path?" into "allow all of the host?".
+    rows = [_path_row(), _path_row("/other-bucket/x")]
+    build = _Build(env["log"], [(1, rows), (0, [])])
+    prompt, asked = _answers("o")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    other = "storage.googleapis.com/other-bucket/"
+    assert asked[0].startswith(f"  allow {_CFT}, {other} (2× · node) for builds?")
+    assert "[p]ermanent each · [h]ost: all of storage.googleapis.com" in asked[0]
+    assert allowlist.effective()["build_allow"] == [_CFT, other]
+    out = capsys.readouterr().out  # one recommend line per directory, each with its own paths
+    assert f'{{ host = "{_CFT}", why = "observed: node GET /chrome-for-testing-public/' in out
+    assert f'{{ host = "{other}", why = "observed: node GET /other-bucket/x — edit me"' in out
+
+
+@pytest.mark.parametrize("odd", ["write", "no path"])
+def test_a_write_or_no_path_beside_the_reads_offers_the_host(env, odd):
+    row = (
+        {**_path_row("/upload/x"), "method": "PUT"}
+        if odd == "write"
+        else _row("storage.googleapis.com")
+    )
+    build = _Build(env["log"], [(1, [_path_row(), row]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (2×"), asked[0]
+    assert "[h]ost" not in asked[0]
+    # The prompt says why only the host answers, and never blames the directory count for it.
+    reason = " · PUT)" if odd == "write" else " · no usable path)"
+    assert reason in asked[0] and "refused under" not in asked[0]
+
+
+def _dirs(n: int) -> list[dict]:
+    return [_path_row(f"/v{i}/x") for i in range(n)]
+
+
+def test_past_the_limit_an_ungranted_host_is_offered_whole_and_says_why(env):
+    build = _Build(env["log"], [(1, _dirs(allowlist.SCOPE_OFFERS + 2)), (0, [])])
+    prompt, asked = _answers("n")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (5× · node) — refused under 5 ")
+
+
+def test_a_write_among_many_directories_is_named_as_the_reason(env):
+    # Reported nit: the directory count read like the reason when a write was.
+    put = {**_path_row("/upload/x"), "method": "PUT"}
+    build = _Build(env["log"], [(1, [*_dirs(allowlist.SCOPE_OFFERS + 2), put]), (0, [])])
+    prompt, asked = _answers("n")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (6× · node · PUT) for builds?")
+
+
+def test_past_the_limit_a_path_granted_host_is_still_offered_paths_only(env):
+    allowlist.grant(_CFT, "permanent", build=True)
+    build = _Build(env["log"], [(1, _dirs(allowlist.SCOPE_OFFERS + 2)), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert (
+        "storage.googleapis.com/v0/, storage.googleapis.com/v1/, storage.googleapis.com/v2/"
+        in (asked[0])
+    )
+    assert "(+2 more directories: the next attempt asks)" in asked[0]
+    assert "[h]ost" not in asked[0]  # a path-granted host is never one keypress from whole
+    assert "storage.googleapis.com" not in allowlist.effective()["build_allow"]
+
+
+def test_a_refusal_beyond_a_path_is_said_beside_a_new_directorys_offer(env, capsys):
+    allowlist.grant(_CFT, "permanent", build=True)
+    put = {**_path_row("/chrome-for-testing-public/x"), "method": "PUT", "outside": True}
+    build = _Build(env["log"], [(1, [put, _path_row("/other-bucket/x")]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com/other-bucket/ (2×")
+    assert "[h]ost" not in asked[0]
+    assert "refused PUT /chrome-for-testing-public/x — beyond the paths" in capsys.readouterr().out
+
+
+def test_h_on_a_path_granted_host_widens_nothing(env):
+    # The answer `h` isn't on offer there, so typing it is an unrecognised answer: no grant.
+    allowlist.grant(_CFT, "permanent", build=True)
+    build = _Build(env["log"], [(1, [_path_row("/other-bucket/x")])])
+    prompt, asked = _answers("h", "p")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert len(asked) == 1
+    assert allowlist.effective()["build_allow"] == [_CFT]
+
+
+def test_a_build_path_recommendations_why_is_shown(env):
+    toml = config.current().repo_root / "foldyard.toml"
+    toml.write_text(
+        toml.read_text().replace(
+            "[proxy]\n",
+            f'[proxy]\nrecommend = [{{ host = "{_CFT}", why = "CfT browsers", when = "build" }}]\n',
+        )
+    )
+    config.clear_caches()
+    build = _Build(env["log"], [(1, [_path_row()]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert "CfT browsers" in asked[0]
+
+
+def test_without_a_terminal_the_printed_command_is_the_path(env, capsys):
+    build = _Build(env["log"], [(1, [_path_row()])])
+    buildgate.run(build, what="box image", interactive=False, prompt=lambda q: "")
+    assert f"fy allow add {_CFT} --build" in capsys.readouterr().out
+
+
+def test_a_write_beyond_a_build_path_grant_is_reported_never_offered(env, capsys):
+    # The PR-review finding: with the path granted for builds, a build step's PUT under it used
+    # to fall back to "allow storage.googleapis.com for builds?" — the whole-host upload channel.
+    allowlist.grant(_CFT, "permanent", build=True)
+    put = {**_path_row("/chrome-for-testing-public/x"), "method": "PUT", "outside": True}
+    build = _Build(env["log"], [(1, [put])])
+    prompt, asked = _answers("o")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 1
+    assert asked == [] and build.calls == 1  # nothing offered, so nothing to retry
+    out = capsys.readouterr().out
+    assert "refused PUT /chrome-for-testing-public/x — beyond the paths it is granted" in out
+    assert allowlist.effective()["build_allow"] == [_CFT]
+
+
+def test_without_a_terminal_a_write_beyond_a_path_grant_prints_no_grant(env, capsys):
+    allowlist.grant(_CFT, "permanent", build=True)
+    put = {**_path_row("/chrome-for-testing-public/x"), "method": "PUT", "outside": True}
+    buildgate.run(_Build(env["log"], [(1, [put])]), what="box image", interactive=False)
+    out = capsys.readouterr().out
+    assert "--level once" not in out and "No terminal here" not in out
+    assert "beyond the paths it is granted" in out
+
+
+def test_a_refused_write_offers_the_host_and_says_it_is_a_write(env):
+    put = {**_path_row("/upload/x"), "method": "PUT"}
+    build = _Build(env["log"], [(1, [put])])
+    prompt, asked = _answers()
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert asked[0].startswith("  allow storage.googleapis.com (1× · node · PUT)")
+    assert "[h]ost" not in asked[0]
 
 
 def test_concurrent_token_updates_are_serialized(env):

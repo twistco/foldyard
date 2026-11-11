@@ -1,16 +1,20 @@
 """The build gate — an image build the egress wall refused, turned into one question per host.
 
 Under the in-VM wall an image build (`fy box build`, the stack's `fy up` build) reaches the proxy
-as a trusted build: tunnelled, not decrypted, and still walled (ADR-0029's amendment). When the
-wall refuses it, the tool reports the URL it ASKED for, which is often not the host that was
-refused: a CDN redirects inside the build's tunnel, where the proxy can't see the redirect
-(`cdn.playwright.dev` → `storage.googleapis.com`, seen live). Naming the real host used to mean
-reading the egress log by hand.
+as a trusted build: tunnelled, not decrypted, to a host granted as a whole, and still walled
+(ADR-0029's amendment). When the wall refuses it, the tool reports the URL it ASKED for, which is
+often not the host that was refused: a CDN redirects inside the build's tunnel, where the proxy
+can't see the redirect (`cdn.playwright.dev` → `storage.googleapis.com`, seen live). Naming the
+real host used to mean reading the egress log by hand.
 
 So the gate reads the refusals the proxy attributed to the build (its secret flags them)
 and, on the host with a terminal, offers each one — once / session / permanent / no — then
-retries. A retry is cheap for a build (the layer cache replays everything before the failing
-step), and a redirect chain reveals one hop per attempt, so it loops, bounded. Whatever is
+retries. A refused host is decrypted for a build whose step trusts the proxy CA, so its row names
+the path: the gate then offers a PATH grant (`storage.googleapis.com/chrome-for-testing-public/`,
+the request's first directory) rather than the whole of a shared host, with the host one keypress
+away. A refusal with no path to go on (a client that didn't trust the CA) offers the host.
+A retry is cheap for a build (the layer cache replays everything before the failing step), and a
+redirect chain reveals one hop per attempt, so it loops, bounded. Whatever is
 granted comes back as `[proxy] recommend` lines, so the team is offered the same hosts at their
 own `fy up` — the operator's consent, shared, never a grant written into the repo.
 
@@ -198,32 +202,109 @@ def _report_bypasses(bypassed: list[dict], what: str, echo: Callable[[str], None
     echo("  postinstall script with its own HTTP client, a raw socket. More: `fy docs networking`.")
 
 
-def _describe(entry: dict) -> str:
+def _describe(entry: dict, keys: list[str] | None = None) -> str:
     tool = f" · {entry['uas'][0]}" if entry["uas"] else ""
-    return f"{entry['host']} ({entry['count']}×{tool})"
+    # Why only the host answers, when it does: a write (a read never needs the host), or no path
+    # to shape a narrower grant on (a client that didn't trust the proxy CA left only its CONNECT).
+    writes = f" · {', '.join(entry['writes'])}" if entry.get("writes") else ""
+    pathless = " · no usable path" if entry.get("pathless") else ""
+    return f"{', '.join(keys or [entry['host']])} ({entry['count']}×{tool}{writes}{pathless})"
+
+
+def _keys(entry: dict) -> list[str]:
+    """What a host's refusals are offered as, narrowest first: the path grants its refused reads
+    ask for — one per first directory, up to ``allowlist.SCOPE_OFFERS`` — or the host, when a
+    refusal only the host answers (a write, no path) or past that many directories, where a first
+    directory is likely a version or a hash rather than a bucket.
+
+    Never the host as a fallback on a host already granted for some paths (``scoped``): past
+    the limit it offers the first directories and the next attempt asks about the rest, and a
+    refusal beyond its paths offers nothing (``_report_beyond``). Several directories used to
+    fall back to the host too, which let a box-edited build step turn a path offer into a
+    whole-host one by reading from a second bucket. ``[]``: nothing to offer."""
+    scopes = entry.get("scopes") or []
+    if entry.get("whole"):
+        return [entry["host"]]
+    if entry.get("more_scopes") and not entry.get("scoped"):
+        return [entry["host"]]
+    return list(scopes)
+
+
+def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
+    """Refusals beyond the paths a host is granted: said, never offered. Widening it to the
+    whole host is a decision to type, not a keypress in the middle of a build."""
+    host = entry["host"]
+    echo(
+        f"  ✗ {host}: refused {', '.join(entry['beyond'])} — beyond the paths it is granted, "
+        "which allow reads (GET/HEAD, no body) only. Not offered: all of the host would let a "
+        "build step upload there. If a build really needs it, on your computer: "
+        f"`fy allow add {host} --build`"
+    )
+
+
+def _crowded(entry: dict, keys: list[str]) -> str:
+    """Why a host's directories aren't all offered, or ''."""
+    more = entry.get("more_scopes", 0)
+    if not more or entry.get("whole"):
+        return ""  # with `whole`, a write or a missing path is the reason, said by `_describe`
+    n = len(entry.get("scopes") or []) + more
+    if keys == [entry["host"]]:
+        return f" — refused under {n} directories"
+    return f" (+{more} more director{'y' if more == 1 else 'ies'}: the next attempt asks)"
+
+
+def _for_key(entry: dict, key: str) -> dict:
+    """``entry`` as the team is offered ``key``: its host, and the sampled paths under it."""
+    scoped = allowlist.path_grant(key)
+    paths = entry.get("paths") or []
+    if scoped is not None:
+        paths = [p for p in paths if f"{p}/".startswith(scoped[1])]
+    return {**entry, "host": key, "paths": paths, "more_paths": 0}
+
+
+_LEVELS = f"[o]nce ({ONCE_TTL_SECONDS // 60} min) · [s]ession · [p]ermanent"
+
+
+def _ask(question: str, prompt: Callable[[str], str]) -> str:
+    return prompt(question).strip().lower()
 
 
 def _offer(refused: list[dict], prompt: Callable[[str], str], echo: Callable[[str], None]):
     granted: list[dict] = []
     whys = allowlist.build_recommendations()
     for entry in refused:
-        why = f" — {whys[entry['host']]}" if whys.get(entry["host"]) else ""
-        answer = (
-            prompt(
-                f"  allow {_describe(entry)}{why} for builds?  [o]nce ({ONCE_TTL_SECONDS // 60} "
-                "min) · [s]ession · [p]ermanent · [n]o (default): "
-            )
-            .strip()
-            .lower()
+        host = entry["host"]
+        if entry.get("beyond"):
+            _report_beyond(entry, echo)  # said whatever else is offered for the host
+        keys = _keys(entry)
+        if not keys:
+            continue
+        known = list(dict.fromkeys(w for k in [*keys, host] if (w := whys.get(k))))
+        why = f" — {'; '.join(known)}" if known else ""
+        # Never on a host already granted for some paths: one keypress there would widen it to the
+        # whole host, uploads included — what its path grant was made to leave out. Typed, it is
+        # still made (`fy allow add <host> --build`); `_report_beyond` names the command.
+        wider = f" · [h]ost: all of {host}" if keys != [host] and not entry.get("scoped") else ""
+        each = " each" if len(keys) > 1 else ""
+        answer = _ask(
+            f"  allow {_describe(entry, keys)}{_crowded(entry, keys)}{why} for builds?  "
+            f"{_LEVELS}{each}{wider} · [n]o (default): ",
+            prompt,
         )
+        if wider and answer in ("h", "host"):
+            keys = [host]
+            answer = _ask(
+                f"  allow all of {host} for builds?  {_LEVELS} · [n]o (default): ", prompt
+            )
         level = _ANSWERS.get(answer)  # exact matches only; anything else is no
         if level is None:
-            echo(f"    ({entry['host']} not granted)")
+            echo(f"    ({', '.join(keys)} not granted)")
             continue
         ttl = ONCE_TTL_SECONDS if level == "once" else None
-        allowlist.grant(entry["host"], level, ttl, build=True)
-        echo(f"  ✓ {entry['host']} allowed for builds ({level})")
-        granted.append(entry)
+        for key in keys:
+            allowlist.grant(key, level, ttl, build=True)
+            echo(f"  ✓ {key} allowed for builds ({level})")
+            granted.append(_for_key(entry, key))  # what was granted is what the team is offered
     return granted
 
 
@@ -282,8 +363,13 @@ def _run(
         echo(f"✗ the allowlist refused {hosts} during the {what}")
         if not interactive:
             for e in refused:
-                echo(f"    fy allow add {e['host']} --build --level once --ttl {ONCE_TTL_SECONDS}")
-            echo("  No terminal here — grant with the commands above, then build again.")
+                if e.get("beyond"):
+                    _report_beyond(e, echo)
+            offered = [key for e in refused for key in _keys(e)]
+            for key in offered:
+                echo(f"    fy allow add {key} --build --level once --ttl {ONCE_TTL_SECONDS}")
+            if offered:
+                echo("  No terminal here — grant with the commands above, then build again.")
             break
         granted = _offer(refused, prompt, echo)
         if not granted:

@@ -717,3 +717,35 @@ def test_a_build_grant_answers_only_a_build_recommendation(checkout):
         allowlist.grant("cdn.example.com", "permanent", build=True)
     status = {host: s for host, _why, s in collect(cfg).recommended}
     assert status == {"pypi.org": "pending", "cdn.example.com": "granted"}
+
+
+def test_a_path_recommendation_is_answered_by_its_path_or_its_whole_host(checkout):
+    from foldyard import allowlist
+
+    cft = "storage.googleapis.com/chrome-for-testing-public/"
+    cfg = checkout(
+        BASE + f'recommend = [{{ host = "{cft}", why = "browsers", when = "build" }}, '
+        '"objects.example.com/pkg/"]\n'
+    )
+    with config.using(cfg):
+        allowlist.grant(cft, "permanent", build=True)
+        allowlist.grant("objects.example.com", "session")
+    status = {host: s for host, _why, s in collect(cfg).recommended}
+    assert status == {cft: "granted", "objects.example.com/pkg/": "granted"}
+
+
+def test_an_ignored_recommendation_is_named_not_dropped_silently(checkout):
+    cfg = checkout(BASE + 'recommend = ["pypi.org", "cdn.example.com/a/../b/", { why = "x" }]\n')
+    exp = collect(cfg)
+    assert [h for h, _w, _s in exp.recommended] == ["pypi.org"]
+    assert exp.recommend_dropped == ["'cdn.example.com/a/../b/'", "{'why': 'x'}"]
+    ok, _name, detail = exposure.doctor_row(exp)
+    assert ok is None and "`proxy.recommend` ignores 2 entries" in detail
+    body = rendered(cfg)
+    assert "ignored recommendations" in body and "cdn.example.com/a/../b/" in body
+
+
+def test_a_recommend_that_is_not_a_list_is_reported_too(checkout):
+    exp = collect(checkout(BASE + 'recommend = "pypi.org"\n'))
+    assert exp.recommended == [] and exp.recommend_dropped == ["'pypi.org'"]
+    assert exposure.doctor_row(exp)[0] is None  # WARN: config that reads as an ask and isn't
