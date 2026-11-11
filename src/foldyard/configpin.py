@@ -750,12 +750,28 @@ def forget(cfg: config.Config) -> bool:
     target = pin_dir(cfg)
     if not os.path.lexists(target):
         return False
-    if target.is_symlink():
-        target.unlink()
-        return True
-    (target / ADOPTED_MARKER).unlink(missing_ok=True)
-    shutil.rmtree(target)
+    _remove(target)
     return True
+
+
+def drop(pin: Path) -> None:
+    """Remove one adoption folder, found by its path under :func:`_pin_root` (`fy prune` lists them
+    by that, not by a config). The marker goes first, as in :func:`forget`; a link is unlinked,
+    never followed. Anything not directly in the root is refused."""
+    _require_host()
+    if pin.parent.resolve() != _pin_root().resolve() or pin.name in ("", ".", ".."):
+        raise ValueError(f"{pin} isn't an adoption under {_pin_root()}")
+    _remove(pin)
+
+
+def _remove(pin: Path) -> None:
+    """The marker first, in one unlink, so a reader sees "never adopted" from then on; a link is
+    unlinked, never followed."""
+    if pin.is_symlink():
+        pin.unlink()
+        return
+    (pin / ADOPTED_MARKER).unlink(missing_ok=True)
+    shutil.rmtree(pin)
 
 
 def _after_first_adoption(adopted: config.Config) -> None:

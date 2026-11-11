@@ -172,22 +172,6 @@ def test_only_foldyards_own_unclaimed_vms_are_left_over_and_the_base_is_its_own_
     assert "mine" not in out and "Base VM foldyard-base: stopped" in out
 
 
-def test_an_adoption_whose_checkout_is_gone_is_left_over(host, monkeypatch, tmp_path):
-    root = tmp_path / "pins"
-    for i, (checkout, worktree) in enumerate(
-        [(str(tmp_path / "vanished"), ""), (str(host.checkouts[0]), ""), ("/x/wt", "w")]
-    ):
-        pin = root / f"p{i}"
-        pin.mkdir(parents=True)
-        doc = {"checkout": checkout, "worktree": worktree}
-        (pin / configpin.ADOPTED_MARKER).write_text(json.dumps(doc))
-    monkeypatch.setattr(configpin, "_pin_root", lambda: root)
-    got = projects.collect()
-    assert [(lo.what, lo.why) for lo in got.leftovers] == [
-        (f"adopted config for {tmp_path / 'vanished'}", "the checkout is gone")
-    ]
-
-
 def test_a_childs_answer_is_sanitised_and_its_failure_reported(host):
     host.child["doc"]["unavailable"] = "\x1b]52;c;evil\x07engine slow"
     host.child["doc"]["workspaces"].append({"name": "\x1b[2Jx", "box": True, "containers": "3"})
@@ -266,7 +250,7 @@ def test_fy_ls_runs_outside_a_project(monkeypatch, tmp_path):
     monkeypatch.setattr(projects, "ls", lambda **k: seen.append(k) or 0)
     result = CliRunner().invoke(cli.app, ["ls", "--json"])
     assert result.exit_code == 0, result.output
-    assert seen == [{"here_only": False, "as_json": True}]
+    assert seen == [{"here_only": False, "as_json": True, "verbose": False}]
 
 
 def test_size_reads_like_a_person_would_write_it():
@@ -346,3 +330,193 @@ def test_an_empty_listing_still_says_lima_didnt_answer():
     # left-over VMs never ran (CodeRabbit on #181).
     out = projects.render(projects.Listing([], [], None, lima_unavailable=True))
     assert "`limactl list` didn't answer" in out
+
+
+# --- leftovers: adoptions, state folders, and `fy prune` --------------------------------------
+
+
+def _adoption(root: Path, name: str, checkout: Path | str, worktree: str = "") -> Path:
+    pin = root / name
+    pin.mkdir(parents=True)
+    doc = {"checkout": str(checkout), "worktree": worktree}
+    (pin / configpin.ADOPTED_MARKER).write_text(json.dumps(doc))
+    return pin
+
+
+@pytest.fixture
+def pins(host, monkeypatch):
+    """The adoption root, with one adoption per case beside the two live projects'."""
+    root = host.tmp / "pins"
+    monkeypatch.setattr(configpin, "_pin_root", lambda: root)
+    emptied = host.tmp / "work" / "emptied"  # the folder is there, its foldyard.toml isn't
+    emptied.mkdir(parents=True)
+    alive_wt = host.tmp / "work" / "alpha-worktrees" / "live"
+    (alive_wt).mkdir(parents=True)
+    (alive_wt / "foldyard.toml").write_text("")
+    return SimpleNamespace(
+        root=root,
+        alpha=_adoption(root, "alpha-1", host.checkouts[0]),
+        gone=_adoption(root, "gone-2", host.tmp / "vanished"),
+        gone_wt=_adoption(root, "feat-3", host.tmp / "work" / "alpha-worktrees" / "feat", "feat"),
+        live_wt=_adoption(root, "live-4", alive_wt, "live"),
+        emptied=_adoption(root, "emptied-5", emptied),
+    )
+
+
+def _adoptions(listing) -> list:
+    return [lo for lo in listing.leftovers if lo.kind == "adoption"]
+
+
+def test_an_adoption_is_left_over_when_its_checkout_or_worktree_is_gone(pins):
+    got = {lo.path: lo for lo in _adoptions(projects.collect())}
+    assert set(got) == {str(pins.gone), str(pins.gone_wt), str(pins.emptied)}
+    assert got[str(pins.gone)].prunable and got[str(pins.gone_wt)].prunable
+    # A folder that only lost its foldyard.toml is reported, never pruned: a box can delete the
+    # file, and forgetting the adoption would turn the next review into a whole-file one.
+    assert not got[str(pins.emptied)].prunable
+    assert "foldyard.toml" in got[str(pins.emptied)].why
+
+
+def test_a_state_folder_no_adopted_project_uses_is_left_over(host, pins):
+    state = host.tmp / "home" / ".foldyard"
+    for name in ("alpha", "beta", "adopted", "cache", "worktrees"):
+        (state / name).mkdir(parents=True)
+    (state / "homelab").mkdir()
+    (state / "homelab" / "host.env").write_text("TOKEN=x\n")
+    (state / "backup").mkdir()
+    (state / "backup" / "images.tar").write_bytes(b"x" * 4096)
+    (state / "ports.json").write_text("{}")
+    folders = {lo.what: lo for lo in projects.collect().leftovers if lo.kind == "folder"}
+    assert set(folders) == {"folder ~/.foldyard/backup", "folder ~/.foldyard/homelab"}
+    assert "host.env" in folders["folder ~/.foldyard/homelab"].why
+    assert "host.env" not in folders["folder ~/.foldyard/backup"].why
+    assert not any(lo.prunable for lo in folders.values())
+
+
+def test_no_state_folders_are_judged_under_a_relocated_state_dir(host, pins, monkeypatch):
+    (host.tmp / "home" / ".foldyard" / "homelab").mkdir(parents=True)
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(host.tmp / "elsewhere"))
+    assert not [lo for lo in projects.collect().leftovers if lo.kind == "folder"]
+
+
+def test_foldyards_own_folders_in_the_state_root_are_the_ones_ls_skips():
+    # Every folder the package names straight under ~/.foldyard must be in projects.OWN_FOLDERS,
+    # or `fy ls` would call it left over.
+    import re
+
+    src = Path(projects.__file__).parent
+    named = set()
+    for path in src.rglob("*.py"):
+        named |= set(re.findall(r'"\.foldyard"\)?\s*/\s*"([^"%.]+)"', path.read_text()))
+    assert named and named <= set(projects.OWN_FOLDERS)
+
+
+def test_ls_counts_adoptions_and_lists_them_only_when_asked(pins):
+    listing = projects.collect()
+    out = projects.render(listing)
+    assert "2 adoptions whose checkout is gone — `fy prune` forgets them" in out
+    assert "1 adoption whose folder no longer holds a foldyard.toml" in out
+    assert str(pins.gone) not in out and "vanished" not in out
+    verbose = projects.render(listing, verbose=True)
+    assert "vanished" in verbose and "alpha-worktrees/feat" in verbose
+
+
+def test_json_counts_adoptions_and_lists_them_only_when_asked(pins):
+    listing = projects.collect()
+    doc = json.loads(projects.to_json(listing))
+    assert doc["adoptions_left_over"] == 3
+    assert all(lo["kind"] != "adoption" for lo in doc["leftovers"])
+    full = json.loads(projects.to_json(listing, verbose=True))
+    assert full["adoptions_left_over"] == 3
+    assert sum(lo["kind"] == "adoption" for lo in full["leftovers"]) == 3
+
+
+def _prune(answer: str | None, **kw) -> tuple[int, list[str]]:
+    asked: list[str] = []
+
+    def ask(question: str) -> bool:
+        asked.append(question)
+        return answer == "y"
+
+    return projects.prune(ask=ask if answer is not None else None, **kw), asked
+
+
+def test_prune_forgets_the_gone_adoptions_once_you_say_yes(pins, capsys):
+    rc, asked = _prune("y")
+    assert rc == 0 and len(asked) == 1 and "2" in asked[0]
+    assert not pins.gone.exists() and not pins.gone_wt.exists()
+    for kept in (pins.alpha, pins.live_wt, pins.emptied):
+        assert kept.is_dir()
+    out = capsys.readouterr().out
+    assert "vanished" in out  # what it removes is shown before the question
+
+
+def test_prune_removes_nothing_on_no(pins):
+    rc, _ = _prune("n")
+    assert rc == 0 and pins.gone.is_dir() and pins.gone_wt.is_dir()
+
+
+def test_prune_without_a_terminal_removes_nothing_and_says_yes(pins, capsys, monkeypatch):
+    monkeypatch.setattr(projects.sys.stdin, "isatty", lambda: False, raising=False)
+    rc, _ = _prune(None)
+    assert rc == 1 and pins.gone.is_dir()
+    assert "fy prune --yes" in capsys.readouterr().err
+
+
+def test_prune_yes_asks_nothing(pins):
+    rc, asked = _prune("n", yes=True)
+    assert rc == 0 and asked == [] and not pins.gone.exists() and not pins.gone_wt.exists()
+
+
+def test_prune_keeps_a_checkout_that_came_back_before_the_answer(pins, host):
+    back = host.tmp / "vanished"
+
+    def ask(question: str) -> bool:
+        back.mkdir()  # the drive was plugged back in while you read the list
+        return True
+
+    assert projects.prune(ask=ask) == 0
+    assert pins.gone.is_dir() and not pins.gone_wt.exists()
+
+
+def test_prune_names_what_it_leaves_and_how_to_remove_it(pins, host, capsys):
+    host.instances["old-proj"] = {"name": "old-proj", "status": "Stopped", "dir": ""}
+    host.provisioned.add("old-proj")
+    _prune("y")
+    out = capsys.readouterr().out
+    assert "not removed" in out.lower() and "`limactl delete old-proj`" in out
+
+
+def test_prune_with_nothing_to_forget_says_so(host, monkeypatch, capsys):
+    monkeypatch.setattr(configpin, "_pin_root", lambda: host.tmp / "none")
+    rc, asked = _prune("y")
+    assert rc == 0 and asked == []
+    assert "nothing to prune" in capsys.readouterr().out.lower()
+
+
+def test_prune_refuses_in_a_box(monkeypatch, capsys):
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert projects.prune(yes=True) == 1
+    assert "on your computer" in capsys.readouterr().err
+
+
+def test_fy_prune_runs_outside_a_project(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FOLDYARD_REPO", raising=False)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(config, "in_project", lambda: False)
+    seen: list = []
+    monkeypatch.setattr(projects, "prune", lambda **k: seen.append(k) or 0)
+    result = CliRunner().invoke(cli.app, ["prune", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert seen == [{"yes": True}]
+
+
+def test_fy_ls_passes_verbose(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(config, "in_project", lambda: False)
+    seen: list = []
+    monkeypatch.setattr(projects, "ls", lambda **k: seen.append(k) or 0)
+    assert CliRunner().invoke(cli.app, ["ls", "--verbose"]).exit_code == 0
+    assert seen == [{"here_only": False, "as_json": False, "verbose": True}]

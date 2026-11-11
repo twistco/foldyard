@@ -72,6 +72,8 @@ _PROJECT_FREE = (
     ("agent", "ls"),
     # Every local project, from anywhere on your computer.
     ("ls",),
+    # Your computer's leftover adoptions, from anywhere.
+    ("prune",),
     ("agent", "attach"),
     ("agent", "stop"),
     ("agent", "clean"),
@@ -386,15 +388,31 @@ def mode(
 @app.command("ls")
 def ls(
     as_json: bool = typer.Option(False, "--json", help="machine-readable output"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="list each leftover adoption, not only how many"
+    ),
     here: bool = typer.Option(False, "--here", hidden=True, help="this project's engine side"),
 ) -> None:
     """Every foldyard project on your computer: its VM (state, size, disk used), host supervisor,
     boxes up and running agents, then what needs attention (with the command that fixes it) and
-    what's left over (VMs no project uses, adoptions of vanished checkouts). Read-only: a stopped
-    VM is reported, never started."""
+    what's left over (VMs and state folders no project uses, adoptions of vanished checkouts,
+    counted unless --verbose). Read-only: a stopped VM is reported, never started; `fy prune`
+    forgets the adoptions."""
     from . import projects
 
-    raise typer.Exit(projects.ls(here_only=here, as_json=as_json))
+    raise typer.Exit(projects.ls(here_only=here, as_json=as_json, verbose=verbose))
+
+
+@app.command("prune")
+def prune(
+    yes: bool = typer.Option(False, "--yes", "-y", help="don't ask (for a script)"),
+) -> None:
+    """Forget the adopted configs whose checkout or worktree folder is gone, after listing them
+    and asking. VMs and state folders no project uses are only named, with how to remove them:
+    they hold data and secrets."""
+    from . import projects
+
+    raise typer.Exit(projects.prune(yes=yes))
 
 
 @app.command()

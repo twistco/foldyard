@@ -253,9 +253,15 @@ Why each step is the way it is:
 `fy ls`, from anywhere on your computer, lists every project you've adopted a config for: its VM
 (running or not, its size and the disk it takes), its host supervisor, the boxes up and the agents
 running in them. Below the table it lists what needs attention, each with the command that fixes it,
-and what's left over: VMs foldyard made that no project uses, and adoptions of checkouts that are
-gone. It only reads. A stopped VM is reported, never started, and nothing is removed for you.
-`--json` gives the same as JSON.
+and what's left over: VMs foldyard made that no project uses, folders in `~/.foldyard` no project
+uses, and adoptions of checkouts that are gone (counted; `--verbose` lists each one). It only reads.
+A stopped VM is reported, never started, and nothing is removed for you. `--json` gives the same as
+JSON.
+
+`fy prune` forgets the adoptions whose checkout folder is gone, after listing them and asking
+(`--yes` doesn't ask). A checkout on a drive that isn't plugged in reads as gone, and its next
+`fy up` asks you to adopt again. VMs and state folders it only names, with how to remove them: a VM
+holds your databases and volumes, a state folder your `host.env`.
 
 Where next: the [docs map](https://github.com/twistco/foldyard/blob/main/docs/README.md) — modes and
 time limits, the egress proxy and its log, the security model — and, for the reasoning behind the
