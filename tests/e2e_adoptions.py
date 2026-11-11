@@ -34,7 +34,8 @@ def record(repo: Path) -> None:
     # A copy straight under your home would make the home the folder to clear, and every
     # project of yours with it; one straight in the temp folder, every other run's adoptions.
     shared = {Path.home(), Path("/"), Path(tempfile.gettempdir()), Path("/tmp")}
-    assert base not in {p.resolve() for p in shared}, f"no copy may sit in {base}"
+    if base in {p.resolve() for p in shared}:  # not `assert`: `python -O` would drop the guard
+        raise AssertionError(f"no copy may sit in {base}")
     _bases.add(base)
 
 
