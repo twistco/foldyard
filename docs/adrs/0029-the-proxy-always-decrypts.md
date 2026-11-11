@@ -196,20 +196,19 @@ belongs in the middle — but *one* middle, not a switch between two.
   - refused outright if a server might resolve the path elsewhere (dot segments, `..;`, `//`, a
     backslash, a percent-encoded `/`, `\`, `.` or `%`).
 
-  It lives in the effective file's `allow` list beside the host grants. A proxy that predates
-  path grants matches no host against `host/path`, so it fails closed. A path can only be judged
-  decrypted, so a path-granted host is never blind-tunnelled: not on `passthrough`, not for a
-  build. That made `--build` path grants a refusal, since builds were tunnelled (until the
-  amendment below). The tunnel itself
-  had to be fenced. mitmproxy relays a CONNECT's raw TCP, and inside a decrypted tunnel it relays
-  any stream that doesn't look like HTTP: a leading CRLF is enough, and a server may skip the CRLF
-  and read the request after it. So the proxy answers the CONNECT itself, as for a refused host,
-  and opens the upstream only for a connection that earned it: a ClientHello the proxy is about
-  to decrypt, or a cleartext request the grant passed. Raw bytes in a decrypted tunnel are emptied
-  before mitmproxy sends them, and the connection is closed. `tests/test_proxy_wall_e2e.py` pins
-  all three on a real mitmdump. A refusal that follows a granted host's redirect names that host
-  and suggests the path grant (`via` on the row). The proxy keeps that memory for two minutes, as
-  an explanation only.
+  It lives in the effective file's `allow` list beside the host grants. A proxy that predates path
+  grants matches no host against `host/path`, so it fails closed. A path can only be judged
+  decrypted, so a path-granted host is never blind-tunnelled: not on `passthrough`, not for a build.
+  That made `--build` path grants a refusal, since builds were tunnelled (until the amendment
+  below). The tunnel itself had to be fenced. mitmproxy relays a CONNECT's raw TCP, and inside a
+  decrypted tunnel it relays any stream that doesn't look like HTTP: a leading CRLF is enough, and a
+  server may skip the CRLF and read the request after it. So the proxy answers the CONNECT itself,
+  as for a refused host, and opens the upstream only for a connection that earned it: a ClientHello
+  the proxy is about to decrypt, or a cleartext request the grant passed. Raw bytes in a decrypted
+  tunnel are emptied before mitmproxy sends them, and the connection is closed.
+  `tests/test_proxy_wall_e2e.py` pins all three on a real mitmdump. A refusal that follows a granted
+  host's redirect names that host and suggests the path grant (`via` on the row). The proxy keeps
+  that memory for two minutes, as an explanation only.
 - **A build can hold a path grant, and a refused build is decrypted** (amended 2026-11-10). The
   refusal above was inherited from the 2026-09-23 reason for tunnelling builds (a build container
   had no CA), which the 2026-10-06 amendment had already removed for the walled VM: every build
