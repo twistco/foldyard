@@ -5,7 +5,7 @@ share one root cause: state that the box can write is never authoritative for wh
 and containers freeze parts of their config at creation. Work down the table before assuming a bug.
 
 | you edited | why it didn't take | what makes it take |
-| --- | --- | --- |
+| -- | -- | -- |
 | `foldyard.toml` / `foldyard.local.toml` | the host reconciles from the copy it **adopted**, outside the mount — your edit is inert by design | the human answers the adopt/revert/ignore prompt at the next `fy up`/`fy host restart`, or runs `fy config adopt`. `fy config status` / `fy config diff` show where you are |
 | a block you deleted from `foldyard.toml` | `foldyard.local.toml` wins the merge and may still declare it (that file is gitignored, so it's invisible in `git status`) | `fy config widenings` names the file behind each one; a local `disabled = true` is how one person opts out of a block the team keeps |
 | a compose file, inside a worktree | each worktree's stack reads its own checkout's compose files — the edit reaches only that worktree's stack | bring that stack up: `WORKTREE=<name> fy up` (or `fy up` from inside the worktree) |

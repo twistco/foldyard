@@ -17,20 +17,22 @@
 `fy code` attaches an isolated VS Code instance (its own `--user-data-dir`, one per worktree) to the
 running dev box. "Attach to Running Container" ignores `devcontainer.json`; the lever for installing
 extensions and applying settings on attach is an *attached-container config* that VS Code reads from
-the instance's own globalStorage. Under [ADR-0023](./0023-no-host-executed-code-from-the-repo-mount.md)
-a consumer script produced that document in the box and foldyard sanitised it against a key
-allowlist before the one host-side write.
+the instance's own globalStorage. Under
+[ADR-0023](./0023-no-host-executed-code-from-the-repo-mount.md) a consumer script produced that
+document in the box and foldyard sanitised it against a key allowlist before the one host-side
+write.
 
 Everything such a script can compute decomposes into three kinds of thing:
 
 | what it produced | whose fact it is |
-| --- | --- |
+| -- | -- |
 | `remoteUser` | **foldyard's** — `fy shell`/`fy claude` exec as root; a consumer choosing otherwise would be a bug |
 | `extensions` | **a list** |
 | `settings` | **a table** |
 
-Nothing there needs to be *computed*. This is [ADR-0024](./0024-declarative-consumer-axes-no-repo-path-plugins.md)'s
-finding again: the thing that looked like it needed code was data.
+Nothing there needs to be *computed*. This is
+[ADR-0024](./0024-declarative-consumer-axes-no-repo-path-plugins.md)'s finding again: the thing that
+looked like it needed code was data.
 
 **The finding that set the boundary.** The `extensions` list is consumed by the Dev Containers
 extension on the host, with no click. Workspace-kind extensions install in the box — inside the
@@ -49,24 +51,24 @@ consumer code runs to produce it, nothing under the mount is read for it, and th
 the checkout folder.**
 
 - `[vscode] extensions = [...]` — the auto-install list, as marketplace ids, id-validated,
-  de-duplicated, with the Dev Containers extension dropped. **Config, not `.vscode/extensions.json`:**
-  the list decides what the host installs, so it lives where the adopt gate reviews it. The
-  recommendations files keep their plain-VS-Code role (click-to-install), which is the human gate
-  this list bypasses. The duplication is the cost, and it is small.
+  de-duplicated, with the Dev Containers extension dropped. **Config, not
+  `.vscode/extensions.json`:** the list decides what the host installs, so it lives where the adopt
+  gate reviews it. The recommendations files keep their plain-VS-Code role (click-to-install), which
+  is the human gate this list bypasses. The duplication is the cost, and it is small.
 - `[vscode.settings]` — a table carried into the config's `settings` (both schemas, so newer and
   older Dev Containers versions alike apply it). Settings can't execute; the schema's lifecycle
   hooks are not a key. The daemon-port pin merges on top and wins.
-- **Read from the adopted copy, behind the gate.** `fy code` calls `configpin.gate("fy code")`
-  then reads the table through `devmode.worktree_config()` — the funnel every host-consequence verb
-  uses ([ADR-0022](./0022-host-runs-the-adopted-config.md)). A box edit to `[vscode]` is inert
-  until an operator adopts it, and the adoption diff is where "this branch wants `x.y` installed
-  on your machine" is seen.
+- **Read from the adopted copy, behind the gate.** `fy code` calls `configpin.gate("fy code")` then
+  reads the table through `devmode.worktree_config()` — the funnel every host-consequence verb uses
+  ([ADR-0022](./0022-host-runs-the-adopted-config.md)). A box edit to `[vscode]` is inert until an
+  operator adopts it, and the adoption diff is where "this branch wants `x.y` installed on your
+  machine" is seen.
 - `remoteUser` is pinned to `root` by foldyard, not declared.
-- foldyard keeps the last config it wrote as the record of what the box's Machine settings hold,
-  and clears `.writeMachineSettingsMarker` whenever the settings differ (a first write included) —
-  the twin of the `.installExtensionsMarker` reset. Dev Containers applies an attached config only
-  once per server install; without this, a changed setting never reached a box that had been
-  attached to before.
+- foldyard keeps the last config it wrote as the record of what the box's Machine settings hold, and
+  clears `.writeMachineSettingsMarker` whenever the settings differ (a first write included) — the
+  twin of the `.installExtensionsMarker` reset. Dev Containers applies an attached config only once
+  per server install; without this, a changed setting never reached a box that had been attached to
+  before.
 - The `_generatedBy` ownership contract is all-or-nothing: remove the key and `fy code` leaves the
   file alone, so the table stops applying to that instance. It is a host-side file under
   `~/.foldyard`, so the box can't reach it.
@@ -93,16 +95,16 @@ Each layer has one job:
   there: editor defaults, per-language formatters, tool paths, agent flags. It sits on the persisted
   vscode-server volume, so it survives box recreation, and it is the slot VS Code designed for
   "settings for this environment" — **machine-scoped** keys (interpreter and binary paths) are
-  honoured here and *ignored* at the local user level, which is why this and not the instance's
-  user settings is the delivery target.
+  honoured here and *ignored* at the local user level, which is why this and not the instance's user
+  settings is the delivery target.
 - **Workspace is the person's.** The checkout's `.vscode/settings.json` overrides the policy, and
   foldyard never writes it, so a consumer can keep it gitignored and let each operator hold their
   own tweaks there — window colours per worktree, a personal ruler — without a diff. Being
   per-checkout, it is per-worktree by construction.
-- **User is the operator's, plus foldyard's instance plumbing** (the local-terminal shims, the
-  port and git-bridge pins) and nothing a consumer declares. A new instance is seeded once from
-  the operator's own VS Code User folder, minus the settings that name a container engine; that
-  is where `update.mode` comes from now (amended 2026-09-24 — foldyard pinned it to `manual`).
+- **User is the operator's, plus foldyard's instance plumbing** (the local-terminal shims, the port
+  and git-bridge pins) and nothing a consumer declares. A new instance is seeded once from the
+  operator's own VS Code User folder, minus the settings that name a container engine; that is where
+  `update.mode` comes from now (amended 2026-09-24 — foldyard pinned it to `manual`).
 
 Per-operator overrides of the *policy* go in `foldyard.local.toml`: its `[vscode.settings]`
 deep-merges key-by-key over the shared table and is adopted alongside it, so one setting can be
@@ -122,62 +124,60 @@ life: a first attach on the folder (the generated file did not exist yet), later
 VS Code reads window-scoped settings from the folder's `.vscode/settings.json` in a single-root
 window but only from the workspace file in a multi-root one, so what an operator set in the first
 session silently stopped applying in the second. Per-folder formatter defaults are a consumer's
-editor policy, expressible by committed per-folder `.vscode/settings.json` files, and not
-foldyard's concern.
+editor policy, expressible by committed per-folder `.vscode/settings.json` files, and not foldyard's
+concern.
 
 **Shadowing `.vscode/` with overlay volumes so the box can't edit it.** It would defend the residual
 channel — VS Code itself still reads the mount's `.vscode/` when attached — but the boundary this
-codebase draws is *host consequences come from adopted config*, not *mount files are immutable*,
-and the second is a losing game: `.vscode/`, `.editorconfig`, a `pyproject` naming a tool path —
-every file an editor reads is a candidate. It also breaks the yard's own model (agents legitimately
-edit workspace settings; a shadow diverges from the checkout under branch switches, on both sides
-of the mount). The residual exposure is VS Code's workspace-trust model for any trusted workspace,
-and in an attached window nearly all of it executes in the box: the extension host, tasks, launch
-configs and terminals all run remote. What executed on the host without a click was the
-`extensions` list, and that is what moved. If a *specific* `.vscode` key is ever shown to reach the
-host, the fix is the same shape as this one — name it, pin it, or move it to config — not a
-mount-wide overlay.
+codebase draws is *host consequences come from adopted config*, not *mount files are immutable*, and
+the second is a losing game: `.vscode/`, `.editorconfig`, a `pyproject` naming a tool path — every
+file an editor reads is a candidate. It also breaks the yard's own model (agents legitimately edit
+workspace settings; a shadow diverges from the checkout under branch switches, on both sides of the
+mount). The residual exposure is VS Code's workspace-trust model for any trusted workspace, and in
+an attached window nearly all of it executes in the box: the extension host, tasks, launch configs
+and terminals all run remote. What executed on the host without a click was the `extensions` list,
+and that is what moved. If a *specific* `.vscode` key is ever shown to reach the host, the fix is
+the same shape as this one — name it, pin it, or move it to config — not a mount-wide overlay.
 
 ## Consequences
 
 - A consumer generator script has no job left. Editor policy it merged into the checkout moves to
-  `[vscode.settings]`; extensions it collected move to `[vscode] extensions`; a multi-root
-  workspace it generated is replaced by committed per-folder settings.
+  `[vscode.settings]`; extensions it collected move to `[vscode] extensions`; a multi-root workspace
+  it generated is replaced by committed per-folder settings.
 - **`[vscode.settings]` reaches the `fy code` window only.** A native VS Code window on the same
-  checkout sees neither the policy nor, if the consumer gitignores it, a workspace file. A team
-  that needs policy in native windows commits `.vscode/settings.json` instead and gives up the
-  personal layer there — that trade-off is the consumer's, and this ADR only makes it explicit.
-- An agent adding an extension on a branch now needs an operator to adopt before it installs.
-  That friction is the point: it is the exact moment the operator should see the id.
-- `fy config widenings` lists `[vscode]` as the editor attach — not for the extensions (a
-  follow-up: they are a repo-declared ask of the host in the same sense as an injection target)
-  but for what the attach itself does. Found while this ADR was in review (2026-09-17): Dev
-  Containers forwards the host's SSH agent and git-credential store into every terminal it opens
-  in the box, and no setting stops it (launching VS Code with `SSH_AUTH_SOCK` stripped still
-  forwards — macOS shell-env resolution). A live agent with one key sat in a box whose posture
-  read "never push"; the defeat one consumer's image carried (an rc-file unset) was never
-  foldyard's, and the socket is usable by path regardless of the env. What the process holds it
-  forwards verbatim, though — only an *unset* var makes it hunt for the host's agent — so `fy
-  code` now launches VS Code with foldyard's own empty ssh-agent: the SSH side carries no
-  credential by construction, since no setting chooses what is forwarded. The git side is weaker:
-  `git.terminalAuthentication` is pinned off at user and machine scope, but workspace settings
-  win and `.vscode/settings.json` is mount data, so that pin is a default; the enforcement is
-  the bootstrap's in-box hygiene (`box._HARDEN_SNIPPET`: the vars unset in every shell, the IPC
-  socket reaped — re-ensured by `fy code` before the attach, which refuses if it can't), which
-  also covers a manual attach, plus `fy verify` failing a checkout that re-arms the setting. The
-  egress wall fences CONNECT to `:443`. The gate is still what stops the box; this is what stops
-  the attach.
+  checkout sees neither the policy nor, if the consumer gitignores it, a workspace file. A team that
+  needs policy in native windows commits `.vscode/settings.json` instead and gives up the personal
+  layer there — that trade-off is the consumer's, and this ADR only makes it explicit.
+- An agent adding an extension on a branch now needs an operator to adopt before it installs. That
+  friction is the point: it is the exact moment the operator should see the id.
+- `fy config widenings` lists `[vscode]` as the editor attach — not for the extensions (a follow-up:
+  they are a repo-declared ask of the host in the same sense as an injection target) but for what
+  the attach itself does. Found while this ADR was in review (2026-09-17): Dev Containers forwards
+  the host's SSH agent and git-credential store into every terminal it opens in the box, and no
+  setting stops it (launching VS Code with `SSH_AUTH_SOCK` stripped still forwards — macOS shell-env
+  resolution). A live agent with one key sat in a box whose posture read "never push"; the defeat
+  one consumer's image carried (an rc-file unset) was never foldyard's, and the socket is usable by
+  path regardless of the env. What the process holds it forwards verbatim, though — only an *unset*
+  var makes it hunt for the host's agent — so `fy code` now launches VS Code with foldyard's own
+  empty ssh-agent: the SSH side carries no credential by construction, since no setting chooses what
+  is forwarded. The git side is weaker: `git.terminalAuthentication` is pinned off at user and
+  machine scope, but workspace settings win and `.vscode/settings.json` is mount data, so that pin
+  is a default; the enforcement is the bootstrap's in-box hygiene (`box._HARDEN_SNIPPET`: the vars
+  unset in every shell, the IPC socket reaped — re-ensured by `fy code` before the attach, which
+  refuses if it can't), which also covers a manual attach, plus `fy verify` failing a checkout that
+  re-arms the setting. The egress wall fences CONNECT to `:443`. The gate is still what stops the
+  box; this is what stops the attach.
 - Follow-up (2026-11-03): the git side was weaker than the paragraph above says. Reading VS Code's
   source and the Dev Containers 0.469.0 bundle showed the settings only switch off the container
   end. The git extension still creates and answers its askpass socket with
   `git.terminalAuthentication` off. Dev Containers' own IPC socket, created on every attach, has a
-  host side that runs `git credential fill` (and the Docker credential helpers) for any caller,
-  with no setting consulted. So `fy code` now takes the same route as the SSH agent: it launches
-  VS Code with an empty git config, so the host side has no helper to run whoever asks. It also
-  pins the rest of the forwarders off (`dev.containers.gitCredentialHelperConfigLocation`,
-  `dockerCredentialHelper`, `copyGitConfig`, `githubCLILoginWithToken`,
-  `github.gitAuthentication`), refuses to launch when it can't write those pins, and reaps the
-  Dev Containers and `code` CLI sockets too. `fy verify` gains a row for a box `credential.helper`
-  that calls back to the host. See `docs/security.md` § Editor-attach credential bridges.
+  host side that runs `git credential fill` (and the Docker credential helpers) for any caller, with
+  no setting consulted. So `fy code` now takes the same route as the SSH agent: it launches VS Code
+  with an empty git config, so the host side has no helper to run whoever asks. It also pins the
+  rest of the forwarders off (`dev.containers.gitCredentialHelperConfigLocation`,
+  `dockerCredentialHelper`, `copyGitConfig`, `githubCLILoginWithToken`, `github.gitAuthentication`),
+  refuses to launch when it can't write those pins, and reaps the Dev Containers and `code` CLI
+  sockets too. `fy verify` gains a row for a box `credential.helper` that calls back to the host.
+  See `docs/security.md` § Editor-attach credential bridges.
 - A future surface that genuinely needs *computed* output from the yard should reach for ADR-0023
   §2's split again — this ADR removes one instance of it, not the pattern.

@@ -4,41 +4,39 @@
   `plugins/gh_cli_token.py`, `plugins/__init__.py` (`Secret`/`Registry.secrets`),
   `keyless.ensure_secret`, `worktree._init_in_yard`, `allowlist.py` (host-owned grants *and* wall
   switch), `config.engine_cli`. The VS Code surface (`vscode._generate_attached_config` +
-  `_ALLOWED_CONFIG_KEYS`) is superseded by
-  [ADR-0026](./0026-vscode-attach-config-is-declarative.md) — the generator is gone and the
-  attached config is `[vscode]` data foldyard authors itself; branch 2 below keeps the history.
-  **Amended 2026-10-05:** the rule that "`[plugins.github].permissions` is capped by the package
-  default as a ceiling" is withdrawn by
-  [ADR-0031](./0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md): the table
-  is gone (GitHub is `[[inject]]` kinds now), the minter asks for no `permissions`, and the App
+  `_ALLOWED_CONFIG_KEYS`) is superseded by [ADR-0026](./0026-vscode-attach-config-is-declarative.md)
+  — the generator is gone and the attached config is `[vscode]` data foldyard authors itself; branch
+  2 below keeps the history. **Amended 2026-10-05:** the rule that "`[plugins.github].permissions`
+  is capped by the package default as a ceiling" is withdrawn by
+  [ADR-0031](./0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md): the table is
+  gone (GitHub is `[[inject]]` kinds now), the minter asks for no `permissions`, and the App
   installation's own permissions are the scope. The kinds below are now named by an `[[inject]]`
-  row's `kind`; the rest of this ADR stands.
-  **Amended 2026-10-27:** `fy worktree add`'s CHECKOUT joins branch 1. A checkout runs the filter
-  drivers the shared `.git/config` names (`filter.<d>.smudge`/`process`, applied through
-  `.gitattributes` or `.git/info/attributes`), so a host `git worktree add` was host execution
-  for anything that can write the checkout. The host now runs only `git worktree add
-  --no-checkout` (the branch, HEAD, the admin dir) and the files + index are written in a
-  one-off container from the box image (`worktree._checkout_in_yard`). Unlike `worktree_init`,
-  a worktree with no files is useless, so a missing image REFUSES before any git runs, with the
-  command to run first — still never a host fallback. The same day, `fy worktree remove`'s
-  HASHING joined it: its check for uncommitted work (`git worktree remove`'s own `git status`)
-  and the parking of that work on `refs/fy/removed/…` (`add -A`) ran every `clean` filter the
-  shared config names. Both run in a one-off container now (`worktree._uncommitted_in_yard`); the
-  host checks the commit id it is handed (`cat-file -t`), writes the ref and deletes the checkout
-  with `--force`. No image refuses before anything is torn down; `--discard` is the operator's
-  explicit way to remove without checking or parking — never a check on the host. foldyard's own
-  host git now runs no filter driver. Its review found a third door: the shared config can make
-  the repo a partial clone, and reading a missing object (an id the yard names, a ref a box
-  pointed at a deleted one) made git fetch it over a transport that config picks
-  (`core.sshCommand`, `ext::`). Every host git in `worktree.py` now runs with `GIT_NO_LAZY_FETCH=1`
-  and every transport's policy set to `never` on the command line (which outranks a repo-level
-  per-protocol `always`; a bare `protocol.allow=never` doesn't), and on a git older than 2.44 a
-  repo with a promisor remote is refused: every key git 2.43's `promisor-remote.c` registers one
-  for — `extensions.partialClone`, `remote.<name>.promisor` (true), `remote.<name>.partialclonefilter`
-  (any value) — plus the older `core.partialclonefilter`, found in every config file and include
-  whatever its condition, as the hook scan reads them. Requiring 2.44 isn't an option: Ubuntu
-  24.04 ships 2.43. `remove` also re-scans the config for hooks after the yard (which
-  mounts main's `.git` writable) has run.
+  row's `kind`; the rest of this ADR stands. **Amended 2026-10-27:** `fy worktree add`'s CHECKOUT
+  joins branch 1. A checkout runs the filter drivers the shared `.git/config` names
+  (`filter.<d>.smudge`/`process`, applied through `.gitattributes` or `.git/info/attributes`), so a
+  host `git worktree add` was host execution for anything that can write the checkout. The host now
+  runs only `git worktree add --no-checkout` (the branch, HEAD, the admin dir) and the files + index
+  are written in a one-off container from the box image (`worktree._checkout_in_yard`). Unlike
+  `worktree_init`, a worktree with no files is useless, so a missing image REFUSES before any git
+  runs, with the command to run first — still never a host fallback. The same day,
+  `fy worktree remove`'s HASHING joined it: its check for uncommitted work (`git worktree remove`'s
+  own `git status`) and the parking of that work on `refs/fy/removed/…` (`add -A`) ran every `clean`
+  filter the shared config names. Both run in a one-off container now
+  (`worktree._uncommitted_in_yard`); the host checks the commit id it is handed (`cat-file -t`),
+  writes the ref and deletes the checkout with `--force`. No image refuses before anything is torn
+  down; `--discard` is the operator's explicit way to remove without checking or parking — never a
+  check on the host. foldyard's own host git now runs no filter driver. Its review found a third
+  door: the shared config can make the repo a partial clone, and reading a missing object (an id the
+  yard names, a ref a box pointed at a deleted one) made git fetch it over a transport that config
+  picks (`core.sshCommand`, `ext::`). Every host git in `worktree.py` now runs with
+  `GIT_NO_LAZY_FETCH=1` and every transport's policy set to `never` on the command line (which
+  outranks a repo-level per-protocol `always`; a bare `protocol.allow=never` doesn't), and on a git
+  older than 2.44 a repo with a promisor remote is refused: every key git 2.43's `promisor-remote.c`
+  registers one for — `extensions.partialClone`, `remote.<name>.promisor` (true),
+  `remote.<name>.partialclonefilter` (any value) — plus the older `core.partialclonefilter`, found
+  in every config file and include whatever its condition, as the hook scan reads them. Requiring
+  2.44 isn't an option: Ubuntu 24.04 ships 2.43. `remove` also re-scans the config for hooks after
+  the yard (which mounts main's `.git` writable) has run.
 - **Sources:** the review of the finalised `github=app` PR-bot minter — "does the consumer-side
   minter hand the box a code-execution path to the Mac?"; five review rounds against the
   implementation. Related: [0007](./0007-credential-injection-at-egress-proxy.md) (where minting
@@ -50,24 +48,23 @@
 
 ## Context
 
-Credential minting is host-side by design (ADR-0007): the token must be minted where the
-long-lived identity lives and injected in flight, so it never enters the box. The supervisor
-therefore runs minters as children of `mitmdump`, on the Mac, as the operator, in a process whose
-environment holds **every** injectable secret for every axis (`load_host_env` merges the whole of
-`host.env` into the supervisor's `os.environ` each tick, and a daemon's env is
-`{**os.environ, **spec["env"]}`).
+Credential minting is host-side by design (ADR-0007): the token must be minted where the long-lived
+identity lives and injected in flight, so it never enters the box. The supervisor therefore runs
+minters as children of `mitmdump`, on the Mac, as the operator, in a process whose environment holds
+**every** injectable secret for every axis (`load_host_env` merges the whole of `host.env` into the
+supervisor's `os.environ` each tick, and a daemon's env is `{**os.environ, **spec["env"]}`).
 
 The `github=app` minter named its implementation as a path **inside the repo mount** —
-`uv run --script <repo>/dev-stack/gh-app-token`. The command line was fixed by the package; the
-code it executed was a working-tree file. Anything that can write the checkout — an in-box agent
-running with prompts skipped, an `npm install`/`uv sync` lifecycle script, a branch the operator
-checks out to review, all three explicitly in the threat model — therefore had arbitrary code
-execution on the host, as the operator, next to the credentials.
+`uv run --script <repo>/dev-stack/gh-app-token`. The command line was fixed by the package; the code
+it executed was a working-tree file. Anything that can write the checkout — an in-box agent running
+with prompts skipped, an `npm install`/`uv sync` lifecycle script, a branch the operator checks out
+to review, all three explicitly in the threat model — therefore had arbitrary code execution on the
+host, as the operator, next to the credentials.
 
 Three details made it a reliable path rather than a theoretical one:
 
-1. **It re-ran on a timer, unattended.** The token's TTL is an hour and the addon re-mints early,
-   so while `github=app` was on the file executed roughly every 55 minutes, plus at every proxy
+1. **It re-ran on a timer, unattended.** The token's TTL is an hour and the addon re-mints early, so
+   while `github=app` was on the file executed roughly every 55 minutes, plus at every proxy
    relaunch and every 401 replay. Nobody had to run a command for a payload to fire.
 2. **The rung was not TTL-bound.** Only emergency rungs expire; `app` persisted across sessions and
    reboots, because the PR bot is only useful if it stays on.
@@ -76,42 +73,41 @@ Three details made it a reliable path rather than a theoretical one:
    inline metadata is honoured, so the payload could be a *dependency* fetched from the network at
    mint time, with no suspicious Python in the diff at all.
 
-This falsified two claims the product makes: that "no daemon running ⇒ no credential flows,
-whatever any file inside the yard claims" (the daemon's minter *was* a file inside the yard), and
-that a hijacked agent "can scribble on the local checkout but cannot lift credentials" (scribbling
-on the checkout was precisely how it lifted them).
+This falsified two claims the product makes: that "no daemon running ⇒ no credential flows, whatever
+any file inside the yard claims" (the daemon's minter *was* a file inside the yard), and that a
+hijacked agent "can scribble on the local checkout but cannot lift credentials" (scribbling on the
+checkout was precisely how it lifted them).
 
 **Fixing only the minter would have been theatre.** The same shape appeared six more times, each
 repo-controlled and host-executed with no acknowledgement step: `[[inject]].minter` as an arbitrary
 command string in committed config; `[project].dev_vm_dir` redirecting the minter path anywhere in
-the repo; the `worktree_init` script run by `fy worktree add`; the VS Code attached-config
-generator run by `fy code`; `[proxy] allow` (and later `default_deny`) folded into the host's
-effective allowlist, so the box could widen — or switch off — its own wall by editing a file rather
-than calling the verb that refuses in-box; and `[claude].system_prompt`, which is not host
-execution but the same "repo content steers a privileged actor" shape.
+the repo; the `worktree_init` script run by `fy worktree add`; the VS Code attached-config generator
+run by `fy code`; `[proxy] allow` (and later `default_deny`) folded into the host's effective
+allowlist, so the box could widen — or switch off — its own wall by editing a file rather than
+calling the verb that refuses in-box; and `[claude].system_prompt`, which is not host execution but
+the same "repo content steers a privileged actor" shape.
 
 ## Decision
 
 **Nothing under the repo mount executes on the host.** The rule is applied by asking one triage
 question per surface — *does this actually need host privileges?* — which has exactly three answers:
 
-1. **No → run it in the yard.** `worktree_init` copies gitignored config between two checkouts,
-   both inside the mount; it needs zero host privileges. It runs in a throwaway container over the
-   worktrees root (`worktree._init_in_yard`). The engine becomes a prerequisite and `fy worktree
-   add` SKIPS with a retry hint when there's no image yet — deliberately **not** a host fallback,
-   because "the yard wasn't ready" must never silently become "so we ran it on the host".
+1. **No → run it in the yard.** `worktree_init` copies gitignored config between two checkouts, both
+   inside the mount; it needs zero host privileges. It runs in a throwaway container over the
+   worktrees root (`worktree._init_in_yard`). The engine becomes a prerequisite and
+   `fy worktree add` SKIPS with a retry hint when there's no image yet — deliberately **not** a host
+   fallback, because "the yard wasn't ready" must never silently become "so we ran it on the host".
 2. **Yes, but it needs no credentials → split it: read in the yard, write on the host.**
-   *(Superseded for this surface by
-   [ADR-0026](./0026-vscode-attach-config-is-declarative.md): the generator turned out to be data
-   wearing a script, and is now `[vscode]` config foldyard evaluates itself. The triage answer
-   stands for any future surface that genuinely needs computed output.)* The VS Code
-   generator ran in the box (which `fy code` already requires to be up) and PRINTS a JSON document
-   on stdout; foldyard parses it host-side and performs the one privileged write. The document is
-   sanitized by an **allowlist** (`_ALLOWED_CONFIG_KEYS`), not a denylist: VS Code's attached-config
-   schema includes lifecycle hooks and `initializeCommand` runs ON THE HOST, so a passthrough would
-   have handed the repo back exactly the path this closed, and a denylist fails open the day the
-   schema grows another hook. Dropped keys are named rather than silently swallowed; values with
-   host consequences are pinned rather than trusted.
+   *(Superseded for this surface by [ADR-0026](./0026-vscode-attach-config-is-declarative.md): the
+   generator turned out to be data wearing a script, and is now `[vscode]` config foldyard evaluates
+   itself. The triage answer stands for any future surface that genuinely needs computed output.)*
+   The VS Code generator ran in the box (which `fy code` already requires to be up) and PRINTS a
+   JSON document on stdout; foldyard parses it host-side and performs the one privileged write. The
+   document is sanitized by an **allowlist** (`_ALLOWED_CONFIG_KEYS`), not a denylist: VS Code's
+   attached-config schema includes lifecycle hooks and `initializeCommand` runs ON THE HOST, so a
+   passthrough would have handed the repo back exactly the path this closed, and a denylist fails
+   open the day the schema grows another hook. Dropped keys are named rather than silently
+   swallowed; values with host consequences are pinned rather than trusted.
 3. **Yes, irreducibly (credential minting) → it belongs in the package.** Minters are a finite set
    of named KINDS shipped as package modules (`static`, `gh-cli`, `github-app`, the Codex refresh
    flow, the gcp metadata minter), invoked as `<sys.executable> -m foldyard.plugins.<kind>`.
@@ -124,11 +120,11 @@ Four rules follow, and they are the ones to keep:
   "where do I get this?" — which foldyard **PRINTS and never executes**. It can be a gcloud command,
   a 1Password item, a URL, or "ask Ops". Vault *fetching*, if it ever ships, is a fixed set of
   package-implemented `source =` kinds, never a command.
-- **Doctor checks PRESENCE, offline; it does not check provenance.** "Is the credential there,
-  read exactly as the supervisor will read it" plus a cheap offline shape check. Asking a vault
-  instead drags its whole access chain onto the critical path, which is how the highest-value
-  identity on this Mac came to gate the lowest-privilege capability in the system — a cloud
-  elevation chain standing between you and posting a PR comment.
+- **Doctor checks PRESENCE, offline; it does not check provenance.** "Is the credential there, read
+  exactly as the supervisor will read it" plus a cheap offline shape check. Asking a vault instead
+  drags its whole access chain onto the critical path, which is how the highest-value identity on
+  this Mac came to gate the lowest-privilege capability in the system — a cloud elevation chain
+  standing between you and posting a PR comment.
 - **A minter's environment is an allowlist, not an inheritance.** Each minter runs with a small base
   (`PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, the proxy vars) plus the names its rule declared —
   otherwise one mint's worth of code execution reaches every axis's credential. This needs a field
@@ -150,14 +146,14 @@ Four rules follow, and they are the ones to keep:
   (below) before anyone counted the customers, and there were two. Removing the mechanism left
   nothing to gate, and the codebase got smaller rather than larger. Count the customers first.
 - **What a consumer loses:** a bespoke vault or credential flow can no longer be added with config
-  alone. The routes are (a) upstream a named kind, (b) ship an entry-point plugin — the
-  "installed = trusted" tier, an explicit host-side act — or (c) put the secret in `host.env` by
-  hand or via capture, with a declared `how` hint. This is a deliberate narrowing of ADR-0019's
-  "plugins in your own repo" promise **for host-executed credential code specifically**; every
-  other hook was unaffected at the time (ADR-0024 has since withdrawn the promise entirely, on
-  this ADR's reasoning). It reads as the honest conclusion of ADR-0019's own reasoning: if
-  whole-plugin trust is the only honest boundary, the credential hook is the one place not to offer
-  a config-shaped bypass of it.
+  alone. The routes are (a) upstream a named kind, (b) ship an entry-point plugin — the "installed =
+  trusted" tier, an explicit host-side act — or (c) put the secret in `host.env` by hand or via
+  capture, with a declared `how` hint. This is a deliberate narrowing of ADR-0019's "plugins in your
+  own repo" promise **for host-executed credential code specifically**; every other hook was
+  unaffected at the time (ADR-0024 has since withdrawn the promise entirely, on this ADR's
+  reasoning). It reads as the honest conclusion of ADR-0019's own reasoning: if whole-plugin trust
+  is the only honest boundary, the credential hook is the one place not to offer a config-shaped
+  bypass of it.
 - **The counter-pressure to watch is config-DSL creep.** A `jwt-exchange` kind with claim templates
   and JSON paths is a step toward a programming language in TOML. The boundary that keeps it honest:
   a small set of named kinds each with a fixed shape, and for anything that doesn't fit, the
