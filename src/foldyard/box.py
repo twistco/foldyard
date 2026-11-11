@@ -2272,8 +2272,8 @@ def _up(
     prepared = False
     # A recreate of a running box: what `box down` does, but only once everything below that can
     # still refuse has had its chance (the build a changed box.Dockerfile or [box].packages needs,
-    # which the egress wall can refuse; the plugins' box args; the network). `_replace` removes it
-    # right before the create.
+    # which the egress wall can refuse; the plugins' box args; the network). The `if replacing:` block
+    # before the create removes it.
     replacing = recreate and _running(engine, box, env)
     if replacing:
         if not _agents_may_stop(engine, box, env, args or []):
