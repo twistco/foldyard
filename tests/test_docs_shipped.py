@@ -27,8 +27,12 @@ from foldyard import cli
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "src" / "foldyard" / "assets" / "skills"
 # A relative link's path: `](path#frag)`, or `](<path#frag>)` — CommonMark's spelling for a target
-# holding `(`, `)` or a space, which mdformat writes. Absolute URLs either way are not pages.
-_LINK = re.compile(r"\]\(<?(?!https?:|mailto:)([^)\s#<>]*)(?:#[^)\s<>]*)?>?\)")
+# holding `(`, `)` or a space, which mdformat writes, read whole up to its `>`. Absolute URLs
+# either way are not pages. One group each; `_targets` takes whichever matched.
+_LINK = re.compile(
+    r"\]\((?:<(?!https?:|mailto:)([^<>\n#]*)(?:#[^<>\n]*)?>"
+    r"|(?!<|https?:|mailto:)([^)\s#]*)(?:#[^)\s]*)?)\)"
+)
 _MAC = re.compile(r"\bMacs?\b")
 
 
@@ -47,6 +51,24 @@ SHIPPED = _shipped()
 MANUAL = [p for p in SHIPPED if p.parent.name != "adrs"]
 
 
+def _targets(text: str) -> list[str]:
+    """The relative link paths in ``text`` (fragment dropped; '' for an in-page `#anchor`)."""
+    return [bracketed or bare for bracketed, bare in _LINK.findall(text)]
+
+
+@pytest.mark.parametrize(
+    ("markdown", "targets"),
+    [
+        ("[x](./a.md#b) and [y](#here)", ["./a.md", ""]),
+        ("[a](<./b c.md>)", ["./b c.md"]),  # a space: whole, not skipped
+        ("[a](<./foo(bar).md#x>)", ["./foo(bar).md"]),  # parentheses: not cut at the `)`
+        ("[V](<https://x/init(url:readonly:)>) [w](https://x/y)", []),  # absolute: not pages
+    ],
+)
+def test_the_link_pattern_reads_both_target_spellings(markdown, targets):
+    assert _targets(markdown) == targets
+
+
 def _ids(pages: list[Path]) -> list[str]:
     return [str(p.relative_to(ROOT)) for p in pages]
 
@@ -56,7 +78,7 @@ def test_a_shipped_page_links_only_to_shipped_pages(page: Path):
     shipped = {p.resolve() for p in SHIPPED}
     broken = [
         target
-        for target in _LINK.findall(page.read_text())
+        for target in _targets(page.read_text())
         if target and (page.parent / target).resolve() not in shipped
     ]
     assert not broken, (

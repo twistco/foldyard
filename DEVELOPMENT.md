@@ -45,7 +45,8 @@ reflow prose by hand. Not formatted: the Marp talk sources and `CHANGELOG.md` (w
 **The pre-commit hook is opt-in** (`just hooks`, which sets `core.hooksPath` to `.githooks/`): it
 runs `just lint`, a few seconds, never the whole suite. It runs wherever you commit, the box
 included, and on your computer it is code from this box-writable checkout like any repo hook
-(docs/security.md) — tracked, so a change to it shows in review.
+(docs/security.md): an edit to the hook or the `lint` recipe, committed or not, runs at your next
+commit there. Turn it on only where you'd run the checkout's `just lint` anyway.
 
 ## Module map — `src/foldyard/`
 
