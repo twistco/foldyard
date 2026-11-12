@@ -5,7 +5,6 @@ clipboard, engine or tmux runs: subprocess.run is stubbed wherever one would."""
 from __future__ import annotations
 
 import base64
-import contextlib
 import os
 import subprocess
 
@@ -438,20 +437,49 @@ def test_bounded_survives_a_child_that_never_reads_its_stdin():
 @pytest.mark.spawns("sh")
 def test_bounded_says_incomplete_when_a_grandchild_holds_stdout(monkeypatch, tmp_path):
     """The child exits 0, but a background subshell it left keeps stdout open past the grace —
-    blocked on a FIFO until the test lets it go, so nothing outlives the test."""
+    blocked reading a FIFO the test holds, so nothing outlives the test. The shell opens the FIFO
+    BEFORE starting the subshell (the test's descriptor is a writer, so that open can't block),
+    so by the time the shell has exited the subshell holds it, and closing the test's end — the
+    only writer — gives it EOF, whether or not its read has started."""
     monkeypatch.setattr(paste, "_DRAIN_GRACE", 0.2)
     fifo = tmp_path / "hold"
     os.mkfifo(fifo)
-    script = '(read -r x < "$1") & printf head; exit 0'
+    held = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    script = 'exec 3<"$1"; (read -r x <&3) & exec 3<&-; printf head; exit 0'
     try:
         ran = paste._bounded(["sh", "-c", script, "sh", str(fifo)], out_limit=100, timeout=10)
     finally:
-        # The subshell's read sees EOF and it exits. Non-blocking: with no reader left, an open
-        # for writing would wait forever (ENXIO instead).
-        with contextlib.suppress(OSError):
-            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        os.close(held)
     assert ran is not None
     assert (ran.rc, ran.out, ran.complete) == (0, b"head", False)
+
+
+@pytest.mark.spawns("sh")
+def test_bounded_returns_while_a_grandchild_holds_stdin_unread(monkeypatch, tmp_path):
+    """The feed is still blocked writing (more than a pipe holds; nothing reads it) when the child
+    and its pipes are done: closing stdin under it would wait on the writer's lock forever. Run
+    in a thread, so a regression fails here instead of hanging the suite."""
+    import threading
+
+    monkeypatch.setattr(paste, "_DRAIN_GRACE", 0.2)
+    fifo = tmp_path / "hold"
+    os.mkfifo(fifo)
+    held = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+    script = 'exec 3<"$1"; (read -r x <&3) >&- 2>&- & exec 3<&-; exit 0'
+    result: list = []
+    runner = threading.Thread(
+        target=lambda: result.append(
+            paste._bounded(["sh", "-c", script, "sh", str(fifo)], data=PNG * 100_000, timeout=10)
+        ),
+        daemon=True,
+    )
+    try:
+        runner.start()
+        runner.join(5)
+        assert not runner.is_alive(), "_bounded hung closing stdin under a blocked feed"
+    finally:
+        os.close(held)  # the subshell exits; the feed's write fails and its thread ends
+    assert result[0] is not None and result[0].rc == 0
 
 
 @pytest.mark.spawns("sh")

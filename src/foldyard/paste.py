@@ -166,14 +166,17 @@ def _bounded(
         rc = proc.wait()
     finally:
         killer.cancel()
-    drains = threads[:2]
     for t in threads:
         t.join(_DRAIN_GRACE)
-    complete = not any(t.is_alive() for t in drains)
-    if complete:  # else a drain still reads one of them; it ends with the pipe's last holder
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+    complete = not any(t.is_alive() for t in threads[:2])
+    # Close only what no thread still uses: a drain ends with its pipe's last holder, and a feed
+    # blocked in write() holds the writer's lock, so closing stdin under it would hang here.
+    if complete:
+        for pipe in (proc.stdout, proc.stderr):
             if pipe is not None:
                 pipe.close()
+    if proc.stdin is not None and not any(t.is_alive() for t in threads[2:]):
+        proc.stdin.close()
     # Killed means died BY the kill: one that exited on its own as the timer fired keeps its status.
     status = None if killed.is_set() and rc < 0 else rc
     return _Ran(status, bytes(out), bytes(err), over.is_set(), complete)
