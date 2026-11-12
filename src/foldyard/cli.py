@@ -18,14 +18,73 @@ options, and `CliRunner` testability.
 from __future__ import annotations
 
 import typer
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup
+
+
+def _code_without_background() -> None:
+    """Inline `code` in help renders in rich's ``markdown.code`` style, cyan on a BLACK background:
+    a black slab on a light terminal theme. Keep the colour, drop the background, which reads on
+    both. Typer's console builds its theme from ``DEFAULT_STYLES`` at each render, so changing the
+    entry before one is enough. Called only when help is rendered: rich stays off the hot path."""
+    from rich.default_styles import DEFAULT_STYLES
+    from rich.style import Style
+
+    DEFAULT_STYLES["markdown.code"] = Style(bold=True, color="cyan")
+
+
+def _with_light_safe_code(format_help):
+    def format_help_(self, ctx, formatter):
+        _code_without_background()
+        return format_help(self, ctx, formatter)
+
+    return format_help_
+
+
+# Every help screen — root, group or command, whichever Typer class renders it.
+TyperCommand.format_help = _with_light_safe_code(TyperCommand.format_help)
+TyperGroup.format_help = _with_light_safe_code(TyperGroup.format_help)
+
+# `fy --help`, grouped: (panel, verbs), in the order shown. The verbs of a feature in the
+# experimental register (`experimental.Feature.verbs`) leave their panel for EXPERIMENTAL, shown
+# last. tests/test_cli_help.py holds every visible verb to exactly one panel.
+_PANELS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Start here", ("init", "prereq", "tui", "doctor", "docs", "changelog")),
+    ("The stack", ("up", "down", "ps", "logs", "shell", "build", "open", "reclaim", "nuke")),
+    (
+        "The box and its agents",
+        ("box", "claude", "codex", "agent", "paste", "code", "worktree", "transcripts", "skill"),
+    ),
+    ("Posture and egress", ("mode", "allow", "config", "verify", "state", "host")),
+    ("Machines and projects", ("machine", "ls", "prune")),
+    ("Testing", ("clock",)),
+)
+EXPERIMENTAL = "Experimental"
+
+
+def panels() -> list[tuple[str, tuple[str, ...]]]:
+    """:data:`_PANELS` with the experimental features' verbs moved to their own panel, last."""
+    from . import experimental
+
+    moved = tuple(v for f in experimental.REGISTER for v in f.verbs)
+    out = [(title, tuple(v for v in verbs if v not in moved)) for title, verbs in _PANELS]
+    return [*out, (EXPERIMENTAL, moved)] if moved else out
 
 
 class _RootGroup(TyperGroup):
-    """Keeps the command line for the root callback. Click hands the root callback only the verb
-    name, having already set the rest aside for the subcommand — so `fy machine base --help` and
-    `fy machine stop` look the same there. The callback needs the difference (see
-    :func:`_command_path`)."""
+    """Groups the verbs into :func:`panels` for `fy --help`, and keeps the command line for the
+    root callback. Click hands the root callback only the verb name, having already set the rest
+    aside for the subcommand — so `fy machine base --help` and `fy machine stop` look the same
+    there. The callback needs the difference (see :func:`_command_path`)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        order = [(verb, title) for title, verbs in panels() for verb in verbs]
+        rank = {verb: i for i, (verb, _) in enumerate(order)}
+        for verb, title in order:
+            if isinstance(cmd := self.commands.get(verb), TyperCommand | TyperGroup):
+                cmd.rich_help_panel = title
+        # The panels print in the order their first verb is listed; unpanelled (hidden) verbs last.
+        self.commands = dict(sorted(self.commands.items(), key=lambda kv: rank.get(kv[0], 1 << 16)))
 
     def invoke(self, ctx):
         ctx.meta["fy.argv"] = [*getattr(ctx, "_protected_args", []), *ctx.args]
@@ -241,10 +300,12 @@ def prereq(
         help="also do the big downloads now: bake the base VM new projects are cloned from",
     ),
 ) -> None:
-    """Check what this computer needs for foldyard (Lima, podman, a hypervisor, KVM on Linux,
-    disk, memory…) and print the command that installs each missing piece. Checks only — you run
-    the installs. Needs no project: `uvx foldyard prereq` works before foldyard is installed.
-    Exit 1 while anything required is missing."""
+    """Check what this computer needs for foldyard, and how to install what's missing.
+
+    Lima, podman, a hypervisor, KVM on Linux, disk, memory: each missing piece is printed with the
+    command that installs it. Checks only — you run the installs. Needs no project:
+    `uvx foldyard prereq` works before foldyard is installed. Exit 1 while anything required is
+    missing."""
     from . import prereq as prereq_mod
 
     raise typer.Exit(prereq_mod.run(fetch=fetch))
@@ -289,8 +350,9 @@ def nuke() -> None:
 
 @app.command()
 def reclaim() -> None:
-    """Free engine-store space now — the sweeps `up` runs under low headroom, plus the
-    project's [reclaim] script — without bouncing the box or the machine."""
+    """Free engine-store space now, without restarting the box or the VM.
+
+    Runs the sweeps `up` runs under low headroom, plus the project's [reclaim] script."""
     from . import stack
 
     raise typer.Exit(stack.reclaim_now())
@@ -332,9 +394,11 @@ def verify() -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def claude(ctx: typer.Context) -> None:
-    """Run Claude Code in the dev box, pre-oriented + skipping permission prompts (the box's
-    rootless isolation is the safety boundary). Needs `[claude]` in foldyard.toml. Extra args
-    pass through to `claude` (`fy claude --resume`, `fy claude -p "…"`)."""
+    """Run Claude Code in the dev box, skipping permission prompts.
+
+    Pre-oriented to the box, whose rootless isolation is the safety boundary. Needs `[claude]` in
+    foldyard.toml. Extra args pass through to `claude` (`fy claude --resume`, `fy claude -p "…"`).
+    """
     from . import box
 
     raise typer.Exit(box.claude(ctx.args))
@@ -344,8 +408,9 @@ def claude(ctx: typer.Context) -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def codex(ctx: typer.Context) -> None:
-    """Run the OpenAI Codex CLI in the dev box, bypassing approvals + its sandbox (the box's
-    rootless isolation is the boundary). Needs `[codex]` in foldyard.toml. Extra args pass
+    """Run the OpenAI Codex CLI in the dev box, bypassing approvals and its sandbox.
+
+    The box's rootless isolation is the boundary. Needs `[codex]` in foldyard.toml. Extra args pass
     through to `codex`."""
     from . import box
 
@@ -354,11 +419,40 @@ def codex(ctx: typer.Context) -> None:
 
 @app.command()
 def code() -> None:
-    """Open VS Code attached to the running dev box, in an ISOLATED user-data-dir so the
-    box's podman DOCKER_HOST can't leak into your default VS Code singleton (your computer only)."""
+    """Open VS Code attached to the running dev box (your computer only).
+
+    In an ISOLATED user-data-dir, so the box's podman DOCKER_HOST can't leak into your default VS
+    Code singleton."""
     from . import vscode
 
     raise typer.Exit(vscode.code())
+
+
+@app.command()
+def paste(
+    file: str = typer.Argument(
+        "", help="an image file to send instead of the clipboard's (drag one into the terminal)"
+    ),
+    session: str = typer.Option(
+        "",
+        "--session",
+        "-s",
+        help="an `fy agent` session (id, prefix or name): send to the box holding it (which may "
+        "be another worktree's) and type the path into it",
+    ),
+    no_copy: bool = typer.Option(
+        False, "--no-copy", help="don't put the in-box path on your clipboard"
+    ),
+) -> None:
+    """Send the clipboard's image (or FILE) into this checkout's dev box, for an agent there.
+
+    The box has no clipboard of yours, so a screenshot pasted into an agent there never reaches
+    it. The image lands in the box's /tmp/fy-paste/ (PNG, JPEG, GIF or WebP, 20 MB at most); with
+    `--session` its path is typed into that agent's prompt, else copied to your clipboard. Your
+    computer only."""
+    from . import paste as paste_mod
+
+    raise typer.Exit(paste_mod.paste(file, session=session, copy=not no_copy))
 
 
 @app.command("open")
@@ -393,11 +487,12 @@ def ls(
     ),
     here: bool = typer.Option(False, "--here", hidden=True, help="this project's engine side"),
 ) -> None:
-    """Every foldyard project on your computer: its VM (state, size, disk used), host supervisor,
-    boxes up and running agents, then what needs attention (with the command that fixes it) and
-    what's left over (VMs and state folders no project uses, adoptions of vanished checkouts,
-    counted unless --verbose). Read-only: a stopped VM is reported, never started; `fy prune`
-    forgets the adoptions."""
+    """Every foldyard project on your computer, and what needs attention.
+
+    For each: its VM (state, size, disk used), host supervisor, boxes up and running agents. Then
+    what needs attention, with the command that fixes it, and what's left over (VMs and state
+    folders no project uses, adoptions of vanished checkouts, counted unless --verbose). Read-only:
+    a stopped VM is reported, never started; `fy prune` forgets the adoptions."""
     from . import projects
 
     raise typer.Exit(projects.ls(here_only=here, as_json=as_json, verbose=verbose))
@@ -407,9 +502,10 @@ def ls(
 def prune(
     yes: bool = typer.Option(False, "--yes", "-y", help="don't ask (for a script)"),
 ) -> None:
-    """Forget the adopted configs whose checkout or worktree folder is gone, after listing them
-    and asking. VMs and state folders no project uses are only named, with how to remove them:
-    they hold data and secrets."""
+    """Forget the adopted configs whose checkout or worktree folder is gone.
+
+    Lists them and asks first. VMs and state folders no project uses are only named, with how to
+    remove them: they hold data and secrets."""
     from . import projects
 
     raise typer.Exit(projects.prune(yes=yes))
@@ -442,9 +538,9 @@ def clock(
 host_app = typer.Typer(
     rich_markup_mode="markdown",
     name="host",
-    help="the project's host supervisor — the credential daemons + the egress proxy the box "
-    "rides. `fy up` / `fy box up` start it with the VM and `fy machine stop` stops it with the "
-    "VM, so there is no `stop`. Bare `fy host` = status. Host only.",
+    help="The project's host supervisor: the credential daemons and the egress proxy the box "
+    "rides.\n\n`fy up` / `fy box up` start it with the VM and `fy machine stop` stops it with the "
+    "VM, so there is no `stop`. Bare `fy host` = status. Your computer only.",
     invoke_without_command=True,
 )
 app.add_typer(host_app)
@@ -552,7 +648,7 @@ monitor_app = typer.Typer(
     rich_markup_mode="markdown",
     name="monitor",
     help="What the guest monitor recorded: processes, connections, selected files (your "
-    "computer). Bare `fy monitor` shows the recent events, `--since`/`--until` any stretch the "
+    "computer).\n\nBare `fy monitor` shows the recent events, `--since`/`--until` any stretch the "
     "store still holds; `fy monitor hook` sends them on to a file, a program or a URL, and "
     "`fy monitor check` verifies a file a hook wrote.",
     invoke_without_command=True,
@@ -602,8 +698,8 @@ def _monitor_host_only() -> None:
 hook_app = typer.Typer(
     rich_markup_mode="markdown",
     name="hook",
-    help="Where the monitor's events go besides `fy monitor`: a file, your program or a URL, "
-    "kept in host-only config. Bare `fy monitor hook` lists them with their delivery health.",
+    help="Where the monitor's events go besides `fy monitor`: a file, your program or a URL."
+    "\n\nKept in host-only config. Bare `fy monitor hook` lists them with their delivery health.",
     invoke_without_command=True,
 )
 monitor_app.add_typer(hook_app)
@@ -686,8 +782,10 @@ def hook_add(
 
 @hook_app.command("remove")
 def hook_remove(name: str = typer.Argument(..., help="the hook to remove")) -> None:
-    """Remove a hook, keeping the rest of the file and your edits. Its place in the event stream
-    is kept: re-adding the name resumes there, and a file it wrote stays checkable."""
+    """Remove a hook, keeping the rest of the file and your edits.
+
+    Its place in the event stream is kept: re-adding the name resumes there, and a file it wrote
+    stays checkable."""
     _monitor_host_only()
     from . import monitorhooks
 
@@ -699,8 +797,10 @@ def monitor_check(
     path: str = typer.Argument(..., help="a file a `file` hook wrote"),
     hook: str = typer.Option("", "--hook", help="the hook that wrote it (default: from config)"),
 ) -> None:
-    """Verify a file a hook wrote: every line signed by this computer's sink, none missing,
-    moved or added, and nothing cut from the end. Non-zero on the first problem, with its line."""
+    """Verify a file a hook wrote.
+
+    Every line signed by this computer's sink, none missing, moved or added, and nothing cut from
+    the end. Non-zero on the first problem, with its line."""
     _monitor_host_only()
     from . import monitorhooks
 
@@ -709,7 +809,11 @@ def monitor_check(
 
 @app.command()
 def tui() -> None:
-    """Interactive mode TUI (your computer only; Textual)."""
+    """See and drive your project from one screen: modes, boxes, worktrees, egress, the doctor.
+
+    Per worktree: switch its modes, start, stop or recreate its box, open VS Code or the app, add
+    or remove worktrees. Also starts and stops the VM, grants hosts the proxy refused, adopts
+    config changes and runs the doctor's fixes. Your computer only."""
     from . import term
     from . import tui as tui_mod
 
@@ -767,7 +871,7 @@ def banner() -> None:
 machine_app = typer.Typer(
     rich_markup_mode="markdown",
     name="machine",
-    help="the project's VM lifecycle (your computer only; no-op/refused in the box)",
+    help="The project's VM lifecycle (your computer only; refused in the box).",
     no_args_is_help=True,
 )
 app.add_typer(machine_app)
@@ -787,8 +891,9 @@ def machine_ensure() -> None:
 def machine_recreate(
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),
 ) -> None:
-    """Stop + remove + re-init the machine so it mounts the worktrees root (VM mount sets are
-    init-only). Named cache volumes are lost and rebuild on next `fy up`."""
+    """Stop, remove and re-create the VM, so it mounts the worktrees root.
+
+    VM mount sets are init-only. Named cache volumes are lost and rebuild on the next `fy up`."""
     from . import machine, stack
 
     main = stack.main_repo()
@@ -820,8 +925,9 @@ def machine_desktop() -> None:
 def machine_rm(
     yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),
 ) -> None:
-    """Stop + DELETE the machine VM and host supervisor — every container and named volume in it
-    is lost (the repo is untouched). `fy up` / `fy machine ensure` re-creates it."""
+    """Stop and DELETE the VM and the host supervisor (the repo is untouched).
+
+    Every container and named volume in it is lost. `fy up` / `fy machine ensure` re-creates it."""
     from . import machine
 
     raise typer.Exit(machine.delete(assume_yes=yes))
@@ -832,9 +938,10 @@ def machine_rm(
 def machine_host_wall(
     uninstall: bool = typer.Option(False, "--uninstall", help="print the removal steps instead"),
 ) -> None:
-    """Install the host firewall: print the nftables table and the system unit foldyard rendered,
-    the exact root commands that install them, and whether the firewall is enforcing now.
-    foldyard never runs them — you do, with the files in front of you. Exit 1 when not
+    """Print how to install the host firewall, and whether it is enforcing now.
+
+    The nftables table and the system unit foldyard rendered, and the exact root commands that
+    install them. foldyard never runs them — you do, with the files in front of you. Exit 1 when not
     enforcing. Linux + `[machine] host_firewall = true`; a one-off install, not part of the VM's
     lifecycle."""
     from . import machine
@@ -845,10 +952,7 @@ def machine_host_wall(
 base_app = typer.Typer(
     rich_markup_mode="markdown",
     name="base",
-    help=(
-        "the base VM a new project's VM is cloned from — one per computer, project-less "
-        "(`fy docs base-vm`)"
-    ),
+    help=("The base VM new project VMs are cloned from, one per computer (`fy docs base-vm`)."),
     invoke_without_command=True,
 )
 machine_app.add_typer(base_app)
@@ -876,9 +980,11 @@ def base_status() -> None:
 
 @base_app.command("bake")
 def base_bake() -> None:
-    """(Re)create the base VM: Lima's podman template, nothing mounted, booted once, foldyard's
-    generic box image built in it, stopped. Every project VM created afterwards is a clone of it
-    (seconds, no download). Existing project VMs are never touched."""
+    """(Re)create the base VM that new project VMs are cloned from.
+
+    Lima's podman template, nothing mounted, booted once, foldyard's generic box image built in it,
+    stopped. Every project VM created afterwards is a clone of it (seconds, no download). Existing
+    project VMs are never touched."""
     from . import basevm
 
     raise typer.Exit(basevm.bake())
@@ -886,8 +992,10 @@ def base_bake() -> None:
 
 @base_app.command("rm")
 def base_rm() -> None:
-    """Delete the base VM. VMs already cloned from it are independent and unaffected; new ones
-    are created from the template again."""
+    """Delete the base VM.
+
+    VMs already cloned from it are independent and unaffected; new ones are created from the
+    template again."""
     from . import basevm
 
     raise typer.Exit(basevm.rm())
@@ -903,8 +1011,8 @@ def machine_delete(
 agent_app = typer.Typer(
     rich_markup_mode="markdown",
     name="agent",
-    help="agents in tmux sessions in the dev box: start, list, attach, resume, stop "
-    "(`fy docs agents`)",
+    help="Agents in tmux sessions in the dev box: start, list, attach, resume, stop "
+    "(`fy docs agents`).",
     no_args_is_help=True,
 )
 app.add_typer(agent_app)
@@ -920,10 +1028,11 @@ def agent_start(
     name: str = typer.Option("", "--name", "-n", help="the session's name (default: <agent>-<id>)"),
     attach: bool = typer.Option(False, "--attach", "-a", help="attach to it once started"),
 ) -> None:
-    """Start `fy claude` (or `fy codex`) in a detached tmux session in this checkout's box, so it
-    keeps running with no terminal attached. Args after `--` pass to the agent
-    (`fy agent start claude -- --model opus`). Prints the session id `fy agent attach` takes —
-    for Claude, its own session id."""
+    """Start an agent in a detached tmux session in this checkout's box.
+
+    `fy claude` (or `fy codex`) keeps running there with no terminal attached. Args after `--` pass
+    to the agent (`fy agent start claude -- --model opus`). Prints the session id `fy agent attach`
+    takes — for Claude, its own session id."""
     from . import agents
 
     raise typer.Exit(agents.start(agent, name, list(ctx.args), attach_after=attach))
@@ -946,10 +1055,12 @@ def agent_resume(
     ),
     attach: bool = typer.Option(False, "--attach", "-a", help="attach to it once started"),
 ) -> None:
-    """Pick an agent's conversation up again in this checkout's box — after the agent exited, or
-    after the box it ran in was recreated: Claude's by its session id, Codex's by its thread id
-    (recorded once Codex saves the thread, at your first message). Removes the exited session that
-    held it first. Args after `--` pass to the agent (`fy agent resume <id> -- --model opus`)."""
+    """Pick an agent's conversation up again in this checkout's box.
+
+    After the agent exited, or after the box it ran in was recreated: Claude's by its session id,
+    Codex's by its thread id (recorded once Codex saves the thread, at your first message). Removes
+    the exited session that held it first. Args after `--` pass to the agent
+    (`fy agent resume <id> -- --model opus`)."""
     from . import agents
 
     raise typer.Exit(agents.resume(session, name, list(ctx.args), agent=agent, attach_after=attach))
@@ -960,8 +1071,10 @@ def agent_ls(
     here: bool = typer.Option(False, "--here", help="only this project's boxes"),
     as_json: bool = typer.Option(False, "--json", help="print JSON instead of a table"),
 ) -> None:
-    """List agent sessions: on your computer every local project's (each project you adopted a
-    config for, whose VM is running — none is started), in a box that box's own."""
+    """List agent sessions: every local project's, or in a box that box's own.
+
+    On your computer, each project you adopted a config for whose VM is running — no VM is started.
+    """
     from . import agents
 
     raise typer.Exit(agents.ls(here=here, as_json=as_json))
@@ -972,8 +1085,9 @@ def agent_attach(
     session: str = typer.Argument(..., help="a session id (or its first 8+ characters) or name"),
     here: bool = typer.Option(False, "--here", help="only look in this project"),
 ) -> None:
-    """Attach this terminal to an agent's session, from anywhere on your computer. Ctrl-B d
-    detaches and leaves the agent running."""
+    """Attach this terminal to an agent's session, from anywhere on your computer.
+
+    Ctrl-B d detaches and leaves the agent running."""
     from . import agents
 
     raise typer.Exit(agents.attach(session, here=here))
@@ -989,8 +1103,10 @@ def agent_clean(
     here: bool = typer.Option(False, "--here", help="only this project's boxes"),
     dry_run: bool = typer.Option(False, "--dry-run", help="list what would be removed"),
 ) -> None:
-    """Remove EXITED agent sessions older than `--older-than` (default 1d), across every local
-    project (in a box, that box's). A running agent is never removed, whatever its age."""
+    """Remove exited agent sessions older than `--older-than` (default 1d).
+
+    Across every local project (in a box, that box's). A running agent is never removed, whatever
+    its age."""
     from . import agents
 
     raise typer.Exit(agents.clean(older_than, here=here, dry_run=dry_run))
@@ -1010,7 +1126,7 @@ def agent_stop(
 box_app = typer.Typer(
     rich_markup_mode="markdown",
     name="box",
-    help="the long-lived, per-worktree dev box (engine socket + repo mount)",
+    help="The long-lived, per-worktree dev box (engine socket + repo mount).",
     no_args_is_help=True,
 )
 app.add_typer(box_app)
@@ -1050,9 +1166,11 @@ def box_recreate(
         False, "--yes", "-y", help="don't ask before stopping agents still running in the box"
     ),
 ) -> None:
-    """Recreate the dev box (`fy box down` then `fy box up`), which is how a box picks up what is
-    fixed when it is created: env, mounts, its foldyard, the image. Everything that can refuse
-    runs before the old box is removed; agents still running in it are named first, as by `down`."""
+    """Recreate the dev box: `fy box down`, then `fy box up`.
+
+    That is how a box picks up what is fixed when it is created: env, mounts, its foldyard, the
+    image. Everything that can refuse runs before the old box is removed; agents still running in it
+    are named first, as by `down`."""
     from . import box
 
     raise typer.Exit(box.main("recreate", ["--yes"] if yes else []))
@@ -1071,9 +1189,10 @@ def box_shell() -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def box_exec(ctx: typer.Context) -> None:
-    """Run a command non-interactively in the running dev box, at the caller's cwd
-    (`foldyard box exec '<cmd>'`). Behind the git hooks' dispatch into the box;
-    `--skip-if-down` no-ops cleanly when the box is stopped."""
+    """Run a command non-interactively in the running dev box, at your working directory.
+
+    `foldyard box exec '<cmd>'`. Behind the git hooks' dispatch into the box; `--skip-if-down`
+    no-ops cleanly when the box is stopped."""
     from . import box
 
     raise typer.Exit(box.main("exec", ctx.args))
@@ -1085,8 +1204,10 @@ def box_down(
         False, "--yes", "-y", help="don't ask before stopping agents still running in the box"
     ),
 ) -> None:
-    """Stop + remove the dev box (login/CLI volumes kept). Agents still running in it
-    (`fy agent ls`) are named first, and on a terminal it asks before stopping them."""
+    """Stop and remove the dev box (login and CLI volumes kept).
+
+    Agents still running in it (`fy agent ls`) are named first, and on a terminal it asks before
+    stopping them."""
     from . import box
 
     raise typer.Exit(box.main("down", ["--yes"] if yes else []))
@@ -1103,7 +1224,7 @@ def box_ps() -> None:
 allow_app = typer.Typer(
     rich_markup_mode="markdown",
     name="allow",
-    help="the egress allowlist the proxy enforces under [proxy] enforce (your computer only)",
+    help="The egress allowlist the proxy enforces under [proxy] enforce (your computer only).",
     no_args_is_help=True,
 )
 app.add_typer(allow_app)
@@ -1425,7 +1546,7 @@ def allow_remove(
 config_app = typer.Typer(
     rich_markup_mode="markdown",
     name="config",
-    help="the foldyard.toml you ADOPTED — what the supervisor actually runs (your computer only)",
+    help="The foldyard.toml you ADOPTED: what the supervisor actually runs (your computer only).",
     no_args_is_help=True,
 )
 app.add_typer(config_app)
@@ -1526,12 +1647,13 @@ def config_diff() -> None:
 
 @config_app.command("widenings")
 def config_widenings() -> None:
-    """Inventory what this config asks the HOST to allow: capture exemptions, injection targets,
-    agent prompts — plus any key that reads as security config but is no longer honoured.
+    """What this config asks the host to allow.
+
+    Capture exemptions, injection targets, agent prompts — plus any key that reads as security
+    config but is no longer honoured.
 
     The counterweight to `@all` and to defaults: one token in `[proxy] passthrough` can exempt
-    ~200 hosts from decryption, and nothing else prints that number.
-    """
+    ~200 hosts from decryption, and nothing else prints that number."""
     from . import config, devmode, exposure
 
     cfg = _active_config()
@@ -1570,7 +1692,7 @@ def config_revert() -> None:
 worktree_app = typer.Typer(
     rich_markup_mode="markdown",
     name="worktree",
-    help="host-sibling worktrees sharing the one rootless VM (your computer only)",
+    help="Worktrees beside the checkout, sharing the project's one VM (your computer only).",
     no_args_is_help=True,
 )
 app.add_typer(worktree_app)
@@ -1661,7 +1783,7 @@ def worktree_list() -> None:
 skill_app = typer.Typer(
     rich_markup_mode="markdown",
     name="skill",
-    help="Claude Code skills bundled with foldyard (list / install into .claude/skills)",
+    help="Claude Code skills bundled with foldyard (list / install into .claude/skills).",
     no_args_is_help=True,
 )
 app.add_typer(skill_app)

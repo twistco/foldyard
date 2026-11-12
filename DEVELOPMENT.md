@@ -56,7 +56,9 @@ commit. Turn it on only where you'd run the checkout's `just lint` anyway.
 
 Core (stdlib-only on the hot path; heavy imports lazy):
 
-- `cli.py` — the typer app; every verb, heavy imports deferred.
+- `cli.py` — the typer app; every verb, heavy imports deferred. `fy --help` groups the verbs into
+  `cli._PANELS` (a new visible verb goes in one, or `tests/test_cli_help.py` fails); an experimental
+  feature's verbs (`experimental.Feature.verbs`) move to the Experimental panel, last.
 - `config.py` — repo/project/path resolution + ALL consumer config (env var wins →
   `foldyard.local.toml` → `foldyard.toml` → default) + the `~/.foldyard/<project>/` state paths.
 - `stack.py` — stack-setup env + the compose verbs (`up`/`down`/`ps`/`logs`/`shell`…); emits
@@ -281,6 +283,12 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   per VM, which Podman Desktop lists side by side; where Podman Desktop is installed,
   `machine.ensure` keeps it current and pins the ssh port — `FOLDYARD_PODMAN_DESKTOP` `0`/`1`
   overrides the detection).
+- `paste.py` — `fy paste`: an image from your computer's clipboard (capability-detected:
+  `osascript`, `wl-paste`, `xclip`) or a named file into a box's `/tmp/fy-paste/` over
+  `podman exec -i`, then its path typed into an `fy agent` session (a bracketed `paste-buffer -p`)
+  or copied to your clipboard. Only PNG/JPEG/GIF/WebP bytes leave your computer, 20 MB at most: a
+  file argument may be a link the box planted at a secret. Not the to-box (Lima-only, every box
+  reads it) — docs/fleet-scope.md's image relay is the same transfer.
 - `buildgate.py` — an image build the egress wall refused, turned into one question per host.
 - `attribution.py` · `forwarder.py` — who a proxy row's stamp names, and the forwarder that stamps
   it (`[machine].attribution = "record"`, ADR-0034).
@@ -740,8 +748,9 @@ minutes, and the `e2e` job is the single status to check.
 - **Experimental means a register entry, not a word in prose.** A setting you're not ready to stand
   behind goes in `experimental.REGISTER` with what's unproven and what would graduate it, gets the
   `*(experimental)*` tag in docs/configuration.md, and its changelog fragment says
-  `experimental: true`. Graduating one is deleting the entry and the tag, plus a `.changes/` entry
-  under Changed — review the `graduates_when` lines when cutting a release.
+  `experimental: true`. A top-level verb that exists for it goes in the entry's `verbs`, which puts
+  it in `fy --help`'s Experimental panel. Graduating one is deleting the entry and the tag, plus a
+  `.changes/` entry under Changed — review the `graduates_when` lines when cutting a release.
 - **Changelog entries are files, not edits.** A change a consumer would notice adds
   `.changes/<slug>.md` (section + bump frontmatter, then the bullet; format in
   [.changes/README.md](./.changes/README.md)); `just release` folds them into `CHANGELOG.md`. Never

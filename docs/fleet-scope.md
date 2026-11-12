@@ -75,6 +75,7 @@ Four capabilities, each with a different direction of trust:
   picks a Claude or Codex conversation up again.
 
 - **Images.** Claude reads an image from the clipboard or a path, and the box has neither yours.
+  Locally, `fy paste` does the transfer below from the CLI; the relay still needs its own.
 
 - **Codex's transcript ↔ session link.**
 

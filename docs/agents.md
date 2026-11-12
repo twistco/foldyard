@@ -83,10 +83,16 @@ one. `--dry-run` lists them first. A running agent is never removed, whatever it
 - **Shift-Enter** reaches the agent as its own key, so Claude's multi-line input works. foldyard
   turns tmux's extended keys on for this, and your terminal has to send them too.
 - **A second attach doesn't shrink the first.** The window follows whichever terminal used it last.
-- **Pasting an image doesn't work in the box**, with or without tmux: Claude reads a pasted image
-  from the clipboard, and the box doesn't have yours. A file works: save the image inside the
-  checkout (the box sees it at the same path; a gitignored folder keeps it out of commits) and give
-  Claude its path.
+- **Pasting an image into the agent doesn't work in the box**, with or without tmux: Claude reads a
+  pasted image from the clipboard, and the box doesn't have yours. Run `fy paste` on your computer
+  instead: it sends the clipboard's image (or a file you name, `fy paste shot.png`) into the box's
+  `/tmp/fy-paste/` and copies that path to your clipboard, for you to paste into the agent. With
+  `--session <id>` it types the path into that session's prompt itself, and Claude attaches it as an
+  image. Only a PNG, JPEG, GIF or WebP is sent, 20 MB at most. It goes to one box only: this
+  checkout's, or with `--session` the box holding that session, which can be another worktree's. It
+  is gone when that box is recreated. A file is never read through a symlink something running as
+  you could have made: the box writes the checkout as you. Reading the clipboard takes `osascript`
+  (macOS), `wl-paste` (Wayland) or `xclip` (X11); without one, name a file.
 
 ## Two settings that cut down what reaches your terminal
 
