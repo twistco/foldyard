@@ -18,14 +18,49 @@ options, and `CliRunner` testability.
 from __future__ import annotations
 
 import typer
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup
+
+# `fy --help`, grouped: (panel, verbs), in the order shown. The verbs of a feature in the
+# experimental register (`experimental.Feature.verbs`) leave their panel for EXPERIMENTAL, shown
+# last. tests/test_cli_help.py holds every visible verb to exactly one panel.
+_PANELS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Start here", ("init", "prereq", "doctor", "docs", "changelog")),
+    ("The stack", ("up", "down", "ps", "logs", "shell", "build", "open", "reclaim", "nuke")),
+    (
+        "The box and its agents",
+        ("box", "claude", "codex", "agent", "paste", "code", "worktree", "transcripts", "skill"),
+    ),
+    ("Posture and egress", ("mode", "allow", "config", "verify", "state", "host", "tui")),
+    ("Machines and projects", ("machine", "ls", "prune")),
+    ("Testing", ("clock",)),
+)
+EXPERIMENTAL = "Experimental"
+
+
+def panels() -> list[tuple[str, tuple[str, ...]]]:
+    """:data:`_PANELS` with the experimental features' verbs moved to their own panel, last."""
+    from . import experimental
+
+    moved = tuple(v for f in experimental.REGISTER for v in f.verbs)
+    out = [(title, tuple(v for v in verbs if v not in moved)) for title, verbs in _PANELS]
+    return [*out, (EXPERIMENTAL, moved)] if moved else out
 
 
 class _RootGroup(TyperGroup):
-    """Keeps the command line for the root callback. Click hands the root callback only the verb
-    name, having already set the rest aside for the subcommand — so `fy machine base --help` and
-    `fy machine stop` look the same there. The callback needs the difference (see
-    :func:`_command_path`)."""
+    """Groups the verbs into :func:`panels` for `fy --help`, and keeps the command line for the
+    root callback. Click hands the root callback only the verb name, having already set the rest
+    aside for the subcommand — so `fy machine base --help` and `fy machine stop` look the same
+    there. The callback needs the difference (see :func:`_command_path`)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        order = [(verb, title) for title, verbs in panels() for verb in verbs]
+        rank = {verb: i for i, (verb, _) in enumerate(order)}
+        for verb, title in order:
+            if isinstance(cmd := self.commands.get(verb), TyperCommand | TyperGroup):
+                cmd.rich_help_panel = title
+        # The panels print in the order their first verb is listed; unpanelled (hidden) verbs last.
+        self.commands = dict(sorted(self.commands.items(), key=lambda kv: rank.get(kv[0], 1 << 16)))
 
     def invoke(self, ctx):
         ctx.meta["fy.argv"] = [*getattr(ctx, "_protected_args", []), *ctx.args]
@@ -359,6 +394,32 @@ def code() -> None:
     from . import vscode
 
     raise typer.Exit(vscode.code())
+
+
+@app.command()
+def paste(
+    file: str = typer.Argument(
+        "", help="an image file to send instead of the clipboard's (drag one into the terminal)"
+    ),
+    session: str = typer.Option(
+        "",
+        "--session",
+        "-s",
+        help="an `fy agent` session (id, prefix or name): type the path into it",
+    ),
+    no_copy: bool = typer.Option(
+        False, "--no-copy", help="don't put the in-box path on your clipboard"
+    ),
+) -> None:
+    """Send the clipboard's image (or FILE) into this checkout's dev box, for an agent there.
+
+    The box has no clipboard of yours, so a screenshot pasted into an agent there never reaches
+    it. The image lands in the box's /tmp/fy-paste/ (PNG, JPEG, GIF or WebP, 20 MB at most); with
+    `--session` its path is typed into that agent's prompt, else copied to your clipboard. Your
+    computer only."""
+    from . import paste as paste_mod
+
+    raise typer.Exit(paste_mod.paste(file, session=session, copy=not no_copy))
 
 
 @app.command("open")
