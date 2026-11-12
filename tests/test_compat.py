@@ -400,7 +400,7 @@ def test_the_box_nudge_is_not_doubled(repo_declaring):
 
 def test_box_group_help_survives_its_new_callback(repo_declaring):
     repo_declaring()
-    assert "the long-lived, per-worktree dev box" in _invoke(["box", "--help"]).output
+    assert "The long-lived, per-worktree dev box" in _invoke(["box", "--help"]).output
 
 
 def test_gate_still_runs_when_the_worktree_pin_short_circuits(repo_declaring, monkeypatch):
