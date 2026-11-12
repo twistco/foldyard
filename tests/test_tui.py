@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
+from collections.abc import Callable
 from datetime import timedelta
 from typing import cast
 
@@ -293,6 +295,17 @@ def _stub_mac_only(monkeypatch):
             "new_profiles": "",
         },
     )
+
+
+async def _until(pilot, ok: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Pause until ``ok()`` holds, or ``timeout`` passes (the caller's assert then says what's
+    wrong). The TUI's updates land over several event-loop hops: a cursor move posts a message,
+    its handler refreshes the bindings, and the footer recomposes after the next refresh. A
+    background doctor run reports when its worker gets the CPU. One fixed pause covers that on an
+    idle machine, but not on a loaded runner (CI and a full local run, 2026-11-11)."""
+    deadline = time.monotonic() + timeout
+    while not ok() and time.monotonic() < deadline:
+        await pilot.pause(0.05)
 
 
 def _fixed_doctor(deep=False):
@@ -1398,10 +1411,14 @@ async def _on_network_leaf(pilot, line: int):
     await pilot.pause()
     tree = app.query_one("#network-tree", tui.Tree)
     tree.focus()
-    tree.root.children[0].expand()
-    await pilot.pause()
+    host = tree.root.children[0]
+    host.expand()
+    # Shown once the host's first row has a line of its own (-1 until the tree renders it).
+    await _until(
+        pilot, lambda: app.focused is tree and bool(host.children) and host.children[0].line >= 0
+    )
     tree.cursor_line = line
-    await pilot.pause()
+    await _until(pilot, lambda: tree.cursor_node is not None and tree.cursor_node.line == line)
     return app, tree
 
 
@@ -1520,15 +1537,20 @@ async def test_the_footer_names_what_each_key_does_on_the_row_under_the_cursor(m
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app, tree = await _on_network_leaf(pilot, 1)  # a refused GET with a path to grant
+        await _until(pilot, lambda: _footer(app).get("a") == "allow path…")
         footer = _footer(app)
         assert footer["a"] == "allow path…" and footer["l"] == "copy log row" and "x" not in footer
         for line, a in ((0, "allow host"), (2, "allow host")):  # the host; the CONNECT row
+            # Each reached from the GET, whose footer differs: going from the host straight to
+            # the CONNECT row changes nothing a wait could see, so it read the host's footer.
+            tree.cursor_line = 1
+            await _until(pilot, lambda: _footer(app).get("a") == "allow path…")
             tree.cursor_line = line
-            await pilot.pause()
+            await _until(pilot, lambda a=a: _footer(app).get("a") == a)
             footer = _footer(app)
             assert footer["a"] == a and footer["l"] == "copy log row", line
         tree.cursor_line = 3  # the "… earlier" note: nothing to copy, its host still to allow
-        await pilot.pause()
+        await _until(pilot, lambda: "l" not in _footer(app))
         footer = _footer(app)
         assert footer["a"] == "allow host" and "l" not in footer
 
@@ -1819,10 +1841,17 @@ async def test_doctor_render_survives_ansi_and_markup_in_detail(monkeypatch):
     monkeypatch.setattr(devmode, "doctor", _fixed_doctor)
     async with tui.DevModeTui().run_test() as pilot:
         # the startup deep run drives the (stubbed) doctor — there's no d/D shortcut anymore
-        await pilot.pause(0.1)
+        app = cast(tui.DevModeTui, pilot.app)
+        await _until(
+            pilot,
+            lambda: (
+                any(status == "ok" for status, _, _ in app._doctor_rows)
+                and "denied" in _text(app.query_one("#doctor-out", tui.Static))
+            ),
+        )
         # No MarkupError raised, and the adversarial detail reached the row data and the
         # rendered Static (which the old markup-string render choked on).
-        rows = cast(tui.DevModeTui, pilot.app)._doctor_rows
+        rows = app._doctor_rows
         assert any("[/red]" in detail for _, _, detail in rows)
         assert any(status == "ok" for status, _, _ in rows)
         out = _text(pilot.app.query_one("#doctor-out", tui.Static))
