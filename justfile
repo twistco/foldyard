@@ -175,8 +175,9 @@ format:
 _mdformat := "mdformat --compact-tables"
 # What it formats: the tracked Markdown, NUL-separated, but not the Marp talk sources (their slide
 # separators and directives aren't paragraphs) nor CHANGELOG.md (written by `just release` from
-# the .changes/ fragments, which are formatted).
-_md_files := "git ls-files -z -- '*.md' ':!:docs/talks/*.md' ':!:CHANGELOG.md'"
+# the .changes/ fragments, which are formatted). Files deleted but not yet committed are skipped:
+# `just release` checks with the folded fragments gone.
+_md_files := 'git ls-files -z -- "*.md" ":!:docs/talks/*.md" ":!:CHANGELOG.md" | while IFS= read -r -d "" f; do [ ! -e "$f" ] || printf "%s\0" "$f"; done'
 
 # Type-check with both pyright (Microsoft) and ty (Astral). The `e2e` group is installed so the
 # opt-in proxy/box e2e tests typecheck too (they import cryptography/requests — e2e-only deps; a
