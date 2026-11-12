@@ -5,7 +5,7 @@ DEDICATED, per-worktree ``--user-data-dir`` (under ``config.state_dir()/vscode``
 user's default one.
 
 WHY. VS Code is single-instance *per ``--user-data-dir``*. The old recipe launched `code`
-with no such flag while `DOCKER_HOST` pointed at the box's podman machine socket — so the
+with no such flag while `DOCKER_HOST` pointed at the box's VM socket — so the
 box-attached window became (or merged into) the user's DEFAULT VS Code singleton and every
 later window, for any repo, inherited that podman `DOCKER_HOST`. In an unrelated repo on
 Docker Desktop + Dev Containers, that silently routed the Dev Containers extension at podman.
@@ -190,8 +190,8 @@ def _user_settings(udd: Path) -> Path:
 # by reading `[minter] :8188` out of `fy host`'s own startup line, and every mint from the box
 # then hung — the credential path dead with every posture surface still green.
 #
-# The same key guards the mirror case: a port the host PUBLISHES into the stack (`[ports]`). Under
-# podman machine a publish of `127.0.0.1:P` is a gvproxy bind on the host's loopback, so if VS Code
+# The same key guards the mirror case: a port the host PUBLISHES into the stack (`[ports]`). A
+# publish of `127.0.0.1:P` is forwarded to a bind on the host's loopback, so if VS Code
 # holds P first — it auto-forwarded 4400 off a `ps` line while the stack was down after a reboot,
 # and `remote.restoreForwardedPorts` re-bound it on every reopen — the container can never start
 # (`bind: address already in use` on every `up`, nothing in the box to see it with).

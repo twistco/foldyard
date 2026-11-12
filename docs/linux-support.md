@@ -129,7 +129,6 @@ the firewall fails closed. `test_wall_e2e.py` probes for this and skips. A custo
   `/mnt/c`. Windows on ARM has no KVM in the distro. See
   [isolation-layers.md](./isolation-layers.md#wsl2--a-linux-host-whose-hyper-v-boundary-protects-the-wrong-asset).
 - **`fy tui`, `fy code` (the VS Code attach), `fy open` (browser)** on Linux — untested.
-- **The `podman` backend** (podman machine) on a Linux host — untried.
 - **`tests/test_proxy_box_e2e.py` on a real Lima VM** — it needs the test process inside a container
   beside the box, which the `live-e2e` job provides; `test_box_e2e.py` covers the box on the VM.
 

@@ -174,19 +174,13 @@ change with the mode (`[[overlay]]`). Every key is in [configuration.md](./confi
 For parallel work, `fy worktree add <name>` gives a branch its own checkout and its own stack, with
 offset ports, sharing the one VM and its caches.
 
-## Backends: lima · podman
+## The VM
 
-`init` writes the default, `backend = "lima"` with `firewall = true`. Lima gives each project its
-own VM, runs several side by side, and is the only backend that carries the VM firewall. The one
-alternative, set in `[machine]`:
-
-- `backend = "podman"` — one podman machine, shared by every project, and only one runs at a time.
-  There is no VM firewall, so routing through the proxy is cooperative only. Pick it if podman
-  machine is already your daily driver.
-
-Either way there is always a VM, on Linux too. The old VM-less `native` backend is gone
-([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)); a config that still names it gets a
-warning and the podman backend.
+`init` writes `firewall = true`. Every project gets its own Lima VM, several run side by side, and
+there is always a VM, on Linux too. The podman machine backend was removed
+([ADR-0036](./adrs/0036-lima-only-podman-machine-backend-removed.md)), and the VM-less `native` one
+before it ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)); a config that still names
+either is refused until it says `lima`.
 
 Two more `[machine]` options add layers on top: `runtime = "gvisor"` runs the box under gVisor's
 userspace kernel, and `host_firewall = true` (Linux only) adds a second firewall around the VM on

@@ -3,7 +3,7 @@
 # The sibling of ../example (the minimal, backend-agnostic dogfood fixture). This one shows
 # the most-isolated posture foldyard offers and the ONE caveat it introduces:
 #
-#   • backend = "lima"      concurrent per-project VM (not the single podman machine)
+#   • backend = "lima"      concurrent per-project VM
 #   • [machine] firewall = true nftables default-deny INSIDE the VM — the Mac proxy is the ONLY
 #                           way out (fail-closed: egress that ignores the proxy is REJECTED)
 #   • [proxy] enforce  an ENFORCED allowlist on top (blocked hosts show in `fy tui`)

@@ -26,7 +26,6 @@ firewalls, worktrees and `fy reclaim`. The in-box topology (the proxy and box e2
 | krun / libkrun experiments (a microVM per container inside the VM) | needs `/dev/kvm` *inside* the VM guest — a third level on a runner | x86 nested KVM, or an Apple M3+ (untested with the GIC traps below) |
 | arm64 Linux hosts | `ubuntu-24.04-arm` runners have no KVM | Apple M3+ (below): the host tier passes there |
 | running the host tier without touching the VMs on your computer | CI only runs what's pushed; on your computer the tier drives the one `foldyard-example` VM | Apple M3+ (below) |
-| the `podman` backend (`podman machine`) | untried on a runner | any host with podman |
 | timings that match a laptop | runners are one level deeper, and shared | a real host |
 
 ## Rig 1: an x86 Linux VM with nested KVM

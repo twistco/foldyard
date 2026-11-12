@@ -743,7 +743,7 @@ class ProxyPlugin(Plugin):
                     # LOOPBACK only. The proxy authenticates no client, and injects this project's
                     # credentials — on 0.0.0.0 anyone on the operator's network could use it. The
                     # VM doesn't need more: its user-mode network hands the guest's host gateway
-                    # (Lima 192.168.5.2, gvproxy host.containers.internal) to 127.0.0.1.
+                    # (Lima's 192.168.5.2) to 127.0.0.1.
                     "--listen-host",
                     "127.0.0.1",
                     "--listen-port",
@@ -791,9 +791,8 @@ class ProxyPlugin(Plugin):
             return {}
         # Per-worktree port (config.proxy_port) so each worktree's box routes to ITS OWN proxy
         # listener — the supervisor runs one per worktree on the matching offset port. The address
-        # is backend-dependent (config.host_alias): host.containers.internal under podman-machine/
-        # native, Lima's guest→host gateway IP under lima (where that alias points at the VM, not
-        # the host).
+        # is Lima's guest→host gateway IP (config.host_alias; host.containers.internal points at
+        # the VM there, not the host).
         return {"FY_PROXY": f"{config.host_alias()}:{config.proxy_port()}"}
 
     def box_args(self, env: dict) -> list[str]:

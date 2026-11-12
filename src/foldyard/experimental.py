@@ -126,7 +126,7 @@ REGISTER: tuple[Feature, ...] = (
         unproven=(
             "every compose call and a project's own box image run in the VM, and its own e2e "
             "module passes on vz, Linux and WSL2 hosts, but the other host-tier modules have run "
-            "with it on under vz only, it hasn't run on the podman backend or under gVisor, and "
+            "with it on under vz only, it hasn't run under gVisor, and "
             "no maintainer uses it day to day yet. Registry logins on your computer don't reach "
             "the VM, and a box that writes the VM user's ~/.bashrc can read a build's gate token "
             "before the runner starts (docs/compose-in-vm-scope.md)"

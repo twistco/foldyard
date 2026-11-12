@@ -53,7 +53,7 @@ class Note:
 class Vm:
     name: str
     backend: str
-    status: str  # Lima's own words (Running, Stopped, Broken…), "missing", or "unknown"
+    status: str  # Lima's own words (Running, Stopped, Broken…), "missing", "unknown", "retired"
     cpus: int | None = None
     memory: int | None = None  # bytes
     disk_used: int | None = None  # bytes actually on disk (sparse images count what they hold)
@@ -161,16 +161,14 @@ def _lima_vm(name: str, row: dict | None, listed: bool = True) -> Vm:
 
 
 def _vm(instances: dict[str, dict] | None) -> Vm:
-    """The bound project's VM. Lima from the one listing; podman machine by asking it."""
-    name, backend = config.machine_name(), config.machine_backend()
-    if backend == "lima":
-        if instances is None:
-            return _lima_vm(name, None, listed=False)
-        return _lima_vm(name, instances.get(name))
-    from .machine_backend import get_backend
-
-    state = get_backend(backend).state(name)
-    return Vm(name, backend, {"running": "Running", "stopped": "Stopped"}.get(state, "unknown"))
+    """The bound project's VM, from the one listing. A config still naming a retired backend has
+    no Lima VM to show: what it names isn't foldyard's any more."""
+    name = config.machine_name()
+    if retired := config.retired_backend():
+        return Vm(name, retired, "retired")
+    if instances is None:
+        return _lima_vm(name, None, listed=False)
+    return _lima_vm(name, instances.get(name))
 
 
 def _supervisor(vm: Vm, notes: list[Note], fingerprint: str) -> str:
@@ -290,6 +288,9 @@ def _describe(
             notes.append(Note("⚠", f"its VM {vm.name} doesn't exist (yet)", "fy up"))
         elif vm.status.lower() == "broken":
             notes.append(Note("✗", f"its VM {vm.name} stopped answering (Broken)", "fy up"))
+        elif vm.status == "retired":
+            why = f'[machine].backend = "{vm.backend}" is no longer supported (Lima only)'
+            notes.append(Note("✗", why, "fy machine ensure"))
     return Project(name, str(checkout), vm, state, notes=notes, below_floor=below_floor)
 
 

@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import config, configpin, mountwrite, worktree_registry
-from .machine_backend import get_backend
+from .machine_backend import LimaBackend, retired_block
 from .plugins import DoctorContext, registry
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ DEFAULT_TTL = 3600
 MAX_TTL = 8 * 3600
 
 PODMAN_MACHINE = config.machine_name()
-_BACKEND = get_backend(config.machine_backend())
+_BACKEND = LimaBackend()
 
 
 def axes() -> dict[str, tuple[str, ...]]:
@@ -504,8 +504,8 @@ def degraded_capabilities(mode: dict | None = None) -> list[tuple[str, str]]:
 
 
 def probe(port: int, host: str | None = None) -> bool:
-    # In-box, host daemon ports are probed at the backend's guest→host address (config.host_alias:
-    # host.containers.internal under podman-machine/native, the Lima host gateway IP under lima).
+    # In-box, host daemon ports are probed at the guest→host address (config.host_alias: the Lima
+    # host gateway IP).
     host = host or (config.host_alias() if in_box() else "127.0.0.1")
     try:
         with socket.create_connection((host, port), timeout=0.5):
@@ -585,8 +585,8 @@ def _engine_env() -> dict[str, str]:
     the read-only engine probes in this module (:func:`workspaces`, :func:`up_worktrees`,
     :func:`_box_env_hint`) and ``reconcile``'s scopes. ``stack.resolve()`` exports the socket for
     the real verbs; these probes shell the engine directly, and bare they only worked on the
-    podman backend BY ACCIDENT — ``podman machine init`` registers itself as podman's default
-    connection, lima does not, so a bare ``podman ps`` missed a running lima box and the TUI
+    retired podman backend, whose ``podman machine init`` registered itself as podman's default
+    connection; lima does not, so a bare ``podman ps`` missed a running lima box and the TUI
     said "no devbox" while `fy box shell` (which resolves) attached fine. A preset DOCKER_HOST
     (in-box, or an operator override) wins; a backend that can't name a socket yet (no machine)
     degrades to the ambient env — the probe then fails exactly as before ("engine unreachable").
@@ -2424,17 +2424,15 @@ def _podman_checks():
     )
     if not have_podman:
         return  # nothing to inspect without the CLI; the row above already flagged it
-    # Lima backend additionally needs limactl on the host to manage the VM.
-    if _BACKEND.name != "podman":
-        ok = _BACKEND.available()
-        yield _result(
-            ok,
-            f"{_BACKEND.cli} CLI",
-            "installed",
-            f"missing — backend = '{_BACKEND.name}' needs it ({_BACKEND.install_hint})",
-        )
-        if not ok:
-            return
+    if retired := config.retired_backend():
+        yield _result(False, "machine backend", "", retired_block(retired).removeprefix("✗ "))
+        return
+    ok = _BACKEND.available()
+    yield _result(
+        ok, f"{_BACKEND.cli} CLI", "installed", f"missing — install it: {_BACKEND.install_hint}"
+    )
+    if not ok:
+        return
     machine = PODMAN_MACHINE
     label = f"{_BACKEND.name} machine"
     state = machine_state()  # 'running' | 'stopped' | 'unknown' (unknown ⇒ not initialised)
@@ -2453,7 +2451,7 @@ def _ssh_port_check():
     start on a port that is taken waits forever for ssh. Silent when it matches."""
     from . import podman_desktop  # stdlib-only, but only this row needs it
 
-    if _BACKEND.name != "lima" or not podman_desktop.following():
+    if not podman_desktop.following():
         return
     have, want = _BACKEND.ssh_port(PODMAN_MACHINE), config.machine_ssh_port()
     if not have or have == want:
@@ -2470,9 +2468,8 @@ def _ssh_port_check():
 def _to_box_check():
     """ADR-0033's to-box (lima): shared READ-ONLY with the VM and every box, where the VM's share
     type enforces that outside the guest; otherwise there is none, and this says why. Read from
-    the instance's effective config — no ssh. Silent on the podman backend, whose mounts foldyard
-    leaves as they were, and before the VM exists."""
-    if _BACKEND.name != "lima" or not _BACKEND.exists(PODMAN_MACHINE):
+    the instance's effective config — no ssh. Silent before the VM exists."""
+    if not _BACKEND.exists(PODMAN_MACHINE):
         return
     from . import boxmounts
     from .machine_backend import Mount
@@ -2511,7 +2508,7 @@ def _host_wall_check():
     whether the VM is up or not, because the install is bound to the user manager, not the VM.
     Silent when the option is off — most consumers — so the row only ever appears where it
     means something."""
-    if _BACKEND.name != "lima" or not config.machine_host_wall():
+    if not config.machine_host_wall():
         return
     from . import hostwall  # stdlib-only, but only this row needs it
 
@@ -2536,7 +2533,7 @@ def _guest_monitor_check():
     """The guest monitor (`[machine] monitor = "observe"`, lima), read from the guest's OWN report
     over ssh as the VM user — never from the host's memory of what it recorded. Silent when the
     option is off. Never red: the monitor only observes, so "not observing" is a warning."""
-    if _BACKEND.name != "lima" or config.machine_monitor() == "off":
+    if config.machine_monitor() == "off":
         return
     from . import monitor  # only this row needs it
 
@@ -2563,7 +2560,7 @@ def _forwarder_check():
     OWN report over ssh as the VM user. Silent when the option is off. Red when it isn't serving:
     it is the only way from a container to the proxy, so a forwarder that isn't serving means no
     egress for anything in the VM (it fails closed)."""
-    if _BACKEND.name != "lima" or config.machine_attribution() == "off":
+    if config.machine_attribution() == "off":
         return
     from . import forwarder  # only this row needs it
 
@@ -2664,7 +2661,7 @@ def _monitor_hooks_check():
     """The operator's monitor hooks (host-only config), from the delivery state the supervisor
     saves — no ssh, so they show with the VM down too. Silent when the monitor is off. Warn,
     never fail: a hook forwards what `fy monitor` already holds."""
-    if _BACKEND.name != "lima" or config.machine_monitor() == "off":
+    if config.machine_monitor() == "off":
         return
     import time
 

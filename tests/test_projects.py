@@ -96,6 +96,16 @@ def test_a_running_vm_is_asked_through_its_checkout_a_missing_one_is_not(host):
     assert "running (4 CPU, 8 GiB)" in out and "main" in out
 
 
+def test_a_project_still_naming_the_podman_backend_is_retired_not_missing(host):
+    # Its Lima VM doesn't exist and mustn't be offered as one `fy up` would make: that `fy up`
+    # refuses, and says how to move over.
+    host.tomls[host.checkouts[1]]["machine"]["backend"] = "podman"
+    beta = _row(projects.collect(), "beta")
+    assert beta.vm.status == "retired" and beta.vm.backend == "podman"
+    assert [n.fix for n in beta.notes if n.level == "✗"] == ["fy machine ensure"]
+    assert not any("doesn't exist" in n.text for n in beta.notes)
+
+
 def test_a_running_vm_without_its_supervisor_is_flagged(host):
     host.sup["running"] = set()
     alpha = _row(projects.collect(), "alpha")

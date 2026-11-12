@@ -1,11 +1,8 @@
 """Rootless dev-VM lifecycle — core foldyard (init/start/recreate).
 
-Backend-agnostic orchestration over :mod:`foldyard.machine_backend`: Lima
-(``[machine].backend = "lima"``, the default) for concurrent per-project VMs, or ``podman
-machine`` (``backend = "podman"``). There is no VM-less backend (ADR-0027). The
-backend is chosen once at import (``BACKEND``); this module only sequences create → start
-→ socket and owns the cross-cutting policy (isolation mounts, the one-VM-at-a-time guard
-for non-concurrent backends).
+Orchestration over :mod:`foldyard.machine_backend`: one Lima VM per project, run concurrently
+(ADR-0011, ADR-0036). There is no VM-less backend (ADR-0027). This module sequences create →
+start → socket and owns the cross-cutting policy (isolation mounts, boot provisioning).
 
 Host-only: the dev box runs INSIDE the engine boundary, so it can't manage its own host VM/engine
 — ``ensure`` no-ops there and ``recreate`` refuses. The isolation property rests on the VM seeing
@@ -29,10 +26,10 @@ import time
 from pathlib import Path
 
 from . import boxmounts, config, forwarder, guestlog, hostwall, monitor, podman_desktop, sandbox
-from .machine_backend import Mount, default_unavailable_block, get_backend
+from .machine_backend import LimaBackend, Mount, retired_block, unavailable_block
 
 MACHINE = config.machine_name()
-BACKEND = get_backend(config.machine_backend())
+BACKEND = LimaBackend()
 
 
 def _err(*a: object) -> None:
@@ -49,11 +46,8 @@ def _volumes(main: Path, wt_root: Path, vmtype: str = "") -> list[Mount]:
     foldyard's two directories (ADR-0033, :mod:`foldyard.boxmounts`): the from-box, writable, and
     — only where ``vmtype`` has a share type that enforces read-only OUTSIDE the guest, which
     :meth:`LimaBackend._set_expr` / :func:`_record_mounts` pin — the to-box, read-only. An
-    enforcing to-box or none: one the guest could write would read as tamper-proof. The podman
-    backend's set is unchanged (its mounts are fixed at `podman machine init`)."""
+    enforcing to-box or none: one the guest could write would read as tamper-proof."""
     mounts = [Mount(str(main), str(main)), Mount(str(wt_root), str(wt_root))]
-    if BACKEND.name != "lima":
-        return mounts
     from_box, to_box = str(boxmounts.from_box_dir()), str(boxmounts.to_box_dir())
     mounts.append(Mount(from_box, from_box))
     if mount_type := boxmounts.mount_type_for(vmtype):
@@ -72,12 +66,6 @@ def guest_mounts(main: Path, wt_root: Path) -> list[str]:
 def to_box_unavailable() -> str | None:
     """Why this project's VM has no to-box, or ``None`` when it has one (or will, at its next
     `fy up`). For the tenants that offer it (`fy monitor hook add --to-box`)."""
-    if BACKEND.name != "lima":
-        return (
-            f"the {BACKEND.name} backend has no to-box: no provider enforces a read-only mount "
-            "outside the guest, and its mounts are fixed when the machine is created (the lima "
-            "backend has one)"
-        )
     vmtype = BACKEND.vmtype(MACHINE) if exists() else BACKEND.resolve_vmtype()
     if not boxmounts.mount_type_for(vmtype):
         return (
@@ -90,23 +78,14 @@ def to_box_unavailable() -> str | None:
 def to_box_mounted() -> bool:
     """Does the VM share the to-box read-only right now (its effective config)? What `fy box up`
     asks before binding it into the box."""
-    if BACKEND.name != "lima":
-        return False
     to_box = str(boxmounts.to_box_dir())
     return Mount(to_box, to_box, writable=False) in (BACKEND.mount_set(MACHINE) or [])
 
 
 def from_box_mounted() -> bool:
     """Does the VM share the from-box? (`fy box up` binds transcripts there only then.)"""
-    if BACKEND.name != "lima":
-        return False
     from_box = str(boxmounts.from_box_dir())
     return Mount(from_box, from_box) in (BACKEND.mount_set(MACHINE) or [])
-
-
-def running_machines() -> list[str]:
-    """Names of currently-running VMs of the active backend."""
-    return BACKEND.list_running()
 
 
 def exists() -> bool:
@@ -145,20 +124,8 @@ def responsive() -> bool:
 
 
 def _start() -> bool:
-    """Start MACHINE. On a NON-concurrent backend (podman on macOS) refuse to start beside
-    another running VM — rather than emit the backend's cryptic error, print actionable
-    guidance: stop the other, or switch this project to the Lima backend. Returns True on a
+    """Start MACHINE (beside any other project's: Lima runs them concurrently). Returns True on a
     running machine."""
-    if not BACKEND.supports_concurrent():
-        others = [m for m in running_machines() if m != MACHINE]
-        if others:
-            _err(f"✗ {BACKEND.name} machine '{others[0]}' is already running, and macOS runs")
-            _err(f"  only ONE {BACKEND.name} VM at a time — '{MACHINE}' can't start beside it.")
-            _err("  Either:")
-            _err(f"    • stop the other yourself:   {BACKEND.cli} machine stop {others[0]}")
-            _err("    • or run projects concurrently with the Lima backend — set")
-            _err('      backend = "lima"  under [machine] in foldyard.toml (needs limactl).')
-            return False
     # Under the host wall the VM's host processes are launched inside their own transient
     # cgroup scope under a per-VM PERSISTENT slice, so the wall has one predictable,
     # restart-stable thing to match (see _check_host_wall). The slice must already be active:
@@ -179,9 +146,8 @@ def _start() -> bool:
         _err(f"✗ '{BACKEND.cli}' failed to start '{MACHINE}'.")
         # `limactl start` also gives up on a VM that IS up, when its boot scripts don't finish
         # within its timeout: say which ones are still going.
-        if BACKEND.name == "lima":
-            for line in _unfinished_boot_lines(_boot_progress()):
-                _err(line)
+        for line in _unfinished_boot_lines(_boot_progress()):
+            _err(line)
         return False
     return True
 
@@ -206,7 +172,7 @@ def _revive() -> bool:
     _err(f"⚠ {BACKEND.name} machine '{MACHINE}' reports running, but nothing is serving its")
     _err("  socket — a half-started VM (host crash, or a boot that never came up). Restarting…")
     if not BACKEND.stop(MACHINE):
-        _err(f"  ('{BACKEND.cli} machine stop' failed — continuing; the reap below is the point.)")
+        _err(f"  ('{BACKEND.cli} stop' failed — continuing; the reap below is the point.)")
     # A stop that "succeeds" may still leave the hypervisor alive: once the backend has lost
     # track of the process it reports success without reaping it, and the next start races it.
     reaped = BACKEND.reap_orphans(MACHINE)
@@ -227,8 +193,8 @@ def _revive() -> bool:
         if attempt + 1 < _REVIVE_PROBES:
             time.sleep(_REVIVE_PROBE_DELAY)
     _err(f"✗ '{MACHINE}' started but its socket is still dead. The VM may be failing to")
-    _err(f"  boot — check the console log, then `{BACKEND.cli} machine rm {MACHINE}`")
-    _err("  and `fy up` to rebuild it (containers and named volumes are lost).")
+    _err(f"  boot — check ~/.lima/{MACHINE}/serial*.log, then `fy machine rm` and `fy up` to")
+    _err("  rebuild it (containers and named volumes are lost).")
     return False
 
 
@@ -251,7 +217,7 @@ def _revive() -> bool:
 
 
 def _host_wall_wanted() -> bool:
-    return BACKEND.name == "lima" and config.machine_host_wall()
+    return config.machine_host_wall()
 
 
 def _check_host_wall() -> None:
@@ -517,7 +483,7 @@ def _render_provisioning() -> tuple[str, str]:
         .replace("@@ENGINE_LINK@@", ENGINE_SOCK_IN_VM)
         .replace("@@ENGINE_SOCK@@", _engine_sock_name())
         .replace("@@WANT@@", _provision_want())
-        .replace("@@JOURNAL@@", guestlog.journal_snippet(sudo="").strip("\n"))
+        .replace("@@JOURNAL@@", guestlog.journal_snippet().strip("\n"))
     )
     ident = hashlib.sha256(body.encode()).hexdigest()[:16]
     return body.replace("@@ID@@", ident, 1), ident
@@ -620,7 +586,7 @@ def wall_denies() -> list[dict] | None:
     port}``, ``seq`` the kernel log's own sequence number within ``boot`` — read WITHOUT root.
     ``None`` when there is no report to read: not a walled Lima VM, the VM unreachable, or a guest
     provisioned before the reporter. Diagnosis only: nothing decides on it."""
-    if BACKEND.name != "lima" or not config.machine_wall():
+    if not config.machine_wall():
         return None
     try:
         out = subprocess.run(
@@ -647,8 +613,6 @@ def wall_denies() -> list[dict] | None:
 def _record_provisioning() -> None:
     """Record the boot script in the (STOPPED) instance config when it differs from what is
     recorded; refuse a RUNNING VM whose recording is stale (see the section comment)."""
-    if BACKEND.name != "lima":
-        return
     if config.machine_wall():
         _ensure_guest_ca()
     script, ident = _render_provisioning()
@@ -711,8 +675,6 @@ def _record_proxy_propagation() -> None:
 
 def _monitor_recording() -> tuple[str, str] | None:
     """``(script, id)`` the current config wants recorded, or ``None`` when nothing should be."""
-    if BACKEND.name != "lima":
-        return None
     on = monitor.wanted()
     if not on and not BACKEND.provision_id(MACHINE, monitor.MARKER):
         return None
@@ -741,7 +703,7 @@ def _record_monitor() -> None:
 def _check_monitor() -> None:
     """After the guest's own checks: deliver the release if the guest waits for one, and say so
     when the monitor isn't observing. Never aborts."""
-    if BACKEND.name != "lima" or not monitor.wanted():
+    if not monitor.wanted():
         return
     want = _monitor_recording()
     if want is None:
@@ -769,8 +731,6 @@ FORWARDER_SETTLE = 15.0  # seconds a freshly started forwarder may take to repor
 
 def _forwarder_recording() -> tuple[str, str] | None:
     """``(script, id)`` the current config wants recorded, or ``None`` when nothing should be."""
-    if BACKEND.name != "lima":
-        return None
     on = forwarder.wanted()
     if not on and not BACKEND.provision_id(MACHINE, forwarder.MARKER):
         return None
@@ -800,7 +760,7 @@ def _record_forwarder() -> None:
 def _check_forwarder(settle: float = FORWARDER_SETTLE) -> None:
     """After the guest's own checks: the forwarder must report serving the recorded id. Read from
     the guest's own report (never the host's memory of what it recorded); refused when it isn't."""
-    if BACKEND.name != "lima" or not forwarder.wanted():
+    if not forwarder.wanted():
         return
     want = _forwarder_recording()
     if want is None:
@@ -832,8 +792,6 @@ def _check_guest_provisioning() -> None:
     """After a boot, and on the steady-state path: the guest's own report must match what the
     config wants. One `limactl shell` per `fy up` — correctness over speed: a VM reset behind
     foldyard's back, a failed boot script or a re-enabled rootful socket all surface here."""
-    if BACKEND.name != "lima":
-        return
     want = _provision_want()
     got, active, masked = _guest_state()
     problems = []
@@ -910,10 +868,7 @@ def _mounts_drift(main: Path, wt_root: Path) -> tuple[list[Mount], str, str] | N
 
 def _record_mounts(main: Path, wt_root: Path) -> None:
     """Record foldyard's two directories in the (STOPPED) instance config when they differ; refuse
-    a RUNNING VM whose set is stale (see the section comment). Lima only: the podman backend's
-    mounts are fixed at `podman machine init`, and nothing about them changes."""
-    if BACKEND.name != "lima":
-        return
+    a RUNNING VM whose set is stale (see the section comment)."""
     drift = _mounts_drift(main, wt_root)
     if drift is None:
         return
@@ -937,10 +892,8 @@ def _record_mounts(main: Path, wt_root: Path) -> None:
 
 
 def _check_box_dirs(main: Path, wt_root: Path) -> None:
-    """Lima only: make foldyard's two directories, and refuse a state dir inside a writable mount
-    — a read-only to-box nested in the checkout stays writable through it."""
-    if BACKEND.name != "lima":
-        return
+    """Make foldyard's two directories, and refuse a state dir inside a writable mount — a
+    read-only to-box nested in the checkout stays writable through it."""
     dirs = [boxmounts.to_box_dir(), boxmounts.from_box_dir()]
     clash = boxmounts.nested(dirs, [main, wt_root])
     if clash:
@@ -952,13 +905,22 @@ def _check_box_dirs(main: Path, wt_root: Path) -> None:
     boxmounts.prepare()
 
 
+def _refuse_unusable() -> None:
+    """Stop before touching any VM when the config still names a retired backend (an empty Lima
+    VM beside the old one's data is the trap), or ``limactl`` is missing (no VM to target)."""
+    if retired := config.retired_backend():
+        _err(retired_block(retired))
+        raise SystemExit(1)
+    if not BACKEND.available():
+        _err(unavailable_block(BACKEND))
+        raise SystemExit(1)
+
+
 def ensure(main: Path, wt_root: Path) -> None:
     """Provision the rootless machine (mounts ONLY repo + worktrees root) if absent, start it
-    if stopped. No-op inside the box (manages its host VM from outside). A missing backend CLI
-    is a hard error either way — one message when the consumer NAMED the backend, another when
-    they inherited the default — because a silent skip leaves the socket unset and hands the
-    whole stack to the host's own podman
-    (:func:`machine_backend.default_unavailable_block`). Progress → stderr."""
+    if stopped. No-op inside the box (manages its host VM from outside). A config still naming a
+    retired backend, or a missing ``limactl``, is a hard error (:func:`_refuse_unusable`).
+    Progress → stderr."""
     if config.in_box():
         return
     if not config.ambient_adopted():
@@ -968,19 +930,12 @@ def ensure(main: Path, wt_root: Path) -> None:
         _err("  provision the VM from. `fy up` asks to adopt it; or `fy config diff`, then")
         _err("  `fy config adopt`.")
         raise SystemExit(1)
-    if not BACKEND.available():
-        if not config.machine_backend_explicit():
-            _err(default_unavailable_block(BACKEND))
-            raise SystemExit(1)
-        _err(f"✗ [machine].backend = '{BACKEND.name}' but '{BACKEND.cli}' isn't installed.")
-        _err(f"  Install it ({BACKEND.install_hint}) or name a different [machine].backend.")
-        raise SystemExit(1)
+    _refuse_unusable()
     wt_root.mkdir(parents=True, exist_ok=True)
     _check_box_dirs(main, wt_root)
     if not exists():
         _err(f"▶ {BACKEND.name} machine '{MACHINE}' not found — initialising (rootless; mounts")
-        extra = ", and foldyard's to-box + from-box" if BACKEND.name == "lima" else ""
-        _err(f"  ONLY {main} and {wt_root}{extra})…")
+        _err(f"  ONLY {main} and {wt_root}, and foldyard's to-box + from-box)…")
         vols = _volumes(main, wt_root, BACKEND.resolve_vmtype())
         if not BACKEND.create(MACHINE, _resources(), vols):
             _err(
@@ -1031,7 +986,7 @@ def _pin_ssh_port() -> None:
     survives a reboot — Lima picks a fresh port at every start otherwise. Only where Podman
     Desktop is followed (:func:`podman_desktop.following`), and only on a STOPPED VM
     (``limactl edit`` refuses a running one): a running VM picks it up at its next start."""
-    if BACKEND.name != "lima" or not podman_desktop.following():
+    if not podman_desktop.following():
         return
     want = config.machine_ssh_port()
     if BACKEND.ssh_port(MACHINE) == want or state() == "running":
@@ -1044,7 +999,7 @@ def _pin_ssh_port() -> None:
 def _follow_in_podman_desktop() -> None:
     """Keep this VM's Podman Desktop entry current, where Podman Desktop is followed. Silent
     unless it changed something."""
-    if BACKEND.name != "lima" or not podman_desktop.following():
+    if not podman_desktop.following():
         return
     for line in _show_in_podman_desktop():
         _err(line)
@@ -1065,9 +1020,6 @@ def point_podman_desktop() -> int:
     """`fy machine desktop`: register this VM with Podman Desktop now."""
     if config.in_box():
         print("✗ run on the host — Podman Desktop lives there, not in the box")
-        return 1
-    if BACKEND.name != "lima":
-        print(f"✗ Podman Desktop shows {BACKEND.name} machines itself — nothing to register")
         return 1
     lines = _show_in_podman_desktop(verbose=True)
     if not any(line.startswith(("▶", "⚠")) for line in lines):
@@ -1196,13 +1148,13 @@ def delete(assume_yes: bool = False) -> int:
 
 
 def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
-    """Stop + remove + re-create the machine with foldyard's mount set. On the podman backend
-    that is the only way to change it (``podman machine set`` has no volume flag); Lima applies a
-    changed set at its next start (:func:`_record_mounts`), so there a recreate is for starting
-    over. Interactive unless assume_yes."""
-    if config.in_box() or not BACKEND.available():
+    """Stop + remove + re-create the machine with foldyard's mount set. Lima applies a changed
+    set at its next start (:func:`_record_mounts`), so a recreate is for starting over.
+    Interactive unless assume_yes."""
+    if config.in_box():
         print("✗ run on your computer — the box can't recreate its own machine")
         return 1
+    _refuse_unusable()
     vols = _volumes(main, wt_root, BACKEND.resolve_vmtype())
     print(f"This stops + REMOVES {BACKEND.name} machine '{MACHINE}' and re-creates it with mounts:")
     for m in vols:
@@ -1228,7 +1180,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     _record_monitor()
     _record_forwarder()
     _record_proxy_propagation()
-    if not _start():  # one-VM-at-a-time aware on non-concurrent backends
+    if not _start():
         return 1
     _check_host_wall()
     _check_guest_provisioning()

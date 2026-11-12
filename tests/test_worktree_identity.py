@@ -73,7 +73,7 @@ def test_an_unadopted_registered_worktree_takes_mains_identity(project):
     assert config.project() == "acme"
     assert config.project_prefix() == "ac"
     assert config.machine_name() == "acme-vm"
-    assert config.machine_backend() == "podman"
+    assert config.retired_backend() == "podman"
     # …and where the project's worktrees live, or the CLI's worktree inference (which reads it)
     # would read this checkout as MAIN and key its posture on main's.
     assert config.worktrees_root(project["main"]) == project["main"].parent / "trees"

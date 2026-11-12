@@ -60,7 +60,7 @@ def bound(repo, monkeypatch):
     config.clear_caches()
     plugins._REGISTRY_CACHE.clear()
     monkeypatch.setattr(machine, "MACHINE", VM)
-    monkeypatch.setattr(machine, "BACKEND", machine_backend.get_backend("lima"))
+    monkeypatch.setattr(machine, "BACKEND", machine_backend.LimaBackend())
     yield
     config.clear_caches()
     plugins._REGISTRY_CACHE.clear()

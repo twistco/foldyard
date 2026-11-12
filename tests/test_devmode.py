@@ -2939,7 +2939,7 @@ def test_ssh_port_row_warns_on_a_port_off_the_band(ssh_port_row):
     assert "41190" in detail and "41390" in detail and "fy machine stop" in detail
 
 
-@pytest.mark.parametrize("why", ["not followed", "not lima", "no port yet"])
+@pytest.mark.parametrize("why", ["not followed", "no port yet"])
 def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatch, why):
     # Without Podman Desktop nothing pins the port: Lima picks one per start, and any is fine.
     from foldyard import podman_desktop
@@ -2947,8 +2947,6 @@ def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatc
     ssh_port_row.port = 41190
     if why == "not followed":
         monkeypatch.setattr(podman_desktop, "following", lambda: False)
-    elif why == "not lima":
-        ssh_port_row.name = "podman"
     else:
         ssh_port_row.port = None
     assert list(devmode._ssh_port_check()) == []
@@ -3082,10 +3080,6 @@ def test_to_box_row_says_why_a_hypervisor_has_none(to_box_row, monkeypatch):
     assert status == "ok" and "krunkit" in detail and "--file" in detail
 
 
-@pytest.mark.parametrize("backend", ["podman", "no vm"])
-def test_to_box_row_silent_on_podman_and_before_the_vm(to_box_row, monkeypatch, backend):
-    be = _ToBoxBackend(exists=backend != "no vm")
-    if backend == "podman":
-        be.name = "podman"
-    monkeypatch.setattr(devmode, "_BACKEND", be)
+def test_to_box_row_silent_before_the_vm(to_box_row, monkeypatch):
+    monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend(exists=False))
     assert list(devmode._to_box_check()) == []

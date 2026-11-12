@@ -266,9 +266,9 @@ instead of a direct route.
 **Without the VM firewall, routing is cooperative.** Proxy variables are honoured by well-behaved
 software and ignored by anything else:
 
-- `backend = "lima"` + `firewall = true` — traffic control is **enforced**. This is the default.
-- `backend = "podman"` (one shared VM) — no VM firewall is possible. The proxy sees everything that
-  cooperates: a *monitoring* guarantee, not a filtering one.
+- `firewall = true` — traffic control is **enforced**. This is what `init` writes.
+- `firewall = false` — the proxy sees everything that cooperates: a *monitoring* guarantee, not a
+  filtering one.
 - **QUIC/HTTP-3 (UDP/443)** bypasses a CONNECT proxy entirely. With the VM firewall, it is refused.
   Without it, it is not captured at all.
 
@@ -643,12 +643,6 @@ own HTTP client, or a program opening raw sockets.
   for about 60 s, idle or mid-request, and TCP keepalives don't reset the timer. It measures the
   same from an ordinary client on the internet with no foldyard involved. Stream the response (or
   ask for progress output, such as a model's thought summaries) so bytes keep flowing.
-- **`fy up` fails with `proxy already running` (podman backend).** That's podman machine's port
-  forwarder (gvproxy), not the egress proxy: it still holds a forward for a host port from a stack
-  that wasn't torn down cleanly (a crash, or `rm -f` on a container that publishes a port). The
-  forward lasts as long as the VM, so every `fy up` hits it until you run
-  `fy machine stop && fy up`, which also stops any other project sharing that machine
-  (`[machine] name`). Ending work with `fy down` avoids it.
 
 ## Deeper
 

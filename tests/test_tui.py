@@ -223,8 +223,8 @@ def test_doctor_includes_engine_and_machine_checks_on_mac(monkeypatch):
     # "lima machine". The podman CLI row is unconditional: podman drives the socket whatever
     # backend produced it (lima needs limactl AND podman).
     monkeypatch.setattr(devmode, "machine_state", lambda: "running")
-    # A non-podman backend also gets its own lifecycle-CLI row, and the machine row is gated on
-    # it — so the box (no limactl) needs that stubbed to reach the machine row at all.
+    # limactl gets its own row, and the machine row is gated on it — so the box (no limactl)
+    # needs that stubbed to reach the machine row at all.
     monkeypatch.setattr(devmode._BACKEND, "available", lambda: True)
     rows = _mac_doctor(monkeypatch, "me@x.io")
     names = [n for _, n, _ in rows]

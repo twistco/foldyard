@@ -227,28 +227,19 @@ memory_mib = 8192
 disk_gib = 60
 ```
 
-- **`backend`** — `"lima"` | `"podman"`. Default: `"lima"` (also what `init` writes): one VM per
-  project, running concurrently, and the only backend with the VM firewall. `"podman"` is a podman
-  machine per project too (shared by its worktrees, like Lima's), with nothing extra to install.
-  **The podman backend is deprecated and will be removed in a future release.** Only one of its
-  machines can run at a time
-  ([one VM at a time](https://github.com/twistco/foldyard/blob/main/docs/lima-backend-scope.md#podman-machine-one-vm-at-a-time-upstream-podman26281)),
-  it can't carry the VM firewall, and it has none of what is built on Lima since: the read-only
-  to-box, the from-box that keeps transcripts out of the checkout
-  ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)), and the guest monitor.
-  To move, set `backend = "lima"`: the next `fy up` creates a new VM, so images are rebuilt and the
-  podman machine's volumes (agent logins included) don't come along. There is no VM-less option; a
-  config still naming the retired `native` backend gets a warning and, for now, the deprecated
-  podman backend: set `lima` instead
-  ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)). Lima needs `limactl` *and*
-  `podman` (which drives the VM's socket). A missing CLI is a hard error, whether you named the
-  backend or inherited the default. Env: `MACHINE_BACKEND`.
+- **`backend`** — `"lima"`, the only backend and the default: one VM per project, running
+  concurrently. Lima needs `limactl` *and* `podman` (which drives the VM's socket); a missing one is
+  a hard error. The `podman` backend was removed
+  ([ADR-0036](./adrs/0036-lima-only-podman-machine-backend-removed.md)) and `native` before it
+  ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)): a config still naming either is
+  refused before anything touches a VM, with your old VM and its volumes left as they are. Run your
+  project's migration if it has one; otherwise set `backend = "lima"` (or drop the key) and
+  `fy config adopt`, and the next `fy up` creates a new, empty VM. Env: `MACHINE_BACKEND`.
 
 - **`firewall`** — the VM firewall: nftables rules in the VM, installed as root at boot, so the
   box's only way out is the proxy on your computer. Traffic that ignores the proxy settings is
-  rejected, not let through. Lima only (preflight enforces it), and needs `[proxy]` declared, or the
-  box has no way out at all. Default: `false` (`init` writes `true`). Env: `MACHINE_FIREWALL`
-  (`1`/`true`/`on`/`yes`).
+  rejected, not let through. Needs `[proxy]` declared, or the box has no way out at all. Default:
+  `false` (`init` writes `true`). Env: `MACHINE_FIREWALL` (`1`/`true`/`on`/`yes`).
 
 - **`firewall_allow`** — direct openings in the VM firewall, for a client that can't use an HTTP
   proxy (cloud-sql-proxy dials its instance on TCP 3307, say). A list of `{ to, port, why }`: `to`
@@ -522,8 +513,7 @@ disk_gib = 60
   checkout and its worktrees are the only files of yours. Any other value is an error. Env:
   `MACHINE_COMPOSE`.
 
-  - *Experimental*: it hasn't run under gVisor or on the podman backend, and it hasn't been used day
-    to day.
+  - *Experimental*: it hasn't run under gVisor, and it hasn't been used day to day.
   - Every compose call and the build of a project's own box image run in the VM. `fy shell` enters
     the container through the engine instead.
   - The VM must mount the checkout. `fy machine ensure` does, for a VM created from it; otherwise
@@ -1150,13 +1140,12 @@ tui = { raw_output_mode = false }
   Where the box binds them out: on Lima, the checkout's slot in foldyard's from-box
   (`~/.foldyard/<project>/from-box/main/` or `…/worktrees/<name>/`), out of the checkout, so
   `git clean -fdx` and `fy worktree remove` don't take them (`remove` archives the slot, then
-  deletes it). A box created before that, and every box on the podman backend, binds them into the
-  checkout (`.devbox-claude/`, `.devbox-codex/`); for this release the sync reads both places.
-  Creating a box on Lima moves what that old place holds out of the checkout: copied into the new
-  box's slot (an in-box resume still lists those sessions) and into the archive, then deleted.
-  Whatever can't be copied whole stays, with a warning, and the next new box tries again.
-  `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` still name a place of your own (the old place is
-  then only archived).
+  deletes it). A box created before that binds them into the checkout (`.devbox-claude/`,
+  `.devbox-codex/`); for this release the sync reads both places. Creating a box on Lima moves what
+  that old place holds out of the checkout: copied into the new box's slot (an in-box resume still
+  lists those sessions) and into the archive, then deleted. Whatever can't be copied whole stays,
+  with a warning, and the next new box tries again. `DEVBOX_TRANSCRIPTS` /
+  `DEVBOX_CODEX_TRANSCRIPTS` still name a place of your own (the old place is then only archived).
 
   Codex records a session's directory inside the file instead, where the host can't check it, so box
   Codex sessions never go into your own `~/.codex/sessions`: a Codex there would offer a session

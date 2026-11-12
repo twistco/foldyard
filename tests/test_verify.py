@@ -521,7 +521,6 @@ def _ssh_origin(
     the (host, port)s a direct connect reaches, `timeouts` those it times out on, `unreachable`
     those an upstream ICMP reply turns away; everything else is refused, the wall's reset."""
     _enter_box(monkeypatch, tmp_path)
-    monkeypatch.setattr(verify.config, "machine_backend", lambda: "lima")
     monkeypatch.setattr(verify.config, "machine_wall", lambda: wall)
     _, results = secure_engine
     results["git_rc"], results["git_stderr"] = 128, _SSH_REFUSED_STDERR

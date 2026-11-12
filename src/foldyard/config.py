@@ -738,9 +738,8 @@ def engine() -> str:
     ``DOCKER_AUTH_CONFIG``) with no one switch to stop it, where podman has one
     (:mod:`foldyard.registrylogins`).
 
-    NOTE this is a DIFFERENT binary from the machine backend's ``cli``
-    (:func:`machine_backend`): the backend creates the VM, this drives the socket it hands out.
-    Lima needs ``limactl`` *and* this.
+    NOTE this is a DIFFERENT binary from ``limactl``: Lima creates the VM, this drives the socket
+    it hands out. foldyard needs both.
 
     ``FOLDYARD_ENGINE`` and ``[engine].cli`` may only say so. `[engine].cli` is repo config, and
     this value is exec'd host-side by every engine verb (`fy up`, `fy box up`, the reconciler, the
@@ -1133,7 +1132,7 @@ def worktree_base() -> str | None:
 
 
 def machine_name() -> str:
-    """The rootless podman machine's name. ``PODMAN_MACHINE`` wins, then
+    """The project's Lima VM's name. ``PODMAN_MACHINE`` wins, then
     ``[machine].name``, then the project name — each held to :func:`_safe_name`."""
     if env := os.environ.get("PODMAN_MACHINE"):
         return _safe_name(env, "PODMAN_MACHINE")
@@ -1142,32 +1141,14 @@ def machine_name() -> str:
     return project()
 
 
-def machine_backend_explicit() -> str:
-    """The backend the consumer actually ASKED for (``MACHINE_BACKEND`` or ``[machine].backend``),
-    or ``""`` when they said nothing and :func:`machine_backend` fell back to the default.
-
-    The distinction matters wherever a missing backend CLI has to be classified: a CLI missing for
-    a backend nobody chose is "this host doesn't do VMs" (skip quietly — a Linux/CI host, or the
-    box managing its own VM), while one missing for a backend somebody NAMED is a misconfiguration
-    that must fail loudly rather than silently fall back to a weaker profile."""
-    return str(
-        os.environ.get("MACHINE_BACKEND") or _identity_value("machine", "backend") or ""
-    ).lower()
-
-
-def machine_backend() -> str:
-    """The engine backend. Explicit env/TOML wins; otherwise **lima**.
-
-    Lima is the default because it is the only backend that delivers the full boundary: per-project
-    VMs that run concurrently (``podman machine`` on macOS allows one at a time — upstream
-    podman#26281), and the in-VM fail-closed egress wall (``[machine] firewall``), which podman
-    machine's CoreOS appliance can't be provisioned with. ``backend = "podman"`` remains supported
-    and is the zero-extra-dependency floor. ``foldyard init`` has scaffolded ``lima`` + ``wall``
-    since it shipped; this default just stops a hand-written config from silently getting less.
-
-    There is no VM-less backend: ``native`` was retired (ADR-0027) — foldyard always has a VM;
-    :func:`machine_backend.get_backend` warns a config still naming it and hands out podman."""
-    return machine_backend_explicit() or "lima"
+def retired_backend() -> str:
+    """The backend ``MACHINE_BACKEND`` or ``[machine].backend`` still names when it isn't
+    ``lima``, else ``""``. Lima is the only backend: ``native`` was retired (ADR-0027) and
+    ``podman`` removed (ADR-0036). A name here is a config from before, so the VM verbs refuse it
+    (:func:`machine_backend.retired_block`) rather than make an empty Lima VM beside the old
+    one's data."""
+    name = str(os.environ.get("MACHINE_BACKEND") or _identity_value("machine", "backend") or "")
+    return "" if name.lower() in ("", "lima") else name.lower()
 
 
 def _env_flag(*names: str) -> bool | None:
@@ -1185,8 +1166,7 @@ def machine_wall() -> bool:
     into the REAL lima machine, so
     the VM user's (and thus every container's) only way out is the host-side egress proxy at
     :data:`LIMA_HOST_GATEWAY` (fail-closed: egress that ignores the proxy env is REJECTED, not
-    silently allowed). Only meaningful for ``backend = "lima"`` (podman-machine's immutable CoreOS
-    appliance can't be provisioned like this) — preflight enforces the pairing.
+    silently allowed).
     ``MACHINE_FIREWALL`` env wins (1/true/on/yes ⇒ on; ``MACHINE_WALL`` is the old spelling)."""
     env = _env_flag("MACHINE_FIREWALL", "MACHINE_WALL")
     if env is not None:
@@ -1398,17 +1378,16 @@ def wall_proxy_url() -> str:
 
 def host_alias() -> str:
     """The address a CONTAINER in the machine uses to reach the host-side foldyard daemons (egress
-    proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the host as
-    ``host.containers.internal``, and native podman's netavark publishes the host under the same
-    alias. Under LIMA that alias resolves to the VM's own gateway — NOT the host — so emit Lima's
-    guest→host address instead (:data:`LIMA_HOST_GATEWAY`): container → pasta → VM → usernet → host.
+    proxy, gcp minter). Under Lima ``host.containers.internal`` resolves to the VM's own gateway —
+    NOT the host — so this is Lima's guest→host address (:data:`LIMA_HOST_GATEWAY`): container →
+    pasta → VM → usernet → host.
     Emitting the literal IP sidesteps podman's alias machinery entirely (no containers.conf
     provisioning, works for already-created VMs). ``FY_HOST_ALIAS`` env is the escape hatch (e.g.
     a customised Lima network whose host gateway differs)."""
     explicit = os.environ.get("FY_HOST_ALIAS")
     if explicit:
         return explicit
-    return LIMA_HOST_GATEWAY if machine_backend() == "lima" else "host.containers.internal"
+    return LIMA_HOST_GATEWAY
 
 
 def machine_vmtype() -> str:
@@ -1428,7 +1407,7 @@ def machine_vmtype() -> str:
 
 
 def machine_resources() -> dict[str, str]:
-    """``podman machine init`` sizing as strings. Env (``MACHINE_CPUS`` /
+    """The VM's sizing as strings. Env (``MACHINE_CPUS`` /
     ``MACHINE_MEMORY`` MiB / ``MACHINE_DISK`` GiB) wins, then ``[machine]``, then
     modest defaults."""
     m = _table("machine")
@@ -1474,15 +1453,14 @@ def packaged_box_image(tag: str) -> dict:
 
 def box_sock_in_vm() -> str:
     """The rootless podman socket path INSIDE the VM (bind-mounted to the box's
-    /var/run/docker.sock). ``PODMAN_SOCK_IN_VM`` wins, then ``[box].sock_in_vm``, then the
-    active backend's guest-socket default (``/run/docker.sock`` for podman machine; Lima's
-    rootless ``/run/user/<uid>/podman/podman.sock``)."""
+    /var/run/docker.sock). ``PODMAN_SOCK_IN_VM`` wins, then ``[box].sock_in_vm``, then Lima's
+    rootless ``/run/user/<uid>/podman/podman.sock``."""
     explicit = os.environ.get("PODMAN_SOCK_IN_VM") or _box_table().get("sock_in_vm")
     if explicit:
         return explicit
-    from .machine_backend import get_backend  # lazy: machine_backend imports config
+    from .machine_backend import LimaBackend  # lazy: machine_backend imports config
 
-    return get_backend(machine_backend()).guest_socket()
+    return LimaBackend().guest_socket()
 
 
 def box_shadow_volumes() -> list[str]:

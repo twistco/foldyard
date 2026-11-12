@@ -29,7 +29,7 @@ Navigation is zoned (see DevModeTui / ModeGrid / WorkspaceList for the seams):
   • workspace list: ↑/↓ between workspaces (last row = ＋ new worktree, enter opens the
     branch picker), → hands off to the panel. With a workspace highlighted: c opens Code
     (`fy code`), d starts/stops its dev box (stopping confirms first — an agent session may
-    be running inside), s starts/stops the Podman machine (stopping confirms first — it
+    be running inside), s starts/stops the VM (stopping confirms first — it
     takes every workspace's containers down), x removes the worktree (not main — tears
     down its box + stack, archives transcripts, then git-removes it, after a confirm dialog)
   • [ ] switch panel anywhere (when a DataTable owns the arrows) · q quit. The doctor
@@ -241,7 +241,7 @@ class NewWorktreeCard(ListItem):
 class WorkspaceList(ListView):
     """The left column. ↑/↓ are native (cursor); → hands off to the active panel.
     When a real workspace is highlighted, b/c/d/r/s act on it (open browser / open Code / toggle
-    its dev box / recreate a running one / toggle the Podman machine); x removes a worktree (not
+    its dev box / recreate a running one / toggle the VM); x removes a worktree (not
     main). Workspace actions are hidden on the ＋ new-worktree row (which only takes enter), r
     where no box is running, and x on main. The stop directions of d and s, and r, confirm first
     (see DevModeTui.toggle_devbox/recreate_devbox/_machine)."""
@@ -872,7 +872,7 @@ class DevModeTui(App):
         if devmode.machine_state() == "running":
             self.push_screen(
                 ConfirmScreen(
-                    title="Stop the Podman machine?",
+                    title="Stop the VM?",
                     body=(
                         "The machine hosts [b]every[/b] workspace: stopping it takes all "
                         "stacks, dev boxes, and any agent sessions running inside them down "
@@ -886,7 +886,7 @@ class DevModeTui(App):
             self._do_toggle_machine()
 
     def _do_toggle_machine(self) -> None:
-        self.notify("toggling the Podman machine…")
+        self.notify("toggling the VM…")
 
         def work() -> None:
             rc, out = devmode.machine_toggle()
@@ -2321,7 +2321,7 @@ class SecretScreen(ModalScreen):
 
 
 class ConfirmScreen(ModalScreen):
-    """A generic stop-something confirmation (dev box / Podman machine): title + body spell out
+    """A generic stop-something confirmation (dev box / VM): title + body spell out
     the blast radius, focus defaults to Cancel, y (or the confirm button) confirms, esc/n cancels.
     Dismisses True (do it) / False (leave it). `title`/`body` are Rich markup — escape() any
     interpolated names at the call site."""

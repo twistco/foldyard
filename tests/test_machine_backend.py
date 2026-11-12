@@ -1,7 +1,4 @@
-"""machine_backend.py — the backends behind machine.py. The host CLIs (`podman`,
-`limactl`) are mocked. PodmanBackend: assert `mounts()` reads the on-disk machine config
-(NOT the broken `inspect .Mounts` template, absent on podman 5.x libkrun/applehv) and that
-list/state parse correctly. LimaBackend: assert the
+"""machine_backend.py — the Lima backend behind machine.py, with `limactl` mocked: the
 `--set` override (sizing + isolation mounts), JSON-lines parsing, state normalisation, and the
 forwarded-socket path. Liveness (`responsive`) and orphan reaping use REAL AF_UNIX sockets and
 files — the failure they exist to catch is a socket file that exists but serves nothing, which a
@@ -11,7 +8,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -28,89 +24,17 @@ class _Proc:
         self.stdout = stdout
 
 
-# ── get_backend selection ─────────────────────────────────────────────────────────────
-
-
-def test_get_backend_selects_by_name():
-    assert isinstance(mb.get_backend("podman"), mb.PodmanBackend)
-    assert isinstance(mb.get_backend("lima"), mb.LimaBackend)
-
-
-def test_get_backend_native_is_retired_loudly_and_falls_back_to_a_vm(capsys):
-    # ADR-0027: the VM-less backend is gone. A config still naming it must not silently get a
-    # different profile, nor take `fy docs`/`fy config` down — a loud warning naming the ADR, then
-    # podman, a VM backend (the fall-back is in the safe direction).
-    be = mb.get_backend("native")
-    assert isinstance(be, mb.PodmanBackend)
-    err = capsys.readouterr().err
-    assert "RETIRED" in err and "ADR-0027" in err and '"lima"' in err and '"podman"' in err
-    assert not hasattr(mb, "NativeBackend")
-
-
-def test_get_backend_unknown_falls_back_to_podman(capsys):
-    be = mb.get_backend("virtualbox")
-    assert isinstance(be, mb.PodmanBackend)
-    assert "unknown" in capsys.readouterr().err.lower()
-
-
-def test_concurrency_capability():
-    assert mb.PodmanBackend().supports_concurrent() is False  # macOS one-VM-at-a-time
-    assert mb.LimaBackend().supports_concurrent() is True
-
-
-def test_guest_socket_paths(monkeypatch):
-    # podman machine exposes the docker-compat socket; Lima forwards a rootless socket whose
-    # uid matches the host's (Lima maps guest uid → host uid).
-    assert mb.PodmanBackend().guest_socket() == "/run/docker.sock"
+def test_guest_socket_path(monkeypatch):
+    # Lima forwards a rootless socket whose uid matches the host's (Lima maps guest uid → host uid).
     monkeypatch.setattr(mb.os, "getuid", lambda: 501)
     assert mb.LimaBackend().guest_socket() == "/run/user/501/podman/podman.sock"
 
 
-# ── PodmanBackend ─────────────────────────────────────────────────────────────────────
-
-
-def test_podman_mounts_reads_targets_from_on_disk_config(monkeypatch, tmp_path):
-    # podman 5.x libkrun `machine inspect` has NO `.Mounts` field (the template errors), but
-    # the ConfigDir json always records the Mounts array — mounts() must read THAT.
-    (tmp_path / "tangible.json").write_text(
-        json.dumps(
-            {
-                "Mounts": [
-                    {"Target": "/Users/x/workspace/Tangible"},
-                    {"Target": "/Users/x/workspace/Tangible-worktrees"},
-                ]
-            }
-        )
-    )
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, str(tmp_path)))
-    assert mb.PodmanBackend().mounts("tangible") == [
-        "/Users/x/workspace/Tangible",
-        "/Users/x/workspace/Tangible-worktrees",
-    ]
-
-
-def test_podman_mounts_empty_when_inspect_fails(monkeypatch):
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(125, ""))
-    assert mb.PodmanBackend().mounts("tangible") == []
-
-
-def test_podman_mounts_empty_when_config_unreadable(monkeypatch, tmp_path):
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, str(tmp_path)))
-    assert mb.PodmanBackend().mounts("tangible") == []  # tangible.json doesn't exist
-
-
-def test_podman_list_running_parses_only_running(monkeypatch):
-    monkeypatch.setattr(
-        mb, "_run", lambda cmd: _Proc(0, "tangible|true\nhomelab|false\nfoo|true\n")
-    )
-    assert mb.PodmanBackend().list_running() == ["tangible", "foo"]
-
-
-def test_podman_state_normalises(monkeypatch):
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, "Running\n"))
-    assert mb.PodmanBackend().state("x") == "running"
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(125, ""))
-    assert mb.PodmanBackend().state("x") == ""
+@pytest.mark.parametrize("name", ["podman", "native"])
+def test_the_retired_block_names_the_backend_and_the_way_over(name):
+    block = mb.retired_block(name)
+    assert f'backend = "{name}"' in block and "ADR-0036" in block and "fy config adopt" in block
+    assert not hasattr(mb, "PodmanBackend") and not hasattr(mb, "NativeBackend")
 
 
 # ── LimaBackend ───────────────────────────────────────────────────────────────────────
@@ -149,7 +73,6 @@ def test_lima_state_and_exists_parse_json_lines(monkeypatch):
     assert be.state("tangible") == "running"
     assert be.state("homelab") == "stopped"
     assert be.state("absent") == ""
-    assert be.list_running() == ["tangible"]
 
 
 def test_lima_socket_is_forwarded_podman_sock(monkeypatch):
@@ -340,20 +263,6 @@ def test_lima_set_mounts_replaces_foldyards_entries_and_keeps_anyone_elses(monke
     assert expr.endswith('| .mountType = "9p"')
 
 
-def test_podman_create_passes_only_writable_volumes_as_given(monkeypatch):
-    seen = {}
-
-    def fake_run(cmd, *a, **k):
-        seen["cmd"] = cmd
-        return _Proc(0)
-
-    monkeypatch.setattr(mb.subprocess, "run", fake_run)
-    mb.PodmanBackend().create(
-        "acme", {"cpus": "4", "memory": "8192", "disk": "60"}, [mb.Mount("/r", "/r")]
-    )
-    assert seen["cmd"][-2:] == ["--volume", "/r:/r"]
-
-
 def test_lima_create_pins_the_vmtype(monkeypatch, fresh_config):
     seen = {}
 
@@ -444,26 +353,11 @@ def test_socket_alive_only_for_a_served_socket(sockdir):
         keep.close()
 
 
-def _podman_run(config_dir="", sock="", ps=""):
-    """A cmd-aware `_run` stub: podman's two inspect templates plus the process listing."""
-
-    def run(cmd):
-        if cmd[0] == "ps":
-            return _Proc(0, ps)
-        if "{{.ConfigDir.Path}}" in cmd:
-            return _Proc(0 if config_dir else 125, config_dir)
-        if "{{.ConnectionInfo.PodmanSocket.Path}}" in cmd:
-            return _Proc(0, sock)
-        return _Proc(0, "")
-
-    return run
-
-
-def test_podman_responsive_probes_the_api_socket(monkeypatch, sockdir):
-    api = sockdir / "acme-api.sock"
-    monkeypatch.setattr(mb, "_run", _podman_run(sock=str(api)))
-    be = mb.PodmanBackend()
-    keep = _listening(api)
+def test_responsive_probes_the_forwarded_socket(monkeypatch, sockdir):
+    sock = sockdir / "podman.sock"
+    monkeypatch.setattr(mb.LimaBackend, "socket", lambda self, name: f"unix://{sock}")
+    be = mb.LimaBackend()
+    keep = _listening(sock)
     try:
         assert be.responsive("acme") is True
     finally:
@@ -474,140 +368,6 @@ def test_podman_responsive_probes_the_api_socket(monkeypatch, sockdir):
 
 def test_reap_orphans_is_a_noop_by_default():
     assert mb.LimaBackend().reap_orphans("acme") == []
-
-
-# ── orphan reaping (podman) ───────────────────────────────────────────────────────────
-
-_CONFIG = {
-    "Mounts": [{"Target": "/Users/x/workspace/acme"}],
-    "ImagePath": {"Path": "/Users/x/.local/share/containers/podman/machine/libkrun/tng-arm64.raw"},
-    "LibKrunHypervisor": {
-        "KRun": {"VirtualMachine": {"bootloader": {"efiVariableStorePath": "/m/efi-bl-tng"}}}
-    },
-}
-
-
-def _with_config(tmp_path, sock="/tmp/podman/tng-api.sock", ps="", config=None):
-    (tmp_path / "tng.json").write_text(json.dumps(_CONFIG if config is None else config))
-    return _podman_run(config_dir=str(tmp_path), sock=sock, ps=ps)
-
-
-def test_machine_paths_come_from_podmans_own_records_not_the_name(monkeypatch, tmp_path):
-    monkeypatch.setattr(mb, "_run", _with_config(tmp_path))
-    paths = mb.PodmanBackend()._machine_paths("tng")
-    assert paths == {
-        "/Users/x/.local/share/containers/podman/machine/libkrun/tng-arm64.raw",
-        "/m/efi-bl-tng",  # found however deep the provider nests it
-        "/tmp/podman/tng-api.sock",
-    }
-    # The repo mount must NOT be a match token — it appears in half the argvs on a dev host.
-    assert "/Users/x/workspace/acme" not in paths
-
-
-_PS = """\
-  101   501 /opt/podman/bin/krunkit --cpus 8 --device virtio-blk,path=/Users/x/.local/share/\
-containers/podman/machine/libkrun/tng-arm64.raw --restful-uri tcp://localhost:50513
-  102   501 /opt/podman/bin/gvproxy -listen-vfkit unix:///tmp/podman/tng-api.sock
-  103   501 /opt/podman/bin/krunkit --device virtio-blk,path=/Users/x/.local/share/containers/\
-podman/machine/libkrun/tng-two-arm64.raw
-  104     0 /opt/podman/bin/krunkit --device virtio-blk,path=/Users/x/.local/share/containers/\
-podman/machine/libkrun/tng-arm64.raw
-  105   501 grep -r /Users/x/.local/share/containers/podman/machine/libkrun/tng-arm64.raw
-"""
-
-
-def test_orphan_pids_requires_our_uid_a_vm_binary_and_this_machines_paths(monkeypatch, tmp_path):
-    monkeypatch.setattr(mb, "_run", _with_config(tmp_path, ps=_PS))
-    monkeypatch.setattr(mb.os, "getuid", lambda: 501)
-    # 101 hypervisor (disk image) + 102 forwarder (api socket) — and nothing else:
-    #  103 a SIBLING machine whose name merely shares our prefix — killing it would take down
-    #      another project's VM, the reason matching is by recorded path, not by name;
-    #  104 another user's process; 105 not a VM binary at all (a grep that quotes the path).
-    assert mb.PodmanBackend()._orphan_pids("tng") == [101, 102]
-
-
-def test_orphan_pids_never_guesses_when_the_machine_paths_are_unknown(monkeypatch, tmp_path):
-    # Unreadable config AND no socket path → we cannot identify this machine's processes, so we
-    # must signal NOTHING rather than fall back to matching on the name.
-    monkeypatch.setattr(mb, "_run", _podman_run(config_dir="", sock="", ps=_PS))
-    monkeypatch.setattr(mb.os, "getuid", lambda: 501)
-    assert mb.PodmanBackend()._orphan_pids("tng") == []
-
-
-class _Kills:
-    """A fake `os.kill` over a set of pids, recording every (pid, signal) it is asked for."""
-
-    def __init__(self, *, stubborn=()):
-        self.sent: list[tuple[int, int]] = []
-        self.dead: set[int] = set()
-        self.stubborn = set(stubborn)
-
-    def __call__(self, pid: int, sig: int) -> None:
-        if sig == 0:  # a liveness check, not a signal
-            if pid in self.dead:
-                raise ProcessLookupError(pid)
-            return
-        self.sent.append((pid, sig))
-        if sig == signal.SIGKILL or pid not in self.stubborn:
-            self.dead.add(pid)
-
-
-def test_reap_orphans_terminates_then_kills_what_ignores_sigterm(monkeypatch, tmp_path):
-    monkeypatch.setattr(mb, "_run", _with_config(tmp_path, ps=_PS))
-    monkeypatch.setattr(mb.os, "getuid", lambda: 501)
-    monkeypatch.setattr(mb.time, "sleep", lambda _s: None)
-    kills = _Kills(stubborn=[102])
-    monkeypatch.setattr(mb.os, "kill", kills)
-
-    assert mb.PodmanBackend().reap_orphans("tng") == [101, 102]
-    assert (101, signal.SIGTERM) in kills.sent
-    assert (101, signal.SIGKILL) not in kills.sent  # went quietly — never escalated
-    assert (102, signal.SIGTERM) in kills.sent
-    assert (102, signal.SIGKILL) in kills.sent  # ignored the term; the whole point of the reap
-
-
-def test_reap_orphans_survives_a_process_that_exits_between_listing_and_signalling(
-    monkeypatch, tmp_path
-):
-    monkeypatch.setattr(mb, "_run", _with_config(tmp_path, ps=_PS))
-    monkeypatch.setattr(mb.os, "getuid", lambda: 501)
-    monkeypatch.setattr(mb.time, "sleep", lambda _s: None)
-
-    def gone(pid, sig):
-        raise ProcessLookupError(pid)
-
-    monkeypatch.setattr(mb.os, "kill", gone)
-    assert mb.PodmanBackend().reap_orphans("tng") == [101, 102]  # no traceback
-
-
-def test_unlink_dead_sockets_spares_live_ones_the_log_and_a_sibling_machine(
-    monkeypatch, sockdir, tmp_path
-):
-    api = sockdir / "tng-api.sock"
-    _stale(api)
-    _stale(sockdir / "tng.sock")
-    _stale(sockdir / "tng-gvproxy.sock-krun.sock")
-    (sockdir / "tng.log").write_text("console log")
-    sibling = _stale(sockdir / "tng-two.sock")  # another project's machine, same $TMPDIR
-    live = sockdir / "tng-gvproxy.sock"
-    keep = _listening(live)
-
-    monkeypatch.setattr(mb, "_run", _with_config(tmp_path, sock=str(api)))
-    try:
-        mb.PodmanBackend()._unlink_dead_sockets("tng")
-    finally:
-        keep.close()
-
-    assert not api.exists() and not (sockdir / "tng.sock").exists()
-    assert not (sockdir / "tng-gvproxy.sock-krun.sock").exists()
-    assert live.exists()  # served → untouchable, even mid-reap
-    assert (sockdir / "tng.log").exists()  # not a socket
-    assert sibling.exists()  # `tng` must not sweep `tng-two`'s files
-
-
-def test_unlink_dead_sockets_noop_when_the_api_path_is_unknown(monkeypatch, tmp_path):
-    monkeypatch.setattr(mb, "_run", _with_config(tmp_path, sock=""))
-    mb.PodmanBackend()._unlink_dead_sockets("tng")  # must not raise
 
 
 # ── boot provisioning (lima): recorded in the stored config, applied by Lima at every boot ──
@@ -688,12 +448,6 @@ def test_every_provision_marker_reads_the_same_as_a_regex():
         assert not set(marker) & set(".^$*+?()[]{}|\\"), marker
 
 
-def test_backends_without_a_provisionable_guest_record_nothing():
-    for be in (mb.get_backend("podman"),):
-        assert be.provision_id("x") == ""
-        assert be.set_provision("x", "#!/bin/bash\n# fy-provision y\n") is False
-
-
 # ── the host-side wall's input (lima): the VM's host pids ──────────────────────────────────
 
 
@@ -709,26 +463,6 @@ def test_lima_ssh_target_comes_from_the_instances_ssh_config(monkeypatch, tmp_pa
     assert t is not None
     assert (t.user, t.port, t.identity) == ("dain", 60022, "/h/.lima/_config/user")
     assert mb.LimaBackend().ssh_target("absent") is None
-
-
-def test_podman_ssh_target_comes_from_a_machine_inspect_TEMPLATE(monkeypatch):
-    # NOT `--format json` — `podman machine inspect` renders `json` as a literal string. The
-    # template must be tab-separated user/port/identity.
-    seen = {}
-
-    def fake_run(cmd):
-        seen["fmt"] = cmd[cmd.index("--format") + 1]
-        return _Proc(0, "core\t50501\t/h/machine\n")
-
-    monkeypatch.setattr(mb, "_run", fake_run)
-    t = mb.PodmanBackend().ssh_target("tangible")
-    assert t is not None
-    assert (t.user, t.port, t.identity) == ("core", 50501, "/h/machine")
-    assert "{{.SSHConfig.RemoteUsername}}" in seen["fmt"] and "json" not in seen["fmt"]
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(125, ""))
-    assert mb.PodmanBackend().ssh_target("tangible") is None
-    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, "core\t\t/h/machine\n"))  # a blank field
-    assert mb.PodmanBackend().ssh_target("tangible") is None
 
 
 def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
@@ -747,11 +481,6 @@ def test_lima_vm_pid_reads_the_drivers_pid_file(monkeypatch, tmp_path):
     (inst / "qemu.pid").unlink()
     (inst / "vz.pid").write_text("4242\n")  # vz: the VMM IS the hostagent — listed once
     assert mb.LimaBackend().host_pids("acme") == [4242]
-
-
-def test_backends_without_a_host_wall_input_report_nothing():
-    for be in (mb.PodmanBackend(),):
-        assert be.host_pids("x") == [] and be.vm_pid("x") == 0
 
 
 def test_lima_start_runs_under_the_given_prefix(monkeypatch):
@@ -985,11 +714,6 @@ def test_lima_set_proxy_propagation_edits_the_stored_config(monkeypatch, on, val
     assert seen == [
         ["limactl", "edit", "--tty=false", "acme", "--set", f".propagateProxyEnv = {value}"]
     ]
-
-
-def test_backends_without_the_setting_report_none():
-    assert mb.PodmanBackend().proxy_propagation("x") is None
-    assert not mb.PodmanBackend().set_proxy_propagation("x", False)
 
 
 def test_lima_listing_tells_a_failed_list_from_no_vms(monkeypatch):

@@ -34,7 +34,7 @@ from .machine_backend import SshTarget
 from .sandbox import _ssh
 
 HELPER = Path(__file__).resolve().parent / "assets" / "crossmask" / "inject.py"
-PYTHON = "/usr/bin/python3"  # both backends' guests have it (Fedora on Lima, CoreOS on podman)
+PYTHON = "/usr/bin/python3"  # Lima's Fedora guest has it
 TIMEOUT_S = 30.0  # one ssh round trip + a few seconds' wait for a dir to reach the VM
 _OWN_MOUNTINFO = Path("/proc/self/mountinfo")
 

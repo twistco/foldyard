@@ -1,7 +1,9 @@
 # Machine backends — the contract, and why Lima is the default
 
-The design note behind `machine_backend.py` and `config.machine_backend()`. The decision is
-[ADR-0011](./adrs/0011-machine-backends-one-socket-contract.md).
+The design note behind `machine_backend.py`. The decision is
+[ADR-0011](./adrs/0011-machine-backends-one-socket-contract.md). **Historical since
+[ADR-0036](./adrs/0036-lima-only-podman-machine-backend-removed.md):** Lima is the only backend now;
+what follows about choosing between backends records why.
 
 ## The contract (backend-blind downstream)
 
