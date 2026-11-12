@@ -808,7 +808,11 @@ def monitor_check(
 
 @app.command()
 def tui() -> None:
-    """Interactive mode TUI (your computer only; Textual)."""
+    """See and drive your project from one screen: modes, boxes, worktrees, egress, the doctor.
+
+    Per worktree: switch its modes, start, stop or recreate its box, open VS Code or the app, add
+    or remove worktrees. Also starts and stops the VM, grants hosts the proxy refused, adopts
+    config changes and runs the doctor's fixes. Your computer only."""
     from . import term
     from . import tui as tui_mod
 
