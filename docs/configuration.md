@@ -214,7 +214,7 @@ worktrees root. `fy doctor` shows a `to-box` row; `fy verify` checks both.
 
 ```toml
 [machine]
-vmtype = "vz"
+# vmtype = "vz"   # unset: the best each computer has
 firewall = true
 host_firewall = true
 name = "acme"

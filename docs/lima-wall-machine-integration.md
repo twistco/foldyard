@@ -2,11 +2,10 @@
 
 **Status: built.** The VM firewall is validated live on macOS (Lima/vz) and runs in CI on Linux and
 WSL2 hosts (`tests/test_wall_e2e.py`, the `lima-host-e2e` and `wsl2-host-e2e` jobs); the host
-firewall runs in the Linux job. This is the design reference for three pieces that work together on
-the `lima` backend:
+firewall runs in the Linux job. This is the design reference for three pieces that work together:
 
-1. **Routing** (always on for `backend = "lima"`): the box reaches the host-side proxy and token
-   services through Lima's guest→host gateway (`config.host_alias()`).
+1. **Routing** (always on): the box reaches the host-side proxy and token services through Lima's
+   guest→host gateway (`config.host_alias()`).
 2. **The VM firewall** (`[machine] firewall = true`): nftables default-deny inside the VM, set up as
    root at boot, so the host-side proxy is the *only* way out — fail-closed.
 3. **The host firewall** (`[machine] host_firewall = true`, Linux): the same rule enforced on the
@@ -90,9 +89,9 @@ Routing alone is *cooperative*: a process that ignores `HTTPS_PROXY` goes direct
 makes Lima **fail-closed**.
 
 **Config.** `config.machine_wall()`: `MACHINE_FIREWALL` env → `[machine] firewall` → default
-`false`. `fy init` scaffolds `firewall = true`. Preflight aborts `fy up` if the firewall is on
-without `backend = "lima"`, or with nothing routing the box (no `[proxy]`, keyless agent or
-`[[inject]]` — that would be an airgapped box).
+`false`. `fy init` scaffolds `firewall = true`. Preflight aborts `fy up` if the firewall is on with
+nothing routing the box (no `[proxy]`, keyless agent or `[[inject]]` — that would be an airgapped
+box).
 
 **The rules** (`assets/machine-wall/machine-wall.sh`, `install|uninstall|status`, idempotent; never
 `flush ruleset`, because netavark/pasta keep their own nft state):
