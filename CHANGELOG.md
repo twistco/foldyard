@@ -6,6 +6,85 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.11.0 — 2026-11-12
+
+New verbs for day-to-day work: `fy box recreate` in one step, `fy ls` for every project on your
+computer and what needs attention, and `fy paste` to get an image from your clipboard to an agent
+in the box. An image build can now be granted one path of a shared host rather than the whole host,
+and removing a grant for a local address closes the connections it let through. After upgrading,
+run `fy host restart` so the proxy has both.
+
+### Security
+
+- **Removing a grant for a local address now closes the connections it let through, with the
+  allowlist observing too.** An SSH session to a machine on your network, through
+  `fy allow add <address>:22`, used to outlive `fy allow remove` unless the allowlist was enforcing.
+  Such a tunnel, neither TLS nor HTTP, also gets a Network Log row now (`tcp tunnel`); a granted one
+  left no trace before. A path grant on a local address never carries one, with the allowlist
+  observing too.
+
+### Changed
+
+- **`fy --help` groups the verbs**: start here, the stack, the box and its agents, posture and
+  egress, machines and projects, testing, and last the verbs of experimental features (today
+  `fy monitor`). Every verb is still where it was on the command line.
+- **Inline code in `fy` help no longer sits on a black background**, which showed as black slabs on
+  a light terminal theme. It keeps its colour on whatever background your terminal has. Each verb's
+  line in a help listing is now one short, capitalised sentence; the detail moved to
+  `fy <verb> --help`.
+
+### Added
+
+- **A path grant can be for image builds, and `[proxy] recommend` takes paths.** Previously, a build
+  that needed one bucket of a shared host got the whole host: Playwright's browser download
+  redirects from `cdn.playwright.dev` to `storage.googleapis.com/chrome-for-testing-public/`, and
+  all of `storage.googleapis.com` lets a build step upload to any bucket there. The box can edit
+  that step's Dockerfile. Now
+  `fy allow add storage.googleapis.com/chrome-for-testing-public/ --build` grants builds reads under
+  that path only. The proxy decrypts the build's connection to check each path; on a walled VM,
+  build steps already trust the proxy's CA. When a build is refused, the build gate offers each
+  refused read's first directory as a path grant, all in one prompt, and `h` grants the whole host
+  instead. It offers the host itself only when nothing narrower would do (a write, more than 3
+  directories), and never on a host that already has a path grant. `[proxy] recommend` accepts
+  `host/path/` entries, `when = "build"` included. A grant of the whole host also counts as
+  answering one.
+- **A build the allowlist refuses is now decrypted, like the box's own requests.** The proxy answers
+  the CONNECT itself, so the refusal row in the log names the path the build asked for, not only the
+  host. A build step that doesn't trust the proxy's CA (Java, `apt` over HTTPS, the gVisor posture)
+  now fails with a certificate error rather than a `403`. Its refusal is still logged and offered by
+  host, as before.
+- **`fy config widenings` names `[proxy] recommend` entries it ignores.** An entry that is neither a
+  host nor a path grant used to be dropped silently, as was a `recommend` that isn't a list at all
+  (`recommend = "pypi.org"`). Now each is listed, and the `config widenings` doctor row warns.
+- **`fy box recreate` removes the dev box and creates it again in one step, and the TUI's `r` does
+  the same for the highlighted workspace.** It replaces `fy box down && fy box up`, which every
+  "recreate the box" hint used to spell out (those hints now name the new verb; `fy box restart` is
+  an alias). A box takes its env, mounts, foldyard install and image only when it is created, which
+  is why this recreates rather than restarts the container. The gates, the secret prompts and the
+  supervisor's readiness all run before the old box is removed, so a recreate that can't go ahead
+  leaves it running. Agents still running in it are named first, as `down` does (`--yes` skips the
+  question). From inside a box it refuses: it would remove the box it runs in.
+- **`fy ls` lists every foldyard project on your computer, from anywhere.** For each one it shows
+  the VM (running or not, its CPUs and memory, the disk it takes), the host supervisor, the boxes up
+  and the agents running in them. Below that it lists what needs attention, each with the command
+  that fixes it: a VM running without its supervisor, a supervisor that is failing, wedged or still
+  on the foldyard you had before upgrading, a version floor or recommendation you're below,
+  `foldyard.toml` changed since it was adopted, a registered worktree whose directory is gone. It
+  also lists what's left over: VMs foldyard made and folders in `~/.foldyard` that no project uses
+  any more, and adoptions of checkouts that are gone, counted unless you pass `--verbose`. It only
+  reads: a stopped VM is reported, never started, and nothing is removed. `--json` for scripts.
+- **`fy prune` forgets the adopted configs whose checkout or worktree folder is gone**, after
+  listing them and asking (`--yes` for a script). It leaves VMs and state folders alone and says how
+  to remove each: they hold your data and your `host.env`.
+- **`fy paste` sends an image from your computer into the dev box**, because an image pasted into an
+  agent there never arrives: the box has no clipboard of yours. Run it on your computer with an
+  image on the clipboard, or name a file (`fy paste shot.png`). The image lands in the box's
+  `/tmp/fy-paste/` and its path is copied to your clipboard, for you to paste into the agent. With
+  `--session <id>` it is typed into that `fy agent` session's prompt instead, and Claude attaches it
+  as an image. Only a PNG, JPEG, GIF or WebP is sent, 20 MB at most, and to one box only: this
+  checkout's, or with `--session` the box holding that session, which can be another worktree's.
+  Reading the clipboard takes `osascript` (macOS), `wl-paste` (Wayland) or `xclip` (X11).
+
 ## 0.10.0 — 2026-11-10
 
 The VM firewall can now open one TCP port to one address, for a client that can't go through

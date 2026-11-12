@@ -26,7 +26,7 @@ prefix = "foldyard"
 # `[box].packages`, and 0.7.0 is a security release. When the recommendation moves past it,
 # raise the floor to meet it once everyone has moved.
 min_foldyard_version = "0.7.0"
-recommended_foldyard_version = "0.10.0"
+recommended_foldyard_version = "0.11.0"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -46,6 +46,7 @@ recommended_foldyard_version = "0.10.0"
 "0.9.0" = "VM firewall fixes (stack containers' NO_PROXY includes `[proxy] no_proxy`; `fy verify` with an SSH origin), `/run/foldyard/engine.sock` for compose services on lima, and experimental `[machine] compose = \"vm\"` — `fy machine stop && fy up` for each lima VM, then `fy down && fy up`"
 "0.9.1" = "`fy up` and `fy mode` reconciles no longer hang forever on a dependency with no container (a stopped dependent removed in parallel, or a failed create) — `fy host restart` so the supervisor's reconcile has it"
 "0.10.0" = "`[machine] firewall_allow` opens one TCP port to one address through the VM firewall, for a client that can't use an HTTP proxy (cloud-sql-proxy's instance dial); the firewall's refusals are timestamped and listed by `fy verify` — `fy machine stop && fy up` for each walled lima VM"
+"0.11.0" = "`fy box recreate`, `fy ls` (every project's VM, supervisor and boxes, and what needs attention) and `fy paste` (an image from your clipboard into the box); build-only path grants and paths in `[proxy] recommend`; removing a LAN grant closes the tunnels it let through — `fy host restart` so the proxy has them"
 
 [machine]
 # A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
