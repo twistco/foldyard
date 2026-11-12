@@ -22,10 +22,11 @@ def adoption_settled(monkeypatch):
 
 
 class _FakeBackend:
-    def __init__(self, cli: str, available: bool, name: str = "podman"):
-        self.name = name
-        self.cli = cli
-        self.install_hint = f"brew install {cli}"
+    name = "lima"
+    cli = "limactl"
+    install_hint = "brew install lima"
+
+    def __init__(self, available: bool):
         self._available = available
 
     def available(self) -> bool:
@@ -35,8 +36,8 @@ class _FakeBackend:
 def _wire(
     monkeypatch,
     *,
-    backend="podman",
     backend_available=True,
+    retired="",
     proxy_enabled=False,
     claude_keyless="",
     codex_keyless="",
@@ -46,7 +47,6 @@ def _wire(
     in_box=False,
     wall=False,
     host_wall=False,
-    explicit=True,
     engine_on_path=True,
     github_table: dict | None = None,
 ):
@@ -58,20 +58,13 @@ def _wire(
     monkeypatch.setattr(
         preflight, "which", lambda name: f"/shim/{name}" if engine_on_path else None
     )
-    monkeypatch.setattr(preflight.config, "machine_backend", lambda: backend)
-    # `explicit` distinguishes a backend the consumer NAMED from the inherited default.
-    monkeypatch.setattr(
-        preflight.config, "machine_backend_explicit", lambda: backend if explicit else ""
-    )
+    monkeypatch.setattr(preflight.config, "retired_backend", lambda: retired)
     monkeypatch.setattr(preflight.config, "machine_wall", lambda: wall)
     # Pinned, not inherited: `MACHINE_HOST_FIREWALL` in the ambient env (or the repo's own toml)
     # would otherwise bolt the host-wall checks onto every test here.
     monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: host_wall)
-    cli = {"podman": "podman", "lima": "limactl"}.get(backend, backend)
     monkeypatch.setattr(
-        preflight.machine_backend,
-        "get_backend",
-        lambda name: _FakeBackend(cli, backend_available, name=backend),
+        preflight.machine_backend, "LimaBackend", lambda: _FakeBackend(backend_available)
     )
     monkeypatch.setattr(preflight.config, "proxy_enabled", lambda: proxy_enabled)
     monkeypatch.setattr(preflight.config, "claude_keyless", lambda: claude_keyless)
@@ -98,23 +91,19 @@ def test_all_present_no_proxy_needed_is_clean(monkeypatch):
     assert preflight.issues() == []
 
 
-def test_missing_backend_cli_blocks(monkeypatch):
-    # CHOSEN explicitly → a missing CLI is a misconfiguration, and silently falling back to
-    # another backend would swap the isolation profile without saying so.
-    _wire(monkeypatch, backend="lima", backend_available=False, explicit=True)
+def test_missing_limactl_blocks(monkeypatch):
+    # Letting it through leaves DOCKER_HOST/CONTAINER_HOST unset and drops the whole stack onto
+    # the host's own podman socket: no VM boundary, and nobody chose that (ADR-0027).
+    _wire(monkeypatch, backend_available=False)
     problems = preflight.issues()
-    assert any("limactl" in p and "isn't installed" in p for p in problems)
+    assert any("limactl" in p and "brew install lima" in p for p in problems)
 
 
-def test_missing_cli_on_the_INHERITED_default_backend_blocks_too(monkeypatch):
-    # Nobody named a backend → the lima DEFAULT, with no limactl. Blocking is the point: letting
-    # it through leaves DOCKER_HOST/CONTAINER_HOST unset and drops the whole stack onto the host's
-    # own podman socket (the native profile, unchosen). Different WORDING from the explicit case —
-    # the fix is "install it, or NAME the weaker backend" — but the same hard stop.
-    _wire(monkeypatch, backend="lima", backend_available=False, explicit=False)
+@pytest.mark.parametrize("retired", ["podman", "native"])
+def test_a_retired_backend_blocks(monkeypatch, retired):
+    _wire(monkeypatch, retired=retired)
     problems = preflight.issues()
-    assert any("limactl" in p and "DEFAULT" in p and 'backend = "podman"' in p for p in problems)
-    assert not any("native" in p for p in problems)  # the VM-less way out is gone (ADR-0027)
+    assert any(f'backend = "{retired}"' in p and "fy config adopt" in p for p in problems)
 
 
 def test_proxy_required_but_mitmproxy_missing_blocks(monkeypatch):
@@ -132,45 +121,32 @@ def test_mitmproxy_not_checked_when_no_proxy_needed(monkeypatch):
 def test_lima_with_keyless_is_clean(monkeypatch):
     # Keyless on lima is ROUTED now (config.host_alias emits the Lima host gateway, so the box
     # reaches the Mac proxy) — the old hard-block must be gone.
-    _wire(monkeypatch, backend="lima", claude_keyless="oauth")
+    _wire(monkeypatch, claude_keyless="oauth")
     assert preflight.issues() == []
 
 
 def test_lima_without_proxy_is_fine(monkeypatch):
     # Plain lima box (no injector) routes egress DIRECT — no proxy, so no routing problem.
-    _wire(monkeypatch, backend="lima")
+    _wire(monkeypatch)
     assert preflight.issues() == []
 
 
-def test_wall_on_non_lima_backend_blocks(monkeypatch):
-    # The wall provisions nftables into a lima VM; podman-machine/native have nothing to provision.
-    _wire(monkeypatch, backend="podman", proxy_enabled=True, wall=True)
-    assert any("[machine] firewall" in p and "lima" in p for p in preflight.issues())
-
-
-def test_monitor_on_non_lima_backend_blocks(monkeypatch):
-    # The guest monitor is a root boot script, which only lima's guest takes.
-    _wire(monkeypatch, backend="podman", proxy_enabled=True)
-    monkeypatch.setattr(preflight.config, "machine_monitor", lambda: "observe")
-    assert any("[machine] monitor" in p and "lima" in p for p in preflight.issues())
-
-
 def test_monitor_on_lima_is_clean(monkeypatch):
-    _wire(monkeypatch, backend="lima", proxy_enabled=True)
+    _wire(monkeypatch, proxy_enabled=True)
     monkeypatch.setattr(preflight.config, "machine_monitor", lambda: "observe")
     assert not any("monitor" in p for p in preflight.issues())
 
 
 def test_wall_without_proxy_routing_blocks(monkeypatch):
     # wall=true + nothing routing through the proxy = an airgapped box (default-deny, no way out).
-    _wire(monkeypatch, backend="lima", wall=True)
+    _wire(monkeypatch, wall=True)
     problems = preflight.issues()
     assert any("[machine] firewall" in p and "NO way out" in p for p in problems)
 
 
 def test_wall_with_lima_and_keyless_is_clean(monkeypatch):
     # The intended locked-down posture: lima + wall + keyless (proxy routed + enforced in-VM).
-    _wire(monkeypatch, backend="lima", claude_keyless="oauth", wall=True)
+    _wire(monkeypatch, claude_keyless="oauth", wall=True)
     assert preflight.issues() == []
 
 
@@ -264,7 +240,7 @@ def test_mitmproxy_missing_names_a_command_a_consumer_has(monkeypatch):
 def test_inject_only_with_wall_is_not_wrongly_aborted(monkeypatch):
     # The mirror's other half: inject-only + wall must NOT trip 'nothing routes through the
     # proxy' (the old hand-rolled _proxy_required missed [[inject]] and aborted a valid config).
-    _wire(monkeypatch, backend="lima", wall=True)
+    _wire(monkeypatch, wall=True)
     from foldyard import plugins
 
     class _Reg:
@@ -296,22 +272,22 @@ def test_check_or_abort_is_a_noop_in_the_box(monkeypatch):
 
 
 def test_check_or_abort_raises_on_a_problem(monkeypatch, capsys):
-    _wire(monkeypatch, backend="lima", backend_available=False)
+    _wire(monkeypatch, backend_available=False)
     with pytest.raises(SystemExit):
         preflight.check_or_abort("fy up")
     assert "prerequisites not met" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("verb", ["fy up", "fy box up"])
-def test_inherited_lima_without_limactl_aborts_both_launch_verbs(monkeypatch, capsys, verb):
+def test_missing_limactl_aborts_both_launch_verbs(monkeypatch, capsys, verb):
     # The regression: BOTH launch verbs gate here before machine/engine resolution, so neither can
     # proceed to an unset DOCKER_HOST/CONTAINER_HOST and the host's podman socket. (`fy up` wires
     # this in stack.up, `fy box up` in box.main — each pinned by its own module's test.)
-    _wire(monkeypatch, backend="lima", backend_available=False, explicit=False)
+    _wire(monkeypatch, backend_available=False)
     with pytest.raises(SystemExit):
         preflight.check_or_abort(verb)
     err = capsys.readouterr().err
-    assert verb in err and "limactl" in err and 'backend = "podman"' in err
+    assert verb in err and "limactl" in err
 
 
 # ── [machine] host_firewall — the host-side cgroup wall (Linux; nft + cgroup v2) ──────────────
@@ -320,7 +296,7 @@ def test_inherited_lima_without_limactl_aborts_both_launch_verbs(monkeypatch, ca
 def test_host_wall_without_the_guest_wall_blocks(monkeypatch):
     # The host wall is the tier ABOVE the guest wall (it opens the same band the guest wall
     # expects and nothing else); alone it is a wall with no in-VM counterpart to back-stop.
-    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=False, host_wall=True)
+    _wire(monkeypatch, proxy_enabled=True, wall=False, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
     assert any(
         "[machine] host_firewall" in p and "firewall = true" in p for p in preflight.issues()
@@ -330,7 +306,7 @@ def test_host_wall_without_the_guest_wall_blocks(monkeypatch):
 def test_host_wall_on_a_host_that_cannot_enforce_it_blocks(monkeypatch):
     # Asked for and undeliverable is a hard stop, never a silent downgrade (macOS, or a Linux
     # host without nftables / cgroup v2).
-    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    _wire(monkeypatch, proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: False)
     assert any("[machine] host_firewall" in p and "nft" in p for p in preflight.issues())
 
@@ -339,7 +315,7 @@ def test_host_wall_on_a_kernel_without_nft_socket_blocks(monkeypatch):
     # nft + cgroup v2 present, but the kernel was built without nftables' `socket` expression
     # (the stock WSL2 kernel): the `socket cgroupv2` match can never load, so refuse HERE —
     # before `fy up` re-provisions the VM walled and the load fails closed on the far side.
-    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    _wire(monkeypatch, proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
     monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: False)
     hits = [p for p in preflight.issues() if "[machine] host_firewall" in p]
@@ -349,14 +325,14 @@ def test_host_wall_on_a_kernel_without_nft_socket_blocks(monkeypatch):
 def test_host_wall_with_an_unknown_kernel_config_is_not_refused(monkeypatch):
     # No readable kernel config (None): not a reason to refuse — the load-time error, explained,
     # covers that host; refusing on ignorance would block every Linux host without /proc/config.gz.
-    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    _wire(monkeypatch, proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
     monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: None)
     assert not any("host_wall" in p for p in preflight.issues())
 
 
 def test_host_wall_with_wall_lima_proxy_and_nft_is_clean(monkeypatch):
-    _wire(monkeypatch, backend="lima", proxy_enabled=True, wall=True, host_wall=True)
+    _wire(monkeypatch, proxy_enabled=True, wall=True, host_wall=True)
     monkeypatch.setattr(preflight.hostwall, "available", lambda: True)
     monkeypatch.setattr(preflight.hostwall, "nft_socket_in_kernel", lambda: True)
     assert not any("host_wall" in p for p in preflight.issues())

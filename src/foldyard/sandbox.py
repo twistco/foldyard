@@ -43,10 +43,8 @@ from .machine_backend import SshTarget
 
 
 class SshBackend(Protocol):
-    """What this module needs from a machine backend: a name for messages, and its ssh route
-    into the guest (:meth:`machine_backend.Backend.ssh_target`)."""
-
-    name: str
+    """What this module needs from a machine backend: its ssh route into the guest
+    (:meth:`machine_backend.Backend.ssh_target`)."""
 
     def ssh_target(self, name: str) -> SshTarget | None: ...
 
@@ -71,9 +69,8 @@ def wanted() -> bool:
 
 
 def _runtime_dir() -> str:
-    """The VM user's ``XDG_RUNTIME_DIR``. The VM user is the host user's uid on both backends
-    (Lima maps it; podman machine creates ``core`` with it), so it is ``/run/user/<host uid>``
-    there — the same convention the Lima backend's guest socket uses."""
+    """The VM user's ``XDG_RUNTIME_DIR``. Lima maps the VM user to the host user's uid, so it is
+    ``/run/user/<host uid>`` there — the same convention the guest socket uses."""
     return f"/run/user/{os.getuid()}"
 
 
@@ -103,8 +100,8 @@ def _target(backend: SshBackend, name: str) -> SshTarget:
     target = backend.ssh_target(name)
     if target is None:
         raise SystemExit(
-            f'✗ [machine].runtime = "gvisor" needs ssh access to the VM, and the {backend.name} '
-            f"backend offers none for machine '{name}' (is it created?)."
+            f'✗ [machine].runtime = "gvisor" needs ssh access to the VM, and there is none for '
+            f"machine '{name}' (is it created?)."
         )
     return target
 

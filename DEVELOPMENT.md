@@ -106,8 +106,8 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `test_e2e.py`.
 - `verify.py` — the isolation battery, the product's credibility check; plugin-agnostic core + the
   registry's `verify_checks`.
-- `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle behind the pluggable backend
-  contract (podman | lima; see `docs/lima-backend-scope.md`).
+- `machine.py` / `machine_backend.py` — rootless dev-VM lifecycle on Lima, behind a one-socket
+  backend contract the tests fake (ADR-0036; history in `docs/lima-backend-scope.md`).
 - `boxmounts.py` — ADR-0033's two foldyard-owned directories beside the checkout, lima only:
   `<state dir>/to-box` (written by the host, shared READ-ONLY with the VM and bound `:ro` at
   `/run/foldyard/to-box` in every box — only on vz+virtiofs / qemu+9p, the `mountType` pinned with
@@ -115,9 +115,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   a slot per checkout: `main/`, `worktrees/<n>/`; the agents' transcripts bind out there).
   `machine._record_mounts` records the two on a stopped VM and refuses a running one that lacks
   them, from the instance's EFFECTIVE config (`limactl list`'s merged `config`); the checkout mounts
-  are left as created. The podman backend's mounts are untouched. Host writes into the from-box go
-  through `mountwrite.makedirs` (no `mkdir(parents=True)`), reads through the transcript sync's
-  no-follow walk, deletes through `boxmounts.remove_slot`.
+  are left as created. Host writes into the from-box go through `mountwrite.makedirs` (no
+  `mkdir(parents=True)`), reads through the transcript sync's no-follow walk, deletes through
+  `boxmounts.remove_slot`.
 - `basevm.py` — the project-less BASE VM (`fy machine base`, `fy prereq --fetch`): Lima's podman
   template, nothing mounted, booted once, the packaged box image built in it, stopped, stamped in
   `~/.foldyard/base-vm.json` by its INPUTS (resolved template · vmType · packaged-box fingerprint) +
@@ -185,9 +185,9 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   `fy monitor check`. `monitorhooks` also edits `monitor-hooks.toml` for
   `fy monitor hook add|remove` — textual, proven by re-parsing, refusing what it can't change
   exactly.
-- `guestlog.py` — the VM's log budget (`machine ensure`, every VM backend): journald cap as root
-  (Lima: rendered into the boot script; podman machine: `sudo -n` over ssh) + the rootless API
-  service's log level as a user drop-in over ssh. Best-effort — a warning, never an abort.
+- `guestlog.py` — the VM's log budget (`machine ensure`): journald cap as root (rendered into the
+  boot script) + the rootless API service's log level as a user drop-in over ssh. Best-effort — a
+  warning, never an abort.
 - `hostwall.py` — the host firewall for the machine VM on Linux: nftables matched by the VM's cgroup
   v2 SLICE (the VM is started in a per-VM scope under a persistent per-VM slice, so the match is
   predictable and its cgroup id survives restarts), wired via `[machine] host_firewall`; fail-closed
@@ -647,10 +647,9 @@ host — now `{{json .Labels}}` (`devmode.ps_labels`). Things a Linux runner nee
 does not: `qemu-img` (from `qemu-utils`, not implied by `qemu-system-x86-core`), a `systemd --user`
 manager for anything scoped (`loginctl enable-linger`), and Lima from the release tarball into
 `/usr/local`. **arm64 runners have no KVM** (`ubuntu-24.04-arm`: no `/dev/kvm` before or after
-`modprobe kvm`, probed 2026-09-17), so the job is x86-only. The `podman` backend (podman-machine)
-has not been tried on a runner; the `lima` backend is the product path and the one tested. The
-nested-KVM rig recipe in [docs/nested-virt.md](./docs/nested-virt.md) remains for what a VM job
-cannot reach (the gVisor posture under nested virtualisation).
+`modprobe kvm`, probed 2026-09-17), so the job is x86-only. The nested-KVM rig recipe in
+[docs/nested-virt.md](./docs/nested-virt.md) remains for what a VM job cannot reach (the gVisor
+posture under nested virtualisation).
 
 **Why the same tier runs inside WSL2 on a Windows runner (2026-09-17).** WSL2's distro is a Hyper-V
 guest, so a Lima/QEMU VM inside it is nested twice (Azure → runner VM → WSL2 utility VM → QEMU). The
@@ -949,7 +948,7 @@ minutes, and the `e2e` job is the single status to check.
   reads it. `verify` proves it by a real write from a `--privileged` container, never by the `ro`
   flag (root in the guest can drop the flag and the host still refuses). The from-box is
   box-written: the host makes its slots with `mountwrite.makedirs`, reads it only through the
-  transcript sync's no-follow walk, and never mounts it on the podman backend.
+  transcript sync's no-follow walk.
 - **Under the gVisor posture the box mounts the NARROWED socket, never the runsc socket directly.**
   `box.py` mounts `sandbox.box_socket()` (`podman-runsc-filtered.sock`), not `guest_socket()` — the
   filter (`assets/sandbox/socket_filter.py`, a guest user unit provisioned by `sandbox.ensure`)
@@ -961,12 +960,12 @@ minutes, and the `e2e` job is the single status to check.
   body is refused, never forwarded — else a runtime slips past the strip), **keep-alive-correct**
   (it frames every response so a create is filtered even as the *second* request on a reused
   connection — the bypass a "peek at the first request then splice" proxy leaves), and
-  **stdlib-only** (it runs under the guest's `python3`; both backends have `/usr/bin/python3`). It
-  is foldyard's own packaged code run in the GUEST, not host code from the repo mount, so ADR-0023
-  is not in tension. `tests/test_socket_filter.py` pins the rewrite, the fail-closed refusal,
-  keep-alive and the hijack splice; the podman-6 strip effect (a client-chosen runtime honoured,
-  then stripped) is only observable there day to day — the shipped guests are podman 5.8, which
-  ignores the field; it was shown live once on a podman 6.1.1 guest (2026-09-13,
+  **stdlib-only** (it runs under the guest's `python3`, which Lima's Fedora guest has at
+  `/usr/bin/python3`). It is foldyard's own packaged code run in the GUEST, not host code from the
+  repo mount, so ADR-0023 is not in tension. `tests/test_socket_filter.py` pins the rewrite, the
+  fail-closed refusal, keep-alive and the hijack splice; the podman-6 strip effect (a client-chosen
+  runtime honoured, then stripped) is only observable there day to day — the shipped guests are
+  podman 5.8, which ignores the field; it was shown live once on a podman 6.1.1 guest (2026-09-13,
   docs/isolation-layers.md).
 
 ## The example consumer

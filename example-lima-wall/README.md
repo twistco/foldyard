@@ -16,7 +16,7 @@ example-lima-wall/
 
 | layer | config | effect |
 | -- | -- | -- |
-| concurrent VM | `backend = "lima"` | a per-project Lima VM (not the one podman machine) |
+| concurrent VM | (always) | a per-project Lima VM |
 | **fail-closed egress** | `[machine] firewall = true` | nftables default-deny in the VM; the Mac proxy is the ONLY way out |
 | enforced allowlist | `[proxy] enforce = true` | non-allowlisted hosts are refused (403) at the proxy |
 | shared allowlist | `[proxy] recommend` | the repo ASKS; the first `fy up` offers each host, you answer (`fy allow sync --yes` to take them all) — grants stay in the host-side store |
@@ -76,5 +76,5 @@ to watch check **E** flip to FAIL.
 
 Comment out `firewall = true` in `foldyard.toml` and `fy up` again — the wall is removed from the VM
 on the next start (it reconciles to the config). Egress then falls back to cooperative routing (the
-box still uses the proxy via its env, but nothing enforces it), exactly like the podman backend.
-There's no separate command: toggling the wall *is* editing the toml.
+box still uses the proxy via its env, but nothing enforces it). There's no separate command:
+toggling the wall *is* editing the toml.

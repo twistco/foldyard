@@ -107,7 +107,7 @@ def bound(monkeypatch):
     monkeypatch.setattr(config, "in_box", lambda: False)
     monkeypatch.setenv("MACHINE_COMPOSE", "vm")
     monkeypatch.setattr(machine, "MACHINE", VM)
-    monkeypatch.setattr(machine, "BACKEND", machine_backend.get_backend("lima"))
+    monkeypatch.setattr(machine, "BACKEND", machine_backend.LimaBackend())
 
 
 def _ctx(scratch: Path, files: tuple[str, ...] = ("compose.yml",), **env: str):

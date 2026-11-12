@@ -145,10 +145,8 @@ services:
   `/run/foldyard/engine.sock` is the same path on every lima VM: foldyard's boot script links it to
   the VM user's own socket, whose path holds your user id. Under
   [`[machine] runtime = "gvisor"`](./configuration.md#machine) it's the box's filtered socket, so
-  the emulator can still look up callers but can't create a container outside gVisor. On the
-  deprecated podman machine backend, mount `/run/docker.sock` instead, or under gVisor the box's
-  filtered socket, `/run/user/<uid>/podman/podman-runsc-filtered.sock` (`<uid>` is `id -u` on your
-  computer). In CI, [link the path](./stack.md#in-ci) to the runner's socket.
+  the emulator can still look up callers but can't create a container outside gVisor. In CI,
+  [link the path](./stack.md#in-ci) to the runner's socket.
 
 **Your services.** Give each service that needs Google its label and point its client libraries at
 the emulator, in an overlay that applies at `sa` and `user`:

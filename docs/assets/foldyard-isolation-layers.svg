@@ -52,16 +52,16 @@
   <rect class="fence" x="140" y="228" width="1040" height="496" rx="16"/>
   <text class="band" x="160" y="259">THE CONTAINMENT STACK</text>
   <text class="band-sub" x="345" y="259">what an escape from the box has to get through, inside → out · cumulative · dashed = a boundary, thick = one that also refuses egress</text>
-  <!-- step 1: Podman VM -->
-  <text class="card-h" x="160" y="293">1 · Podman VM</text>
-  <text class="mono" x="160" y="311">[machine] backend = "podman"</text>
+  <!-- step 1: the VM -->
+  <text class="card-h" x="160" y="293">1 · Lima VM</text>
+  <text class="mono" x="160" y="311">[machine] firewall = false</text>
   <text class="tag" x="160" y="327">MACOS · LINUX</text>
   <rect class="host" x="160" y="340" width="235" height="250" rx="12"/>
   <text class="ring-h" x="172" y="357">HOST</text>
   <text class="ring" x="210" y="357">keys · supervisor · proxy</text>
   <rect class="vm" x="174" y="368" width="207" height="208" rx="10"/>
   <text class="ring-h-vm" x="186" y="385">MACHINE VM</text>
-  <text class="ring" x="186" y="399">one machine, shared by every project</text>
+  <text class="ring" x="186" y="399">one VM per project, side by side</text>
   <text class="ring" x="186" y="417">
     <tspan x="186">rootless podman, one engine socket</tspan>
     <tspan x="186" dy="14">mounts only repo + worktrees root</tspan>
@@ -78,11 +78,11 @@
   <text class="body" x="160" y="610">
     <tspan x="160">The floor, and already a real fence:</tspan>
     <tspan x="160" dy="15">containers need a Linux kernel, so the</tspan>
-    <tspan x="160" dy="15">VM was coming anyway — nothing to</tspan>
-    <tspan x="160" dy="15">install beyond podman. An escape lands</tspan>
+    <tspan x="160" dy="15">VM was coming anyway — Lima plus</tspan>
+    <tspan x="160" dy="15">podman is all it takes. An escape lands</tspan>
     <tspan x="160" dy="15">in a throwaway VM, not your computer.</tspan>
-    <tspan x="160" dy="15">What it lacks: a VM per project and a</tspan>
-    <tspan x="160" dy="15">firewall — traffic can skip the proxy.</tspan>
+    <tspan x="160" dy="15">What it lacks: a firewall — traffic</tspan>
+    <tspan x="160" dy="15">can skip the proxy.</tspan>
   </text>
   <!-- step 2: Lima, walled -->
   <text class="card-h" x="415" y="293">2 · Lima + VM firewall</text>

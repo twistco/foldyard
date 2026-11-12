@@ -6,7 +6,8 @@
   KVM" clause of [ADR-0017](./0017-nested-virt-validation-strategy.md)** (a real Lima/QEMU VM now
   runs in CI). Implemented, on `main` since #17 (released in 0.3.0): `machine_backend.NativeBackend`
   and its branches in `machine`, `preflight`, `init`, `sandbox` are gone; a config still naming it
-  is told so.
+  is told so. Since [ADR-0036](./0036-lima-only-podman-machine-backend-removed.md) the podman
+  backend is gone too, and a config naming either is refused rather than falling back.
 - **Sources:**
   [linux-support.md](https://github.com/twistco/foldyard/blob/main/docs/linux-support.md) (the
   2026-09-17 runner rows),

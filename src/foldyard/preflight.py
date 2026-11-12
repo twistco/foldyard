@@ -51,20 +51,12 @@ def issues() -> list[str]:
             "    `brew install podman` on macOS); it also drives the VM's socket under lima."
         )
 
-    # 2. The backend's own host CLI must exist too, or the machine can't be created/targeted —
-    #    and that blocks `up` whether the consumer NAMED the backend or inherited the default.
-    #    The inherited case gets its own block because the fix is a different one (see
-    #    machine_backend.default_unavailable_block: skipping it silently is how the stack ends
-    #    up on the host's podman socket with the VM boundary gone). Mirrors machine.ensure().
-    backend_name = config.machine_backend()
-    backend = machine_backend.get_backend(backend_name)
+    # 2. A config still naming a retired backend, and limactl itself — mirrors machine.ensure().
+    if retired := config.retired_backend():
+        out.append(machine_backend.retired_block(retired))
+    backend = machine_backend.LimaBackend()
     if not backend.available():
-        out.append(
-            f"✗ the '{backend_name}' backend needs `{backend.cli}`, which isn't installed.\n"
-            f"    Install it ({backend.install_hint}) or change [machine].backend."
-            if config.machine_backend_explicit()
-            else machine_backend.default_unavailable_block(backend)
-        )
+        out.append(machine_backend.unavailable_block(backend))
 
     # 3. An unrecognised keyless value normalises to "" — keyless SILENTLY off, a real footgun. Flag
     #    the raw value so a typo (`keyless = "oath"`) fails loudly instead of shipping a login box.
@@ -147,16 +139,9 @@ def issues() -> list[str]:
                 "    foldyard.local.toml [worktree-offsets] (or unset WT_OFFSET)."
             )
 
-    # 7. The wall only exists for lima (podman-machine's CoreOS appliance can't be provisioned),
-    #    and a walled VM with no proxy routing is an AIRGAPPED box — the wall
-    #    default-denies direct egress, so without the proxy there is no way out at all.
+    # 7. A walled VM with no proxy routing is an AIRGAPPED box — the wall default-denies direct
+    #    egress, so without the proxy there is no way out at all.
     if config.machine_wall():
-        if backend_name != "lima":
-            out.append(
-                "✗ [machine] firewall = true needs the lima backend, but backend =\n"
-                f"    '{backend_name}'. Set [machine] backend = \"lima\" (the firewall is\n"
-                "    nftables provisioned into the lima VM), or drop `firewall`."
-            )
         if not _proxy_required(mode):
             out.append(
                 "✗ [machine] firewall = true but nothing routes the box through the egress\n"
@@ -165,17 +150,8 @@ def issues() -> list[str]:
                 "    goes through the proxy on your computer, or drop `firewall`."
             )
 
-    # 7b. The guest monitor is provisioned by the same root boot script mechanism as the wall,
-    #     which only lima offers.
-    if config.machine_monitor() != "off" and backend_name != "lima":
-        out.append(
-            f'✗ [machine] monitor = "{config.machine_monitor()}" needs the lima backend, but\n'
-            f"    backend = '{backend_name}'. Set [machine] backend = \"lima\" (the monitor is a\n"
-            "    root service provisioned into the lima VM at boot), or drop `monitor`."
-        )
-
-    # 7c. The attributing forwarder (see _attribution_issues).
-    out.extend(_attribution_issues(backend_name))
+    # 7b. The attributing forwarder (see _attribution_issues).
+    out.extend(_attribution_issues())
 
     # 8. The host-side wall is the tier ABOVE the guest wall (same band, enforced where the guest
     #    has no reach), so it needs `wall` — and a host that can enforce it: nftables + cgroup v2
@@ -210,20 +186,14 @@ def issues() -> list[str]:
     return out
 
 
-def _attribution_issues(backend_name: str) -> list[str]:
-    """The attributing forwarder is provisioned like the monitor, lima only, and it is built on
-    the walled VM: the firewall is what points every container at the proxy and refuses the ways
-    round it, so without it there is nothing for the forwarder to be the only way to."""
+def _attribution_issues() -> list[str]:
+    """The attributing forwarder is built on the walled VM: the firewall is what points every
+    container at the proxy and refuses the ways round it, so without it there is nothing for the
+    forwarder to be the only way to."""
     level = config.machine_attribution()
     if level == "off":
         return []
     out = []
-    if backend_name != "lima":
-        out.append(
-            f'✗ [machine] attribution = "{level}" needs the lima backend, but backend =\n'
-            f"    '{backend_name}'. Set [machine] backend = \"lima\" (the forwarder is a root\n"
-            "    service provisioned into the lima VM at boot), or drop `attribution`."
-        )
     if not config.machine_wall():
         out.append(
             f'✗ [machine] attribution = "{level}" needs the VM firewall — set [machine]\n'

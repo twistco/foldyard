@@ -2339,8 +2339,7 @@ def _up(
 
     # Where the agents' transcripts bind out to on your computer: the checkout's own slot in the
     # from-box (ADR-0033) where the VM shares one — out of the checkout, so `git clean` and grep
-    # never see them — else the legacy dirs inside the checkout (the podman backend, which keeps
-    # its mounts as they were).
+    # never see them — else the legacy dirs inside the checkout (a VM from before the from-box).
     vm_from_box = machine.from_box_mounted()
     from_box = vm_from_box
     claude_out = f"{checkout}/{here}/.devbox-claude/projects"

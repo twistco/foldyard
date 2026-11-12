@@ -1,8 +1,6 @@
-"""machine.py — backend-agnostic VM-lifecycle orchestration. The backend (podman/Lima) is
-stubbed; we assert the cross-cutting policy machine.py owns: the one-VM-at-a-time guard for
-NON-concurrent backends (helpful error, no doomed start), that a concurrent backend skips
-that guard, and that `ensure` errors when an explicitly-chosen backend's CLI is missing.
-Backend internals (podman/Lima command shapes) live in test_machine_backend.py."""
+"""machine.py — VM-lifecycle orchestration. The Lima backend is stubbed; we assert the policy
+machine.py owns (create → start → socket, provisioning, mounts, refusing a missing limactl or a
+retired backend). Backend internals (limactl command shapes) live in test_machine_backend.py."""
 
 from __future__ import annotations
 
@@ -27,12 +25,10 @@ from foldyard.plugins import proxy
 class FakeBackend:
     """A scriptable stand-in for a real Backend. Records start/stop/create/remove calls."""
 
-    def __init__(self, *, concurrent, running=(), available=True, name="podman", cli="podman"):
-        self.name = name
-        self.cli = cli
-        self.install_hint = f"brew install {cli}"
-        self._concurrent = concurrent
-        self._running = list(running)
+    def __init__(self, *, available=True):
+        self.name = "lima"
+        self.cli = "limactl"
+        self.install_hint = "brew install lima"
         self._available = available
         self._exists = False
         self._state = "stopped"
@@ -62,14 +58,8 @@ class FakeBackend:
         self.created_with: list = []
         self.calls: list[str] = []
 
-    def supports_concurrent(self):
-        return self._concurrent
-
     def available(self):
         return self._available
-
-    def list_running(self, name=""):
-        return list(self._running)
 
     def exists(self):  # machine.exists() takes no args; the module passes MACHINE through
         return self._exists
@@ -92,7 +82,6 @@ class FakeBackend:
 
     def start(self, name, prefix=()):
         self.calls.append(f"start:{name}" + (f" under {' '.join(prefix)}" if prefix else ""))
-        self._running.append(name)
         self._state = "running"
         self._responsive = self._revives
         return True
@@ -101,9 +90,8 @@ class FakeBackend:
         self.calls.append(f"create:{name}")
         self._exists = True
         self.created_with = list(volumes)
-        if self._mount_set is not None or self.name == "lima":
-            self._mount_set = list(volumes)
-            self._mount_type = {"vz": "virtiofs", "qemu": "9p"}.get(self._vmtype, "")
+        self._mount_set = list(volumes)
+        self._mount_type = {"vz": "virtiofs", "qemu": "9p"}.get(self._vmtype, "")
         return True
 
     def vmtype(self, name):
@@ -196,28 +184,8 @@ def fake(monkeypatch):
     return install
 
 
-# ── one-VM-at-a-time guard (non-concurrent backend, e.g. podman on macOS) ──────────────
-
-
-def test_start_blocks_when_another_machine_runs_on_nonconcurrent_backend(fake, capsys):
-    be = fake(concurrent=False, running=["tangible"])
-    assert machine._start() is False
-    assert be.calls == []  # never attempted the doomed start
-    err = capsys.readouterr().err
-    assert "one" in err.lower()
-    assert "podman machine stop tangible" in err  # tells you to stop the other yourself
-    assert 'backend = "lima"' in err  # …or run concurrently via Lima
-
-
-def test_start_clean_when_nothing_else_running(fake):
-    be = fake(concurrent=False, running=[])
-    assert machine._start() is True
-    assert be.calls == ["start:homelab"]
-
-
-def test_start_skips_guard_on_concurrent_backend(fake):
-    # Lima: another VM running is fine — start ours beside it, no guard, no error.
-    be = fake(concurrent=True, running=["tangible"], name="lima", cli="limactl")
+def test_start_starts_the_vm(fake):
+    be = fake()
     assert machine._start() is True
     assert be.calls == ["start:homelab"]
 
@@ -226,62 +194,81 @@ def test_start_skips_guard_on_concurrent_backend(fake):
 
 
 def test_ensure_noop_in_box(fake, monkeypatch):
-    be = fake(concurrent=False)
+    be = fake()
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
     machine.ensure(Path("/repo"), Path("/repo-wt"))
     assert be.calls == []  # the box manages its host VM from outside — nothing to do
 
 
-def test_ensure_errors_when_chosen_backend_cli_missing(fake, monkeypatch, tmp_path, capsys):
-    # A backend the consumer NAMED whose CLI is absent → loud error, never a silent fallback to
-    # another backend (which would swap the isolation profile without saying so).
-    fake(concurrent=True, available=False, name="lima", cli="limactl")
-    monkeypatch.setattr(machine.config, "machine_backend_explicit", lambda: "lima")
+def test_ensure_fails_closed_without_limactl(fake, monkeypatch, tmp_path, capsys):
+    # It must NOT skip quietly: machine.socket() would then be "", stack would export neither
+    # DOCKER_HOST nor CONTAINER_HOST, and every engine verb would land on the host's own podman
+    # socket — containers on the host kernel, with the VM boundary gone (ADR-0027).
+    be = fake(available=False)
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     with pytest.raises(SystemExit):
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     err = capsys.readouterr().err
-    assert "limactl" in err and "lima" in err
-
-
-def test_ensure_fails_closed_when_the_INHERITED_default_backend_has_no_cli(
-    fake, monkeypatch, tmp_path, capsys
-):
-    # Nobody named a backend, so this is the lima DEFAULT with no limactl. It must NOT skip
-    # quietly: machine.socket() would then be "", stack would export neither DOCKER_HOST nor
-    # CONTAINER_HOST, and every engine verb would land on the host's own podman socket — the
-    # native profile, with the VM boundary gone and nobody having chosen it (ADR-0011).
-    be = fake(concurrent=True, available=False, name="lima", cli="limactl")
-    monkeypatch.setattr(machine.config, "machine_backend_explicit", lambda: "")
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    with pytest.raises(SystemExit):
-        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    err = capsys.readouterr().err
-    assert "limactl" in err and "DEFAULT" in err
-    assert 'backend = "podman"' in err  # names the other VM backend, never a VM-less one
-    assert "native" not in err
+    assert "limactl" in err and "brew install lima" in err
     assert be.calls == []  # and nothing was provisioned
 
 
-def test_ensure_creates_then_starts_when_absent(fake, monkeypatch, tmp_path):
-    be = fake(concurrent=False, available=True)
+@pytest.mark.parametrize("retired", ["podman", "native"])
+def test_ensure_refuses_a_config_still_naming_a_retired_backend(
+    fake, monkeypatch, tmp_path, capsys, retired
+):
+    # Going ahead would make an EMPTY Lima VM beside the old one's data — and a project's
+    # migration then has a fresh VM's volumes to import into. Stop, say how to move over.
+    be = fake()
+    monkeypatch.setattr(machine.config, "retired_backend", lambda: retired)
+    monkeypatch.setattr(machine.config, "in_box", lambda: False)
+    with pytest.raises(SystemExit):
+        machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
+    err = capsys.readouterr().err
+    assert f'backend = "{retired}"' in err and "Lima" in err and "fy config adopt" in err
+    assert be.calls == []
+
+
+def test_ensure_creates_then_starts_when_absent(fake, settled, monkeypatch, tmp_path):
+    be = fake(available=True)
     be._exists = False
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == ["create:homelab", "start:homelab"]
 
 
+@pytest.fixture
+def settled(no_proxy_ca, monkeypatch, tmp_path):
+    """The Lima steps around the lifecycle flow under test, answered as already done: nothing to
+    record in the stored config, a guest that reports what's wanted, and a finished boot. The
+    steps themselves are tested with `lima_env`."""
+    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
+    for step in (
+        "_record_mounts",
+        "_record_provisioning",
+        "_record_monitor",
+        "_record_forwarder",
+        "_record_proxy_propagation",
+    ):
+        monkeypatch.setattr(machine, step, lambda *a: None)
+    monkeypatch.setattr(
+        machine,
+        "_guest_state",
+        lambda: (machine._provision_want(), machine.config.machine_wall(), True),
+    )
+    monkeypatch.setattr(machine, "_boot_progress", lambda: "")
+
+
 # ── ensure: the half-started VM (running per the backend, socket dead) ─────────────────
 
 
 @pytest.fixture
-def half_started(fake, monkeypatch):
+def half_started(fake, settled, monkeypatch):
     """A machine the backend calls `running` while nothing serves its socket — what a host
     crash (or a guest that never signals ready) leaves behind. Trusting the flag made `ensure`
     no-op and every later engine call die on a raw `dial unix …: no such file` instead."""
 
     def install(**kw):
-        kw.setdefault("concurrent", False)
         kw.setdefault("available", True)
         be = fake(**kw)
         be._exists = True
@@ -318,11 +305,11 @@ def test_ensure_provisions_the_gvisor_posture_after_the_guest_checks(
     monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: order.append("guest"))
     monkeypatch.setattr(sandbox, "ensure", lambda backend, name: order.append(f"sandbox:{name}"))
     monkeypatch.setattr(machine.config, "machine_runtime", lambda: "gvisor")
-    machine.ensure(tmp_path, tmp_path / "wt")
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert order == ["guest", f"sandbox:{machine.MACHINE}"]
 
 
-def test_ensure_provisions_the_log_budget_after_the_guest_checks_on_every_backend(
+def test_ensure_provisions_the_log_budget_after_the_guest_checks(
     half_started, tmp_path, monkeypatch
 ):
     from foldyard import guestlog
@@ -335,7 +322,7 @@ def test_ensure_provisions_the_log_budget_after_the_guest_checks_on_every_backen
     monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: order.append("guest"))
     monkeypatch.setattr(guestlog, "ensure", lambda backend, name: order.append(f"log:{name}"))
     monkeypatch.setattr(machine.config, "machine_runtime", lambda: "")
-    machine.ensure(tmp_path, tmp_path / "wt")
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert order == ["guest", f"log:{machine.MACHINE}"]
 
 
@@ -346,7 +333,7 @@ def test_ensure_skips_the_sandbox_without_the_posture(half_started, tmp_path, mo
     monkeypatch.setattr(machine, "_check_guest_provisioning", lambda: None)
     monkeypatch.setattr(sandbox, "ensure", lambda backend, name: pytest.fail("not wanted"))
     monkeypatch.setattr(machine.config, "machine_runtime", lambda: "")
-    machine.ensure(tmp_path, tmp_path / "wt")
+    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
 
 
 def test_ensure_leaves_a_healthy_machine_alone(half_started, tmp_path):
@@ -416,7 +403,7 @@ def test_ensure_fails_loudly_when_the_restart_does_not_revive_the_socket(
         machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == ["stop:homelab", "reap:homelab", "start:homelab"]
     err = capsys.readouterr().err
-    assert "still dead" in err and "machine rm homelab" in err
+    assert "still dead" in err and "fy machine rm" in err
 
 
 @pytest.fixture
@@ -434,7 +421,7 @@ def test_ensure_checks_the_guest_provisioning_after_a_revive(
 ):
     # A revived VM is a booted-from-cold VM: the boot provisioning (sudo grant dropped, wall)
     # re-ran as root at that boot, and ensure must read the guest's report of it as on any start.
-    be = half_started(name="lima", cli="limactl", concurrent=True)
+    be = half_started()
     monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
     monkeypatch.setattr(machine.config, "machine_wall", lambda: True)
     be._provision = machine.provision_id()
@@ -452,15 +439,15 @@ def test_ensure_checks_the_guest_provisioning_after_a_revive(
 def test_not_running_reason_reports_a_dead_socket_on_a_running_machine(fake):
     # `down`/`ps`/`logs` must name the condition rather than reach a socket nothing serves and
     # fail on the engine's dial error. Only `up`/`ensure` may revive it.
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     be._exists = True
     be._state = "running"
     be._responsive = False
     assert "socket is dead" in (machine.not_running_reason() or "")
 
 
-def test_ensure_warns_on_missing_worktrees_mount(fake, monkeypatch, tmp_path, capsys):
-    be = fake(concurrent=False, available=True)
+def test_ensure_warns_on_missing_worktrees_mount(fake, settled, monkeypatch, tmp_path, capsys):
+    be = fake(available=True)
     be._exists = True
     be._state = "running"
     be._mounts = ["/some/repo"]  # no worktrees-root mount
@@ -474,7 +461,7 @@ def test_ensure_warns_on_missing_worktrees_mount(fake, monkeypatch, tmp_path, ca
 
 
 def test_stop_stops_the_supervisor_after_stopping_the_vm(fake, monkeypatch):
-    be = fake(concurrent=True, name="lima", cli="limactl")
+    be = fake()
     be._exists = True
     be._state = "running"
     stopped: list[bool] = []
@@ -488,7 +475,7 @@ def test_stop_stops_the_supervisor_after_stopping_the_vm(fake, monkeypatch):
 def test_stop_without_a_vm_still_stops_the_supervisor(fake, monkeypatch):
     # This is the release-hygiene case: an out-of-band `limactl delete` left the host process
     # alive, so `fy machine stop` must tear it down even though there is no VM command to run.
-    be = fake(concurrent=True, name="lima", cli="limactl")
+    be = fake()
     stopped: list[bool] = []
     monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: stopped.append(True) or True)
 
@@ -508,7 +495,7 @@ def test_stop_host_supervisor_waits_then_clears_the_mirror(monkeypatch, tmp_path
 
 
 def test_delete_stops_the_supervisor_after_removing_the_vm(fake, monkeypatch, tmp_path):
-    be = fake(concurrent=True, name="lima", cli="limactl")
+    be = fake()
     be._exists = True
     be._state = "stopped"
     stopped: list[bool] = []
@@ -538,7 +525,7 @@ def lima_env(fake, no_proxy_ca, monkeypatch, tmp_path):
     set_wall, guest_ok)``: ``guest`` is what `_guest_state` answers (state text, wall active,
     rootful socket masked) and counts reads; ``guest_ok()`` makes it report the CURRENT desired
     provisioning as applied."""
-    be = fake(concurrent=True, name="lima", cli="limactl")
+    be = fake()
     be._exists = True
     be._state = "running"
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
@@ -1284,15 +1271,6 @@ def test_a_failed_lima_start_that_never_booted_says_only_that(lima_env, monkeypa
     assert "boot scripts" not in err
 
 
-def test_a_failed_start_on_another_backend_asks_no_guest(fake, monkeypatch, capsys):
-    be = fake(concurrent=True)
-    monkeypatch.setattr(be, "start", lambda name, prefix=(): False)
-    asked: list[int] = []
-    monkeypatch.setattr(machine, "_boot_progress", lambda: (asked.append(1), "lima")[1])
-    assert machine._start() is False
-    assert asked == []
-
-
 @pytest.mark.parametrize(
     "rc, out, want",
     [
@@ -1372,18 +1350,6 @@ def test_ensure_wall_off_does_not_require_the_rootful_socket_masked(lima_env, tm
     set_wall(False)
     be._provision = machine.provision_id()
     guest.state, guest.active, guest.masked = machine._provision_want(), False, False
-    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert be.calls == []
-
-
-def test_non_lima_backends_are_not_provisioned(fake, monkeypatch, tmp_path):
-    # podman-machine's appliance can't be provisioned and native has no VM: nothing to record,
-    # nothing to read — and never an error here (preflight owns the "wall needs lima" error).
-    be = fake(concurrent=False, name="podman", cli="podman")
-    be._exists = True
-    be._state = "running"
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    monkeypatch.setattr(machine.config, "machine_wall", lambda: True)
     machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
     assert be.calls == []
 
@@ -1882,7 +1848,7 @@ def test_wall_script_creates_user_home_dirs_owned_by_the_user():
 
 
 def test_not_running_reason_over_the_lifecycle(fake, monkeypatch):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     assert "does not exist" in (machine.not_running_reason() or "")
     be._exists = True
     assert "stopped" in (machine.not_running_reason() or "")
@@ -1891,12 +1857,12 @@ def test_not_running_reason_over_the_lifecycle(fake, monkeypatch):
 
 
 def test_not_running_reason_without_backend_cli(fake):
-    fake(concurrent=False, available=False)
+    fake(available=False)
     assert "CLI" in (machine.not_running_reason() or "")
 
 
 def test_stop_noop_when_machine_absent(fake, monkeypatch, capsys):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     assert machine.stop() == 0
     assert be.calls == []
@@ -1904,7 +1870,7 @@ def test_stop_noop_when_machine_absent(fake, monkeypatch, capsys):
 
 
 def test_stop_noop_when_already_stopped(fake, monkeypatch, capsys):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     be._exists = True
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     assert machine.stop() == 0
@@ -1913,7 +1879,7 @@ def test_stop_noop_when_already_stopped(fake, monkeypatch, capsys):
 
 
 def test_stop_stops_a_running_machine(fake, monkeypatch, capsys):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     be._exists = True
     be._state = "running"
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
@@ -1923,7 +1889,7 @@ def test_stop_stops_a_running_machine(fake, monkeypatch, capsys):
 
 
 def test_stop_refused_in_box(fake, monkeypatch):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
     assert machine.stop() == 1
     assert be.calls == []
@@ -1931,7 +1897,7 @@ def test_stop_refused_in_box(fake, monkeypatch):
 
 def test_stop_refused_on_host_when_backend_cli_missing(fake, monkeypatch, capsys):
     # Missing-backend on the host must read as "no CLI", NOT the "inside the box" message.
-    fake(concurrent=True, available=False, name="lima", cli="limactl")
+    fake(available=False)
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     assert machine.stop() == 1
     out = capsys.readouterr().out
@@ -1940,7 +1906,7 @@ def test_stop_refused_on_host_when_backend_cli_missing(fake, monkeypatch, capsys
 
 
 def test_delete_refused_on_host_when_backend_cli_missing(fake, monkeypatch, capsys):
-    be = fake(concurrent=True, available=False, name="lima", cli="limactl")
+    be = fake(available=False)
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     assert machine.delete(assume_yes=True) == 1
     assert be.calls == []
@@ -1950,7 +1916,7 @@ def test_delete_refused_on_host_when_backend_cli_missing(fake, monkeypatch, caps
 
 
 def test_delete_noop_when_machine_absent(fake, monkeypatch, capsys):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     assert machine.delete(assume_yes=True) == 0
     assert be.calls == []
@@ -1960,7 +1926,7 @@ def test_delete_noop_when_machine_absent(fake, monkeypatch, capsys):
 def test_delete_stops_then_removes_a_lima_machine(fake, monkeypatch, tmp_path, capsys):
     # The boot provisioning (wall + sudo grant) is recorded IN the instance config, so removing
     # the VM removes it — there is no host-side wall state left to clear.
-    be = fake(concurrent=True, available=True, name="lima", cli="limactl")
+    be = fake(available=True)
     be._exists = True
     be._state = "running"
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
@@ -1972,7 +1938,7 @@ def test_delete_stops_then_removes_a_lima_machine(fake, monkeypatch, tmp_path, c
 def test_delete_drops_the_vms_podman_desktop_connection(fake, monkeypatch, capsys):
     from foldyard import podman_desktop
 
-    be = fake(concurrent=True, available=True, name="lima", cli="limactl")
+    be = fake(available=True)
     be._exists = True
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     dropped = []
@@ -1983,7 +1949,7 @@ def test_delete_drops_the_vms_podman_desktop_connection(fake, monkeypatch, capsy
 
 
 def test_delete_skips_stop_when_machine_not_running(fake, monkeypatch, tmp_path):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     be._exists = True  # state stays "stopped"
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path)
@@ -1992,7 +1958,7 @@ def test_delete_skips_stop_when_machine_not_running(fake, monkeypatch, tmp_path)
 
 
 def test_delete_prompt_defaults_to_abort(fake, monkeypatch, capsys):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     be._exists = True
     monkeypatch.setattr(machine.config, "in_box", lambda: False)
     monkeypatch.setattr("builtins.input", lambda *a: "")
@@ -2002,7 +1968,7 @@ def test_delete_prompt_defaults_to_abort(fake, monkeypatch, capsys):
 
 
 def test_delete_refused_in_box(fake, monkeypatch):
-    be = fake(concurrent=False, available=True)
+    be = fake(available=True)
     monkeypatch.setattr(machine.config, "in_box", lambda: True)
     assert machine.delete(assume_yes=True) == 1
     assert be.calls == []
@@ -2571,20 +2537,6 @@ def test_no_to_box_on_a_hypervisor_that_cant_enforce_read_only_outside_the_guest
     assert sorted(be.created_with) == sorted(_want(tmp_path, to_box=False))
 
 
-def test_the_podman_backends_mounts_are_unchanged(fake, monkeypatch, tmp_path):
-    from foldyard.machine_backend import Mount
-
-    be = fake(concurrent=False, name="podman", cli="podman")
-    monkeypatch.setattr(machine.config, "in_box", lambda: False)
-    monkeypatch.setattr(machine.config, "state_dir", lambda: tmp_path / "state")
-    machine.ensure(tmp_path / "repo", tmp_path / "repo-wt")
-    assert be.created_with == [
-        Mount(str(tmp_path / "repo"), str(tmp_path / "repo")),
-        Mount(str(tmp_path / "repo-wt"), str(tmp_path / "repo-wt")),
-    ]
-    assert not (tmp_path / "state").exists()  # nothing made for a VM that won't share it
-
-
 def test_a_stopped_vm_with_the_old_set_gets_it_recorded_before_its_boot(lima_env, tmp_path):
     from foldyard.machine_backend import Mount
 
@@ -2765,10 +2717,7 @@ def test_a_state_dir_inside_the_checkout_is_refused(lima_env, tmp_path, monkeypa
     assert "FOLDYARD_STATE_DIR" in capsys.readouterr().err
 
 
-def test_guest_mounts_exempts_foldyards_two_directories_on_lima_only(
-    lima_env, tmp_path, monkeypatch
-):
-    monkeypatch.setattr(machine.config, "machine_backend", lambda: "lima")
+def test_guest_mounts_exempts_foldyards_two_directories(lima_env, tmp_path):
     got = machine.guest_mounts(tmp_path / "repo", tmp_path / "repo-wt")
     assert got == [
         str(tmp_path / "repo"),
@@ -2776,17 +2725,10 @@ def test_guest_mounts_exempts_foldyards_two_directories_on_lima_only(
         str(tmp_path / "state" / "from-box"),
         str(tmp_path / "state" / "to-box"),
     ]
-    monkeypatch.setattr(machine.config, "machine_backend", lambda: "podman")
-    assert machine.guest_mounts(tmp_path / "repo", tmp_path / "repo-wt") == [
-        str(tmp_path / "repo"),
-        str(tmp_path / "repo-wt"),
-    ]
 
 
 def test_to_box_unavailable_says_why(fake, monkeypatch):
-    be = fake(concurrent=False, name="podman", cli="podman")
-    assert "podman backend has no to-box" in (machine.to_box_unavailable() or "")
-    be = fake(concurrent=True, name="lima", cli="limactl")
+    be = fake()
     be._exists, be._vmtype = True, "krunkit"
     assert "only vz (virtiofs) and qemu (9p)" in (machine.to_box_unavailable() or "")
     be._vmtype = "qemu"

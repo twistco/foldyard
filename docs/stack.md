@@ -124,10 +124,8 @@ Variables the current mode sets (from the plugins you use) are there too, and so
 **A service that talks to the engine** (the [gcp metadata emulator](./gcp.md#in-your-compose-file),
 say) mounts `/run/foldyard/engine.sock:/var/run/docker.sock`, written as is: it's the same path on
 every lima VM. foldyard's boot script links it to the VM user's engine socket, whose own path holds
-your user id, or under `[machine] runtime = "gvisor"` to the box's filtered socket. On the
-deprecated podman machine backend, mount `/run/docker.sock`, or under gVisor
-`/run/user/<uid>/podman/podman-runsc-filtered.sock` (`<uid>` is `id -u` on your computer). A CI
-runner has no boot script, so the [step above](#in-ci) makes the same link.
+your user id, or under `[machine] runtime = "gvisor"` to the box's filtered socket. A CI runner has
+no boot script, so the [step above](#in-ci) makes the same link.
 
 **Nothing else from your shell reaches the compose client.** It gets only what it needs to run
 (`PATH`, `HOME`, locale, the engine's and compose's own `COMPOSE_*`/`PODMAN_*` settings) and the

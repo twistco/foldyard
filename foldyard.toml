@@ -49,14 +49,11 @@ recommended_foldyard_version = "0.11.0"
 "0.11.0" = "`fy box recreate`, `fy ls` (every project's VM, supervisor and boxes, and what needs attention) and `fy paste` (an image from your clipboard into the box); build-only path grants and paths in `[proxy] recommend`; removing a LAN grant closes the tunnels it let through — `fy host restart` so the proxy has them"
 
 [machine]
-# A rootless VM that mounts ONLY this repo. Default here is the Lima backend + an in-VM
-# egress FIREWALL: fail-closed, so the box's only way out is the host's allowlisting proxy
-# (below). Sizing applies at FIRST creation; to resize later: `foldyard machine recreate`.
-#   backend = "podman"  # DEPRECATED (0.7.0): the single shared podman machine — no
-#                       # concurrent per-project VMs, and no in-VM firewall
-#   firewall = false    # lima but COOPERATIVE-only: the box uses the proxy, but nothing
-#                       # stops a process that ignores it (the firewall makes it fail-closed)
-backend = "lima"
+# A rootless Lima VM that mounts ONLY this repo, with an in-VM egress FIREWALL: fail-closed,
+# so the box's only way out is the host's allowlisting proxy (below). Sizing applies at FIRST
+# creation; to resize later: `foldyard machine recreate`.
+#   firewall = false    # COOPERATIVE-only: the box uses the proxy, but nothing stops a
+#                       # process that ignores it (the firewall makes it fail-closed)
 firewall = true
 name = "foldyard"
 cpus = 4

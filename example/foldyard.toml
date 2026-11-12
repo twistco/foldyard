@@ -37,11 +37,7 @@ dev_vm_dir = "."
 API_PORT = 8080
 PG_PORT = 5544
 
-# Rootless VM — modest sizing for a throwaway example. The default backend is `lima`
-# (concurrent per-project VMs; needs `limactl` alongside podman). `backend = "podman"` is the
-# nothing-extra-to-install alternative: one shared machine, no concurrent projects, no VM
-# firewall.
-# Both are VMs — there is no VM-less backend (ADR-0027).
+# Rootless Lima VM — modest sizing for a throwaway example (needs `limactl` alongside podman).
 [machine]
 name = "foldyard-example"
 cpus = 2

@@ -3,7 +3,9 @@
 - **Status:** Accepted (2026-06; native backend + lima spike on main via #25) — implemented; lima
   mock-validated + first real multi-project Mac run 2026-07-05. **Amended by
   [ADR-0027](./0027-always-a-vm-native-backend-retired.md) (2026-09-17): the `native` backend is
-  retired** — the socket contract and the two VM backends stand.
+  retired** — the socket contract and the two VM backends stand. **Amended by
+  [ADR-0036](./0036-lima-only-podman-machine-backend-removed.md) (2026-11-12): the `podman` backend
+  is removed** — Lima is the only one.
 - **Sources:** docs/lima-backend-scope.md (which now also holds the podman#26281 note),
   src/foldyard/machine_backend.py
 

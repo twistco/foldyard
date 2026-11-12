@@ -160,7 +160,6 @@ class Exposure:
     openings_error: str = ""  # an invalid entry's refusal: reported, not raised
     wall: bool = False
     host_wall: bool = False  # the same wall enforced on the HOST too (hostwall.py)
-    backend: str = ""
     enforcing: bool = False  # the egress wall's allowlist (host-owned)
 
     @property
@@ -573,7 +572,6 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         openings_error=openings_error,
         wall=config.machine_wall(),
         host_wall=config.machine_host_wall(),
-        backend=config.machine_backend(),
         enforcing=default_deny(),
     )
 
@@ -748,9 +746,9 @@ def render(exp: Exposure) -> list[str]:
         else ""
     )
     wall = (
-        f"VM firewall ON ({exp.backend}{', host firewall too' if exp.host_wall else ''}{opened})"
+        f"VM firewall ON{' (host firewall too)' if exp.host_wall else ''}{opened}"
         if exp.wall
-        else f"VM firewall OFF ({exp.backend}) — proxy routing is cooperative"
+        else "VM firewall OFF — proxy routing is cooperative"
     )
     allowlist = "allowlist ENFORCING" if exp.enforcing else "allowlist observing only"
     out.append(f"  Context: egress {wall} · {allowlist}.")
