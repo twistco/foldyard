@@ -2542,6 +2542,34 @@ def test_recreate_refuses_to_create_through_a_link_planted_in_the_slot(
     assert "slot" in err and "fy box up" in err
 
 
+def test_recreate_checks_each_slot_again_after_the_removal_with_no_legacy_tree(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # The old box runs until `_remove`, so it can swap its slot for a link after `box_args` made
+    # it. With no legacy transcripts there is nothing to move, and nothing looked again: the
+    # create bound the slot through the link (CodeRabbit on #181).
+    _running_box(fake, monkeypatch)
+    root = tmp_path / "from-box"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(box.boxmounts, "from_box_dir", lambda: root)
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    slot = root / box.boxmounts.claude_rel("")
+    real_remove = box._remove
+
+    def planting(*a, **k):  # the old box's last act, after the slot was checked
+        slot.rmdir()
+        slot.symlink_to(elsewhere)
+        return real_remove(*a, **k)
+
+    monkeypatch.setattr(box, "_remove", planting)
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["run", "-d"])
+    assert "fy box up" in capsys.readouterr().err
+
+
 def test_recreate_fails_when_the_old_box_wont_go(fake, monkeypatch, capsys):
     # `rm -f` refused: the old box still runs, with its old env and mounts. Saying "removed" and
     # then "already up" would be a recreate that did nothing and reported success.

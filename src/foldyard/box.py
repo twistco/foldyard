@@ -2505,12 +2505,17 @@ def _up(
         def _slot(enabled: bool, override: str, out: str) -> Path | None:
             return Path(out) if enabled and not os.environ.get(override) else None
 
+        claude_slot = _slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out)
+        codex_slot = _slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out)
         try:
+            # Each slot this box binds, checked again now that no box can race it: the old one
+            # ran until `_remove`, after `box_args` had made the slots, so it could have swapped
+            # one for a link, whether or not there is a legacy tree to move.
+            for slot in (claude_slot, codex_slot):
+                if slot is not None:
+                    boxmounts.ensure_bind_source(slot)
             transcripts.migrate_legacy(
-                Path(checkout),
-                here,
-                claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
-                codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
+                Path(checkout), here, claude_to=claude_slot, codex_to=codex_slot
             )
         except OSError as e:
             # A link in the slot, planted by the old box after the slot was checked and before it
