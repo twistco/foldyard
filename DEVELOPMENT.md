@@ -267,9 +267,14 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   for every VM, the supervisor's lock/readiness/fingerprint files, the version window, config drift,
   registered worktrees whose directory is gone. The engine half (boxes, stacks, agents) is a child
   `fy ls --here --json` in each checkout whose VM is ALREADY running (`selfspawn`, as `fy agent ls`
-  fans out) and never one below its `min_foldyard_version`, which would only be refused. Leftovers
-  are listed, never removed: Lima VMs carrying foldyard's boot script that no adopted project names
-  (one without it isn't foldyard's and isn't listed), and adoptions of vanished checkouts.
+  fans out) and never one below its `min_foldyard_version`, which would only be refused. Leftovers:
+  Lima VMs carrying foldyard's boot script that no adopted project names (one without it isn't
+  foldyard's and isn't listed), folders in `~/.foldyard` that are neither foldyard's own
+  (`OWN_FOLDERS`, held to the package by a test) nor an adopted project's state, and adoptions whose
+  checkout or worktree is gone, counted unless `--verbose`. `fy prune` (here too) forgets only those
+  adoptions, through `configpin.drop`, and only where the FOLDER is gone: a box can delete a
+  `foldyard.toml`, and a forgotten adoption makes the next review a whole file instead of a diff.
+  VMs and state folders hold data and secrets, so they're named with a command, never removed.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` · `vscode.py`
   · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI, `foldyard init`,
   bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>` podman connection

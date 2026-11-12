@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -89,6 +90,14 @@ class Leftover:
     what: str
     why: str
     fix: str = ""
+    kind: str = "vm"  # vm · folder · adoption
+    path: str = ""  # an adoption's folder under the adoption root: what `fy prune` removes
+    prunable: bool = False  # `fy prune` may remove it (only an adoption whose checkout is gone)
+
+
+# Folders foldyard itself keeps straight under ~/.foldyard, beside each project's state folder.
+# tests/test_projects.py holds this to every such name in the package.
+OWN_FOLDERS = ("adopted", "cache", "logs", "worktrees")
 
 
 @dataclass
@@ -284,8 +293,10 @@ def _describe(
     return Project(name, str(checkout), vm, state, notes=notes, below_floor=below_floor)
 
 
-def _vanished_pins() -> list[Leftover]:
-    """Adoptions of a main checkout that's gone (or no longer holds a `foldyard.toml`)."""
+def _left_adoptions() -> list[Leftover]:
+    """Adoptions, of a main checkout or a worktree, whose checkout is gone or no longer holds a
+    `foldyard.toml`. Only a checkout whose folder is gone is prunable: a box can delete the file,
+    and forgetting the adoption then would make your next review a whole file, not a diff."""
     from . import configpin
 
     try:
@@ -294,24 +305,123 @@ def _vanished_pins() -> list[Leftover]:
         return []
     out = []
     for pin in pins:
-        try:
-            doc = json.loads((pin / configpin.ADOPTED_MARKER).read_text())
-        except (OSError, ValueError):
+        checkout, worktree = _adopted_where(pin)
+        if not checkout or (Path(checkout) / "foldyard.toml").is_file():
             continue
-        if not isinstance(doc, dict) or doc.get("worktree"):
-            continue
-        checkout = doc.get("checkout")
-        if not isinstance(checkout, str) or not checkout:
-            continue
-        if not (Path(checkout) / "foldyard.toml").is_file():
-            out.append(
-                Leftover(
-                    f"adopted config for {_short(checkout)}",
-                    "the checkout is gone",
-                    _short(str(pin)),
-                )
+        gone = not os.path.lexists(checkout)
+        what = "worktree" if worktree else "checkout"
+        out.append(
+            Leftover(
+                f"adopted config for {_short(checkout)}",
+                f"the {what} is gone" if gone else "its folder no longer holds a foldyard.toml",
+                "`fy prune`" if gone else "",
+                kind="adoption",
+                path=str(pin),
+                prunable=gone,
             )
+        )
     return out
+
+
+def _adopted_where(pin: Path) -> tuple[str, str]:
+    """The checkout an adoption folder's marker names, and its worktree (``""`` for main);
+    ``("", "")`` when there's no readable marker."""
+    from . import configpin
+
+    try:
+        doc = json.loads((pin / configpin.ADOPTED_MARKER).read_text())
+    except (OSError, ValueError):
+        return "", ""
+    if not isinstance(doc, dict):
+        return "", ""
+    checkout, worktree = doc.get("checkout"), doc.get("worktree")
+    return (
+        checkout if isinstance(checkout, str) else "",
+        worktree if isinstance(worktree, str) else "",
+    )
+
+
+def _kept_projects() -> set[str]:
+    """The projects of adoptions kept although their folder lost its `foldyard.toml` (see
+    :func:`_left_adoptions`): such a project drops out of the adopted checkouts, but its state
+    folder, `host.env` and all, is still its own. Named from the adopted snapshot as `_describe`
+    names a live one, else from the folder; a worktree's state is its main checkout's."""
+    from . import configpin
+
+    try:
+        pins = sorted(configpin._pin_root().iterdir())
+    except OSError:
+        return set()
+    names = set()
+    for pin in pins:
+        checkout, worktree = _adopted_where(pin)
+        if not checkout or worktree or not os.path.isdir(checkout):
+            continue
+        root = Path(checkout)
+        if (root / "foldyard.toml").is_file():
+            continue
+        toml = configpin.adopted_toml(root) or {}
+        with config.using(config.Config(repo_root=root, worktree="", toml=toml)):
+            try:
+                names.add(config.project())
+            except SystemExit:  # a name _safe_name refuses: claim the folder's, to be safe
+                names.add(root.name.lower())
+    return names
+
+
+def _unused_folders(claimed: set[str]) -> list[Leftover]:
+    """Folders in ~/.foldyard that are neither foldyard's own nor the state folder of an adopted
+    project: a project you stopped using (its `host.env` may still hold secrets), or something
+    another tool put there. Never pruned. Not judged under `FOLDYARD_STATE_DIR`, which relocates
+    one project's state, not the root."""
+    if os.environ.get("FOLDYARD_STATE_DIR"):
+        return []
+    root = Path.home() / ".foldyard"
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    out = []
+    for entry in entries:
+        if entry.name in OWN_FOLDERS or entry.name in claimed:
+            continue
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        secrets = (entry / "host.env").is_file()
+        size, whole = _tree_size(entry)
+        out.append(
+            Leftover(
+                f"folder {_short(str(entry))}",
+                f"{'' if whole else 'at least '}{_size(size)}"
+                f"{', holds host.env' if secrets else ''}; "
+                "no adopted project uses it",
+                kind="folder",
+                path=str(entry),
+            )
+        )
+    return out
+
+
+# How many files `fy ls` sizes per left-over folder before it says "at least": a backup of many
+# small files would otherwise make a quick read-only verb slow.
+SIZE_WALK_FILES = 20_000
+
+
+def _tree_size(root: Path) -> tuple[int, bool]:
+    """Bytes a folder's files hold on disk, links not followed, and whether that is all of them
+    (the walk stops after :data:`SIZE_WALK_FILES` files)."""
+    total, seen = 0, 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if seen >= SIZE_WALK_FILES:
+                return total, False
+            seen += 1
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            total += getattr(st, "st_blocks", 0) * 512 or st.st_size
+    return total, True
 
 
 def _base_vm(instances: dict[str, dict] | None) -> dict | None:
@@ -360,7 +470,7 @@ def _unclaimed(
         else:
             why = "foldyard made it, and no adopted project uses it"
             fix = f"`limactl delete {'--force ' if vm.running else ''}{name}`"
-        out.append(Leftover(f"VM {name} ({vm.status.lower()}{size})", why, fix))
+        out.append(Leftover(f"VM {name} ({vm.status.lower()}{size})", why, fix, kind="vm"))
     return out
 
 
@@ -448,8 +558,9 @@ def _ask(p: Project) -> None:
 # ── the listing ──────────────────────────────────────────────────────────────────────────────
 
 
-def collect() -> Listing:
-    """Every adopted project, what's left over, and the base VM."""
+def collect(*, ask_children: bool = True) -> Listing:
+    """Every adopted project, what's left over, and the base VM. Without ``ask_children`` the
+    engine-side facts are left unasked (`fy prune` needs only what's on disk)."""
     import foldyard
 
     from . import configpin, supervisor
@@ -461,13 +572,14 @@ def collect() -> Listing:
         for c in configpin.adopted_checkouts()
     ]
     # Below a project's floor its child would only be refused by it, saying nothing else.
-    ask = [p for p in projects if p.vm.running and not p.below_floor]
+    ask = [p for p in projects if p.vm.running and not p.below_floor] if ask_children else []
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(_ask, ask))
     claimed = {p.vm.name for p in projects if p.vm.backend == "lima"}
     unresolved = [p.project for p in projects if p.vm.name == "?"]
     unclaimed = _unclaimed(instances, claimed, unresolved) if instances is not None else []
-    leftovers = unclaimed + _vanished_pins()
+    owners = {p.project for p in projects} | _kept_projects()
+    leftovers = unclaimed + _unused_folders(owners) + _left_adoptions()
     return Listing(projects, leftovers, _base_vm(instances), lima_unavailable=instances is None)
 
 
@@ -517,7 +629,7 @@ _LIMA_SILENT = (
 )
 
 
-def render(listing: Listing) -> str:
+def render(listing: Listing, *, verbose: bool = False) -> str:
     if not listing.projects and not listing.leftovers and listing.base_vm is None:
         empty = (
             "No projects yet: a project is listed once its config is adopted on this computer "
@@ -552,9 +664,17 @@ def render(listing: Listing) -> str:
     if listing.lima_unavailable:
         lines += ["", _LIMA_SILENT]
     if listing.leftovers:
-        lines += ["", "Left over (listed, never removed):"]
-        for left in listing.leftovers:
+        lines += ["", "Left over (`fy prune` forgets adoptions; the rest is yours to remove):"]
+        adoptions = [lo for lo in listing.leftovers if lo.kind == "adoption"]
+        shown = (
+            listing.leftovers
+            if verbose
+            else [lo for lo in listing.leftovers if lo not in adoptions]
+        )
+        for left in shown:
             lines.append(f"  {left.what}: {left.why}" + (f" — {left.fix}" if left.fix else ""))
+        if adoptions and not verbose:
+            lines += _adoption_counts(adoptions)
     if (base := listing.base_vm) is not None:
         age = base.get("baked_days_ago")
         baked = f", baked {age:.0f} days ago" if isinstance(age, (int, float)) else ""
@@ -567,11 +687,36 @@ def render(listing: Listing) -> str:
     return "\n".join(lines)
 
 
-def to_json(listing: Listing) -> str:
-    return json.dumps(asdict(listing), indent=2)
+def _adoption_counts(adoptions: list[Leftover]) -> list[str]:
+    gone = sum(lo.prunable for lo in adoptions)
+    emptied = len(adoptions) - gone
+    out = []
+    if gone:
+        out.append(
+            f"  {_plural(gone, 'adoption')} whose checkout is gone — `fy prune` forgets them"
+            " (`fy ls --verbose` lists them)"
+        )
+    if emptied:
+        out.append(
+            f"  {_plural(emptied, 'adoption')} whose folder no longer holds a foldyard.toml"
+            " (`fy ls --verbose` lists them)"
+        )
+    return out
 
 
-def ls(*, here_only: bool, as_json: bool) -> int:
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def to_json(listing: Listing, *, verbose: bool = False) -> str:
+    doc = asdict(listing)
+    doc["adoptions_left_over"] = sum(lo.kind == "adoption" for lo in listing.leftovers)
+    if not verbose:
+        doc["leftovers"] = [lo for lo in doc["leftovers"] if lo["kind"] != "adoption"]
+    return json.dumps(doc, indent=2)
+
+
+def ls(*, here_only: bool, as_json: bool, verbose: bool = False) -> int:
     if config.in_box():
         _err("✗ `fy ls` lists this computer's projects — run it on your computer, not in a box.")
         return 1
@@ -579,5 +724,61 @@ def ls(*, here_only: bool, as_json: bool) -> int:
         print(json.dumps(here()))
         return 0
     listing = collect()
-    print(to_json(listing) if as_json else render(listing))
+    print(to_json(listing, verbose=verbose) if as_json else render(listing, verbose=verbose))
+    return 0
+
+
+def prune(*, yes: bool = False, ask: Callable[[str], bool] | None = None) -> int:
+    """`fy prune`: forget the adoptions whose checkout is gone, after showing them and asking.
+    What else is left over (VMs, state folders, an adoption whose folder only lost its
+    `foldyard.toml`) is named with how to remove it, never removed: those hold data or secrets."""
+    if config.in_box():
+        _err("✗ `fy prune` tidies this computer's foldyard state — run it on your computer.")
+        return 1
+    leftovers = collect(ask_children=False).leftovers
+    doomed = sorted((lo for lo in leftovers if lo.prunable), key=lambda lo: lo.what)
+    rest = [lo for lo in leftovers if not lo.prunable]
+    if rest:
+        print("Not removed by `fy prune` (yours to decide):")
+        for lo in rest:
+            fix = f" — {lo.fix}" if lo.fix else ""  # only a prunable one says `fy prune`
+            print(f"  {lo.what}: {lo.why}{fix}")
+        print("")
+    if not doomed:
+        print("Nothing to prune: every adoption's checkout is still there.")
+        return 0
+    print(f"{_plural(len(doomed), 'adoption')} whose checkout is gone:")
+    for lo in doomed:
+        print(f"  {lo.what.removeprefix('adopted config for ')}")
+    sys.stdout.flush()  # before any refusal on stderr, so a pipe keeps the order
+    if not yes:
+        if ask is None:
+            if not sys.stdin.isatty():
+                _err("✗ Nothing removed: there's no terminal to confirm on.")
+                _err("  `fy prune --yes` removes them without asking.")
+                return 1
+            from .agents import _ask
+
+            ask = _ask
+        these = "this" if len(doomed) == 1 else "these"
+        if not ask(f"Forget {these} {_plural(len(doomed), 'adoption')}? (y/N): "):
+            print("Nothing removed.")
+            return 0
+    return _forget(doomed)
+
+
+def _forget(doomed: list[Leftover]) -> int:
+    from . import configpin
+
+    forgot = kept = 0
+    for lo in doomed:
+        checkout, _ = _adopted_where(Path(lo.path))
+        if not checkout or os.path.lexists(checkout):  # back (or changed) since it was listed
+            kept += 1
+            continue
+        configpin.drop(Path(lo.path))
+        forgot += 1
+    print(f"✓ Forgot {_plural(forgot, 'adoption')}.")
+    if kept:
+        print(f"  Kept {kept}: changed since it was listed (its checkout is back?).")
     return 0
