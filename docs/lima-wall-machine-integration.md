@@ -26,10 +26,8 @@ Under Lima, podman resolves it to the VM's own gateway, where nothing listens. L
 network, though, always forwards `192.168.5.2` to the host (the guest calls it `host.lima.internal`,
 a name containers can't see).
 
-So one helper, `config.host_alias()`, picks the address:
-
-- `podman` backend → `host.containers.internal`
-- `lima` backend → `192.168.5.2` (`config.LIMA_HOST_GATEWAY`); `FY_HOST_ALIAS` overrides it
+So one helper, `config.host_alias()`, returns `192.168.5.2` (`config.LIMA_HOST_GATEWAY`), or
+`FY_HOST_ALIAS` when that is set.
 
 Its consumers are `proxy.derive_env` (`FY_PROXY`), `gcp.derive_env` (`GCP_MINTER_URL`) and the
 in-box daemon probes. A literal IP sidesteps podman's alias machinery and works for VMs that already
