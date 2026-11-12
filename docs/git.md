@@ -146,6 +146,20 @@ sets a checkout up (lefthook's, say) hasn't run in a new worktree; git in that w
 it at the next checkout there, and setup every new worktree needs belongs in
 `[project].worktree_init`, which runs in a container ([configuration](./configuration.md)).
 
+### Hooks that run only in the box
+
+Hooks in the checkout (a `.githooks` directory, say) can run in the box without running on your
+computer: set `[box] git_hooks = ".githooks"` ([configuration](./configuration.md)). foldyard sets
+`core.hooksPath` in the box's own git config, for this checkout and its worktrees only, and never in
+the shared `.git/config`. So the box's commits run your linters and formatters, and git on your
+computer runs code the box can edit only if you turn it on there yourself
+(`git config core.hooksPath .githooks` in the checkout). If you do, the box's setting is the same
+and doesn't conflict; a different value in `.git/config` wins, and `fy box up` says so.
+
+Lefthook installs into `.git/hooks` by default, which git on your computer runs as well. It doesn't
+need this setting. In the box, foldyard runs every repo hook with `LEFTHOOK_NO_AUTO_INSTALL=1`, so a
+lefthook newer than 2.2.2 doesn't re-sync its hooks from inside one.
+
 Filter drivers can't be switched off like that, and a checkout runs them: `.git/config` can name a
 command for each file `.gitattributes` routes through it (Git LFS's smudge filter is one; a box
 could add its own). So `fy worktree add` doesn't check files out on your computer at all. Git there

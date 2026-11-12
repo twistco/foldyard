@@ -1686,6 +1686,28 @@ def box_bootstrap() -> str:
     return str(raw) if isinstance(raw, str) else ""
 
 
+# A hooks directory as `[box].git_hooks` names it: relative to the checkout and inside it, in plain
+# path characters (it goes into the box's git config and into messages). No `.`/`..` components.
+_GIT_HOOKS_DIR = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.][A-Za-z0-9_.-]*)*")
+
+
+def box_git_hooks() -> str:
+    """The checkout's hooks directory that git in the BOX uses (``core.hooksPath``), set in the
+    box's own git config for this checkout and its worktrees only (``box._git_hooks_script``), so
+    git on your computer runs none of it unless you set it there too. From ``[box].git_hooks``
+    (``""``: git's default, ``.git/hooks``). A path that leaves the checkout is refused."""
+    raw = _box_table().get("git_hooks")
+    if raw is None or raw == "":
+        return ""
+    path = raw.rstrip("/") if isinstance(raw, str) else ""
+    if not _GIT_HOOKS_DIR.fullmatch(path) or {".", ".."} & set(path.split("/")):
+        raise SystemExit(
+            f"✗ [box].git_hooks = {raw!r} isn't a directory inside the checkout. Name it relative "
+            'to the checkout, e.g. git_hooks = ".githooks".'
+        )
+    return path
+
+
 def box_clean_docker_config() -> bool:
     """Point the box's ``DOCKER_CONFIG`` at a foldyard-owned clean config dir
     (``~/.docker-fy``, seeded ``{}`` by the bootstrap) instead of ``~/.docker``. Why: editor

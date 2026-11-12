@@ -1062,6 +1062,14 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   The bootstrap then ends with the box's own `fy doctor`, as a report: a failing row doesn't fail
   `fy box up`.
 
+- **`git_hooks`** — a directory in the checkout whose hooks git runs in the box (`core.hooksPath`),
+  such as `".githooks"`. It is set in the box's own git config, for this checkout and its worktrees
+  only: other repos in the box keep their own hooks, and git on your computer runs none of it,
+  because a box can rewrite these files ([git](./git.md#hooks-that-run-only-in-the-box)).
+  `fy box up` sets it on a box that's already running too, so no recreate. If the repo's
+  `.git/config` sets another `core.hooksPath`, that wins, and the box says so. Default: `""` (git's
+  own `.git/hooks`).
+
 - **`clean_docker_config`** — point `DOCKER_CONFIG` at a clean foldyard-owned dir instead of
   `~/.docker`, whose editor-injected credential helper fails as root and breaks even anonymous
   pulls. `docker login` still works. Default: `true`.
