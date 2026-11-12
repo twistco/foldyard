@@ -1510,6 +1510,10 @@ async def test_the_footer_names_what_each_key_does_on_the_row_under_the_cursor(m
         footer = _footer(app)
         assert footer["a"] == "allow path…" and footer["l"] == "copy log row" and "x" not in footer
         for line, a in ((0, "allow host"), (2, "allow host")):  # the host; the CONNECT row
+            # Each reached from the GET, whose footer differs: going from the host straight to
+            # the CONNECT row changes nothing a wait could see, so it read the host's footer.
+            tree.cursor_line = 1
+            await _until(pilot, lambda: _footer(app).get("a") == "allow path…")
             tree.cursor_line = line
             await _until(pilot, lambda a=a: _footer(app).get("a") == a)
             footer = _footer(app)
