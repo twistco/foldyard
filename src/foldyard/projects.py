@@ -341,6 +341,34 @@ def _adopted_where(pin: Path) -> tuple[str, str]:
     )
 
 
+def _kept_projects() -> set[str]:
+    """The projects of adoptions kept although their folder lost its `foldyard.toml` (see
+    :func:`_left_adoptions`): such a project drops out of the adopted checkouts, but its state
+    folder, `host.env` and all, is still its own. Named from the adopted snapshot as `_describe`
+    names a live one, else from the folder; a worktree's state is its main checkout's."""
+    from . import configpin
+
+    try:
+        pins = sorted(configpin._pin_root().iterdir())
+    except OSError:
+        return set()
+    names = set()
+    for pin in pins:
+        checkout, worktree = _adopted_where(pin)
+        if not checkout or worktree or not os.path.isdir(checkout):
+            continue
+        root = Path(checkout)
+        if (root / "foldyard.toml").is_file():
+            continue
+        toml = configpin.adopted_toml(root) or {}
+        with config.using(config.Config(repo_root=root, worktree="", toml=toml)):
+            try:
+                names.add(config.project())
+            except SystemExit:  # a name _safe_name refuses: claim the folder's, to be safe
+                names.add(root.name.lower())
+    return names
+
+
 def _unused_folders(claimed: set[str]) -> list[Leftover]:
     """Folders in ~/.foldyard that are neither foldyard's own nor the state folder of an adopted
     project: a project you stopped using (its `host.env` may still hold secrets), or something
@@ -360,10 +388,12 @@ def _unused_folders(claimed: set[str]) -> list[Leftover]:
         if entry.is_symlink() or not entry.is_dir():
             continue
         secrets = (entry / "host.env").is_file()
+        size, whole = _tree_size(entry)
         out.append(
             Leftover(
                 f"folder {_short(str(entry))}",
-                f"{_size(_tree_size(entry))}{', holds host.env' if secrets else ''}; "
+                f"{'' if whole else 'at least '}{_size(size)}"
+                f"{', holds host.env' if secrets else ''}; "
                 "no adopted project uses it",
                 kind="folder",
                 path=str(entry),
@@ -372,17 +402,26 @@ def _unused_folders(claimed: set[str]) -> list[Leftover]:
     return out
 
 
-def _tree_size(root: Path) -> int:
-    """Bytes a folder's files hold on disk, links not followed."""
-    total = 0
+# How many files `fy ls` sizes per left-over folder before it says "at least": a backup of many
+# small files would otherwise make a quick read-only verb slow.
+SIZE_WALK_FILES = 20_000
+
+
+def _tree_size(root: Path) -> tuple[int, bool]:
+    """Bytes a folder's files hold on disk, links not followed, and whether that is all of them
+    (the walk stops after :data:`SIZE_WALK_FILES` files)."""
+    total, seen = 0, 0
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
+            if seen >= SIZE_WALK_FILES:
+                return total, False
+            seen += 1
             try:
                 st = os.lstat(os.path.join(dirpath, name))
             except OSError:
                 continue
             total += getattr(st, "st_blocks", 0) * 512 or st.st_size
-    return total
+    return total, True
 
 
 def _base_vm(instances: dict[str, dict] | None) -> dict | None:
@@ -539,7 +578,8 @@ def collect(*, ask_children: bool = True) -> Listing:
     claimed = {p.vm.name for p in projects if p.vm.backend == "lima"}
     unresolved = [p.project for p in projects if p.vm.name == "?"]
     unclaimed = _unclaimed(instances, claimed, unresolved) if instances is not None else []
-    leftovers = unclaimed + _unused_folders({p.project for p in projects}) + _left_adoptions()
+    owners = {p.project for p in projects} | _kept_projects()
+    leftovers = unclaimed + _unused_folders(owners) + _left_adoptions()
     return Listing(projects, leftovers, _base_vm(instances), lima_unavailable=instances is None)
 
 
@@ -701,7 +741,7 @@ def prune(*, yes: bool = False, ask: Callable[[str], bool] | None = None) -> int
     if rest:
         print("Not removed by `fy prune` (yours to decide):")
         for lo in rest:
-            fix = f" — {lo.fix}" if lo.fix and lo.fix != "`fy prune`" else ""
+            fix = f" — {lo.fix}" if lo.fix else ""  # only a prunable one says `fy prune`
             print(f"  {lo.what}: {lo.why}{fix}")
         print("")
     if not doomed:

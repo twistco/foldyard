@@ -393,6 +393,44 @@ def test_a_state_folder_no_adopted_project_uses_is_left_over(host, pins):
     assert not any(lo.prunable for lo in folders.values())
 
 
+def test_a_kept_adoptions_state_folder_is_never_called_unused(host, pins, monkeypatch):
+    # A box can delete foldyard.toml, which drops its project from the adopted checkouts. The
+    # adoption is kept on purpose, and so is its state: listing `~/.foldyard/<project>/` (and its
+    # host.env) as unused would invite an `rm -rf` of a live project's credentials (the Claude
+    # review on #185). Its name comes from the adopted snapshot, else the folder's name.
+    state = host.tmp / "home" / ".foldyard"
+    for name in ("alpha", "beta", "emptied", "nas"):
+        (state / name).mkdir(parents=True)
+        (state / name / "host.env").write_text("TOKEN=x\n")
+    folders = {lo.what for lo in projects.collect().leftovers if lo.kind == "folder"}
+    assert "folder ~/.foldyard/emptied" not in folders  # no snapshot: the folder's name
+    assert "folder ~/.foldyard/nas" in folders
+
+    real = configpin.adopted_toml
+    emptied = host.tmp / "work" / "emptied"
+    monkeypatch.setattr(
+        configpin,
+        "adopted_toml",
+        lambda root: {"project": {"name": "nas"}} if Path(root) == emptied else real(root),
+    )
+    folders = {lo.what for lo in projects.collect().leftovers if lo.kind == "folder"}
+    assert "folder ~/.foldyard/nas" not in folders  # the name its adopted config declares
+
+
+def test_a_big_folder_is_sized_only_so_far(host, pins, monkeypatch):
+    # `fy ls` stays quick: a folder of many files (a backup) is walked up to a budget and its
+    # size said to be at least what was counted (the Claude review on #185).
+    monkeypatch.setattr(projects, "SIZE_WALK_FILES", 3)
+    big = host.tmp / "home" / ".foldyard" / "backup"
+    big.mkdir(parents=True)
+    for i in range(5):
+        (big / f"part-{i}").write_bytes(b"x" * 10)
+    size, whole = projects._tree_size(big)
+    assert not whole and size > 0
+    (folder,) = [lo for lo in projects.collect().leftovers if lo.what.endswith("/backup")]
+    assert folder.why.startswith("at least ")
+
+
 def test_no_state_folders_are_judged_under_a_relocated_state_dir(host, pins, monkeypatch):
     (host.tmp / "home" / ".foldyard" / "homelab").mkdir(parents=True)
     monkeypatch.setenv("FOLDYARD_STATE_DIR", str(host.tmp / "elsewhere"))
