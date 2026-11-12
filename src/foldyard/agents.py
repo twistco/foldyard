@@ -1011,7 +1011,7 @@ def _tmux_ok(b: Box) -> bool:
 
 def _recreate_hint() -> str:
     where = "on your computer, " if config.in_box() else ""
-    return f"{where}`fy box down && fy box up`"
+    return f"{where}`fy box recreate`"
 
 
 def _tmux_missing() -> None:

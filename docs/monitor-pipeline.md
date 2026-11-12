@@ -470,7 +470,7 @@ signed, so a copy that leaves your computer can still be checked (`fy monitor ch
 hypervisor that can't enforce read-only outside the guest — it says so and points at `--file`, which
 works as below; a `--file` in a tree the box can write (the checkout, the worktrees root, the
 from-box) gets a warning when it is added. A VM or box created before the to-box needs
-`fy machine stop && fy up` and then `fy box down && fy box up`.
+`fy machine stop && fy up` and then `fy box recreate`.
 
 The rest of this section is the sink itself, wherever it writes. The use that motivated it: an
 experiment in the box scores the monitor's events, so the box needs them in a file it can read —

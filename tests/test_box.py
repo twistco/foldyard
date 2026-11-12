@@ -618,7 +618,7 @@ def test_up_nags_when_the_running_box_predates_the_posture(fake, monkeypatch, ca
     fake["state"]["image_fingerprint"] = "expected-fingerprint"
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "[machine].runtime" in out and "gvisor" in out and "fy box down && fy box up" in out
+    assert "[machine].runtime" in out and "gvisor" in out and "fy box recreate" in out
 
 
 def test_up_no_runtime_nag_when_the_running_box_matches(fake, monkeypatch, capsys):
@@ -783,7 +783,7 @@ def test_running_box_without_its_packages_layer_is_drift(fake, monkeypatch, caps
     _with_packages(fake, monkeypatch)
     fake["state"].update(running=True, exists=True)  # box_fingerprint = the base's
     assert box.main("up") == 0
-    assert "fy box down && fy box up" in capsys.readouterr().out
+    assert "fy box recreate" in capsys.readouterr().out
     fake["state"]["box_fingerprint"] = _layer_fp(fake)
     assert box.main("up") == 0
     assert "older image definition" not in capsys.readouterr().out
@@ -989,7 +989,7 @@ def test_up_nags_when_running_box_uses_stale_image(fake, capsys):
     fake["state"].update(running=True, box_fingerprint="old-fingerprint")
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "older image definition" in out and "fy box down && fy box up" in out
+    assert "older image definition" in out and "fy box recreate" in out
 
 
 def test_up_nags_when_running_box_has_a_stale_proxy_port(fake, capsys):
@@ -1007,7 +1007,7 @@ def test_up_no_nag_when_running_box_port_matches(fake, capsys):
     fake["state"]["running"] = True
     fake["state"]["baked_proxy_port"] = "41000"  # matches the allocated band base
     assert box.main("up") == 0
-    assert "recreate" not in capsys.readouterr().out
+    assert "connection-refuse" not in capsys.readouterr().out  # the port nag, not the others
 
 
 def test_up_nags_when_a_running_boxs_proxy_port_moved_with_its_offset(
@@ -1069,7 +1069,7 @@ def test_up_nags_when_running_box_has_a_different_foldyard(fake, capsys, monkeyp
     assert box.main("up") == 0
     out = capsys.readouterr().out
     assert "0.2.1" in out and "0.3.0" in out
-    assert "fy box down && fy box up" in out
+    assert "fy box recreate" in out
 
 
 def test_up_asks_the_box_which_foldyard_it_runs(fake, monkeypatch):
@@ -1097,7 +1097,7 @@ def test_up_nags_when_running_box_has_no_working_foldyard(fake, capsys, monkeypa
     monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "no working foldyard" in out and "fy box down && fy box up" in out
+    assert "no working foldyard" in out and "fy box recreate" in out
 
 
 def test_up_no_nag_when_running_box_foldyard_matches(fake, capsys, monkeypatch):
@@ -1106,7 +1106,7 @@ def test_up_no_nag_when_running_box_foldyard_matches(fake, capsys, monkeypatch):
     fake["state"]["box_foldyard"] = "0.3.0"
     monkeypatch.setattr(foldyard, "__version__", "0.3.0", raising=False)
     assert box.main("up") == 0
-    assert "fy box down && fy box up" not in capsys.readouterr().out
+    assert "fy box recreate" not in capsys.readouterr().out
 
 
 def test_bootstrap_reinstalls_a_retained_foldyard_that_is_not_the_hosts(monkeypatch):
@@ -2315,6 +2315,317 @@ def test_down_noops_without_provisioning_when_machine_gone(fake, monkeypatch):
     assert not fake["mirror"].exists()
 
 
+# ── recreate ───────────────────────────────────────────────────────────────────────────
+
+
+def _running_box(fake, monkeypatch) -> None:
+    """A box that is up until something removes it (the fixture's state is otherwise fixed)."""
+    fake["state"].update(running=True, exists=True)
+    run = box.subprocess.run
+
+    def removing(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            fake["state"].update(running=False, exists=False)
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", removing)
+
+
+def test_recreate_removes_the_running_box_then_creates_it(fake, monkeypatch, capsys):
+    from foldyard import transcripts
+
+    _running_box(fake, monkeypatch)
+    synced: list = []
+    monkeypatch.setattr(transcripts, "sync_current", lambda env, **k: (synced.append(env), 0)[1])
+    assert box.main("recreate", ["--yes"]) == 0
+    calls = fake["calls"]
+    rm = calls.index(_find(calls, has=["rm", "-f", "tangible-podman-devbox"])[0])
+    run = calls.index(_find(calls, has=["run", "-d", "sleep"])[0])
+    assert rm < run
+    assert synced  # the transcripts promoted before the container went, as by `down`
+    out = capsys.readouterr().out
+    assert "creating it again" in out and "already up" not in out
+
+
+def test_recreate_without_a_box_just_creates_one(fake):
+    assert box.main("recreate") == 0
+    assert _find(fake["calls"], has=["run", "-d", "sleep"])
+
+
+def test_recreate_leaves_the_box_when_the_supervisor_isnt_ready(fake, monkeypatch):
+    # Everything that can refuse runs BEFORE the removal: a refused recreate is a running box.
+    _running_box(fake, monkeypatch)
+    fake["readiness"]["ok"] = False
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
+def test_recreate_keeps_the_box_when_its_agents_shouldnt_stop(fake, monkeypatch, capsys):
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_agents_may_stop", lambda *a: False)
+    assert box.main("recreate") == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "Aborted" in capsys.readouterr().out
+
+
+def test_recreate_passes_yes_to_the_agents_question(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    asked: list = []
+    monkeypatch.setattr(box, "_agents_may_stop", lambda *a: asked.append(a[-1]) or True)
+    assert box.main("recreate", ["--yes"]) == 0
+    assert asked == [["--yes"]]
+
+
+def test_recreate_keeps_the_box_when_its_image_wont_build(fake, monkeypatch, capsys):
+    # A changed box.Dockerfile is what recreate is run for, and its build is what a wall refuses:
+    # the build runs while the old box still serves, and a failed one leaves it serving.
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_fingerprint", lambda *a: "older")
+    monkeypatch.setattr(box, "_from_base_image", lambda *a: False)
+    monkeypatch.setattr(box, "_build_img", lambda *a: 7)
+    assert box.main("recreate", ["--yes"]) == 7
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "still running" in capsys.readouterr().out
+
+
+def test_recreate_keeps_the_box_when_its_packages_wont_install(fake, monkeypatch, capsys):
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_ensure_packages_layer", lambda engine, img, *a: (5, img))
+    assert box.main("recreate", ["--yes"]) == 5
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "still running" in capsys.readouterr().out
+
+
+def test_recreate_builds_before_it_removes(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    order: list = []
+    monkeypatch.setattr(box, "_fingerprint", lambda *a: "older")
+    monkeypatch.setattr(box, "_from_base_image", lambda *a: False)
+    monkeypatch.setattr(box, "_build_img", lambda *a: order.append("build") or 0)
+    run = box.subprocess.run
+
+    def recording(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            order.append("rm")
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", recording)
+    assert box.main("recreate", ["--yes"]) == 0
+    assert order[:2] == ["build", "rm"] and order.count("build") == 1
+
+
+def test_recreate_keeps_the_box_when_a_plugins_box_args_refuse(fake, monkeypatch, capsys):
+    # The plugins' box args can refuse (a SystemExit naming what's missing): after the build,
+    # before the create, and so before the old box goes.
+    _running_box(fake, monkeypatch)
+    real = box.registry()
+
+    class _Refusing:
+        def box_args(self, env):
+            raise SystemExit("✗ a plugin refuses")
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(box, "registry", lambda: _Refusing())
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
+def test_recreate_keeps_the_box_when_its_network_is_missing(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(box, "_has_compose", lambda: True)
+    monkeypatch.setattr(box.config, "external_network", lambda: False)
+    monkeypatch.setattr(box.stack, "network_exists", lambda *a: False)
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
+def test_recreate_keeps_the_box_when_foldyards_wheel_wont_build(fake, monkeypatch, capsys):
+    # A host editable install builds the wheel the new box installs foldyard from; built after
+    # the removal, a failure left a box with no `fy` and its old self gone (CodeRabbit on #181).
+    _running_box(fake, monkeypatch)
+    monkeypatch.setattr(
+        box,
+        "_foldyard_install_subst",
+        lambda c, h: {"fy_wheel": "", "fy_version": "", "fy_stage_failed": "1"},
+    )
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["rm", "-f"])
+    assert "still running" in capsys.readouterr().out
+
+
+def test_recreate_builds_foldyards_wheel_once(fake, monkeypatch):
+    _running_box(fake, monkeypatch)
+    built: list = []
+
+    def subst(c, h):
+        built.append(c)
+        return {"fy_wheel": "/w.whl", "fy_version": ""}
+
+    monkeypatch.setattr(box, "_foldyard_install_subst", subst)
+    assert box.main("recreate", ["--yes"]) == 0
+    assert len(built) == 1
+
+
+def test_recreate_keeps_the_box_when_the_gvisor_endpoint_refuses(fake, monkeypatch):
+    # Under gVisor the create goes through an ssh endpoint, which refuses with no ssh target.
+    _running_box(fake, monkeypatch)
+    _gvisor(fake, monkeypatch)
+
+    def no_target(*a, **k):
+        raise SystemExit("✗ needs ssh access to the VM")
+
+    monkeypatch.setattr(box.sandbox, "engine_env", no_target)
+    with pytest.raises(SystemExit):
+        box.main("recreate", ["--yes"])
+    assert not _find(fake["calls"], has=["rm", "-f"])
+
+
+def test_recreate_removes_the_old_box_right_before_the_new_one_is_created(
+    fake, monkeypatch, tmp_path
+):
+    _running_box(fake, monkeypatch)
+    (tmp_path / "from-box").mkdir()
+    monkeypatch.setattr(box.boxmounts, "from_box_dir", lambda: tmp_path / "from-box")
+    order: list = []
+    run = box.subprocess.run
+
+    def recording(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            order.append("rm")
+        elif cmd[1:3] == ["run", "-d"]:
+            order.append("create")
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", recording)
+    from foldyard import transcripts
+
+    monkeypatch.setattr(transcripts, "migrate_legacy", lambda *a, **k: order.append("migrate"))
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    real = box.registry()
+
+    class _Recording:
+        def box_args(self, env):
+            order.append("box args")
+            return real.box_args(env)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(box, "registry", lambda: _Recording())
+    assert box.main("recreate", ["--yes"]) == 0
+    # Everything that can refuse first; the legacy transcripts move only once the box that bound
+    # them is gone.
+    assert order == ["box args", "rm", "migrate", "create"]
+
+
+def test_recreate_refuses_to_create_through_a_link_planted_in_the_slot(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # Only the old box can plant it, after the slot was checked and before its own removal. The
+    # move after the removal is the check nothing can race: it refuses, and the create never binds
+    # through the link (CodeRabbit on #181 asked to carry on; that would bind where it points).
+    _running_box(fake, monkeypatch)
+    (tmp_path / "from-box").mkdir()
+    monkeypatch.setattr(box.boxmounts, "from_box_dir", lambda: tmp_path / "from-box")
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    from foldyard import transcripts
+
+    def planted(*a, **k):
+        raise OSError(40, "Too many levels of symbolic links", "slot")
+
+    monkeypatch.setattr(transcripts, "migrate_legacy", planted)
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["run", "-d"])
+    err = capsys.readouterr().err
+    assert "slot" in err and "fy box up" in err
+
+
+def test_recreate_checks_each_slot_again_after_the_removal_with_no_legacy_tree(
+    fake, monkeypatch, tmp_path, capsys
+):
+    # The old box runs until `_remove`, so it can swap its slot for a link after `box_args` made
+    # it. With no legacy transcripts there is nothing to move, and nothing looked again: the
+    # create bound the slot through the link (CodeRabbit on #181).
+    _running_box(fake, monkeypatch)
+    root = tmp_path / "from-box"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(box.boxmounts, "from_box_dir", lambda: root)
+    monkeypatch.setattr(box.machine, "from_box_mounted", lambda: True)
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    slot = root / box.boxmounts.claude_rel("")
+    real_remove = box._remove
+
+    def planting(*a, **k):  # the old box's last act, after the slot was checked
+        slot.rmdir()
+        slot.symlink_to(elsewhere)
+        return real_remove(*a, **k)
+
+    monkeypatch.setattr(box, "_remove", planting)
+    assert box.main("recreate", ["--yes"]) == 1
+    assert not _find(fake["calls"], has=["run", "-d"])
+    assert "fy box up" in capsys.readouterr().err
+
+
+def test_recreate_fails_when_the_old_box_wont_go(fake, monkeypatch, capsys):
+    # `rm -f` refused: the old box still runs, with its old env and mounts. Saying "removed" and
+    # then "already up" would be a recreate that did nothing and reported success.
+    fake["state"].update(running=True, exists=True)
+    run = box.subprocess.run
+
+    def refusing(cmd, **kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            run(cmd, **kw)
+            return subprocess.CompletedProcess(cmd, 125)
+        return run(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", refusing)
+    assert box.main("recreate", ["--yes"]) == 1
+    out = capsys.readouterr().out
+    assert "still running" in out and "removed" not in out and "already up" not in out
+    assert not _find(fake["calls"], has=["run", "-d", "sleep"])
+
+
+def test_down_says_so_when_the_box_wont_go(fake, monkeypatch, capsys):
+    fake["state"].update(running=True, exists=True)
+    run = box.subprocess.run
+    monkeypatch.setattr(
+        box.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            subprocess.CompletedProcess(cmd, 125) if cmd[1:3] == ["rm", "-f"] else run(cmd, **kw)
+        ),
+    )
+    assert box.main("down", ["--yes"]) == 1
+    assert "stopped" not in capsys.readouterr().out
+
+
+def test_recreate_refuses_in_the_box(fake, monkeypatch, capsys):
+    # It would remove the container running it, half-way, with nothing left to create it again.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert box.main("recreate") == 1
+    assert fake["calls"] == [] and fake["hosted"] == []
+    assert "from your computer" in capsys.readouterr().err
+
+
+def test_recreate_runs_preflight_first(fake, monkeypatch):
+    from foldyard import preflight
+
+    seen: list = []
+
+    def refused(context):
+        seen.append(context)
+        raise SystemExit(1)
+
+    monkeypatch.setattr(preflight, "check_or_abort", refused)
+    with pytest.raises(SystemExit):
+        box.main("recreate")
+    assert seen == ["fy box recreate"] and fake["calls"] == []
+
+
 def test_ps_noops_when_machine_gone(fake, monkeypatch):
     monkeypatch.setattr(box.stack, "engine_reachable", lambda *a, **k: False)
     assert box.main("ps") == 0
@@ -2670,7 +2981,7 @@ def test_up_nags_when_running_box_predates_a_declared_claude(fake, capsys, monke
     fake["state"]["running"] = True
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "[claude]" in out and "fy box down && fy box up" in out
+    assert "[claude]" in out and "fy box recreate" in out
 
 
 def test_up_no_claude_nag_when_the_box_was_created_with_it(fake, capsys, monkeypatch):
@@ -2689,7 +3000,7 @@ def test_up_nags_when_running_box_predates_a_declared_codex(fake, capsys, monkey
     fake["state"]["running"] = True
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "[codex]" in out and "fy box down && fy box up" in out
+    assert "[codex]" in out and "fy box recreate" in out
 
 
 def test_up_no_codex_nag_when_the_box_was_created_with_it(fake, capsys, monkeypatch):
@@ -2793,7 +3104,7 @@ def test_up_names_an_inject_row_added_after_the_box_was_created(
     assert box.main("up") == 0
     line = _drift_line(capsys.readouterr().out)
     assert "HAIKU_API_KEY: missing" in line
-    assert "fy box down && fy box up" in line
+    assert "fy box recreate" in line
     assert "dummy-x" not in line  # names, never a credential slot's value
 
 
@@ -2821,7 +3132,7 @@ def test_up_shows_the_timezone_it_had_and_the_one_it_would_get(fake, monkeypatch
     line = _drift_line(capsys.readouterr().out)
     assert "TZ: Europe/London → Asia/Tokyo" in line
     assert "your computer's clock settings" in line  # not "the config": nothing was adopted
-    assert "fy box down && fy box up" in line
+    assert "fy box recreate" in line
 
 
 def test_a_box_env_pin_of_the_timezone_is_config_not_your_computers_clock(
@@ -3289,7 +3600,7 @@ def test_up_nags_when_a_running_box_still_binds_into_the_checkout(fake, lima_dir
     fake["state"]["running"] = True
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "predates foldyard's to-box and from-box" in out and "fy box down && fy box up" in out
+    assert "predates foldyard's to-box and from-box" in out and "fy box recreate" in out
     assert "binds its transcripts into the checkout" in out
     fake["state"]["baked_env"]["FY_FROM_BOX"] = str(lima_dirs / "from-box")
     assert box.main("up") == 0
@@ -3518,7 +3829,7 @@ def test_up_already_up_names_worktrees_its_box_does_not_mask(
     assert box.main("up") == 0
     out = capsys.readouterr().out
     assert f"{wt_root}/late/data/.venv" in out and f"{wt_root}/a/" not in out
-    assert "fy box down && fy box up" in out
+    assert "fy box recreate" in out
 
 
 def test_up_already_up_in_a_box_tells_an_unregistered_checkout_from_a_late_one(
@@ -3549,7 +3860,7 @@ def test_up_already_up_says_when_its_own_dirs_are_not_shadowed(fake, monkeypatch
     _masked(fake, monkeypatch, mounts=_box_mounts(f"{main}/data/.venv", name="own"))
     assert box.main("up") == 0
     out = capsys.readouterr().out
-    assert "platform/node_modules" in out and "fy box down && fy box up" in out
+    assert "platform/node_modules" in out and "fy box recreate" in out
 
 
 def test_up_already_up_is_quiet_when_the_mounts_cannot_be_read(fake, monkeypatch, capsys):
@@ -3615,7 +3926,7 @@ def test_up_already_up_names_what_it_could_not_mask_and_why(
     assert "✓ masked" not in out  # 'late' is only half masked: no claim it is
     assert f"{wt_root}/late/platform/node_modules" in out
     assert f"{wt_root}/late/data/.venv" not in out
-    assert "not while it runs: a symlink on the path" in out and "fy box down && fy box up" in out
+    assert "not while it runs: a symlink on the path" in out and "fy box recreate" in out
 
 
 def test_up_already_up_falls_back_to_the_recreate_when_it_cannot_inject(
@@ -3627,7 +3938,7 @@ def test_up_already_up_falls_back_to_the_recreate_when_it_cannot_inject(
     assert box.main("up") == 0
     out = capsys.readouterr().out
     assert f"{wt_root}/late/data/.venv" in out and "no ssh route into the VM" in out
-    assert "fy box down && fy box up" in out
+    assert "fy box recreate" in out
 
 
 def test_mask_gaps_believes_the_kernel_over_the_engines_record(
@@ -3681,3 +3992,19 @@ def test_exec_from_inside_a_box_says_where_to_start_the_missing_box(fake, monkey
     assert box.main("exec", ["pnpm install"]) == 1
     err = capsys.readouterr().err
     assert "WORKTREE=a fy box up" in err and "on your computer" in err
+
+
+def test_box_restart_is_an_alias_of_recreate(monkeypatch):
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    seen: list = []
+    monkeypatch.setattr(config, "in_box", lambda: True)  # the root callback's host gates stand down
+    monkeypatch.setattr(box, "main", lambda cmd, args=None: seen.append((cmd, args)) or 0)
+    for verb in ("recreate", "restart"):
+        result = CliRunner().invoke(cli.app, ["box", verb, "--yes"])
+        assert result.exit_code == 0, result.output
+    assert seen == [("recreate", ["--yes"])] * 2
+    shown = CliRunner().invoke(cli.app, ["box", "--help"]).output
+    assert "recreate" in shown and "restart" not in shown

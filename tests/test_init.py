@@ -386,7 +386,7 @@ def test_step_two_recreates_the_box_because_an_agent_is_installed_at_create():
     # create-time, and the adopt prompt defaults to ignore. The sequence the quickstart teaches:
     header = init.render(init.InitOptions(name="x")).split("[project]", 1)[0]
     assert "+ `fy box up` again" not in header
-    for step in ("fy config adopt", "fy box down && fy box up", "fy mode claude=on"):
+    for step in ("fy config adopt", "fy box recreate", "fy mode claude=on"):
         assert step in header, f"step 2 no longer says `{step}`"
 
 
@@ -533,7 +533,7 @@ def test_with_only_strips_its_own_blocks_comment_level():
 def test_with_an_agent_step_two_no_longer_says_uncomment_and_recreate():
     header = init.render(_with("claude")).split("[project]", 1)[0]
     assert "Uncomment ONE agent" not in header
-    assert "fy box down && fy box up" not in header.split("#   3.", 1)[0]
+    assert "fy box recreate" not in header.split("#   3.", 1)[0]
     assert "fy mode claude=on" in header and "fy claude" in header
     both = init.render(_with("claude", "codex")).split("[project]", 1)[0]
     assert "fy mode claude=on" in both and "fy mode codex=on" in both

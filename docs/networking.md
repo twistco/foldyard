@@ -609,8 +609,8 @@ own HTTP client, or a program opening raw sockets.
   - Nothing was refused: the connection left the VM, so the trouble is at the far end (the service
     is down, or its login failed, an expired access grant, say). Read the client's own logs.
 - **The Network Log is empty.** The box may be missing the proxy variables or the CA — recreate it
-  once (`fy box down && fy box up`). The log only shows a request once it gets a response, so a
-  failing TLS handshake (CA not trusted) shows nothing.
+  once (`fy box recreate`). The log only shows a request once it gets a response, so a failing TLS
+  handshake (CA not trusted) shows nothing.
 - **Node fails with `ECONNREFUSED` against a raw IP address.** Its `fetch()` went direct instead of
   through the proxy, and the VM firewall refused it. The box sets `NODE_USE_ENV_PROXY=1`; a stack
   container has to set it itself ([Node and npm](#node-and-npm)).

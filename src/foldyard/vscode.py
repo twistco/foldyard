@@ -975,7 +975,7 @@ def code() -> int:
     if not box_mod.ensure_harden(engine, box, env):
         _err(f"✗ couldn't apply the in-box editor-attach hygiene to {box} (bash in the box failed)")
         _err("  — not attaching: the attach would forward your credentials into an unguarded box.")
-        _err("  `fy box shell` to look; `fy box down && fy box up` rebuilds it.")
+        _err("  `fy box shell` to look; `fy box recreate` rebuilds it.")
         return 1
     agent = _empty_agent(udd)
     if agent is None:

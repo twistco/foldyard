@@ -990,3 +990,12 @@ def test_lima_set_proxy_propagation_edits_the_stored_config(monkeypatch, on, val
 def test_backends_without_the_setting_report_none():
     assert mb.PodmanBackend().proxy_propagation("x") is None
     assert not mb.PodmanBackend().set_proxy_propagation("x", False)
+
+
+def test_lima_listing_tells_a_failed_list_from_no_vms(monkeypatch):
+    # `fy ls` must not read "limactl failed" as "every VM is gone" (#181 review).
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(0, ""))
+    assert mb.LimaBackend()._listing() == []
+    monkeypatch.setattr(mb, "_run", lambda cmd: _Proc(127, ""))
+    assert mb.LimaBackend()._listing() is None
+    assert mb.LimaBackend()._instances() == []

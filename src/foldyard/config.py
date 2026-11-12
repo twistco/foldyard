@@ -1302,7 +1302,7 @@ def machine_runtime() -> str:
     posture: ``machine ensure`` provisions it in the VM, and the box's own engine socket defaults
     to it, so the box cannot opt itself or a sibling out. Only the postures foldyard knows how to
     provision are accepted — never a runtime path or command from config (ADR-0023). Changing it
-    means recreating the box (``fy box down && fy box up``) and, on Lima, restarting the VM: its
+    means recreating the box (``fy box recreate``) and, on Lima, restarting the VM: its
     boot provisioning points ``machine.ENGINE_SOCK_IN_VM`` at the filtered socket.
     ``MACHINE_RUNTIME`` env wins."""
     raw = os.environ.get("MACHINE_RUNTIME")

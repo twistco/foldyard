@@ -163,7 +163,7 @@ def _warn_stale_runtime(engine: str, box: str, env: dict) -> None:
     want = wanted or "the VM engine's own runtime"
     print(
         f"⚠ dev box {box} runs under {have}, but [machine].runtime now asks for {want}. "
-        "The runtime is fixed at create: `fy box down && fy box up`."
+        "The runtime is fixed at create: `fy box recreate`."
     )
 
 
@@ -184,7 +184,7 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
         print(
             f"⚠ dev box {box} was built for proxy port {baked.strip()}, but this project's proxy "
             f"now serves :{current} (its port range moved). The box's egress — including keyless "
-            f"agent auth — will connection-refuse until you recreate it: `fy box down && fy box up`."
+            f"agent auth — will connection-refuse until you recreate it: `fy box recreate`."
         )
         return
     # The range held, but this worktree's offset moved: it had shared one with a sibling (their
@@ -196,7 +196,7 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
             f"⚠ dev box {box} was built for proxy port {was}, but this worktree's proxy now serves "
             f":{now} (its port offset moved: it had shared one with another worktree, or a pin "
             f"changed). The box's egress will connection-refuse until you recreate it: "
-            f"`fy box down && fy box up`."
+            f"`fy box recreate`."
         )
 
 
@@ -242,7 +242,7 @@ def _warn_stale_foldyard(engine: str, box: str, env: dict) -> None:
     print(
         f"⚠ dev box {box} has {was} installed, but your computer now runs foldyard {__version__}. The "
         "bootstrap that installs it runs only on a freshly created box, so `fy box up` alone "
-        "won't move it: `fy box down && fy box up`."
+        "won't move it: `fy box recreate`."
     )
 
 
@@ -259,7 +259,7 @@ def _warn_predates_box_dirs(engine: str, box: str, env: dict) -> None:
         f"⚠ dev box {box} predates foldyard's to-box and from-box: it has no "
         f"{boxmounts.TO_BOX_IN_BOX}"
         + (" and binds its transcripts into the checkout" if agents else "")
-        + ". Recreate it: `fy box down && fy box up`."
+        + ". Recreate it: `fy box recreate`."
     )
 
 
@@ -437,7 +437,7 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
         print(
             f"⚠ dev box {box} doesn't shadow {', '.join(own)} (declared in [box].shadow_volumes "
             "after it was created), so an install there lands on your computer's disk. "
-            "Recreate it: `fy box down && fy box up`."
+            "Recreate it: `fy box recreate`."
         )
     why = ""
     if others and not config.in_box():
@@ -453,7 +453,7 @@ def _warn_mask_gaps(engine: str, box: str, ctx) -> None:
             + (f" (not while it runs: {why})" if why else "")
             + ". An install there from this box lands on your computer's disk — run it in that "
             "checkout's own box (`WORKTREE=<name> fy box exec '<command>'`), or recreate this one "
-            "to mask them: `fy box down && fy box up`."
+            "to mask them: `fy box recreate`."
         )
     if unregistered:  # only ever in a box: on your computer the registry is the whole list
         print(
@@ -1225,7 +1225,7 @@ def _warn_env_drift(engine: str, box: str, ctx, quiet_plugins: Collection[str] =
         print(
             f"⚠ dev box {box}'s environment no longer matches {source} "
             f"({', '.join(map(str, drift))}). "
-            "A box's environment is fixed when it's created: `fy box down && fy box up`."
+            "A box's environment is fixed when it's created: `fy box recreate`."
         )
 
 
@@ -2050,12 +2050,15 @@ fy_doctor_report || true
 """
 
 
-def _bootstrap_script(checkout: str, here: str, env: dict) -> str:
+def _bootstrap_script(
+    checkout: str, here: str, env: dict, subst: dict[str, str] | None = None
+) -> str:
     """The full one-time box bootstrap: base scaffolding + the monitored install steps (core
     foldyard + Claude, then each enabled plugin's, then the consumer's ``[[box.tools]]`` and
     free-form ``[box].bootstrap``), then a failure summary, then the in-box `fy doctor` as a
     report. Each step is reported ✓/⏭/✗."""
-    subst = _foldyard_install_subst(checkout, here)
+    if subst is None:
+        subst = _foldyard_install_subst(checkout, here)
     steps: list[tuple[str, str, str]] = []
     if shim := _git_shim_step():  # first, so the rest of the bootstrap's git is already split
         steps.append(shim)
@@ -2222,7 +2225,13 @@ def _capture_secrets() -> None:
     )
 
 
-def _up(ctx, engine: str, box: str, net: str) -> int:
+def _up(
+    ctx, engine: str, box: str, net: str, *, recreate: bool = False, args: list[str] | None = None
+) -> int:
+    """`fy box up`, and with ``recreate`` `fy box recreate`: everything that can refuse runs
+    first (the gates, the captures, the supervisor's readiness, the image build, the plugins'
+    box args, the network check), and a running box is removed only right before its
+    replacement is created, so a restart that can't go ahead leaves it as it was."""
     env = ctx.env
     img = config.box_image()["tag"]
     main = ctx.main
@@ -2263,14 +2272,30 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
     expected_fingerprint = _box_image_fingerprint(main)
 
-    if _running(engine, box, env):
+    prepared = False
+    # A recreate of a running box: what `box down` does, but only once everything below that can
+    # still refuse has had its chance (the build a changed box.Dockerfile or [box].packages needs,
+    # which the egress wall can refuse; the plugins' box args; the network). The `if replacing:` block
+    # before the create removes it.
+    replacing = recreate and _running(engine, box, env)
+    if replacing:
+        if not _agents_may_stop(engine, box, env, args or []):
+            print("Aborted — the box is still running.")
+            return 1
+        rc, img = _prepare_image(engine, img, main, expected_fingerprint, env)
+        if rc != 0:
+            print(f"✗ The box image didn't build: dev box {box} is still running, as it was.")
+            return rc
+        prepared = True
+
+    if not replacing and _running(engine, box, env):
         _warn_stale_proxy_port(engine, box, env)  # a pre-band box strands on a dead proxy port
         _warn_stale_runtime(engine, box, env)  # [machine].runtime is create-time too
         _, run_fingerprint = _box_run_image(engine, img, expected_fingerprint, env)
         if _fingerprint(engine, "container", box, env) != run_fingerprint:
             print(
                 f"⚠ dev box {box} was built from an older image definition. Recreate it to pick "
-                "up the current tools: `fy box down && fy box up`."
+                "up the current tools: `fy box recreate`."
             )
         # Config drift a running box CANNOT pick up live: the Claude install, volumes and dummy
         # credential are all create-time (claude.py box_args/box_bootstrap), so a box created
@@ -2281,7 +2306,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
             quiet.add("claude")
             print(
                 "⚠ [claude] is declared but this box was created without it (no Claude install, "
-                "volumes or dummy credential). Recreate to add them: `fy box down && fy box up`."
+                "volumes or dummy credential). Recreate to add them: `fy box recreate`."
             )
         # Same drift, same signal, for codex: a box created WITH [codex] bakes CODEX_HOME. Without
         # this row the failure is SILENT and reads as an auth bug — the box has no codex, `fy codex`
@@ -2290,7 +2315,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
             quiet.add("codex")
             print(
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
-                "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
+                "~/.codex volume or keyless seed). Recreate to add them: `fy box recreate`."
             )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
         _warn_mask_gaps(engine, box, ctx)  # and its mounts: shadows + other checkouts' masks
@@ -2299,23 +2324,18 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
             print(
                 "⚠ couldn't (re)apply the in-box editor-attach hygiene (bash in the box failed) — "
-                "`fy verify` in the box says what is exposed; `fy box down && fy box up` rebuilds it."
+                "`fy verify` in the box says what is exposed; `fy box recreate` rebuilds it."
             )
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
-    if _exists(engine, box, env):
+    if not replacing and _exists(engine, box, env):
         subprocess.run(
             [engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-    if _fingerprint(engine, "image", img, env) != expected_fingerprint and not _from_base_image(
-        engine, img, expected_fingerprint, env
-    ):
-        rc = _build_img(engine, main, env)
+    if not prepared:
+        rc, img = _prepare_image(engine, img, main, expected_fingerprint, env)
         if rc != 0:
             return rc
-    rc, img = _ensure_packages_layer(engine, img, expected_fingerprint, env)
-    if rc != 0:
-        return rc
 
     # Where the agents' transcripts bind out to on your computer: the checkout's own slot in the
     # from-box (ADR-0033) where the VM shares one — out of the checkout, so `git clean` and grep
@@ -2341,28 +2361,6 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     env["FY_CLAUDE_HOME"] = claude_in_box
     env["FY_TRANSCRIPTS"] = transcripts_dir
     env["FY_CODEX_TRANSCRIPTS"] = os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_out
-    if from_box:
-        from . import transcripts
-
-        # The legacy bind-out is dead from here (its bind is create-time, the old box is gone):
-        # moved into the slot each agent now binds, or archived and kept where it binds elsewhere.
-        def _slot(enabled: bool, override: str, out: str) -> Path | None:
-            return Path(out) if enabled and not os.environ.get(override) else None
-
-        transcripts.migrate_legacy(
-            Path(checkout),
-            here,
-            claude_to=_slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out),
-            codex_to=_slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out),
-        )
-    print(f"▶ starting long-lived dev box {box} (network {net})…")
-    if config.claude_enabled():
-        print(
-            f"  claude home → {claude_in_box} (in box); transcripts → {transcripts_dir} (on your computer; survives nuke)"
-        )
-    if config.codex_enabled():
-        print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on your computer; survives nuke)")
-
     # Mount the MAIN repo root (a worktree's `.git` points into it) + the WORKTREES ROOT, so every
     # box sees every sibling checkout: an agent can read/edit a worktree copy (the machine already
     # mounts this root — it was only the container that couldn't see it), and `worktree init_config`
@@ -2479,6 +2477,61 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
             + ", ".join(unmaskable)
         )
 
+    # Both resolved before the old box goes, since either can refuse: the gVisor create endpoint
+    # (no ssh target), and the wheel the new box installs foldyard from (a host editable install
+    # builds one).
+    create_env = sandbox.engine_env(env, machine.BACKEND, machine.MACHINE) if gvisor else env
+    fy_subst = _foldyard_install_subst(checkout, here)
+    if replacing and fy_subst.get("fy_stage_failed"):
+        print(
+            f"✗ Couldn't build foldyard for the new box (above); dev box {box} is still running, "
+            "as it was."
+        )
+        return 1
+    if replacing:
+        # Everything above that could refuse has passed: the old box goes now, and only now.
+        if _remove(engine, box, env) is None:
+            print(
+                f"✗ Couldn't remove dev box {box}: it's still running, as it was "
+                f"(`{engine} rm -f {box}` refused)."
+            )
+            return 1
+        print(f"✓ dev box {box} removed (login/CLI volumes kept) — creating it again…")
+    if from_box:
+        from . import transcripts
+
+        # The legacy bind-out is dead from here (its bind is create-time, the old box is gone):
+        # moved into the slot each agent now binds, or archived and kept where it binds elsewhere.
+        def _slot(enabled: bool, override: str, out: str) -> Path | None:
+            return Path(out) if enabled and not os.environ.get(override) else None
+
+        claude_slot = _slot(config.claude_enabled(), "DEVBOX_TRANSCRIPTS", claude_out)
+        codex_slot = _slot(config.codex_enabled(), "DEVBOX_CODEX_TRANSCRIPTS", codex_out)
+        try:
+            # Each slot this box binds, checked again now that no box can race it: the old one
+            # ran until `_remove`, after `box_args` had made the slots, so it could have swapped
+            # one for a link, whether or not there is a legacy tree to move.
+            for slot in (claude_slot, codex_slot):
+                if slot is not None:
+                    boxmounts.ensure_bind_source(slot)
+            transcripts.migrate_legacy(
+                Path(checkout), here, claude_to=claude_slot, codex_to=codex_slot
+            )
+        except OSError as e:
+            # A link in the slot, planted by the old box after the slot was checked and before it
+            # was removed: nothing can race this check, and the create would bind through it.
+            gone = " The old box has been removed." if replacing else ""
+            _err(f"✗ Not creating dev box {box}: its from-box slot refused a write ({e}).{gone}")
+            _err("  Look at what is in that slot on your computer, remove it, then `fy box up`.")
+            return 1
+    print(f"▶ starting long-lived dev box {box} (network {net})…")
+    if config.claude_enabled():
+        print(
+            f"  claude home → {claude_in_box} (in box); transcripts → {transcripts_dir} (on your computer; survives nuke)"
+        )
+    if config.codex_enabled():
+        print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on your computer; survives nuke)")
+
     run = [
         engine,
         "run",
@@ -2512,7 +2565,6 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # ONLY the create goes through the runsc socket (the runtime is decided by the SOCKET a
     # container is created through, never by a flag the box could omit); probes, exec and the
     # build stay on the stack env — both services share the VM's one libpod store.
-    create_env = sandbox.engine_env(env, machine.BACKEND, machine.MACHINE) if gvisor else env
     if subprocess.run(run, env=create_env, stdout=subprocess.DEVNULL).returncode != 0:
         _err("✗ dev box create failed")
         return 1
@@ -2532,7 +2584,8 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     # wheel from an editable host install; else a PyPI version pin) so `fy` works even in a repo
     # that doesn't vendor foldyard (e.g. homelab) — never assumes an editable checkout on the mount.
     subprocess.run(
-        [engine, "exec", box, "bash", "-lc", _bootstrap_script(checkout, here, env)], env=env
+        [engine, "exec", box, "bash", "-lc", _bootstrap_script(checkout, here, env, fy_subst)],
+        env=env,
     )
     if not os.environ.get("DEVBOX_SKIP_DEPS") and config.box_warmup():
         print("▶ warming deps in background (log: /tmp/devbox-deps.log inside the box)…")
@@ -2546,10 +2599,16 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
 
 
 def main(cmd: str = "shell", args: list[str] | None = None) -> int:
-    if cmd == "up":  # fail fast on unmet host prereqs before _ctx() creates the machine (host-only)
+    if cmd == "recreate" and config.in_box():
+        # From in here the removal would end this very process half-way, with nothing left to
+        # create the box again.
+        _err("✗ `fy box recreate` removes the box it runs in — run it from your computer.")
+        return 1
+    # Fail fast on unmet host prereqs before _ctx() creates the machine.
+    if cmd in ("up", "recreate"):
         from . import preflight
 
-        preflight.check_or_abort("fy box up")
+        preflight.check_or_abort(f"fy box {cmd}")
         # After the gate (it reads the adopted config), before _ctx() can start the VM: a
         # `[box].env` that sets a name foldyard owns is refused before anything is started,
         # removed or built.
@@ -2558,7 +2617,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         except SystemExit as e:
             _err(str(e))
             return 1
-    if cmd in ("up", "build"):  # a malformed [box].packages, before anything is built
+    if cmd in ("up", "recreate", "build"):  # a malformed [box].packages, before anything is built
         try:
             config.box_packages()
         except SystemExit as e:
@@ -2602,8 +2661,8 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if rc == 0:
             print(f"✓ built {tag}. Start the box: fy box up")
         return rc
-    if cmd == "up":
-        return _up(ctx, engine, box, net)
+    if cmd in ("up", "recreate"):
+        return _up(ctx, engine, box, net, recreate=cmd == "recreate", args=args or [])
     if cmd == "shell":
         if not _running(engine, box, env):
             _err(f"dev box {box} not running — {_start_it(ctx.worktree)}")
@@ -2622,15 +2681,11 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         if _running(engine, box, env) and not _agents_may_stop(engine, box, env, args or []):
             print("Aborted — the box is still running.")
             return 1
-        # Belt-and-suspenders: promote this box's transcripts to the durable host store before
-        # we drop the container. The bound-out dir survives `box down`, but archiving here keeps
-        # the host's `claude --resume` in sync. Best-effort — never block a teardown. Lazy import
-        # avoids a stack↔transcripts cycle.
-        from . import transcripts
-
-        transcripts.sync_current(env)
-        if _exists(engine, box, env):
-            subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL)
+        removed = _remove(engine, box, env)
+        if removed is None:
+            print(f"✗ Couldn't remove dev box {box}: `{engine} rm -f {box}` refused.")
+            return 1
+        if removed:
             print(f"✓ dev box {box} stopped (login/CLI volumes kept).")
         else:
             print(f"(no dev box {box})")
@@ -2652,8 +2707,40 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
             ],
             env=env,
         ).returncode
-    _err("usage: foldyard box {build|up|shell|exec|down|ps}")
+    _err("usage: foldyard box {build|up|recreate|shell|exec|down|ps}")
     return 2
+
+
+def _prepare_image(
+    engine: str, img: str, main: Path, expected_fingerprint: str, env: dict
+) -> tuple[int, str]:
+    """The image a create runs: built (or re-tagged from the base VM's) when its definition
+    changed, then `[box].packages` layered on. Returns the build's exit code and that image."""
+    if _fingerprint(engine, "image", img, env) != expected_fingerprint and not _from_base_image(
+        engine, img, expected_fingerprint, env
+    ):
+        rc = _build_img(engine, main, env)
+        if rc != 0:
+            return rc, img
+    return _ensure_packages_layer(engine, img, expected_fingerprint, env)
+
+
+def _remove(engine: str, box: str, env: dict) -> bool | None:
+    """Remove the box's container (its login/CLI volumes stay); False when there was none, None
+    when the engine refused (the box is still there).
+
+    Belt-and-suspenders: promote this box's transcripts to the durable host store before we drop
+    the container. The bound-out dir survives the removal, but archiving here keeps the host's
+    `claude --resume` in sync. Best-effort — never block a teardown. Lazy import avoids a
+    stack↔transcripts cycle."""
+    from . import transcripts
+
+    transcripts.sync_current(env)
+    if not _exists(engine, box, env):
+        return False
+    if subprocess.run([engine, "rm", "-f", box], env=env, stdout=subprocess.DEVNULL).returncode:
+        return None
+    return True
 
 
 def _agents_may_stop(engine: str, box: str, env: dict, args: list[str]) -> bool:

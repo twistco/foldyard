@@ -240,16 +240,18 @@ class NewWorktreeCard(ListItem):
 
 class WorkspaceList(ListView):
     """The left column. ↑/↓ are native (cursor); → hands off to the active panel.
-    When a real workspace is highlighted, b/c/d/s act on it (open browser / open Code / toggle
-    its dev box / toggle the Podman machine); x removes a worktree (not main). Workspace actions
-    are hidden on the ＋ new-worktree row (which only takes enter), and x is also hidden on
-    main. The stop directions of d and s confirm first (see DevModeTui.toggle_devbox/_machine)."""
+    When a real workspace is highlighted, b/c/d/r/s act on it (open browser / open Code / toggle
+    its dev box / recreate a running one / toggle the Podman machine); x removes a worktree (not
+    main). Workspace actions are hidden on the ＋ new-worktree row (which only takes enter), r
+    where no box is running, and x on main. The stop directions of d and s, and r, confirm first
+    (see DevModeTui.toggle_devbox/recreate_devbox/_machine)."""
 
     BINDINGS = [
         Binding("right", "to_panel", "panel ▶"),
         Binding("b", "open_browser", "open browser"),
         Binding("c", "open_code", "open Code"),
         Binding("d", "toggle_devbox", "start/stop devbox"),
+        Binding("r", "recreate_devbox", "recreate devbox"),
         Binding("s", "toggle_machine", "start/stop machine"),
         Binding("x", "remove_worktree", "remove worktree"),
     ]
@@ -275,6 +277,9 @@ class WorkspaceList(ListView):
             return False
         if action == "remove_worktree" and not self._on_real_worktree():
             return False
+        if action == "recreate_devbox":  # a recreate, so only of a box that is there
+            item = self.highlighted_child
+            return isinstance(item, WorkspaceCard) and bool(item.ws.get("devbox"))
         return True
 
     def action_to_panel(self) -> None:
@@ -294,6 +299,11 @@ class WorkspaceList(ListView):
         item = self.highlighted_child
         if isinstance(item, WorkspaceCard):
             cast("DevModeTui", self.app).toggle_devbox(item.ws)
+
+    def action_recreate_devbox(self) -> None:
+        item = self.highlighted_child
+        if isinstance(item, WorkspaceCard):
+            cast("DevModeTui", self.app).recreate_devbox(item.ws)
 
     def action_toggle_machine(self) -> None:
         cast("DevModeTui", self.app).toggle_machine()
@@ -900,6 +910,17 @@ class DevModeTui(App):
         if not ws["devbox"]:
             self._start_devbox(ws)
             return
+        self._confirm_devbox(ws, "down")
+
+    def recreate_devbox(self, ws: dict) -> None:
+        """Recreate the highlighted workspace's running box (`fy box recreate`) — after the same
+        confirmation as a stop, since it ends what runs inside it just the same."""
+        self.workers.cancel_group(self, "devbox-confirm")
+        self._confirm_devbox(ws, "recreate")
+
+    def _confirm_devbox(self, ws: dict, verb: str) -> None:
+        """Look up the box's live agent sessions, then ask before `verb` (down/recreate) ends
+        them."""
 
         def work() -> None:
             # Off the UI thread: the lookup is a `podman exec` into the box (up to its timeout).
@@ -917,38 +938,56 @@ class DevModeTui(App):
                 # Checked HERE, on the UI thread, where a newer `d` is handled: a check on the
                 # worker thread could pass just before that press cancelled this worker.
                 if not worker.is_cancelled:
-                    self._confirm_stop_devbox(ws, live)
+                    self._confirm_stop_devbox(ws, live, verb)
 
             self.call_from_thread(show)
 
         self.run_worker(work, thread=True, exclusive=True, group="devbox-confirm")
 
-    def _confirm_stop_devbox(self, ws: dict, live: list) -> None:
-        """The stop-box confirmation, naming the agent sessions still running in it."""
+    def _confirm_stop_devbox(self, ws: dict, live: list, verb: str = "down") -> None:
+        """The stop- (or recreate-) box confirmation, naming the agent sessions still running in
+        it. A confirmed recreate goes the start's way, through the adopt question."""
         named = (
             f"\n\n[b]{len(live)} agent session(s) still running[/b] (`fy agent ls`): "
             + ", ".join(escape(s.name) for s in live)
             if live
             else ""
         )
+        box = f"[dim]{escape(ws['project'])}-devbox[/dim]"
+        killed = (
+            "Anything running inside it — including a live `fy claude` / `fy codex` agent "
+            "session — is killed; the stack's other containers keep running and login/CLI "
+            "volumes are kept."
+        )
+        if verb == "recreate":
+            self.push_screen(
+                ConfirmScreen(
+                    title=f"Recreate the dev box for [b]{escape(ws['name'])}[/b]?",
+                    body=(
+                        f"Removes {box} and creates it again (`fy box recreate`), which picks up "
+                        f"what is fixed at creation: env, mounts, foldyard, the image. {killed}"
+                        f"{named}"
+                    ),
+                    confirm_label="Recreate box",
+                ),
+                lambda ok: self._start_devbox(ws, "recreate") if ok else None,
+            )
+            return
         self.push_screen(
             ConfirmScreen(
                 title=f"Stop the dev box for [b]{escape(ws['name'])}[/b]?",
                 body=(
-                    f"Stops + removes [dim]{escape(ws['project'])}-devbox[/dim]. Anything "
-                    "running inside it — including a live `fy claude` / `fy codex` agent "
-                    "session — is killed; the stack's other containers keep running and "
-                    "login/CLI volumes are kept."
+                    f"Stops + removes {box}. {killed}"
                     f"{named}\n\nStart it again with [b]d[/b] (or `fy box up`)."
                 ),
                 confirm_label="Stop box",
             ),
-            lambda ok: self._run_devbox(ws, up=False) if ok else None,
+            lambda ok: self._run_devbox(ws, "down") if ok else None,
         )
 
-    def _start_devbox(self, ws: dict) -> None:
-        """Bring a box up, resolving the adopt gate FIRST when this checkout has never been
-        adopted (or has drifted since).
+    def _start_devbox(self, ws: dict, verb: str = "up") -> None:
+        """Bring a box up (or, with ``verb="recreate"``, recreate it), resolving the adopt gate
+        FIRST when this checkout has never been adopted (or has drifted since).
 
         `fy box up` inherits `configpin.gate`, which on a terminal asks whether to adopt. The TUI
         has no terminal to answer on, so the gate now refuses instead of hanging — correct, but it
@@ -963,10 +1002,10 @@ class DevModeTui(App):
             drift = configpin.inspect(devmode.worktree_config("" if name == "main" else name))
         except Exception as e:  # never let the gate's own failure block starting a box
             self.notify(f"couldn't check the adopted config ({e})", severity="warning")
-            self._run_devbox(ws, up=True)
+            self._run_devbox(ws, verb)
             return
         if drift.pinned_exists and not drift.changed:
-            self._run_devbox(ws, up=True)
+            self._run_devbox(ws, verb)
             return
         try:
             # What this branch changes about the config the host already runs for main — the only
@@ -992,17 +1031,17 @@ class DevModeTui(App):
                 )
             except configpin.ReviewStale as e:
                 self.notify(f"{e} — asking again", severity="warning")
-                self._start_devbox(ws)
+                self._start_devbox(ws, verb)
                 return
             except Exception as e:
                 self.notify(f"adopt failed: {e}", severity="error")
                 return
             self.notify(f"✓ adopted config for '{ws['name']}'")
-            self._run_devbox(ws, up=True)
+            self._run_devbox(ws, verb)
 
         self.push_screen(AdoptConfigScreen(drift, baseline), _after)
 
-    def _run_devbox(self, ws: dict, up: bool) -> None:
+    def _run_devbox(self, ws: dict, verb: str) -> None:
         name = ws["name"]
         # One in-flight box operation per workspace: marked HERE on the UI thread (both `d`
         # presses land there, so the check-then-add can't race) and cleared in the worker's
@@ -1011,18 +1050,23 @@ class DevModeTui(App):
             self.notify(f"[{name}] a dev-box operation is already running…", severity="warning")
             return
         self._devbox_busy.add(name)
-        self.notify(f"{'starting' if up else 'stopping'} dev box for '{name}'…")
+        doing, done, run = {
+            "up": ("starting", "up", devmode.box_up),
+            "down": ("stopping", "stopped", devmode.box_down),
+            "recreate": ("recreating", "recreated", devmode.box_recreate),
+        }[verb]
+        self.notify(f"{doing} dev box for '{name}'…")
 
         def work() -> None:
             try:
-                rc, out = (devmode.box_up if up else devmode.box_down)(name)
+                rc, out = run(name)
                 tail = out.splitlines()[-1] if out else ""
                 self.call_from_thread(
                     self.notify,
                     (
-                        f"✓ [{name}] dev box {'up' if up else 'stopped'}"
+                        f"✓ [{name}] dev box {done}"
                         if rc == 0
-                        else f"✗ [{name}] box {'up' if up else 'down'} failed: {tail}"
+                        else f"✗ [{name}] box {verb} failed: {tail}"
                     ),
                     severity=("information" if rc == 0 else "error"),
                 )
@@ -1077,7 +1121,7 @@ class DevModeTui(App):
         self._ws_hint_for = name
         if hint and name != "main":  # the recreate, aimed at THIS worktree's box
             wt = f"WORKTREE={name} "
-            hint = hint.replace("fy box down && fy box up", f"{wt}fy box down && {wt}fy box up")
+            hint = hint.replace("fy box recreate", f"{wt}fy box recreate")
         hints.first(Static).update(
             f"[b]{name}[/b]: "
             + (hint or ("devbox env matches the config" if devbox else "no devbox running"))

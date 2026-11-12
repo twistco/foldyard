@@ -266,7 +266,7 @@ def _step_two(agents: list[str]) -> list[str]:
     if not agents:
         return [
             "#   2. Uncomment ONE agent ([claude] or [codex]), `fy config adopt`, then",
-            "#      `fy box down && fy box up` — the agent is installed when the box is CREATED, so a",
+            "#      `fy box recreate` — the agent is installed when the box is CREATED, so a",
             "#      running box won't pick it up (with `keyless`, then `fy mode claude=on` or",
             "#      `codex=on`). Now an AI agent runs INSIDE the safe sandbox (it offers that agent's",
             "#      install hosts the same way). Use it to work out the rest of this config with you.",
@@ -312,7 +312,7 @@ def render(opts: InitOptions) -> str:
         "#      one reviewed batch ([proxy] below).",
         *_step_two([a for a in ("claude", "codex") if a in opts.blocks]),
         "#   3. Uncomment a stack + the features at the bottom as the project needs them. Box",
-        "#      settings are create-time too: adopt, then `fy box down && fy box up`.",
+        "#      settings are create-time too: adopt, then `fy box recreate`.",
         "# Resolution everywhere: explicit env var wins → foldyard.local.toml (gitignored,",
         "# per-developer overrides) → this file → built-in default. Keep what's PERSONAL out of",
         "# here: which agent subscription you pay for, how big your VM is, a pinned worktree port.",
@@ -462,7 +462,7 @@ def render(opts: InitOptions) -> str:
         "# shows what it was last read to grant), or ALL of yours for `github-user`, writes",
         "# included. The box holds a dummy GH_TOKEN for the proxy to replace; the packaged box",
         '# has no `gh`, so add `packages = ["gh"]` under [box]. A new row takes',
-        "# `fy box down && fy box up`.",
+        "# `fy box recreate`.",
         "# [[inject]]",
         '# switch = "github"                 # the App\'s PEM → host.env FY_INJECT_GITHUB (prompted)',
         '# kind = "github-app"',

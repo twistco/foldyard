@@ -3027,7 +3027,7 @@ def test_codex_keyless_api_key_axis_rule_and_dummy(monkeypatch):
     assert p.derive_env({"codex": "on"}) == {"CODEX_INJECT": "on"}
     # The dummy is AMBIENT with the proxy substrate, NOT gated on the rung: `fy mode codex=on` is a
     # host-side flip, and a box-side artifact keyed to the rung could only be built at create time —
-    # which is what made the flip silently require `fy box down && fy box up`.
+    # which is what made the flip silently require `fy box recreate`.
     assert not any("OPENAI_API_KEY" in a for a in p.box_args(dict(_BOX_ENV)))  # no proxy substrate
     assert "OPENAI_API_KEY=sk-dummy" in p.box_args({**_BOX_ENV, "FY_PROXY": "1"})  # rung OFF
     assert "OPENAI_API_KEY=sk-dummy" in p.box_args(

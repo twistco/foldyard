@@ -162,7 +162,7 @@ def test_box_env_hint_is_box_ups_comparison(monkeypatch):
 def test_box_env_hint_says_the_recreate_not_box_up(monkeypatch):
     # `fy box up` on a running box only warns — the fix for create-time env is a new box.
     hint, _ = _hint_for(monkeypatch, ["X: missing"])
-    assert hint and hint.endswith("apply with: fy box down && fy box up")
+    assert hint and hint.endswith("apply with: fy box recreate")
 
 
 def test_box_env_hint_is_silent_when_the_box_matches_or_cannot_be_read(monkeypatch):
@@ -738,7 +738,7 @@ def _two_workspaces_feat_box_up():
     return ws
 
 
-_STALE = "⚠ dev box env out of date (X: missing) — apply with: fy box down && fy box up"
+_STALE = "⚠ dev box env out of date (X: missing) — apply with: fy box recreate"
 
 
 async def test_the_box_env_hint_never_holds_the_ui_thread(monkeypatch):
@@ -788,7 +788,7 @@ async def test_the_box_env_hint_aims_the_recreate_at_the_worktrees_box(monkeypat
         await pilot.pause()
         text = _text(app.query_one("#ws-hint", tui.Static))
     assert "proj-feat" in asked
-    assert "WORKTREE=feat fy box down && WORKTREE=feat fy box up" in text
+    assert "WORKTREE=feat fy box recreate" in text
 
 
 async def test_devbox_toggle_starts_without_confirmation_when_down(monkeypatch):
@@ -872,6 +872,37 @@ async def test_devbox_stop_asks_for_confirmation_then_runs(monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert downs == ["feat"] and ups == []
+
+
+async def test_devbox_recreate_confirms_then_recreates_only_a_running_box(monkeypatch):
+    # `r` is a recreate: offered where a box runs (feat), not where none does (main), and it
+    # asks first — what runs inside is ended just as by a stop.
+    recreates, ups, downs = [], [], []
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _CleanDrift())
+    monkeypatch.setattr(devmode, "box_recreate", lambda name: recreates.append(name) or (0, ""))
+    monkeypatch.setattr(devmode, "box_up", lambda name: ups.append(name) or (0, ""))
+    monkeypatch.setattr(devmode, "box_down", lambda name: downs.append(name) or (0, ""))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 0
+        await pilot.pause()
+        assert lv.check_action("recreate_devbox", ()) is False  # main: no box to recreate
+        lv.index = 1
+        await pilot.pause()
+        assert lv.check_action("recreate_devbox", ()) is True
+        await pilot.press("r")
+        await app.workers.wait_for_complete()  # the live-agent lookup runs on a worker
+        await pilot.pause()
+        assert isinstance(app.screen, tui.ConfirmScreen)
+        assert "Recreate the dev box" in str(app.screen.query_one("#cf-title", tui.Static).render())
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert recreates == ["feat"] and ups == [] and downs == []
 
 
 async def test_devbox_stop_cancel_does_nothing_and_never_hits_the_mode_handler(monkeypatch):

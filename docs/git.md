@@ -239,8 +239,7 @@ the worktree is kept.
   another git first on PATH or the install failed, and none of the above protects you. A new box
   runs this check once at the end of `fy box up`.
 - **`git shim hooks`** (in the box) — the hooks the shim uses to check branch moves are installed,
-  and only root can change them. The fix for either row: `fy box down && fy box up` on your
-  computer.
+  and only root can change them. The fix for either row: `fy box recreate` on your computer.
 - **`shared git config`** (both sides) — `.git/config` still has git's own keys and a remote. A
   config file emptied by a write race fails here, with the keys to restore; no remote is a warning,
   since `fy verify` then can't prove the push refusal.

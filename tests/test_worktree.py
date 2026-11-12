@@ -338,7 +338,7 @@ def test_add_names_running_boxes_that_do_not_mask_the_new_worktree(fake_main, mo
     out = capsys.readouterr().out
     # Both running boxes predate it, so neither can mask it — whatever their mounts say.
     assert "proj-devbox, proj-other-devbox" in out and "x-devbox" not in out
-    assert "WORKTREE=feat fy box up" in out and "fy box down && fy box up" in out
+    assert "WORKTREE=feat fy box up" in out and "fy box recreate" in out
     assert not [c for c in calls if c[1] == "inspect"]
     assert not [c for c in calls if c[1] in ("rm", "run", "stop")]  # never recreates a box
 
