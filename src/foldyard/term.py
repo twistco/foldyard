@@ -138,11 +138,13 @@ def stamp(iso: str | None, now: datetime | None = None) -> str:
         return ""
     try:
         when = datetime.fromisoformat(iso)
-    except ValueError:
-        return iso[11:19]
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    local = when.astimezone(now.tzinfo) if now is not None else when.astimezone()
-    today = (now or datetime.now(local.tzinfo)).astimezone(local.tzinfo).date()
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        local = when.astimezone(now.tzinfo) if now is not None else when.astimezone()
+    except (ValueError, OverflowError, TypeError):  # a host-written log, but never crash a panel
+        return iso[11:19] if isinstance(iso, str) else ""
+    # Today from the clock, never through ``local.tzinfo``: that is the offset the EVENT had, and
+    # across a DST change it would put "now" an hour off — on yesterday, around midnight.
+    today = now.date() if now is not None else datetime.now().date()
     fmt = "%H:%M:%S" if local.date() == today else "%Y-%m-%d %H:%M:%S"
     return local.strftime(fmt)

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import io
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -144,3 +144,40 @@ def test_stamp_reads_a_zoneless_stamp_as_utc():
 def test_stamp_never_raises_on_a_bad_row(raw, shown):
     # Log rows are box-influenced: a ts that doesn't parse keeps the old slice, never raises.
     assert term.stamp(raw, now=_LONDON_SUMMER) == shown
+
+
+@pytest.mark.parametrize("raw", [123, "0001-01-01T00:00:00+00:00"])
+def test_stamp_never_raises_on_a_row_that_parses_but_cant_be_shown(raw):
+    # A number where the ts should be, or a stamp at the edge of datetime's range (west of UTC it
+    # overflows), is still a blank or the old slice — never an exception out of the panel.
+    west = datetime(2026, 7, 1, 12, 0, tzinfo=timezone(timedelta(hours=-5)))
+    assert term.stamp(raw, now=west) in ("", "00:00:00")
+
+
+@pytest.fixture
+def _london(monkeypatch):
+    """The process's local zone is Europe/London (rules, not a fixed offset), and the clock reads
+    23:30 UTC on 2026-03-29: 00:30 BST on the 30th, the first night after the clocks went forward."""
+    import time
+
+    monkeypatch.setenv("TZ", "Europe/London")
+    time.tzset()
+    at = datetime(2026, 3, 29, 23, 30, tzinfo=UTC)
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return at.astimezone(tz) if tz else at.astimezone().replace(tzinfo=None)
+
+    monkeypatch.setattr(term, "datetime", _Clock)
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.usefixtures("_london")
+def test_stamp_takes_today_from_the_clock_not_the_events_offset():
+    # 00:30 UTC on the 29th was 00:30 GMT, before the change: yesterday, so dated. Read through
+    # that event's own +00:00, "now" would be 23:30 on the 29th — the event's day, so no date.
+    assert term.stamp("2026-03-29T00:30:00+00:00") == "2026-03-29 00:30:00"
+    assert term.stamp("2026-03-29T23:15:00+00:00") == "00:15:00"  # 00:15 BST on the 30th: today

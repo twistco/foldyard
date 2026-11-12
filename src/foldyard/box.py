@@ -2018,7 +2018,9 @@ def _git_hooks_script(checkout: str, hooks: str) -> str:
 
     Two ``gitdir:`` entries because the pattern with a trailing slash matches what is INSIDE a
     directory, not the directory: ``<common>`` itself is the main checkout's git dir, and each
-    worktree's is under ``<common>/worktrees/``. A relative ``core.hooksPath`` is resolved from
+    worktree's is under ``<common>/worktrees/``. git reads both as glob patterns, so the path's
+    ``[`` ``]`` ``*`` ``?`` and backslash are escaped first: a checkout at ``/work/app[1]``
+    matches itself, never ``/work/app1``. A relative ``core.hooksPath`` is resolved from
     the top of whichever worktree runs the hook, so each runs its own checked-out copy.
 
     Idempotent (each ``git config`` replaces its value), so ``fy box up`` re-applies it to a box
@@ -2030,10 +2032,13 @@ def _git_hooks_script(checkout: str, hooks: str) -> str:
     return (
         "(\n"
         f"  c=$(git -C {co} rev-parse --path-format=absolute --git-common-dir) || exit 1\n"
+        # The escape in bash itself (backslash first), so the step needs nothing beyond git.
+        r"  g=${c//\\/\\\\}; g=${g//\[/\\[}; g=${g//\]/\\]}; g=${g//\*/\\*}; g=${g//\?/\\?}"
+        "\n"
         f'  f="{_GIT_HOOKS_INCLUDE}"\n'
         f'  git config --file "$f" core.hooksPath {want} || exit 1\n'
-        '  git config --global "includeIf.gitdir:$c.path" "$f" || exit 1\n'
-        '  git config --global "includeIf.gitdir:$c/worktrees/.path" "$f" || exit 1\n'
+        '  git config --global "includeIf.gitdir:$g.path" "$f" || exit 1\n'
+        '  git config --global "includeIf.gitdir:$g/worktrees/.path" "$f" || exit 1\n'
         f'  [ "$(git -C {co} config --get core.hooksPath)" = {want} ] && exit 0\n'
         f"  printf '%s\\n' {clash} >&2\n"
         "  exit 3\n"
@@ -2054,11 +2059,18 @@ def _git_hooks_step(checkout: str) -> tuple[str, str, str] | None:
 def ensure_git_hooks(engine: str, box: str, env: dict, checkout: str) -> str | None:
     """(Re)apply ``[box].git_hooks`` in a running box, as :func:`ensure_harden` does the editor
     hygiene: a box created before the setting gets it at its next ``fy box up``, no recreate.
-    Returns why it failed, or None when it applied — or when the setting is off, which leaves a
-    box's earlier setting as it is. The reason is foldyard's own text, chosen by exit status: the
-    box's output never reaches your terminal."""
+    With the setting off it removes :data:`_GIT_HOOKS_INCLUDE`, so a box that had it goes back to
+    git's default without a recreate (the ``includeIf`` entries stay, naming a file git skips when
+    it's missing). Returns why it failed, or None when it applied. The reason is foldyard's own
+    text, chosen by exit status: the box's output never reaches your terminal."""
     hooks = config.box_git_hooks()
     if not hooks:
+        subprocess.run(
+            [engine, "exec", box, "bash", "-lc", f'rm -f "{_GIT_HOOKS_INCLUDE}"'],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         return None
     proc = subprocess.run(
         [engine, "exec", box, "bash", "-lc", _git_hooks_script(checkout, hooks)],
@@ -2693,6 +2705,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         # removed or built.
         try:
             config.box_env()
+            config.box_git_hooks()  # read again at bootstrap, after the old box is gone
         except SystemExit as e:
             _err(str(e))
             return 1

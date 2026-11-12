@@ -1118,6 +1118,38 @@ async def test_plugin_panel_is_rendered_navigated_and_focused(monkeypatch):
         assert _fid(app) == "demo-table"
 
 
+async def test_a_table_panel_redraws_a_row_that_changed_in_place(monkeypatch):
+    # Same row count, new content (a stamp gains its date at midnight): redrawn. Unchanged rows
+    # are left alone, so an idle tick keeps the cursor.
+    rows = [("a", "23:59:00"), ("b", "1")]
+
+    class _Changing(_PanelPlugin):
+        def tui_panels(self):
+            return [
+                plugins.TuiPanel(
+                    id="demo",
+                    title="Demo Panel",
+                    columns=("k", "v"),
+                    refresh=lambda: plugins.PanelData("the summary", list(rows)),
+                )
+            ]
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_Changing()))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        table = app.query_one("#demo-table", tui.DataTable)
+        app.refresh_panels()
+        assert table.get_row_at(0) == ["a", "23:59:00"]
+        table.move_cursor(row=1)
+        app.refresh_panels()
+        assert table.cursor_row == 1  # nothing changed: not redrawn
+        rows[0] = ("a", "2026-11-11 23:59:00")
+        app.refresh_panels()
+        assert table.row_count == 2
+        assert table.get_row_at(0) == ["a", "2026-11-11 23:59:00"]
+
+
 class _TreePanelPlugin(plugins.Plugin):
     """A plugin contributing a TREE-kind panel — proves the TUI renders grouped, collapsible
     panels generically (the Network Log is one). The refresh is swappable so a test can change the

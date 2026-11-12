@@ -8,4 +8,5 @@ bump: minor
   only. Other repos in the box keep their own hooks. Git on your computer never sees the setting,
   since the box can rewrite those hooks. Before this, getting the same result took a long
   `[box].bootstrap` line that only worked on newly created boxes. `fy box up` now applies the
-  setting to a box that's already running too. See `fy docs git`.
+  setting to a box that's already running too, and clearing it takes it off again. See
+  `fy docs git`.

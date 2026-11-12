@@ -709,6 +709,8 @@ class DevModeTui(App):
         # Tree-panel guard: panel-id → the PanelTree last rendered, so a tree is touched only when
         # its data changed, and relabelled in place while its groups' order holds.
         self._tree_data: dict[str, PanelTree] = {}
+        # Its table-panel twin: panel-id → the rows last rendered, so an idle tick keeps the cursor.
+        self._table_rows: dict[str, list[tuple[str, ...]]] = {}
         self.refresh_workspaces()
         self._select_launch_workspace()
         self.refresh_mode()
@@ -1710,8 +1712,11 @@ class DevModeTui(App):
                 self.query_one(f"#{panel.id}-summary", Static).update(data.summary)
             except NoMatches:
                 continue
-            if table.row_count == len(data.rows):
+            # The rows themselves, not their count: a row can change in place (a stamp gains its
+            # date at midnight, a capped log slides along) with the count the same.
+            if self._table_rows.get(panel.id) == data.rows:
                 continue
+            self._table_rows[panel.id] = list(data.rows)
             table.clear()
             for row in data.rows:
                 table.add_row(*row)

@@ -1066,9 +1066,9 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   such as `".githooks"`. It is set in the box's own git config, for this checkout and its worktrees
   only: other repos in the box keep their own hooks, and git on your computer runs none of it,
   because a box can rewrite these files ([git](./git.md#hooks-that-run-only-in-the-box)).
-  `fy box up` sets it on a box that's already running too, so no recreate. If the repo's
-  `.git/config` sets another `core.hooksPath`, that wins, and the box says so. Default: `""` (git's
-  own `.git/hooks`).
+  `fy box up` sets it on a box that's already running too, and takes it off again once you clear it,
+  so no recreate. If the repo's `.git/config` sets another `core.hooksPath`, that wins, and the box
+  says so. Default: `""` (git's own `.git/hooks`).
 
 - **`clean_docker_config`** — point `DOCKER_CONFIG` at a clean foldyard-owned dir instead of
   `~/.docker`, whose editor-injected credential helper fails as root and breaks even anonymous

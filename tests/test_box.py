@@ -4078,7 +4078,9 @@ def test_bootstrap_sets_the_hooks_dir_only_when_asked(monkeypatch):
 
 @pytest.mark.spawns("bash")  # the real script under bash and git, against a throwaway HOME
 def test_git_hooks_script_scopes_the_hooks_to_this_checkout_and_its_worktrees(tmp_path):
-    repo, other, wt = tmp_path / "repo", tmp_path / "other", tmp_path / "wt"
+    # `repo[1]` is a glob for `repo1` as git reads a gitdir: pattern: the escape keeps the hooks
+    # on the checkout, and off the other repo the bare pattern would match instead.
+    repo, other, wt = tmp_path / "repo[1]", tmp_path / "repo1", tmp_path / "wt"
     for r in (repo, other):
         subprocess.run(["git", "init", "-q", str(r)], check=True)
     env = {
@@ -4133,7 +4135,43 @@ def test_ensure_git_hooks_reapplies_in_a_running_box(monkeypatch, rc, why):
         assert got is not None and why in got
 
 
-def test_ensure_git_hooks_leaves_the_box_alone_when_unset(monkeypatch):
-    monkeypatch.setattr(box.subprocess, "run", lambda *a, **k: pytest.fail("ran"))
+def test_ensure_git_hooks_takes_the_hooks_off_when_unset(monkeypatch):
+    # Cleared after a box had it: foldyard's include file goes, so git there is back to its own
+    # .git/hooks without a recreate. Only that file, and nothing the box says is acted on.
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(box.subprocess, "run", run)
     monkeypatch.setattr(box.config, "box_git_hooks", lambda: "")
     assert box.ensure_git_hooks("podman", "fy-box", {}, "/repo") is None
+    assert calls == [
+        ["podman", "exec", "fy-box", "bash", "-lc", f'rm -f "{box._GIT_HOOKS_INCLUDE}"']
+    ]
+
+
+@pytest.mark.spawns("bash")
+def test_clearing_git_hooks_puts_git_back_on_its_own_hooks(tmp_path):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (tmp_path / "home").mkdir()
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    env["GIT_CONFIG_GLOBAL"] = str(tmp_path / "gitconfig")
+    git = functools.partial(subprocess.run, env=env, capture_output=True, text=True)
+    assert git(["bash", "-c", box._git_hooks_script(str(repo), ".githooks")]).returncode == 0
+    include = tmp_path / "home" / box._GIT_HOOKS_INCLUDE.removeprefix("$HOME/")
+    include.unlink()  # what the unset path's `rm -f` does (rm isn't on the suite's PATH)
+    got = git(["git", "-C", str(repo), "config", "--get", "core.hooksPath"])
+    assert got.returncode == 1 and got.stdout == ""  # unset, and the include left is no error
+
+
+@pytest.mark.parametrize("cmd", ["up", "recreate"])
+def test_a_bad_git_hooks_is_refused_before_the_old_box_goes(fake, monkeypatch, capsys, cmd):
+    # The bootstrap reads it after `_up` has removed the old box and created the new one: refused
+    # only there, the new box would be left without any of its setup.
+    monkeypatch.setattr(box.config, "_box_table", lambda: {"git_hooks": "../elsewhere"})
+    assert box.main(cmd) == 1
+    assert fake["calls"] == []
+    assert "[box].git_hooks" in capsys.readouterr().err

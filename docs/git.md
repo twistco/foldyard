@@ -158,7 +158,8 @@ and doesn't conflict; a different value in `.git/config` wins, and `fy box up` s
 
 Lefthook installs into `.git/hooks` by default, which git on your computer runs as well. It doesn't
 need this setting. In the box, foldyard runs every repo hook with `LEFTHOOK_NO_AUTO_INSTALL=1`, so a
-lefthook newer than 2.2.2 doesn't re-sync its hooks from inside one.
+lefthook release that has the variable (evilmartians/lefthook#1592, merged after 2.2.2 and not yet
+released) doesn't re-sync its hooks from inside one.
 
 Filter drivers can't be switched off like that, and a checkout runs them: `.git/config` can name a
 command for each file `.gitattributes` routes through it (Git LFS's smudge filter is one; a box

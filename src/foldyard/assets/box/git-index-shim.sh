@@ -364,7 +364,7 @@ fy_tx_finish() { # $1 = committed | aborted
 
 # The repo has its own `$hook` to hand this to — never our own directory (that is "none": handing
 # a hook to ourselves re-execs this script forever).
-# It runs with LEFTHOOK_NO_AUTO_INSTALL=1: a lefthook past 2.2.2 (evilmartians/lefthook#1586) then
+# It runs with LEFTHOOK_NO_AUTO_INSTALL=1: a lefthook that has it (evilmartians/lefthook#1592) then
 # skips its hook sync inside our command's hooks, while the operator's own `lefthook run` still
 # syncs. An older lefthook ignores it, which is what fy_hide_override below is for.
 fy_repo_hook() { [ -n "$1" ] && ! [ "$1" -ef "$fy_hooks_dir" ] && [ -x "$1/$hook" ]; }
