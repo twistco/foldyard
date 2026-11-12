@@ -465,7 +465,8 @@ def test_bounded_returns_while_a_grandchild_holds_stdin_unread(monkeypatch, tmp_
     fifo = tmp_path / "hold"
     os.mkfifo(fifo)
     held = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
-    script = 'exec 3<"$1"; (read -r x <&3) >&- 2>&- & exec 3<&-; exit 0'
+    # `<&4`: sh points a background job's stdin at /dev/null unless it is redirected explicitly.
+    script = 'exec 3<"$1" 4<&0; (read -r x <&3) <&4 >&- 2>&- & exec 3<&- 4<&-; exit 0'
     result: list = []
     runner = threading.Thread(
         target=lambda: result.append(
