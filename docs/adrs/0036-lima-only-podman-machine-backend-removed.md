@@ -51,8 +51,10 @@ value `lima`, so a config that names it needs no edit.
   missing one now has one wording, not two.
 - **The `[machine].backend` key has no choice left in it.** Keeping it valid costs one function;
   dropping it would break every config `fy init` wrote.
-- **The doc trail for podman machine is history.** ADR-0001, 0010, 0011 and 0017 describe a world
-  with two backends; their text stands as written, and this ADR is the pointer.
+- **The doc trail for podman machine is history.** ADR-0001, 0010 and 0011 describe a world with two
+  backends; their text stands as written, and this ADR is the pointer. ADR-0017 (the nested-virt
+  rig's prerequisites) and ADR-0033 (its podman carve-outs) carry amendment notes, since they
+  described what to do, not only what was.
 
 ## Rejected alternatives
 

@@ -12,7 +12,10 @@
   2026-11-04:** the "operationally fragile" scoping and the deferral of a full nested e2e no longer
   hold on Apple silicon. With `kvm-arm.vgic_v3_*_trap=1` on the L1 kernel, the Linux host tier ran
   in a nested Lima VM, with the Lima VM as the L1 rather than a container playing the host. Without
-  those arguments, no L2 boots on the software measured (docs/nested-virt.md, Rig 2).
+  those arguments, no L2 boots on the software measured (docs/nested-virt.md, Rig 2). **Amended
+  2026-11-12:** `podman machine` is no longer a foldyard backend
+  ([ADR-0036](./0036-lima-only-podman-machine-backend-removed.md)), so nothing here needs to
+  exercise it, and the rig's L1 is a Lima VM.
 - **Sources:** DEVELOPMENT.md (test tiers, nested-virt architecture, confirmations),
   docs/history/nested-podman-in-devbox.md, docs/history/lima-network-forcing-spike.md
 
@@ -63,6 +66,10 @@ a *container*, not a second VM — and keep CI on containers, with no KVM job.**
   the claim about what you get by default is stale. Lima's `vz` driver has since turned out to
   support `nestedVirtualization` too, so the L1 need not be a podman machine at all — see
   docs/nested-virt.md. Neither changes this ADR's decision.)*
+
+  *(Correction, 2026-11-12: with podman machine gone (ADR-0036), the podman and libkrun-provider
+  prerequisites go with it. What remains is M3+ and macOS 15+, with the L1 a Lima VM on `vz` with
+  `.nestedVirtualization = true`; docs/nested-virt.md, Rig 2, has the recipe.)*
 
 - **Scope the rig to what it's good for.** Confirmed: `/dev/kvm` passthrough + `KVM_CREATE_VM`
   (2026-06-14); the full example dogfood — `foldyard up` building and serving the example stack —

@@ -5,7 +5,11 @@
   where they differ: the names are `to-box/` and `from-box/`; a running VM with a stale mount set is
   refused; transcripts get one release of dual reading; the to-box's first tenant is
   `fy monitor hook add NAME --to-box`; and on the podman backend nothing about the VM's mounts
-  changes. Built for 0.6.1.
+  changes. Built for 0.6.1. **Amended 2026-11-12:** the podman backend is gone
+  ([ADR-0036](./0036-lima-only-podman-machine-backend-removed.md)), so every carve-out for it below
+  (no to-box or from-box there, no stale-mount refusal, a migration of a box recreate alone) no
+  longer applies: every VM gets both directories, and `boxmounts.enabled()` is gone with it. The
+  podman rows of the read-only table stay as the record of why.
 - **Sources:** the current mount set (`machine.py`, `machine_backend.py`, `box.py`, `verify.py` as
   cited below); the transcript bind-out (`transcripts.py`, `plugins/claude.py`, `plugins/codex.py`);
   the guest monitor's hooks (`monitorhooks.py`) and the stopgap file sink being built on the

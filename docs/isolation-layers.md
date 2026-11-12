@@ -130,6 +130,15 @@ Linux the shape is (a). The (b) column stays as the record of what it traded awa
 macOS/arm64 binary. So Lima on Linux buys the boundary, the mount and the firewalls, with QEMU as
 the knowingly accepted weak link — not uniformity with macOS.
 
+**Worth watching: libkrun on Linux under Lima.** Lima's `krunkit` driver
+([lima-vm/lima#4137](https://github.com/lima-vm/lima/pull/4137), Lima 2.0) is built for macOS/arm64
+only, though libkrun itself runs on Linux with KVM. A Linux libkrun driver, in Lima or as an
+external driver plugin, would replace QEMU's device model with libkrun's much smaller one and keep
+everything that comes from Lima: the repo-only mount and both firewalls. That is the one change that
+would harden this tier at the machine layer, the trade the retired `native` + krun shape (column b)
+couldn't make. As of 2026-11-12 there is none; until then the levers here are the host firewall and
+gVisor, below.
+
 **The mount is 9p, and can't be pinned to virtiofs yet.** Lima's QEMU driver defaults `mountType` to
 9p, which is slower on the build path and the more escape-prone of the two. But under Lima 2.2.0's
 rootless `virtiofsd` 1.14, every file create on a virtiofs mount fails with `EINVAL` (Fedora and

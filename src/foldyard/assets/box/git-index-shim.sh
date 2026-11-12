@@ -77,14 +77,14 @@ fy_common() { # $1 = the absolute git dir → its common dir (a linked worktree'
     printf '%s' "$common"
 }
 
-# Over virtiofs this kernel caches a name's lookup, and host git writes HEAD, refs, packed-refs
-# and config by lock→rename: after a HOST replace the name still resolves to the replaced file —
-# absent — until the entry times out (~5 s on podman machine's libkrun, up to ~1 s on Lima;
-# measured, ADR-0021). Git reads an absent loose ref as "fall back to packed-refs, else unborn",
-# so in that window a box `git commit` parented on an old commit or made a ROOT commit, moved the
-# branch there — its under-lock check reads the same stale name — and left every host commit
-# since reachable only from the reflog. A create-style lookup always asks the server again, and
-# link(2) does that lookup on its target before anything else can fail: `ln -dT / <name>`
+# Over virtiofs this kernel caches a name's lookup, and host git writes HEAD, refs, packed-refs and
+# config by lock→rename: after a HOST replace the name still resolves to the replaced file — absent
+# — until the entry times out (up to ~1 s on Lima's vz; ~5 s measured on libkrun, which Lima's
+# krunkit also uses; ADR-0021). Git reads an absent loose ref as "fall back to packed-refs, else
+# unborn", so in that window a box `git commit` parented on an old commit or made a ROOT commit,
+# moved the branch there — its under-lock check reads the same stale name — and left every host
+# commit since reachable only from the reflog. A create-style lookup always asks the server again,
+# and link(2) does that lookup on its target before anything else can fail: `ln -dT / <name>`
 # refreshes the entry, then fails EEXIST (or EXDEV, or EPERM — a directory is never linked), and
 # creates nothing. What remains is the host replacing a name DURING the command: milliseconds.
 fy_refresh() { # $1 = the absolute git dir
@@ -732,9 +732,10 @@ fy_heal() {
 #
 # Offers are always NEW names (index.fy-proposed.<head>.<base>.<ff|carry>, index.fy-record.<head>,
 # index.fy-refused.<rec>.<head>.<base>), written in this kernel and renamed into place: a name the
-# HOST replaces reads as missing from here for up to ~1 s over virtiofs (~5 s on podman machine's
-# libkrun; measured, ADR-0021), so nothing here re-reads a file the host rewrites except
-# index.fy-head — re-asked before each read (a stale "none" sent the sealed heal to the fallback). Decisions mirror the box's own heal above:
+# HOST replaces reads as missing from here for up to ~1 s over vz's virtiofs (~5 s measured on
+# libkrun's, which Lima's krunkit also uses; ADR-0021), so nothing here re-reads a file the host
+# rewrites except index.fy-head — re-asked before each read (a stale "none" sent the sealed heal
+# to the fallback). Decisions mirror the box's own heal above:
 # already matching → record; pure staleness (the old sync point, or a past HEAD from the reflog) →
 # the new HEAD's tree; staged host work disjoint from the move → carried forward; overlapping →
 # refused, for the host to report.
@@ -875,12 +876,12 @@ fy_shared_sync() {
 # Bootstrap: a MISSING index file reads as empty — every tracked file would show as a staged
 # deletion (the exact scare this shim exists to prevent). Seed from the shared index (keeps stat
 # cache + staged state). Host git REPLACES that file, and over virtiofs a replaced name reads as
-# missing from here for up to ~1 s on Lima, ~5 s on podman machine's libkrun (ADR-0021's
-# visibility record) — so a copy that finds nothing is retried for ~6 s, and if the shared index
-# never shows, HEAD's tree seeds it: clean, never empty. Only an unborn repo has nothing to copy
-# (empty is then correct, so it doesn't wait) — and an unresolvable HEAD alone doesn't say unborn:
-# a host commit replaces the branch ref in the same window as the index. The reflog is appended
-# in place, never replaced, so one with entries says HEAD has had a commit.
+# missing from here for up to ~1 s on Lima's vz, ~5 s on libkrun, which Lima's krunkit also uses
+# (ADR-0021's visibility record) — so a copy that finds nothing is retried for ~6 s, and if the
+# shared index never shows, HEAD's tree seeds it: clean, never empty. Only an unborn repo has
+# nothing to copy (empty is then correct, so it doesn't wait) — and an unresolvable HEAD alone
+# doesn't say unborn: a host commit replaces the branch ref in the same window as the index. The
+# reflog is appended in place, never replaced, so one with entries says HEAD has had a commit.
 fy_seed() {
     local tries=60 seed="$ix.seed.$$"
     while ((tries--)); do
