@@ -10,10 +10,6 @@
   `worktree remove`.
 - **Amended 2026-09-18:** `.git/config` added to the shared-file residuals below — foldyard itself
   was its most frequent writer (issue #6).
-- **Amended 2026-11-12:** podman machine is gone
-  ([ADR-0036](./0036-lima-only-podman-machine-backend-removed.md)), but the ~5 s visibility margin
-  measured on its libkrun virtio-fs stays: Lima's `krunkit` driver is libkrun virtio-fs too, and
-  hasn't been measured. Lima's `vz` measures ~1 s. Narrow the margin only after krunkit is.
 - **Amended 2026-09-24:** the "podman/lima on macOS" scope below is now every host. The one-kernel
   `native` backend was retired ([ADR-0027](./0027-always-a-vm-native-backend-retired.md)), and Linux
   and WSL2 hosts run the same Lima VM (validated in CI; the repo is shared over 9p there rather than
@@ -34,6 +30,10 @@
   now checked under git's own ref lock, and the shared index's heal is sealed to the box's ref move
   (Consequences, "Ref moves are checked under git's ref lock" and "The shared index's heal"; the
   live record is the §9 diary behind this amendment).
+- **Amended 2026-11-12:** podman machine is gone
+  ([ADR-0036](./0036-lima-only-podman-machine-backend-removed.md)), but the ~5 s visibility margin
+  measured on its libkrun virtio-fs stays: Lima's `krunkit` driver is libkrun virtio-fs too, and
+  hasn't been measured. Lima's `vz` measures ~1 s. Narrow the margin only after krunkit is.
 
 ## Context
 
