@@ -1150,6 +1150,45 @@ async def test_a_table_panel_redraws_a_row_that_changed_in_place(monkeypatch):
         assert table.get_row_at(0) == ["a", "2026-11-11 23:59:00"]
 
 
+async def test_a_redrawn_table_keeps_the_readers_cursor_and_scroll(monkeypatch):
+    # A capped log (the GCP Tokens panel holds 200) redraws on every new entry with the count the
+    # same: someone reading far down stays there, not sent back to the top each time.
+    rows = [(f"r{i}", str(i)) for i in range(200)]
+
+    class _Long(_PanelPlugin):
+        def tui_panels(self):
+            return [
+                plugins.TuiPanel(
+                    id="demo",
+                    title="Demo Panel",
+                    columns=("k", "v"),
+                    refresh=lambda: plugins.PanelData("the summary", list(rows)),
+                )
+            ]
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_Long()))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        await pilot.press("right")  # onto the panel, so the table is laid out
+        await pilot.pause()
+        table = app.query_one("#demo-table", tui.DataTable)
+        table.move_cursor(row=120)
+        # Scrolled on its own, so the cursor sits mid-view: a cursor scrolled back into view lands
+        # elsewhere, and only the restored scroll matches.
+        table.scroll_to(y=110, animate=False)
+        await pilot.pause()
+        top = table.scroll_y
+        assert top == 110
+        rows.insert(0, ("new", "x"))
+        rows.pop()
+        app.refresh_panels()
+        await pilot.pause()
+        assert table.get_row_at(0) == ["new", "x"]
+        assert table.cursor_row == 120
+        assert table.scroll_y == top
+
+
 class _TreePanelPlugin(plugins.Plugin):
     """A plugin contributing a TREE-kind panel — proves the TUI renders grouped, collapsible
     panels generically (the Network Log is one). The refresh is swappable so a test can change the

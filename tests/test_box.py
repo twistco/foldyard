@@ -4135,18 +4135,21 @@ def test_ensure_git_hooks_reapplies_in_a_running_box(monkeypatch, rc, why):
         assert got is not None and why in got
 
 
-def test_ensure_git_hooks_takes_the_hooks_off_when_unset(monkeypatch):
+@pytest.mark.parametrize(("rc", "why"), [(0, None), (1, "may still run hooks")])
+def test_ensure_git_hooks_takes_the_hooks_off_when_unset(monkeypatch, rc, why):
     # Cleared after a box had it: foldyard's include file goes, so git there is back to its own
-    # .git/hooks without a recreate. Only that file, and nothing the box says is acted on.
+    # .git/hooks without a recreate. Only that file, and nothing the box says is acted on — a
+    # removal that failed is said, in foldyard's words, rather than passed off as done.
     calls = []
 
     def run(cmd, **kw):
         calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 1)
+        return subprocess.CompletedProcess(cmd, rc)
 
     monkeypatch.setattr(box.subprocess, "run", run)
     monkeypatch.setattr(box.config, "box_git_hooks", lambda: "")
-    assert box.ensure_git_hooks("podman", "fy-box", {}, "/repo") is None
+    got = box.ensure_git_hooks("podman", "fy-box", {}, "/repo")
+    assert got is None if why is None else (got is not None and why in got)
     assert calls == [
         ["podman", "exec", "fy-box", "bash", "-lc", f'rm -f "{box._GIT_HOOKS_INCLUDE}"']
     ]

@@ -521,6 +521,9 @@ class DevModeTui(App):
     .panel-summary { margin: 0 1; height: auto; }
     /* Tree-kind plugin panels (the Network Log groups requests by host) fill the pane + scroll. */
     Tree { height: 1fr; }
+    /* Table-kind ones too: left at DataTable's own `height: auto` a long log (GCP Tokens holds
+       200 rows) grows past the screen, where the pane clips it and nothing scrolls. */
+    .panel-table { height: 1fr; }
     /* The Network Log splits: the request log on top, the wall-management pane below (grants +
        pending `[proxy] recommend` offers). The id selector out-specifies the generic Tree rule. */
     #network-tree { height: 3fr; }
@@ -654,7 +657,9 @@ class DevModeTui(App):
                             tree.show_root = False
                             yield tree
                         else:
-                            yield DataTable(id=f"{panel.id}-table", cursor_type="row")
+                            yield DataTable(
+                                id=f"{panel.id}-table", cursor_type="row", classes="panel-table"
+                            )
                         if panel.id == "network":
                             # The egress-wall management pane, below the log: the store's grants
                             # (revoke with x) + the recommendations still awaiting an answer —
@@ -1717,9 +1722,15 @@ class DevModeTui(App):
             if self._table_rows.get(panel.id) == data.rows:
                 continue
             self._table_rows[panel.id] = list(data.rows)
+            # clear() sends the cursor and the scroll home; a capped log redraws on every new
+            # entry, so put both back where the reader left them (row 0 stays on the newest).
+            at, top = table.cursor_row, table.scroll_y
             table.clear()
             for row in data.rows:
                 table.add_row(*row)
+            if data.rows:
+                table.move_cursor(row=min(at, len(data.rows) - 1), scroll=False)
+            table.call_after_refresh(table.scroll_to, y=top, animate=False)
 
     def _refresh_tree_panel(self, panel: TuiPanel, data: PanelTree) -> None:
         """Render a tree-kind panel's PanelTree as a Textual Tree (groups → their rows). While the

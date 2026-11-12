@@ -2065,13 +2065,18 @@ def ensure_git_hooks(engine: str, box: str, env: dict, checkout: str) -> str | N
     text, chosen by exit status: the box's output never reaches your terminal."""
     hooks = config.box_git_hooks()
     if not hooks:
-        subprocess.run(
+        proc = subprocess.run(
             [engine, "exec", box, "bash", "-lc", f'rm -f "{_GIT_HOOKS_INCLUDE}"'],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return None
+        if proc.returncode == 0:
+            return None
+        return (
+            f"[box].git_hooks is off, but removing {_GIT_HOOKS_INCLUDE} in the box failed, so git "
+            "there may still run hooks it was given before. `fy box recreate` starts without them."
+        )
     proc = subprocess.run(
         [engine, "exec", box, "bash", "-lc", _git_hooks_script(checkout, hooks)],
         env=env,
