@@ -21,8 +21,9 @@ def test_render_default_is_a_locked_down_stackless_lima_wall_box():
     assert "app" not in doc["project"]
     assert "compose" not in doc["project"]
     assert "ports" not in doc
-    # The locked-down posture is ACTIVE out of the box: lima + wall + an opted-in proxy.
-    assert doc["machine"]["backend"] == "lima"
+    # The locked-down posture is ACTIVE out of the box: the VM firewall + an opted-in proxy.
+    # No `backend`: Lima is the only one (ADR-0036), and a line with no choice in it reads as one.
+    assert "backend" not in doc["machine"]
     assert doc["machine"]["firewall"] is True
     assert doc["machine"]["name"] == "acme-app"
     assert doc["machine"]["cpus"] == init.DEFAULT_CPUS
@@ -132,9 +133,19 @@ def test_render_prompt_says_host_not_mac():
     assert "Mac" not in body
 
 
+def test_render_shows_the_hypervisor_choice_without_making_it():
+    # Shared config: a pinned `vz` would break every Linux/WSL2 developer, so it's a comment
+    # naming what an unset vmtype resolves to on each.
+    body = init.render(init.InitOptions(name="x"))
+    assert "vmtype" not in _parse(init.InitOptions(name="x"))["machine"]
+    lines = body.splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("#   vmtype = "))
+    comment = " ".join(lines[at : at + 3])
+    assert "vz on macOS" in comment and "qemu on Linux" in comment
+
+
 def test_render_honours_sizing_overrides():
     doc = _parse(init.InitOptions(name="big", cpus=12, memory_mib=64000, disk_gib=200))
-    assert doc["machine"]["backend"] == "lima"
     assert doc["machine"]["cpus"] == 12
     assert doc["machine"]["memory_mib"] == 64000
     assert doc["machine"]["disk_gib"] == 200

@@ -52,9 +52,8 @@ recommended_foldyard_version = "0.11.0"
 # A rootless Lima VM that mounts ONLY this repo, with an in-VM egress FIREWALL: fail-closed,
 # so the box's only way out is the host's allowlisting proxy (below). Sizing applies at FIRST
 # creation; to resize later: `foldyard machine recreate`.
-#   firewall = false    # lima but COOPERATIVE-only: the box uses the proxy, but nothing
-#                       # stops a process that ignores it (the firewall makes it fail-closed)
-backend = "lima"
+#   firewall = false    # COOPERATIVE-only: the box uses the proxy, but nothing stops a
+#                       # process that ignores it (the firewall makes it fail-closed)
 firewall = true
 name = "foldyard"
 cpus = 4

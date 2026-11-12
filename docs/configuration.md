@@ -184,14 +184,13 @@ Why it works this way:
 ## `[machine]`
 
 The rootless VM that mounts only this repo. Sizing, `vmtype` and mounts apply at **first creation**;
-change them with `fy machine recreate`. The one exception is foldyard's two directories on Lima,
-below, which a restart adds.
+change them with `fy machine recreate`. The one exception is foldyard's two directories, below,
+which a restart adds.
 
 ### What the VM mounts
 
-The checkout and the worktrees root, both writable — and, on the **lima** backend, two directories
-of foldyard's own beside them, one per direction
-([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)):
+The checkout and the worktrees root, both writable — and two directories of foldyard's own beside
+them, one per direction ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md)):
 
 - **`to-box`** (`~/.foldyard/<project>/to-box/`) — your computer writes it; the VM and every box can
   only read it (the box sees it at `/run/foldyard/to-box`). Read-only is enforced outside the guest,
@@ -211,13 +210,10 @@ of foldyard's own beside them, one per direction
 
 A VM that predates them is refused while it runs (`fy machine stop && fy up` once adds them;
 containers and volumes are kept), and `FOLDYARD_STATE_DIR` must point outside the checkout and the
-worktrees root. The **podman** backend's mounts are fixed when the machine is created and no podman
-provider enforces read-only outside the guest, so it gets neither: its boxes keep binding
-transcripts into the checkout. `fy doctor` shows a `to-box` row; `fy verify` checks both.
+worktrees root. `fy doctor` shows a `to-box` row; `fy verify` checks both.
 
 ```toml
 [machine]
-backend = "lima"
 vmtype = "vz"
 firewall = true
 host_firewall = true
@@ -227,13 +223,13 @@ memory_mib = 8192
 disk_gib = 60
 ```
 
-- **`backend`** — `"lima"`, the only backend and the default: one VM per project, running
-  concurrently. Lima needs `limactl` *and* `podman` (which drives the VM's socket); a missing one is
-  a hard error. The `podman` backend was removed
-  ([ADR-0036](./adrs/0036-lima-only-podman-machine-backend-removed.md)) and `native` before it
-  ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)): a config still naming either is
-  refused before anything touches a VM, with your old VM and its volumes left as they are. Run your
-  project's migration if it has one; otherwise set `backend = "lima"` (or drop the key) and
+- **`backend`** — legacy: `"lima"` is the only value and the default, so leave it out (a config that
+  says `"lima"` keeps working). One VM per project, running concurrently. Lima needs `limactl` *and*
+  `podman` (which drives the VM's socket); a missing one is a hard error. The `podman` backend was
+  removed ([ADR-0036](./adrs/0036-lima-only-podman-machine-backend-removed.md)) and `native` before
+  it ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)): a config still naming either
+  is refused before anything touches a VM, with your old VM and its volumes left as they are. Run
+  your project's migration if it has one; otherwise set `backend = "lima"` (or drop the key) and
   `fy config adopt`, and the next `fy up` creates a new, empty VM. Env: `MACHINE_BACKEND`.
 
 - **`firewall`** — the VM firewall: nftables rules in the VM, installed as root at boot, so the
@@ -282,10 +278,11 @@ disk_gib = 60
     with `fy machine stop && fy up`. `fy machine stop` and `fy machine rm` leave the install alone.
 
 - **`vmtype`** — the Lima driver, i.e. the hypervisor: `"vz"` (Apple Virtualization.framework) |
-  `"qemu"` | `"krunkit"` | any external Lima driver plugin. Lima only, create-only. Default: the
-  best of `vz` → `qemu` that `limactl info` reports on this computer (so `vz` on macOS, `qemu` on
-  Linux), printed at create. Pin it deliberately: the hypervisor is a security decision, and QEMU is
-  where nearly every published VM escape lives (see
+  `"qemu"` | `"krunkit"` | any external Lima driver plugin. Create-only. Default: the best of `vz` →
+  `qemu` that `limactl info` reports on each computer (so `vz` on macOS, `qemu` on Linux and WSL2),
+  printed at create. It's shared config, so a value only works if every developer's computer has
+  that driver. Pin it deliberately: the hypervisor is a security decision, and QEMU is where nearly
+  every published VM escape lives (see
   [isolation-layers.md](https://github.com/twistco/foldyard/blob/main/docs/isolation-layers.md#macos-arm64--the-machine-layer-does-the-work)).
   `krunkit` *(experimental)* (libkrun microVM) is never picked automatically: experimental upstream,
   macOS/arm64 only, needs `brew install krunkit`. Env: `MACHINE_VMTYPE`.
@@ -299,7 +296,7 @@ disk_gib = 60
 
   - `machine ensure` (run by `fy up`/`fy box up`) installs a pinned, checksummed `runsc` user-level
     in the VM plus a second podman API socket that defaults to it, and creates the box through that
-    socket. Both backends.
+    socket.
   - The box gets a *filtered* view of that socket as its own engine socket: the filter strips
     runtime-selecting fields from every container create, so the box can't opt a container out of
     gVisor, and refuses a create it can't parse. A box that came up under another runtime is removed
@@ -969,7 +966,7 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   time, so run `fy box build` to pick up the distro's updates. Default: `[]`.
 
 - **`sock_in_vm`** — the rootless podman socket inside the VM, mounted as the box's
-  `/var/run/docker.sock`. Default: the backend's own. Env: `PODMAN_SOCK_IN_VM`. Rarely needed.
+  `/var/run/docker.sock`. Default: Lima's rootless socket. Env: `PODMAN_SOCK_IN_VM`. Rarely needed.
 
 - **`shadow_volumes`** — in-tree dirs (checkout-relative) covered by per-box named volumes. Works
   around bind-mount uid squashing, runs installs at VM-disk speed, and keeps what the box installs

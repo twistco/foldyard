@@ -135,10 +135,10 @@ own task runners (`just`, npm scripts) stay yours — foldyard runs *under* them
   Code) · agents (Claude Code and Codex, keyless: the box holds a dummy key and the proxy swaps in
   your real one).
 
-Each project gets its own rootless VM, named after the project. The default backend is **Lima**: it
-runs one VM per project side by side, so a `fy box shell` or `fy code` session in one project
-survives while you work in another, and it is the backend that can carry the VM firewall. The
-alternative, and when to pick it, is in [configuration.md](./docs/configuration.md#machine).
+Each project gets its own rootless [Lima](https://lima-vm.io) VM, named after the project. They run
+side by side, so a `fy box shell` or `fy code` session in one project survives while you work in
+another, and the VM can carry the firewall. The options are in
+[configuration.md](./docs/configuration.md#machine).
 
 ## Status
 

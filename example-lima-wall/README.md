@@ -16,7 +16,7 @@ example-lima-wall/
 
 | layer | config | effect |
 | -- | -- | -- |
-| concurrent VM | `backend = "lima"` | a per-project Lima VM |
+| concurrent VM | (always) | a per-project Lima VM |
 | **fail-closed egress** | `[machine] firewall = true` | nftables default-deny in the VM; the Mac proxy is the ONLY way out |
 | enforced allowlist | `[proxy] enforce = true` | non-allowlisted hosts are refused (403) at the proxy |
 | shared allowlist | `[proxy] recommend` | the repo ASKS; the first `fy up` offers each host, you answer (`fy allow sync --yes` to take them all) — grants stay in the host-side store |

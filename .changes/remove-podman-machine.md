@@ -11,3 +11,6 @@ bump: minor
   `fy worktree list` keep working, so a project's own migration can still run. Without one, set
   `backend = "lima"` (or drop the key), `fy config adopt`, and `fy up` creates a new, empty Lima VM.
   `backend = "native"` gets the same refusal instead of falling back to podman.
+- **`fy init` no longer writes `backend = "lima"`**, and shows `vmtype` as a comment instead: unset,
+  each computer gets the best hypervisor it has (vz on macOS, qemu on Linux and WSL2). A config that
+  says `backend = "lima"` keeps working.

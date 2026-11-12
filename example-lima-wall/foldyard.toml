@@ -1,9 +1,8 @@
-# foldyard — the LOCKED-DOWN example (lima + in-VM egress wall + keyless Claude).
+# foldyard — the LOCKED-DOWN example (in-VM egress wall + keyless Claude).
 #
-# The sibling of ../example (the minimal, backend-agnostic dogfood fixture). This one shows
+# The sibling of ../example (the minimal dogfood fixture). This one shows
 # the most-isolated posture foldyard offers and the ONE caveat it introduces:
 #
-#   • backend = "lima"      concurrent per-project VM
 #   • [machine] firewall = true nftables default-deny INSIDE the VM — the Mac proxy is the ONLY
 #                           way out (fail-closed: egress that ignores the proxy is REJECTED)
 #   • [proxy] enforce  an ENFORCED allowlist on top (blocked hosts show in `fy tui`)
@@ -28,8 +27,7 @@ dev_vm_dir = "."
 API_PORT = 8090
 
 [machine]
-backend = "lima"
-firewall = true           # ← the in-VM egress wall (lima-only). Comment out for cooperative-only.
+firewall = true           # ← the in-VM egress wall. Comment out for cooperative-only.
 name = "fy-wall-example"
 cpus = 2
 # NB memory is MiB and is passed to Lima VERBATIM — any whole number is fine (a rounded-GiB
