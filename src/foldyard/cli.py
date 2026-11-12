@@ -48,13 +48,13 @@ TyperGroup.format_help = _with_light_safe_code(TyperGroup.format_help)
 # experimental register (`experimental.Feature.verbs`) leave their panel for EXPERIMENTAL, shown
 # last. tests/test_cli_help.py holds every visible verb to exactly one panel.
 _PANELS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Start here", ("init", "prereq", "doctor", "docs", "changelog")),
+    ("Start here", ("init", "prereq", "tui", "doctor", "docs", "changelog")),
     ("The stack", ("up", "down", "ps", "logs", "shell", "build", "open", "reclaim", "nuke")),
     (
         "The box and its agents",
         ("box", "claude", "codex", "agent", "paste", "code", "worktree", "transcripts", "skill"),
     ),
-    ("Posture and egress", ("mode", "allow", "config", "verify", "state", "host", "tui")),
+    ("Posture and egress", ("mode", "allow", "config", "verify", "state", "host")),
     ("Machines and projects", ("machine", "ls", "prune")),
     ("Testing", ("clock",)),
 )
