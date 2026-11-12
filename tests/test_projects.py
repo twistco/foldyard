@@ -102,7 +102,7 @@ def test_a_project_still_naming_the_podman_backend_is_retired_not_missing(host):
     host.tomls[host.checkouts[1]]["machine"]["backend"] = "podman"
     beta = _row(projects.collect(), "beta")
     assert beta.vm.status == "retired" and beta.vm.backend == "podman"
-    assert [n.fix for n in beta.notes if n.level == "✗"] == ["fy machine ensure"]
+    assert [n.fix for n in beta.notes if n.level == "✗"] == ["fy config adopt"]
     assert not any("doesn't exist" in n.text for n in beta.notes)
 
 

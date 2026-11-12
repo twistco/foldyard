@@ -289,8 +289,11 @@ def _describe(
         elif vm.status.lower() == "broken":
             notes.append(Note("✗", f"its VM {vm.name} stopped answering (Broken)", "fy up"))
         elif vm.status == "retired":
-            why = f'[machine].backend = "{vm.backend}" is no longer supported (Lima only)'
-            notes.append(Note("✗", why, "fy machine ensure"))
+            why = (
+                f'[machine].backend = "{vm.backend}" is no longer supported (Lima only): run your'
+                ' project\'s migration, or set backend = "lima"'
+            )
+            notes.append(Note("✗", why, "fy config adopt"))
     return Project(name, str(checkout), vm, state, notes=notes, below_floor=below_floor)
 
 

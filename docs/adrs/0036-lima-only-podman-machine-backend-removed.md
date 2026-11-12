@@ -44,11 +44,11 @@ value `lima`, so a config that names it needs no edit.
 
 ## Consequences
 
-- **A podman machine user has to move before upgrading their VM.** foldyard can't do the move:
-  which volumes and images matter is the project's business. The refusal says so and leaves the old
-  VM and its volumes untouched. Starting over is setting `backend = "lima"` and adopting it.
-- **`limactl` is required on every host.** It already was for anyone on the default; the error for
-  a missing one now has one wording, not two.
+- **A podman machine user has to move before upgrading their VM.** foldyard can't do the move: which
+  volumes and images matter is the project's business. The refusal says so and leaves the old VM and
+  its volumes untouched. Starting over is setting `backend = "lima"` and adopting it.
+- **`limactl` is required on every host.** It already was for anyone on the default; the error for a
+  missing one now has one wording, not two.
 - **The `[machine].backend` key has no choice left in it.** Keeping it valid costs one function;
   dropping it would break every config `fy init` wrote.
 - **The doc trail for podman machine is history.** ADR-0001, 0010, 0011 and 0017 describe a world
