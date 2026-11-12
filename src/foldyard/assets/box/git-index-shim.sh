@@ -364,6 +364,9 @@ fy_tx_finish() { # $1 = committed | aborted
 
 # The repo has its own `$hook` to hand this to — never our own directory (that is "none": handing
 # a hook to ourselves re-execs this script forever).
+# It runs with LEFTHOOK_NO_AUTO_INSTALL=1: a lefthook past 2.2.2 (evilmartians/lefthook#1586) then
+# skips its hook sync inside our command's hooks, while the operator's own `lefthook run` still
+# syncs. An older lefthook ignores it, which is what fy_hide_override below is for.
 fy_repo_hook() { [ -n "$1" ] && ! [ "$1" -ef "$fy_hooks_dir" ] && [ -x "$1/$hook" ]; }
 
 case $0 in
@@ -393,11 +396,11 @@ case $0 in
             done <<<"$input"
         fi
         fy_repo_hook "$orig" || exit 0
-        printf '%s' "$input" | env -u FY_HEAL_TOKEN -u FY_HEAD_STATE -u FY_MOVED -u FY_TX PATH="$fy_hook_path" "$orig/$hook" "$@"
+        printf '%s' "$input" | env -u FY_HEAL_TOKEN -u FY_HEAD_STATE -u FY_MOVED -u FY_TX PATH="$fy_hook_path" LEFTHOOK_NO_AUTO_INSTALL=1 "$orig/$hook" "$@"
         exit
     fi
     fy_repo_hook "$orig" || exit 0
-    exec env -u FY_HEAL_TOKEN -u FY_HEAD_STATE -u FY_MOVED -u FY_TX PATH="$fy_hook_path" "$orig/$hook" "$@"
+    exec env -u FY_HEAL_TOKEN -u FY_HEAD_STATE -u FY_MOVED -u FY_TX PATH="$fy_hook_path" LEFTHOOK_NO_AUTO_INSTALL=1 "$orig/$hook" "$@"
     ;;
 esac
 
@@ -414,7 +417,9 @@ FY_NO_REF_SUBS=${FY_NO_REF_SUBS//$'\n'/ }
 # --git-path hooks`, got OUR directory and wrote its hook scripts into it — through the symlinks
 # over this shim when writable (the commit's own checks then silently skipped every file), "could
 # not replace the hook: permission denied" on every commit when root-owned. Only our exact entry
-# goes; a ref-moving git keeps it, so its moves still reach the check.
+# goes; a ref-moving git keeps it, so its moves still reach the check. Kept beside
+# LEFTHOOK_NO_AUTO_INSTALL for a lefthook that predates it: no subprocess, and with one that has it
+# there is no sync to hide from. Remove it once consumers' lefthook all have it.
 fy_hide_override() {
     local own="'core.hooksPath'='$fy_hooks_dir'" p a
     p=${GIT_CONFIG_PARAMETERS-}

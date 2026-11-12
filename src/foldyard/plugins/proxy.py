@@ -30,7 +30,7 @@ from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
 
-from .. import config, mountwrite
+from .. import config, mountwrite, term
 from . import (
     DoctorContext,
     DoctorFix,
@@ -341,7 +341,7 @@ def _net_leaf(e: dict, escape, who=None) -> str:
 
 
 def _net_leaf_body(e: dict, escape) -> str:
-    ts = escape(e.get("ts", "")[11:19])
+    ts = escape(term.stamp(e.get("ts")))
     if e.get("blocked"):
         # Refused by the proxy — no upstream contacted. Red so it stands out as the row you act on
         # (press the allow key in the TUI to let the host through). What was asked: a request's
@@ -494,7 +494,7 @@ def _network_panel_tree() -> PanelTree:
             rows.append(None)
         groups.append(PanelGroup(key=v.host, label=header, children=children, rows=rows))
 
-    since = f" · since {snap.since[:16].replace('T', ' ')}" if snap.since else ""
+    since = f" · since {term.stamp(snap.since)}" if snap.since else ""
     shown = f" ({len(groups)} shown)" if len(groups) < len(snap.hosts) else ""
     summary = (
         f"{snap.requests} requests across {len(snap.hosts)} hosts{shown} · {snap.injected} with "

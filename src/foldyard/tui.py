@@ -1794,7 +1794,7 @@ class DevModeTui(App):
             keys.append(("rec", e["host"]))
         for g in granted:
             exp = g["expires"]
-            rows.append((g["level"], g["host"], f"expires {exp[11:19]}" if exp else ""))
+            rows.append((g["level"], g["host"], f"expires {term.stamp(exp)}" if exp else ""))
             keys.append(("grant", g["host"]))
         wall = "ENFORCING" if enforcing else "observing only"
         summary = (

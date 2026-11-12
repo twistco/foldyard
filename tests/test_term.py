@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -114,3 +115,32 @@ def test_color_enabled_follows_the_same_rules_as_install(monkeypatch):
     monkeypatch.delenv("NO_COLOR")
     monkeypatch.setenv("TERM", "dumb")
     assert term.color_enabled(_FakeTTY()) is False
+
+
+# ── stamp: a log row's UTC timestamp as the TUI panels show it ──────────────────────────────
+
+_LONDON_SUMMER = datetime(2026, 7, 1, 12, 0, tzinfo=timezone(timedelta(hours=1)))
+
+
+def test_stamp_shows_only_the_time_for_today_in_local_time():
+    # 10:15 UTC is 11:15 at +01:00: the log's UTC is never shown as if it were local.
+    assert term.stamp("2026-07-01T10:15:30+00:00", now=_LONDON_SUMMER) == "11:15:30"
+
+
+def test_stamp_adds_the_date_for_any_other_day():
+    assert term.stamp("2026-06-30T10:15:30+00:00", now=_LONDON_SUMMER) == "2026-06-30 11:15:30"
+
+
+def test_stamp_judges_today_by_the_local_date_not_the_utc_one():
+    # 23:30 UTC on the 30th is 00:30 on the 1st at +01:00: today, so no date.
+    assert term.stamp("2026-06-30T23:30:00+00:00", now=_LONDON_SUMMER) == "00:30:00"
+
+
+def test_stamp_reads_a_zoneless_stamp_as_utc():
+    assert term.stamp("2026-07-01T10:15:30", now=_LONDON_SUMMER) == "11:15:30"
+
+
+@pytest.mark.parametrize(("raw", "shown"), [("", ""), (None, ""), ("not-a-time-at-all", "at-all")])
+def test_stamp_never_raises_on_a_bad_row(raw, shown):
+    # Log rows are box-influenced: a ts that doesn't parse keeps the old slice, never raises.
+    assert term.stamp(raw, now=_LONDON_SUMMER) == shown
