@@ -5,6 +5,7 @@ clipboard, engine or tmux runs: subprocess.run is stubbed wherever one would."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 import subprocess
 
@@ -49,8 +50,9 @@ def host(monkeypatch):
                     out[:out_limit],
                     err[: paste._ERR_KEEP],
                     over,
+                    True,
                 )
-        return paste._Ran(0, b"", b"", False)
+        return paste._Ran(0, b"", b"", False, True)
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(paste, "_bounded", bounded)
@@ -317,6 +319,27 @@ def test_a_session_that_cant_be_typed_into_still_names_the_path(
     assert calls[0][0][-1] in err and "typing it into claude-3f2c9a1e failed" in err
 
 
+def test_a_session_tmux_refuses_silently_is_still_a_failure(host, monkeypatch, tmp_path, capsys):
+    """A non-zero exit with nothing on stderr is a failure too — never "typed into"."""
+    _, replies = host
+    _box_target(monkeypatch, pane="claude-3f2c9a1e")
+    replies["paste-buffer"] = _Proc(1, "", "")
+    f = tmp_path / "shot.png"
+    f.write_bytes(PNG)
+    assert paste.paste(str(f), session="3f2c9a1e") == 1
+    captured = capsys.readouterr()
+    assert "tmux exited 1" in captured.err and "typed into" not in captured.out
+
+
+def test_an_incomplete_clipboard_read_is_no_image(monkeypatch):
+    """A reader that exits 0 while something it started still holds its stdout may have handed
+    over half an image, which would still pass the type check."""
+    monkeypatch.setattr(
+        paste, "_bounded", lambda *a, **k: paste._Ran(0, PNG[:10], b"", False, False)
+    )
+    assert paste._capture(["wl-paste", "--type", "image/png"], paste.MAX_BYTES) is None
+
+
 def test_a_failed_write_says_so_with_the_boxs_words_cut_to_printable(
     host, monkeypatch, tmp_path, capsys
 ):
@@ -410,3 +433,29 @@ def test_bounded_kills_at_the_timeout():
 def test_bounded_survives_a_child_that_never_reads_its_stdin():
     ran = paste._bounded(["sh", "-c", "exit 0"], data=PNG * 100_000, timeout=10)
     assert ran is not None and ran.rc == 0
+
+
+@pytest.mark.spawns("sh")
+def test_bounded_says_incomplete_when_a_grandchild_holds_stdout(monkeypatch, tmp_path):
+    """The child exits 0, but a background subshell it left keeps stdout open past the grace —
+    blocked on a FIFO until the test lets it go, so nothing outlives the test."""
+    monkeypatch.setattr(paste, "_DRAIN_GRACE", 0.2)
+    fifo = tmp_path / "hold"
+    os.mkfifo(fifo)
+    script = '(read -r x < "$1") & printf head; exit 0'
+    try:
+        ran = paste._bounded(["sh", "-c", script, "sh", str(fifo)], out_limit=100, timeout=10)
+    finally:
+        # The subshell's read sees EOF and it exits. Non-blocking: with no reader left, an open
+        # for writing would wait forever (ENXIO instead).
+        with contextlib.suppress(OSError):
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+    assert ran is not None
+    assert (ran.rc, ran.out, ran.complete) == (0, b"head", False)
+
+
+@pytest.mark.spawns("sh")
+def test_bounded_reports_its_status_when_it_exits_on_its_own():
+    ran = paste._bounded(["sh", "-c", "printf ok; exit 0"], out_limit=100, timeout=10)
+    assert ran is not None
+    assert (ran.rc, ran.out, ran.complete) == (0, b"ok", True)

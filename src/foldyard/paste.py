@@ -49,6 +49,7 @@ MAX_BYTES = 20 * 1024 * 1024  # a 5K-display screenshot as PNG is ~10 MB
 _CLIPBOARD_TIMEOUT = 15
 _EXEC_TIMEOUT = 60
 _ERR_KEEP = 4096  # what is kept of a child's stderr (the box's, for the write)
+_DRAIN_GRACE = 5  # seconds to finish reading after the child exits (a grandchild may hold a pipe)
 _LIST_LIMIT = 64 * 1024  # a clipboard's list of types
 # The macOS reader prints the image as base64: 4 characters per 3 bytes, plus a newline.
 _B64_LIMIT = 4 * ((MAX_BYTES + 2) // 3) + 2
@@ -98,6 +99,7 @@ class _Ran:
     out: bytes
     err: bytes  # at most _ERR_KEEP bytes of it
     over: bool  # stdout went past ``out_limit``
+    complete: bool  # both pipes were read to their end — else ``out`` may be cut short
 
 
 def _bounded(
@@ -164,9 +166,17 @@ def _bounded(
         rc = proc.wait()
     finally:
         killer.cancel()
+    drains = threads[:2]
     for t in threads:
-        t.join(5)
-    return _Ran(None if killed.is_set() else rc, bytes(out), bytes(err), over.is_set())
+        t.join(_DRAIN_GRACE)
+    complete = not any(t.is_alive() for t in drains)
+    if complete:  # else a drain still reads one of them; it ends with the pipe's last holder
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+    # Killed means died BY the kill: one that exited on its own as the timer fired keeps its status.
+    status = None if killed.is_set() and rc < 0 else rc
+    return _Ran(status, bytes(out), bytes(err), over.is_set(), complete)
 
 
 class _TooLarge(Exception):
@@ -178,7 +188,9 @@ def _capture(argv: list[str], limit: int) -> bytes | None:
     ran = _bounded(argv, out_limit=limit, stop_over=True, timeout=_CLIPBOARD_TIMEOUT)
     if ran is not None and ran.over:
         raise _TooLarge
-    return ran.out if ran is not None and ran.rc == 0 else None
+    # Incomplete: something the reader started still holds its stdout, so what was read may be cut
+    # short — a truncated image would still pass the type check. Refused, like a timeout.
+    return ran.out if ran is not None and ran.rc == 0 and ran.complete else None
 
 
 def _offers_png(argv: list[str]) -> bool:
@@ -403,7 +415,11 @@ def paste(file: str = "", *, session: str = "", copy: bool = True) -> int:
     if pane:
         try:
             typed = target.run(paste_argv(pane, path))
-            why = "" if typed.returncode == 0 else _printable(typed.stderr.strip(), 200)
+            why = (
+                ""
+                if typed.returncode == 0
+                else _printable(typed.stderr.strip(), 200) or f"tmux exited {typed.returncode}"
+            )
         except (OSError, subprocess.TimeoutExpired) as e:
             why = _printable(str(e), 200)
         if why:
