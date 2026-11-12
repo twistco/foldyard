@@ -3590,3 +3590,262 @@ def test_the_host_and_the_proxy_agree_on_what_is_local(gh, address):
     ip = gh.module._address(address)
     assert ip is not None
     assert gh.module._is_local(ip) is allowlist.local_key(address), address
+
+
+# ── a granted raw tunnel to a local address (SSH to a machine on your network) ─────────────────
+# `fy allow add 192.168.1.50:22` is the one way a box reaches a service on your network, and an
+# SSH session through it is a raw TCP tunnel: no TLS, no request, so no row was ever written and
+# a revoke only closed it with the wall enforcing (the SSH spike, 2026-11-11).
+
+
+def _server_event(
+    host: str, port: int, client_id: str, peer: str | None, *, server_id: str = ""
+) -> object:
+    """mitmproxy's ``server_connected``/``server_disconnected`` data: one upstream connection,
+    with an id of its own, as a client may hold several."""
+    return types.SimpleNamespace(
+        server=types.SimpleNamespace(
+            id=server_id or f"{client_id}->{peer or host}:{port}",
+            address=(host, port),
+            peername=(peer or host, port),
+            error=None,
+        ),
+        client=types.SimpleNamespace(id=client_id),
+    )
+
+
+def _tunnel(
+    inj, closer: _Closer, host: str, port: int, client_id: str, *, peer: str | None = None
+) -> None:
+    """A CONNECT the policy lets through, then mitmproxy's eager dial of its target and the
+    connection landing at ``peer`` (what a name resolved to; the address itself by default)."""
+    closer.track(client_id)
+    connect = _Flow(host, port=port)
+    connect.client_conn = types.SimpleNamespace(id=client_id)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is None, f"{host}:{port} refused at CONNECT"
+    assert _dial(inj, host, port, client_id) is None, f"{host}:{port} refused at the dial"
+    inj.server_connected(_server_event(host, port, client_id, peer))
+
+
+def test_a_revoke_closes_a_tunnel_opened_by_a_name_that_resolved_local(observing, closer):
+    # `localhost` on a `127.0.0.1:2222` grant: the dial is vetted at resolution, so only where the
+    # connection landed says it is local (CodeRabbit on #182).
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "localhost", 2222, "ssh", peer="127.0.0.1")
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["ssh"]
+
+
+def test_a_revoke_closes_a_cleartext_connection_to_a_local_address(observing, closer):
+    # `curl --proxy … http://127.0.0.1:8123/`: no CONNECT, so nothing but the dial knows of it.
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
+    inj.refresh()
+    closer.track("plain")
+    assert _dial(inj, "127.0.0.1", 8123, "plain") is None
+    inj.server_connected(_server_event("127.0.0.1", 8123, "plain", None))
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["plain"]
+
+
+@pytest.mark.parametrize("enforcing", [False, True])
+def test_a_revoke_while_the_dial_is_in_flight_closes_the_connection(observing, closer, enforcing):
+    # The dial was judged, the grant went before the connection landed, and the sweep ran with
+    # nothing recorded yet: the landing judges it again (the Claude review on #182).
+    inj, allow, _log = observing
+    inj.default_deny = enforcing
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    closer.track("ssh")
+    assert _dial(inj, "127.0.0.1", 2222, "ssh") is None
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    inj.server_connected(_server_event("127.0.0.1", 2222, "ssh", None))
+    assert closer.closed == ["ssh"]
+
+
+def test_a_connection_landing_on_a_kept_grant_stays_open(observing, closer):
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    closer.track("ssh")
+    assert _dial(inj, "127.0.0.1", 2222, "ssh") is None
+    inj.server_connected(_server_event("127.0.0.1", 2222, "ssh", None))
+    assert closer.closed == []
+
+
+def test_a_local_connection_that_ended_is_forgotten(observing, closer):
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
+    inj.refresh()
+    closer.track("plain")
+    inj.server_connected(_server_event("127.0.0.1", 8123, "plain", None))
+    inj.server_disconnected(_server_event("127.0.0.1", 8123, "plain", None))
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_revoke_closes_the_connection_left_when_its_twin_ends(observing, closer):
+    # One client, two upstream connections to the same address and port: mitmproxy opens a second
+    # for concurrent HTTP/2 requests to an HTTP/1 upstream. One ending forgets only itself
+    # (CodeRabbit on #182).
+    inj, allow, _log = observing
+    _write_allow(allow, ["127.0.0.1:8123"], default_deny=False)
+    inj.refresh()
+    closer.track("h2")
+    first = _server_event("127.0.0.1", 8123, "h2", None, server_id="up-1")
+    second = _server_event("127.0.0.1", 8123, "h2", None, server_id="up-2")
+    inj.server_connected(first)
+    inj.server_connected(second)
+    inj.server_disconnected(first)
+    _write_allow(allow, [], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["h2"]
+
+
+def _tcp_start(inj, host: str, port: int, client_id: str, *, tls: bool = False) -> None:
+    flow = types.SimpleNamespace(
+        client_conn=types.SimpleNamespace(id=client_id, tls_established=tls),
+        server_conn=types.SimpleNamespace(address=(host, port)),
+        metadata={},
+    )
+    inj.tcp_start(flow)
+
+
+@pytest.mark.parametrize("enforcing", [False, True])
+def test_a_revoked_local_grant_closes_its_tunnel_in_every_mode(observing, closer, enforcing):
+    inj, allow, _log = observing
+    inj.default_deny = enforcing  # the live file's switch (`fy allow enforce`)
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 2222, "ssh")
+    _tunnel(inj, closer, "granted.example.com", 443, "web")
+    _write_allow(allow, ["granted.example.com"], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["ssh"]
+
+
+def test_a_local_grant_kept_closes_nothing(observing, closer):
+    inj, allow, _log = observing
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:2222", "10.0.0.5:22"], False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 2222, "ssh")
+    _write_allow(allow, ["granted.example.com", "127.0.0.1:2222"], False)  # another one went
+    inj.refresh()
+    assert closer.closed == []
+
+
+def test_a_raw_tunnel_gets_one_row_naming_where_it_went(observing, closer):
+    inj, allow, log = observing
+    inj.default_deny = True
+    _write_allow(allow, ["127.0.0.1:2222"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 2222, "ssh")
+    before = len(_rows(log))
+    _tcp_start(inj, "127.0.0.1", 2222, "ssh")
+    rows = _rows(log)[before:]
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["method"], row["host"], row["tunnel"], row["local"]) == (
+        "TCP",
+        "127.0.0.1:2222",
+        True,
+        True,
+    )
+    assert not row.get("blocked") and not row.get("would_block")
+
+
+@pytest.mark.parametrize("enforcing", [False, True])
+def test_a_grant_narrowed_to_paths_closes_a_raw_tunnel_and_keeps_a_decrypted_one(
+    observing, closer, enforcing
+):
+    # A raw tunnel can't be judged request by request, so a path grant left on the address is
+    # no grant for it; a decrypted connection's requests are each judged against it (CodeRabbit
+    # on #182).
+    inj, allow, _log = observing
+    inj.default_deny = enforcing
+    _write_allow(allow, ["127.0.0.1"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "127.0.0.1", 443, "ssh")
+    _tcp_start(inj, "127.0.0.1", 443, "ssh")
+    _tunnel(inj, closer, "127.0.0.1", 443, "web")
+    _tcp_start(inj, "127.0.0.1", 443, "web", tls=True)
+    _write_allow(allow, ["127.0.0.1/read/"], default_deny=False)
+    inj.refresh()
+    assert closer.closed == ["ssh"]
+
+
+@pytest.mark.parametrize("enforcing", [False, True])
+def test_a_public_host_narrowed_to_paths_closes_its_raw_tunnel_when_enforcing(
+    observing, closer, enforcing
+):
+    # Not local, so observing leaves it be, as it leaves every public host.
+    inj, allow, _log = observing
+    inj.default_deny = enforcing
+    _write_allow(allow, ["granted.example.com"], default_deny=False)
+    inj.refresh()
+    _tunnel(inj, closer, "granted.example.com", 443, "raw")
+    _tcp_start(inj, "granted.example.com", 443, "raw")
+    _write_allow(allow, ["granted.example.com/read/"], default_deny=False)
+    inj.refresh()
+    assert closer.closed == (["raw"] if enforcing else [])
+
+
+def _raw(host: str, port: int, client_id: str, content: bytes) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        server_conn=types.SimpleNamespace(address=(host, port)),
+        client_conn=types.SimpleNamespace(id=client_id),
+        messages=[types.SimpleNamespace(content=content)],
+        metadata={},
+    )
+
+
+def test_raw_bytes_to_a_local_address_granted_only_for_paths_are_refused_while_observing(
+    observing, closer
+):
+    # A dial to a local address is judged in every mode, so the raw bytes a path grant can't
+    # judge are refused in every mode too; observing relays them only to a host that isn't local.
+    inj, allow, log = observing
+    _write_allow(allow, ["127.0.0.1/read/", "storage.googleapis.com/bucket/"], False)
+    inj.refresh()
+    closer.track("ssh")
+    local = _raw("127.0.0.1", 443, "ssh", b"SSH-2.0-OpenSSH_10.3\r\n")
+    inj.tcp_message(local)
+    assert local.messages[-1].content == b""
+    assert closer.closed == ["ssh"]
+    row = _rows(log)[-1]
+    assert row["blocked"] and row["method"] == "TCP" and row["local"]
+
+    public = _raw("storage.googleapis.com", 443, "web", b"raw")
+    inj.tcp_message(public)
+    assert public.messages[-1].content == b"raw"
+
+
+def test_raw_bytes_inside_a_decrypted_tunnel_get_no_tunnel_row(observing, closer):
+    # TLS the proxy decrypted, then not HTTP: that's `tcp_message`'s case, not a tunnel of its own.
+    inj, _allow, log = observing
+    _tunnel(inj, closer, "granted.example.com", 443, "web")
+    before = len(_rows(log))
+    _tcp_start(inj, "granted.example.com", 443, "web", tls=True)
+    assert _rows(log)[before:] == []
+
+
+def test_the_network_log_shows_a_raw_tunnel_as_one(tmp_path, monkeypatch):
+    from foldyard import allowlist
+    from foldyard.plugins import proxy
+
+    monkeypatch.setattr(allowlist, "live_hosts", lambda: [])
+    monkeypatch.setattr(allowlist, "declined", lambda: set())
+
+    row = {"ts": "2026-11-11T20:00:00+00:00", "method": "TCP", "host": "192.168.1.50:22",
+           "path": "", "status": 0, "tunnel": True, "local": True}  # fmt: skip
+    assert "tcp tunnel" in proxy._net_leaf_body(row, lambda s: s)
+    # Not offered by `fy allow learn`: it went through on a grant, and carries no path.
+    assert allowlist.learned_hosts([row], {"since": row["ts"], "until": row["ts"]}) == []

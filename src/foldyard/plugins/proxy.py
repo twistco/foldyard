@@ -382,6 +382,9 @@ def _net_leaf_body(e: dict, escape) -> str:
         return f"[dim]{ts}[/dim] [yellow]◌ the allowlist would refuse this[/yellow]{ua}"
     if e.get("passthrough"):
         return f"[dim]{ts}[/dim] [dim]· tls tunnel (passthrough, not decrypted)[/dim]"
+    if e.get("tunnel"):
+        # Neither TLS nor HTTP (SSH through a granted address:port): relayed as it is, unread.
+        return f"[dim]{ts}[/dim] [dim]· tcp tunnel (not HTTP, relayed as it is)[/dim]"
     status = e.get("status", 0)
     colour = "green" if status < 400 else "red"
     mark = ("inj" if e.get("injected") else "") + ("+replay" if e.get("replayed") else "")
