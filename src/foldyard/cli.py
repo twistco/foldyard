@@ -437,7 +437,8 @@ def paste(
         "",
         "--session",
         "-s",
-        help="an `fy agent` session (id, prefix or name): type the path into it",
+        help="an `fy agent` session (id, prefix or name): send to the box holding it (which may "
+        "be another worktree's) and type the path into it",
     ),
     no_copy: bool = typer.Option(
         False, "--no-copy", help="don't put the in-box path on your clipboard"

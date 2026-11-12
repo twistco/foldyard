@@ -88,9 +88,11 @@ one. `--dry-run` lists them first. A running agent is never removed, whatever it
   instead: it sends the clipboard's image (or a file you name, `fy paste shot.png`) into the box's
   `/tmp/fy-paste/` and copies that path to your clipboard, for you to paste into the agent. With
   `--session <id>` it types the path into that session's prompt itself, and Claude attaches it as an
-  image. Only a PNG, JPEG, GIF or WebP is sent, 20 MB at most. It goes to this checkout's box only,
-  and is gone when the box is recreated. Reading the clipboard takes `osascript` (macOS), `wl-paste`
-  (Wayland) or `xclip` (X11); without one, name a file.
+  image. Only a PNG, JPEG, GIF or WebP is sent, 20 MB at most. It goes to one box only: this
+  checkout's, or with `--session` the box holding that session, which can be another worktree's. It
+  is gone when that box is recreated. A file is never read through a symlink something running as
+  you could have made: the box writes the checkout as you. Reading the clipboard takes `osascript`
+  (macOS), `wl-paste` (Wayland) or `xclip` (X11); without one, name a file.
 
 ## Two settings that cut down what reaches your terminal
 
