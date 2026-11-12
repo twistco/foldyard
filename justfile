@@ -145,7 +145,7 @@ lint:
     {{_md_files}} | xargs -0 uv run --project "{{_dir}}" {{_mdformat}} --check
 
 # Lint before every commit made ON YOUR COMPUTER too: point this clone's .git/config at the tracked
-# hooks in .githooks/. Boxes have it already, in their own git config (`[box].bootstrap`); this
+# hooks in .githooks/. Boxes have it already, in their own git config (`[box] git_hooks`); this
 # shared setting is the opt-in for your computer, where the hook is code from the box-writable
 # checkout (see .githooks/pre-commit). Refused in a box: written from there, it would turn the
 # hook on for your computer. Undo: `git config --unset core.hooksPath`.
@@ -153,7 +153,7 @@ hooks:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "${IN_DEVBOX:-}" = 1 ]; then
-        echo "✗ run \`just hooks\` on your computer: boxes lint on commit already (foldyard.toml's [box].bootstrap)," >&2
+        echo "✗ run \`just hooks\` on your computer: boxes lint on commit already (foldyard.toml's [box] git_hooks)," >&2
         echo "  and this setting is the shared .git/config's — from here it would turn the hook on for your computer" >&2
         exit 1
     fi

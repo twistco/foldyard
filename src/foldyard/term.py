@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import UTC, datetime
 
 _GREEN, _RED, _BLUE = "32", "31", "34"
 
@@ -125,3 +126,25 @@ def uninstall() -> None:
         stream = getattr(sys, name)
         if isinstance(stream, ColorStream):
             setattr(sys, name, stream.raw)
+
+
+def stamp(iso: str | None, now: datetime | None = None) -> str:
+    """A log row's ISO timestamp as a panel shows it: in YOUR timezone (the logs write UTC), the
+    time alone when it falls today, else the date too — ``14:03:07`` beside ``2026-11-10
+    14:03:07``, so a row from yesterday never reads as this afternoon's. A stamp without a zone is
+    read as UTC, which is what every foldyard log writes; one that doesn't parse keeps the old
+    time-of-day slice. ``now`` (aware) is for tests: its zone stands in for the local one."""
+    if not iso:
+        return ""
+    try:
+        when = datetime.fromisoformat(iso)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        local = when.astimezone(now.tzinfo) if now is not None else when.astimezone()
+    except (ValueError, OverflowError, TypeError):  # a host-written log, but never crash a panel
+        return iso[11:19] if isinstance(iso, str) else ""
+    # Today from the clock, never through ``local.tzinfo``: that is the offset the EVENT had, and
+    # across a DST change it would put "now" an hour off — on yesterday, around midnight.
+    today = now.date() if now is not None else datetime.now().date()
+    fmt = "%H:%M:%S" if local.date() == today else "%Y-%m-%d %H:%M:%S"
+    return local.strftime(fmt)

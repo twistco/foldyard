@@ -2005,6 +2005,98 @@ def _git_identity_step() -> tuple[str, str, str] | None:
     return ("git identity from your computer", check, "\n".join(lines))
 
 
+# Where the box keeps `[box].git_hooks`: a file of its own that the box's global config includes
+# for this checkout's git dirs alone, so the other repos in the box keep their own hooks.
+_GIT_HOOKS_INCLUDE = "$HOME/.gitconfig-foldyard-hooks"
+
+
+def _git_hooks_script(checkout: str, hooks: str) -> str:
+    """Point git in the box at ``hooks`` (``[box].git_hooks``) for this checkout and its
+    worktrees: ``core.hooksPath`` in :data:`_GIT_HOOKS_INCLUDE`, which the box's GLOBAL config
+    includes by ``includeIf.gitdir`` on the main checkout's git dir. Never the shared
+    ``.git/config``: git on your computer reads that, and would run hooks the box can rewrite.
+
+    Two ``gitdir:`` entries because the pattern with a trailing slash matches what is INSIDE a
+    directory, not the directory: ``<common>`` itself is the main checkout's git dir, and each
+    worktree's is under ``<common>/worktrees/``. git reads both as glob patterns, so the path's
+    ``[`` ``]`` ``*`` ``?`` and backslash are escaped first: a checkout at ``/work/app[1]``
+    matches itself, never ``/work/app1``. A relative ``core.hooksPath`` is resolved from
+    the top of whichever worktree runs the hook, so each runs its own checked-out copy.
+
+    Idempotent (each ``git config`` replaces its value), so ``fy box up`` re-applies it to a box
+    that is already running (:func:`ensure_git_hooks`). Fails with status 3, saying why, when the
+    repo's own ``.git/config`` sets another ``core.hooksPath``: that wins over a global include.
+    A subshell, so an ``exit`` ends this step rather than the bootstrap."""
+    co, want = shlex.quote(checkout), shlex.quote(hooks)
+    clash = shlex.quote(f"✗ git hooks: {_git_hooks_clash(hooks)}")
+    return (
+        "(\n"
+        f"  c=$(git -C {co} rev-parse --path-format=absolute --git-common-dir) || exit 1\n"
+        # The escape in bash itself (backslash first), so the step needs nothing beyond git.
+        r"  g=${c//\\/\\\\}; g=${g//\[/\\[}; g=${g//\]/\\]}; g=${g//\*/\\*}; g=${g//\?/\\?}"
+        "\n"
+        f'  f="{_GIT_HOOKS_INCLUDE}"\n'
+        f'  git config --file "$f" core.hooksPath {want} || exit 1\n'
+        '  git config --global "includeIf.gitdir:$g.path" "$f" || exit 1\n'
+        '  git config --global "includeIf.gitdir:$g/worktrees/.path" "$f" || exit 1\n'
+        f'  [ "$(git -C {co} config --get core.hooksPath)" = {want} ] && exit 0\n'
+        f"  printf '%s\\n' {clash} >&2\n"
+        "  exit 3\n"
+        ")"
+    )
+
+
+def _git_hooks_step(checkout: str) -> tuple[str, str, str] | None:
+    """``[box].git_hooks`` as a monitored bootstrap step (:func:`_git_hooks_script`); None when
+    it isn't set. No ``check``: it always runs, so a box gets it even where the shared config
+    already names the same directory today."""
+    hooks = config.box_git_hooks()
+    if not hooks:
+        return None
+    return (f"git hooks from {hooks} (this checkout only)", "", _git_hooks_script(checkout, hooks))
+
+
+def ensure_git_hooks(engine: str, box: str, env: dict, checkout: str) -> str | None:
+    """(Re)apply ``[box].git_hooks`` in a running box, as :func:`ensure_harden` does the editor
+    hygiene: a box created before the setting gets it at its next ``fy box up``, no recreate.
+    With the setting off it removes :data:`_GIT_HOOKS_INCLUDE`, so a box that had it goes back to
+    git's default without a recreate (the ``includeIf`` entries stay, naming a file git skips when
+    it's missing). Returns why it failed, or None when it applied. The reason is foldyard's own
+    text, chosen by exit status: the box's output never reaches your terminal."""
+    hooks = config.box_git_hooks()
+    if not hooks:
+        proc = subprocess.run(
+            [engine, "exec", box, "bash", "-lc", f'rm -f "{_GIT_HOOKS_INCLUDE}"'],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if proc.returncode == 0:
+            return None
+        return (
+            f"[box].git_hooks is off, but removing {_GIT_HOOKS_INCLUDE} in the box failed, so git "
+            "there may still run hooks it was given before. `fy box recreate` starts without them."
+        )
+    proc = subprocess.run(
+        [engine, "exec", box, "bash", "-lc", _git_hooks_script(checkout, hooks)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if proc.returncode == 0:
+        return None
+    if proc.returncode == 3:
+        return _git_hooks_clash(hooks)
+    return "git in the box couldn't write its config"
+
+
+def _git_hooks_clash(hooks: str) -> str:
+    return (
+        f"this repo's .git/config sets core.hooksPath, which wins over [box].git_hooks = "
+        f'"{hooks}". Unset it (git config --unset core.hooksPath) or make it the same.'
+    )
+
+
 # The bootstrap's last word: the in-box `fy doctor`, once per NEW box. Nobody runs doctor in a box
 # without a reason to suspect something, and the git shim rows guard against a change that only
 # happens when a box is created (an image putting another git ahead of the shim on PATH, a hooks
@@ -2064,6 +2156,8 @@ def _bootstrap_script(
         steps.append(shim)
     if identity := _git_identity_step():  # before any step that might commit, or set its own
         steps.append(identity)
+    if hooks := _git_hooks_step(checkout):  # likewise: a later step's commit runs the hooks
+        steps.append(hooks)
     steps += [
         # Core: foldyard self-install. Claude/editor installs come from their gated plugins below.
         ("foldyard CLI", _foldyard_check(), _foldyard_run(checkout, subst)),
@@ -2326,6 +2420,8 @@ def _up(
                 "⚠ couldn't (re)apply the in-box editor-attach hygiene (bash in the box failed) — "
                 "`fy verify` in the box says what is exposed; `fy box recreate` rebuilds it."
             )
+        if why := ensure_git_hooks(engine, box, env, checkout):  # [box].git_hooks, re-applied
+            print(f"⚠ git hooks: {why}")
         print(f"✓ dev box {box} already up. Attach: {_attach_hint(worktree)}")
         return 0
     if not replacing and _exists(engine, box, env):
@@ -2613,6 +2709,7 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         # removed or built.
         try:
             config.box_env()
+            config.box_git_hooks()  # read again at bootstrap, after the old box is gone
         except SystemExit as e:
             _err(str(e))
             return 1

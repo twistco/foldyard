@@ -15,7 +15,7 @@ from typing import cast
 
 import pytest
 
-from foldyard import config, devmode, keyless, plugins
+from foldyard import config, devmode, keyless, plugins, term
 from foldyard.plugins import (
     DoctorContext,
     InjectRule,
@@ -1800,7 +1800,10 @@ def test_network_panel_counts_rotated_backups_too(monkeypatch, tmp_path):
     _net_rows(tmp_path / "egress.jsonl", [_ok("new.example", 6)])
     data = proxy._network_panel_tree()
     assert [g.key for g in data.groups] == ["new.example", "old.example"]
-    assert "2 requests across 2 hosts" in data.summary and "since 2026-10-22 20:00" in data.summary
+    assert (
+        "2 requests across 2 hosts" in data.summary
+        and f"since {term.stamp(_ok('old.example', 0)['ts'])}" in data.summary
+    )
 
 
 def test_network_panel_caps_a_hosts_rows_and_says_how_many_are_earlier(monkeypatch, tmp_path):
