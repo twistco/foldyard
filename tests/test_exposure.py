@@ -493,6 +493,17 @@ def test_the_codex_prompt_is_inventoried_like_claudes(checkout):
     assert "prepended to your agent" in rendered(cfg)
 
 
+def test_the_copilot_prompt_is_inventoried_like_the_others(checkout):
+    """Copilot's prompt arrives as an instruction FILE rather than a flag, but it steers the same
+    privileged actor — so it is the same exposure and belongs in the same section."""
+    cfg = checkout(
+        BASE + 'passthrough = []\n\n[copilot]\nsystem_prompt = "one\\ntwo\\n"\n',
+        local='[copilot]\nsystem_prompt = "mine\\n"\n',
+    )
+    assert collect(cfg).prompts == [("[copilot].system_prompt", 1, exposure.LOCAL)]
+    assert "prepended to your agent" in rendered(cfg)
+
+
 def test_agent_cli_config_is_inventoried_beside_the_prompts(checkout):
     """`[claude.settings]` / `[codex.config]` reach the agent on the command line, and a `hooks` or
     `permissions` entry there steers it harder than any prompt — so they belong in the same

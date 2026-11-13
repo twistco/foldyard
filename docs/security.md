@@ -121,15 +121,15 @@ Three channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-rep
   can read while it runs. So foldyard's clients get none, whatever `podman login` has stored. A
   project can name `FY_REGISTRY_AUTH_FILE` in `[project] compose_env`, for a file you export under
   that name ([stack](./stack.md#private-images)): a box can read that file's login during a build,
-  so keep it narrow. Before this, every login on your computer was exposed that way. Your own
-  recipes that run `"$ENGINE" compose` or `podman build` aren't foldyard's clients: they still send
-  yours.
-- **Repo text that steers the agent.** `[claude].system_prompt` is prepended to every teammate's
-  agent, and `[claude.settings]` / `[codex.config]` are passed to the agent CLI (`--settings` /
-  `-c`), where a `hooks` or `permissions` entry steers it harder than any prompt. This runs in the
-  box, not on your computer, but it is still repo content steering a trusted actor.
-  `fy config widenings` lists all three. They are adopted like the rest of the file — but adopting
-  means a person reading a diff, which is weaker than "can't happen".
+  so keep it narrow. Before this, every login on your computer was exposed that way. Your own recipes that run
+  `"$ENGINE" compose` or `podman build` aren't foldyard's clients: they still send yours.
+- **Repo text that steers the agent.** `[claude].system_prompt` (and the same key on
+  `[codex]`/`[copilot]`) is prepended to every teammate's agent, and `[claude.settings]` /
+  `[codex.config]` are passed to the agent CLI (`--settings` / `-c`), where a `hooks` or
+  `permissions` entry steers it harder than any prompt. This runs in the box, not on your
+  computer, but it is still repo content steering a trusted actor. `fy config widenings` lists
+  all of them. They are adopted like the rest of the file — but adopting means a person reading
+  a diff, which is weaker than "can't happen".
 
 foldyard itself is installed on your computer as a uv tool (`uv tool install foldyard`), a frozen
 copy the repo mount can't change ([ADR-0020](./adrs/0020-post-extraction-consumption-model.md)). The

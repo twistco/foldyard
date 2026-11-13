@@ -41,6 +41,7 @@ def _wire(
     proxy_enabled=False,
     claude_keyless="",
     codex_keyless="",
+    copilot_keyless="",
     github="off",
     mitmdump: str | None = "/venv/bin/mitmdump",
     tables=None,
@@ -69,9 +70,11 @@ def _wire(
     monkeypatch.setattr(preflight.config, "proxy_enabled", lambda: proxy_enabled)
     monkeypatch.setattr(preflight.config, "claude_keyless", lambda: claude_keyless)
     monkeypatch.setattr(preflight.config, "codex_keyless", lambda: codex_keyless)
-    # Undeclared unless a test says so: the ambient (repo) config declares both agents.
+    monkeypatch.setattr(preflight.config, "copilot_keyless", lambda: copilot_keyless)
+    # Undeclared unless a test says so: the ambient (repo) config declares all three agents.
     monkeypatch.setattr(preflight.config, "claude_enabled", lambda: False)
     monkeypatch.setattr(preflight.config, "codex_enabled", lambda: False)
+    monkeypatch.setattr(preflight.config, "copilot_enabled", lambda: False)
     monkeypatch.setattr(preflight.config, "_table", lambda name: tables.get(name, {}))
     monkeypatch.setattr(preflight.config, "in_box", lambda: in_box)
     monkeypatch.setattr(preflight.devmode, "read", lambda: {"mode": {"github": github}})
@@ -121,6 +124,14 @@ def test_mitmproxy_not_checked_when_no_proxy_needed(monkeypatch):
     assert preflight.issues() == []
 
 
+def test_copilot_keyless_alone_requires_the_proxy(monkeypatch):
+    # The third keyless agent routes too: without mitmproxy its dummy token reaches no injector.
+    _wire(monkeypatch, copilot_keyless="api-key", mitmdump=None)
+    assert any("mitmproxy" in p and "Reinstall foldyard" in p for p in preflight.issues())
+    _wire(monkeypatch, copilot_keyless="", mitmdump=None)  # bare [copilot] needs none
+    assert preflight.issues() == []
+
+
 def test_lima_with_keyless_is_clean(monkeypatch):
     # Keyless on lima is ROUTED now (config.host_alias emits the Lima host gateway, so the box
     # reaches the Mac proxy) — the old hard-block must be gone.
@@ -162,6 +173,17 @@ def test_unrecognised_keyless_value_blocks(monkeypatch):
 def test_recognised_keyless_value_does_not_block(monkeypatch):
     # A valid value that normalises fine raises no typo complaint.
     _wire(monkeypatch, claude_keyless="oauth", tables={"claude": {"keyless": "oauth"}})
+    assert not any("isn't recognised" in p for p in preflight.issues())
+
+
+def test_unrecognised_copilot_keyless_value_blocks(monkeypatch):
+    # `"oauth"` is Claude's mode, not Copilot's: it normalises to "" (silently off) — say so.
+    _wire(monkeypatch, copilot_keyless="", tables={"copilot": {"keyless": "oauth"}})
+    problems = preflight.issues()
+    assert any(
+        "[copilot].keyless" in p and "oauth" in p and "api-key | true" in p for p in problems
+    )
+    _wire(monkeypatch, copilot_keyless="api-key", tables={"copilot": {"keyless": "api-key"}})
     assert not any("isn't recognised" in p for p in preflight.issues())
 
 

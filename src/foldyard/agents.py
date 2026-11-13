@@ -1,22 +1,23 @@
 """`fy agent` — agents in tmux sessions inside the dev box: start, list, attach, resume, stop.
 
-`fy claude` / `fy codex` run the agent in the terminal that started them, so closing that terminal
-ends the agent. `fy agent start` runs the same `fy claude` / `fy codex` in a detached tmux session
-in the box instead, so the agent outlives any terminal, and any terminal on your computer can
-reattach to it by its session id (`fy agent attach <id>`). It is a separate verb, never folded into
-`fy claude`: under tmux, scrollback, selection and some keys behave differently (docs/agents.md).
+`fy claude` / `fy codex` / `fy copilot` run the agent in the terminal that started them, so closing
+that terminal ends the agent. `fy agent start` runs the same `fy claude` / `fy codex` / `fy copilot`
+in a detached tmux session in the box instead, so the agent outlives any terminal, and any terminal
+on your computer can reattach to it by its session id (`fy agent attach <id>`). It is a separate
+verb, never folded into `fy claude`: under tmux, scrollback, selection and some keys behave
+differently (docs/agents.md).
 
-**One id per agent.** foldyard generates a UUID per session. For Claude it is passed as
-`--session-id`, so it IS the Claude session id — the one the transcript is named after, and the one
+**One id per agent.** foldyard generates a UUID per session. For Claude and Copilot it is passed as
+`--session-id`, so it IS the agent's session id — the one the transcript is named after, and the one
 a transcript browser such as claude-code-log shows — which makes `fy agent attach <that id>` work
 from anything that names the session. Codex takes no such flag, so its id is foldyard's own, and
 Codex's thread id — what `codex resume` takes — is recorded beside it once Codex has one: a watcher
 in the pane reads which `rollout-<ts>-<thread id>.jsonl` the Codex process holds open (Codex makes
 it at the first message, not at start) and tags the session (`@fy_conversation`). Codex runs
 without its shared background server (`box._codex_argv`), so that file is the pane's own process's
-(or its child's, under npm's wrapper). Claude sessions get the same tag at start — their id, or
-:data:`NO_CONVERSATION` when Claude picks the session itself — so `fy agent resume` refuses what it
-couldn't resume before it removes anything.
+(or its child's, under npm's wrapper). Claude and Copilot sessions get the same tag at start —
+their id, or :data:`NO_CONVERSATION` when the agent picks the session itself — so `fy agent resume`
+refuses what it couldn't resume before it removes anything.
 
 **The transport is the engine socket, nothing else.** The host reaches each box with `podman exec`,
 as every other host verb does; no listener is opened anywhere. tmux runs on foldyard's own socket
@@ -63,7 +64,7 @@ from pathlib import Path
 
 from . import config
 
-AGENTS = ("claude", "codex")
+AGENTS = ("claude", "codex", "copilot")
 SOCKET = "fy"  # `tmux -L fy`: foldyard's own server, apart from any the box's user runs
 MIN_TMUX = (3, 3)  # `allow-passthrough` (off by default) arrived in 3.3; before it, always on
 
@@ -117,8 +118,13 @@ _MIN_PREFIX = 8  # an id prefix shorter than this matches too much to be a handl
 _LIST_TIMEOUT = 10  # one box's `tmux list-panes`
 _PROJECT_TIMEOUT = 60  # one project's `fy agent ls --here --json`
 
-# Claude flags that name (or fork) the session themselves, so foldyard mustn't add --session-id.
-_RESUME_FLAGS = ("--resume", "-r", "--continue", "-c", "--session-id", "--fork-session")
+# Flags that name (or fork) the session themselves, so foldyard mustn't add --session-id.
+# Claude and Copilot both take ``--session-id``; only Claude has ``--fork-session`` and the short
+# ``-c`` for ``--continue`` (Copilot has no ``-c``).
+_RESUME_FLAGS: dict[str, tuple[str, ...]] = {
+    "claude": ("--resume", "-r", "--continue", "-c", "--session-id", "--fork-session"),
+    "copilot": ("--resume", "-r", "--continue", "--session-id"),
+}
 
 
 def _err(*a: object) -> None:
@@ -197,18 +203,18 @@ def parse_panes(stdout: str) -> list[Session]:
     return list(out.values())
 
 
-# What a Claude session started by `fy agent start` is tagged with when Claude picked its own
-# session (`--continue`, a bare `--resume`, `--fork-session`): foldyard doesn't know its id.
+# What a Claude or Copilot session started by `fy agent start` is tagged with when the agent picked
+# its own session (`--continue`, a bare `--resume`, `--fork-session`): foldyard doesn't know its id.
 NO_CONVERSATION = "none"
 
 
 def _conversation(agent: str, sid: str, tag: str) -> str:
     """The id the agent resumes this session's conversation by, "" when there's none (yet).
-    A Claude session WITHOUT the tag predates it (every start tags Claude now): its id is taken
-    as Claude's, which held unless Claude picked the session itself."""
+    A Claude/Copilot session WITHOUT the tag predates it (every start tags them now): its id is
+    taken as the agent's, which held unless the agent picked the session itself."""
     if _UUID.fullmatch(tag):
         return tag
-    if agent == "claude" and not tag and _UUID.fullmatch(sid):
+    if agent in ("claude", "copilot") and not tag and _UUID.fullmatch(sid):
         return sid
     return ""
 
@@ -347,19 +353,20 @@ def pane_command(agent: str, args: list[str]) -> list[str]:
 
 
 def session_args(agent: str, args: list[str]) -> tuple[str, list[str], bool]:
-    """``(id, the agent's args, whether the id is Claude's own)``. Claude gets
+    """``(id, the agent's args, whether the id is the agent's own)``. Claude and Copilot get
     ``--session-id <id>`` so the two ids are one — unless the caller already names the session:
-    ``--resume <uuid>`` (or ``--session-id <uuid>``) makes that uuid the id; ``--continue``, a
-    bare ``--resume`` or ``--fork-session`` leave foldyard's id its own, since Claude picks the
-    session then (and `fy agent resume` can't resume it by that id)."""
+    ``--resume <uuid>`` (or ``--session-id <uuid>``) makes that uuid the id; ``--continue``, a bare
+    ``--resume`` or (Claude) ``--fork-session`` leave foldyard's id its own, since the agent picks
+    the session then (and `fy agent resume` can't resume it by that id)."""
     own = str(uuid.uuid4())
-    if agent != "claude":
+    flags = _RESUME_FLAGS.get(agent)
+    if flags is None:
         return own, args, False
     if any(a.partition("=")[0] == "--fork-session" for a in args):
         return own, args, False
     for i, arg in enumerate(args):
         flag, eq, value = arg.partition("=")
-        if flag not in _RESUME_FLAGS:
+        if flag not in flags:
             continue
         if not eq and flag in ("--resume", "-r", "--session-id") and i + 1 < len(args):
             value = args[i + 1]
@@ -888,10 +895,10 @@ def start(agent: str, name: str, args: list[str], *, attach_after: bool) -> int:
 
 def resume(target: str, name: str, args: list[str], *, agent: str = "", attach_after: bool) -> int:
     """`fy agent resume`: an agent's conversation again, in a new session in this checkout's box —
-    Claude by `--resume <its id>`, Codex by `codex resume <its thread id>`. An exited session in
-    the box that held it is removed first (the new one keeps its name and foldyard id); a running
-    one is left alone. With none left, ``target`` is the agent's own id (``agent`` says which,
-    Claude by default) — or for Codex, a name given with `/rename`."""
+    Claude/Copilot by `--resume <its id>`, Codex by `codex resume <its thread id>`. An exited
+    session in the box that held it is removed first (the new one keeps its name and foldyard id);
+    a running one is left alone. With none left, ``target`` is the agent's own id (``agent`` says
+    which, Claude by default) — or for Codex, a name given with `/rename`."""
     if _bad_name(name):
         return 2
     if agent and agent not in AGENTS:
@@ -917,6 +924,8 @@ def resume(target: str, name: str, args: list[str], *, agent: str = "", attach_a
                 "codex": "Codex saves one at your first message",
                 "claude": "Claude picked it itself, so its id isn't known here — "
                 "`fy agent start claude -- --resume` opens Claude's own list",
+                "copilot": "Copilot picked it itself, so its id isn't known here — "
+                "`fy agent start copilot -- --resume` opens Copilot's own list",
             }.get(agent, "")
             _err(f"✗ {old.name} has no conversation to resume{f' ({why})' if why else ''}.")
             return 1
@@ -934,7 +943,9 @@ def resume(target: str, name: str, args: list[str], *, agent: str = "", attach_a
         if out.returncode != 0:
             _err(f"✗ couldn't remove {old.name}: {_printable(out.stderr.strip(), 200)}")
             return 1
-    resume_args = ["--resume", conversation] if agent == "claude" else ["resume", conversation]
+    resume_args = (
+        ["--resume", conversation] if agent in ("claude", "copilot") else ["resume", conversation]
+    )
     return _launch(
         b,
         cwd,
@@ -960,7 +971,7 @@ def _launch(
     """``sid``: keep this foldyard id (a resumed Codex session's) rather than make one."""
     own, agent_args, claudes = session_args(agent, args)
     sid = sid or own
-    conversation = (sid if claudes else NO_CONVERSATION) if agent == "claude" else ""
+    conversation = (sid if claudes else NO_CONVERSATION) if agent in ("claude", "copilot") else ""
     name = name or f"{agent}-{sid[:8]}"
     out = b.run(start_argv(name, sid, agent, cwd, pane_command(agent, agent_args), conversation))
     if out.returncode != 0:

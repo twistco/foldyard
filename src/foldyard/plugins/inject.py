@@ -397,4 +397,7 @@ def _spec_to_rule(spec: dict) -> InjectRule | None:
         # The keyless agents' exact dummy (``keyless.inject_spec``). A row never carries the key —
         # `_validated` refuses it — and gets its box_env dummies in `InjectPlugin.proxy_rules`.
         dummies=tuple(str(d) for d in spec.get("dummies", ())),
+        # A dummy handed to a client the mechanism doesn't control may arrive with any one auth
+        # scheme word (Copilot sends the same GitHub token as `Bearer`, `token` or bare).
+        any_scheme=bool(spec.get("any_scheme", False)),
     )
