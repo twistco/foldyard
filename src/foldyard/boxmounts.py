@@ -102,6 +102,11 @@ def codex_rel(worktree: str = "") -> Path:
     return slot_rel(worktree) / "codex" / "sessions"
 
 
+def copilot_rel(worktree: str = "") -> Path:
+    """Copilot keeps its sessions under ``$COPILOT_HOME/session-state`` — the dir bound out."""
+    return slot_rel(worktree) / "copilot" / "session-state"
+
+
 def overlaps(a: Path, b: Path) -> bool:
     """Is one of ``a``/``b`` inside (or equal to) the other?"""
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)

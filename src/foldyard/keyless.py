@@ -1,6 +1,6 @@
 """Keyless agent auth — the credential taxonomy + the host-side capture of the real secret.
 
-The prize (ADR-0008): the box runs Claude Code / Codex with a PLACEHOLDER
+The prize (ADR-0008): the box runs Claude Code / Codex / GitHub Copilot with a PLACEHOLDER
 credential and the egress proxy rewrites it in flight with the real one, which lives ONLY in
 ``~/.foldyard/<project>/host.env`` on the host — never in the box, never in the repo. The same shape
 as an ``[[inject]]`` rule (a dummy in the box + the ``static_token`` minter on the host).
@@ -17,7 +17,8 @@ registry hot path:
   - **The capture** (:func:`classify`, :func:`ensure_cred`): on ``fy box up`` (host, TTY) with a
     keyless mode configured and no matching cred in host.env yet, prompt ONCE for "an API key or
     token", classify it by prefix (no need to ask which — ``sk-ant-api`` → Claude key,
-    ``sk-ant-oat`` → Claude OAuth, ``sk-`` → OpenAI/Codex key), and append it to host.env. The
+    ``sk-ant-oat`` → Claude OAuth, ``sk-`` → OpenAI/Codex key, ``github_pat_``/``gho_``/``ghu_`` →
+    Copilot), and append it to host.env. The
     I/O (prompt/echo) is injected so the logic is pure + unit-testable.
 
 And one posture convenience beside them, :func:`seed_posture`: a worktree's FIRST adoption mirrors
@@ -87,6 +88,39 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
         "value_prefix": "Bearer ",
         "how": "create one at https://platform.openai.com/api-keys",
         "prefix": "sk-",
+    },
+}
+
+
+# The GitHub Copilot CLI's keyless target. The box bakes a dummy ``COPILOT_GITHUB_TOKEN`` and the
+# proxy rewrites ``Authorization`` with ``Bearer `` + the real token from host.env. Copilot talks to
+# a PLAN-SPECIFIC API host (business/individual/enterprise), and it ALWAYS validates the token
+# against ``api.github.com`` before any Copilot call — so every host that can carry it is listed,
+# rather than guessing which plan the operator's seat is on. A rule fires only on a request
+# carrying the dummy, and ``any_scheme`` (set by the plugin) covers the schemes a GitHub client
+# may use: ``Bearer <dummy>``, ``token <dummy>``, or the bare value.
+#   ``api-key`` — the token is a GitHub credential Copilot accepts: a FINE-GRAINED PAT
+#                 (``github_pat_…``), an OAuth token (``gho_…``) or a user token (``ghu_…``).
+#                 Classic ``ghp_`` PATs are refused by Copilot itself, which is why they are absent
+#                 from ``_CLASSIFY``/the secret's pattern — a paste of one is refused, not stored.
+COPILOT_KEYLESS_HOSTS = (
+    "api.github.com",  # token validation + `copilot_internal/*` (the first call of every session)
+    "api.githubcopilot.com",
+    "api.individual.githubcopilot.com",
+    "api.business.githubcopilot.com",
+    "api.enterprise.githubcopilot.com",
+    "copilot.github.com",
+    "cafe.github.com",  # Copilot auth/entitlement
+    "exp.business.githubcopilot.com",  # business-plan experiments/config
+)
+COPILOT_KEYLESS: dict[str, dict[str, str]] = {
+    "api-key": {
+        "env": "COPILOT_GITHUB_TOKEN",
+        "header": "Authorization",
+        "dummy": "gho_foldyarddummy",
+        "value_prefix": "Bearer ",
+        "how": "a fine-grained PAT (github_pat_…), `gh auth token` (gho_), or a ghu_ token",
+        "prefix": "github_pat_",
     },
 }
 
@@ -223,10 +257,15 @@ def dummy_box_args(taxonomy: dict, kind: str) -> list[str]:
 # Prefix → (host.env var, human label). Order matters: the Claude ``sk-ant-…`` prefixes are more
 # specific than the bare OpenAI ``sk-`` and so must be tested first. ``sk-proj-…`` (OpenAI project
 # keys) falls under ``sk-``. This is the "no need to ask which" classifier from the design.
+# GitHub tokens: the three shapes Copilot accepts all name the Copilot var (``ghp_`` is absent on
+# purpose — Copilot refuses classic PATs, so an unrecognised value is stored nowhere).
 _CLASSIFY: list[tuple[str, tuple[str, str]]] = [
     ("sk-ant-api", ("ANTHROPIC_API_KEY", "Claude API key")),
     ("sk-ant-oat", ("CLAUDE_CODE_OAUTH_TOKEN", "Claude OAuth token")),
     ("sk-", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
+    ("github_pat_", ("COPILOT_GITHUB_TOKEN", "GitHub fine-grained PAT (Copilot)")),
+    ("gho_", ("COPILOT_GITHUB_TOKEN", "GitHub OAuth token (Copilot)")),
+    ("ghu_", ("COPILOT_GITHUB_TOKEN", "GitHub user token (Copilot)")),
 ]
 
 
@@ -306,7 +345,9 @@ def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
     from repo config that anything able to write the checkout can edit, and feeding that to Python's
     backtracking ``re`` engine makes `fy box up` hangable by a crafted pattern (`(.*)*x` against a
     2 KiB paste). A glob can't nest quantifiers, so the whole class is gone rather than mitigated —
-    and every real shape check here is a prefix or a substring anyway.
+    and every real shape check here is a prefix or a substring anyway. ``|`` separates ALTERNATIVES
+    (each a whole-value glob, any of which may match) — for a credential the provider accepts in
+    several token shapes, e.g. Copilot's ``github_pat_*|gho_*|ghu_*``.
 
     For a ``b64`` secret the paste must be valid base64 whose DECODED text matches, and the paste is
     stored verbatim. That's deliberately strict: host.env is single-line, so the declared ``how``
@@ -315,13 +356,14 @@ def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
     as a broken key."""
     from fnmatch import fnmatchcase
 
+    globs = [g for g in pattern.split("|") if g]
     if b64:
         try:
             decoded = base64.b64decode(value, validate=True).decode()
         except (ValueError, UnicodeDecodeError):
             return None
-        return value if (not pattern or fnmatchcase(decoded, pattern)) else None
-    return value if (not pattern or fnmatchcase(value, pattern)) else None
+        return value if (not globs or any(fnmatchcase(decoded, g) for g in globs)) else None
+    return value if (not globs or any(fnmatchcase(value, g) for g in globs)) else None
 
 
 def ensure_secret(
@@ -457,14 +499,15 @@ def ensure_cred(
 
 
 def seed_posture(wt_cfg: Config) -> dict[str, str]:
-    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex`` axes) into
-    a worktree's posture file, so its keyless box comes up injectable. Called by
+    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex``/``copilot``
+    axes) into a worktree's posture file, so its keyless box comes up injectable. Called by
     :func:`foldyard.configpin.adopt` at the worktree's FIRST adoption — wherever that happens
     (``fy worktree add``, the launch gate, ``fy config adopt``, the TUI) — with ``wt_cfg`` being
     what was just adopted. Returns the axes it set (``{}`` for none).
 
     Why this is needed: posture is per-worktree and a fresh worktree has no ``dev-mode.json``, so
-    every axis reads its rung-0 default (off). With ``claude``/``codex`` off, the worktree's own
+    every axis reads its rung-0 default (off). With ``claude``/``codex``/``copilot`` off, the
+    worktree's own
     egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
     worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
     token and fail with *"Your access token could not be refreshed."* The real creds are already
@@ -482,7 +525,8 @@ def seed_posture(wt_cfg: Config) -> dict[str, str]:
     operator never chose: ``set_mode`` writes EVERY axis into the file, so any earlier write to the
     worktree's posture leaves explicit offs behind. Fail-safe by design — the guard can only keep
     an axis off, never turn one on. A non-keyless developer (no
-    ``[claude]``/``[codex]`` ``keyless`` in their local toml) gets a no-op. Written with
+    ``[claude]``/``[codex]``/``[copilot]`` ``keyless`` in their local toml) gets a no-op. Written
+    with
     ``reconcile=False``: nothing of the worktree is up before its first adoption (the launch verbs
     refuse an unadopted checkout), and the supervisor reconciles from the posture file. Best-effort
     — a hiccup here must not fail the adoption that called it."""
@@ -493,7 +537,11 @@ def seed_posture(wt_cfg: Config) -> dict[str, str]:
         return {}
     try:
         with config.using(wt_cfg):
-            configured = (("claude", config.claude_keyless()), ("codex", config.codex_keyless()))
+            configured = (
+                ("claude", config.claude_keyless()),
+                ("codex", config.codex_keyless()),
+                ("copilot", config.copilot_keyless()),
+            )
             keyless_axes = [axis for axis, on in configured if on]
             if not keyless_axes:
                 return {}

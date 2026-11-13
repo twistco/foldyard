@@ -44,7 +44,7 @@ Built in:
 - `[[inject]]` — one `off | on` switch per entry. The entry's `kind` says how its credential is
   made: a static token, a GitHub App installation token (`github-app`), or your own `gh` token
   (`gh-cli`, always an emergency switch) — [configuration](./configuration.md#inject);
-- `claude` and `codex` — only when you configure keyless auth (below).
+- `claude`, `codex` and `copilot` — only when you configure keyless auth (below).
 
 Everything else — cloud identity, auth simulators, LLM routing — comes from plugins your project
 opts into. No plugin in the config, no switch on the dashboard. So `fy mode` shows *your*
@@ -230,8 +230,8 @@ recovering, token services starting and stopping — on a real machine with zero
 
 ## Keyless agents
 
-If you run a coding agent in the box with `keyless` configured (`[claude]` or `[codex]`), you get
-an on/off switch for it:
+If you run a coding agent in the box with `keyless` configured (`[claude]`, `[codex]` or
+`[copilot]`), you get an on/off switch for it:
 
 ```bash
 fy mode claude=on
@@ -249,6 +249,7 @@ never typed in the box, never in the repo, never in scrollback.
 | `[claude] oauth` | `CLAUDE_CODE_OAUTH_TOKEN` env | `authorization: Bearer …` | `api.anthropic.com` | `host.env` |
 | `[codex] api-key` | `OPENAI_API_KEY` env | `Authorization: Bearer …` | `api.openai.com` | `host.env` |
 | `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex's API + workspace-discovery paths) | your real `auth.json` on your computer, refreshed by the token service |
+| `[copilot] api-key` | `COPILOT_GITHUB_TOKEN` env | `Authorization: Bearer …` | `api.github.com` + the plan's `api.*.githubcopilot.com` host | `host.env` |
 
 With the switch `off`, the box holds only the dummy and can't reach the provider at all. The
 proxy doesn't forward the dummy either: it answers the request itself with a 401 whose message
@@ -275,10 +276,10 @@ again, and `fy host logs` gets one line per attempt. Pasting a missing secret in
 takes effect straight away. A slow token service holds up only the requests that need its
 credential; the rest of the box's traffic carries on.
 
-`fy claude` and `fy codex` check first: with the agent's switch off they say so before
-launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
-anyway). That covers starting a session; the proxy's answer covers the rest — a time limit
-running out mid-session, or an agent started some other way — and the first such answer per
+`fy claude`, `fy codex` and `fy copilot` check first: with the agent's switch off they say so
+before launching and, in a terminal, wait for you to switch it on from your computer (Enter
+launches anyway). That covers starting a session; the proxy's answer covers the rest — a time
+limit running out mid-session, or an agent started some other way — and the first such answer per
 switch also raises a notification on your computer.
 
 Codex on a ChatGPT subscription shows the proxy's message only in passing (a failed model-list

@@ -31,6 +31,7 @@ HANDOVER-*.md
 .devbox-ca/
 .devbox-claude/
 .devbox-codex/
+.devbox-copilot/
 .devbox-foldyard/
 .dev-mode.json
 **/foldyard.local.toml

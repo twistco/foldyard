@@ -1151,11 +1151,11 @@ def load_plugins(
     asks for.
 
     Order is preserved from before the split (gcp, inject, proxy, auth0-sim, llm, claude, vscode,
-    codex when all are present) because it sets switch + doctor-row order (``fy mode`` output) AND
-    overlay stacking order (identity/storage → auth0 → llm). There is no github plugin: GitHub is
-    two ``[[inject]]`` kinds (``github-app``, ``gh-cli``) plus data (ADR-0031)."""
+    codex, copilot when all are present) because it sets switch + doctor-row order (``fy mode``
+    output) AND overlay stacking order (identity/storage → auth0 → llm). There is no github plugin:
+    GitHub is two ``[[inject]]`` kinds (``github-app``, ``gh-cli``) plus data (ADR-0031)."""
     from .. import config as config_mod
-    from . import auth0_sim, claude, codex, fakecred, gcp, inject, llm, proxy, vscode
+    from . import auth0_sim, claude, codex, copilot, fakecred, gcp, inject, llm, proxy, vscode
 
     cfg = config if config is not None else config_mod.current()
 
@@ -1175,6 +1175,7 @@ def load_plugins(
     plugins.append(claude.ClaudePlugin())  # CORE: switch only when [claude].keyless
     plugins.append(vscode.VscodePlugin())  # CORE: no switch, [vscode]-gated box volume only
     plugins.append(codex.CodexPlugin())  # CORE: switch only when [codex].keyless
+    plugins.append(copilot.CopilotPlugin())  # CORE: switch only when [copilot].keyless
 
     if discover:
         plugins += _entry_point_plugins()

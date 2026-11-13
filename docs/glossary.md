@@ -15,8 +15,8 @@ your computer. Everything that runs untrusted code runs in here. The README call
 after the farmyard where animals are penned for the night.
 
 **The box** (*the dev box*) — the long-lived container inside the VM where you and your agent
-work: `fy box shell`, `fy claude`, `fy codex`. It has the repo, your toolchain and the VM's
-container socket, and no credentials.
+work: `fy box shell`, `fy claude`, `fy codex`, `fy copilot`. It has the repo, your toolchain and
+the VM's container socket, and no credentials.
 
 **The stack** — your compose services (databases, API servers, emulators), run in the same VM by
 `fy up`. Services reach each other by container name; your computer reaches them on the ports in
@@ -97,9 +97,9 @@ installation permissions) is what the box gets — foldyard doesn't narrow or ca
 **Injection** (`[[inject]]`, *injector*) — the proxy adding a credential to requests for one host
 as they pass through. The box never holds the real value.
 
-**Keyless** (`[claude] keyless`, `[codex] keyless`) — how an AI agent runs in the box without its
-key: the box has a dummy, and the proxy swaps in the real key for the provider's API host. You
-paste the real key once, on your computer.
+**Keyless** (`[claude] keyless`, `[codex] keyless`, `[copilot] keyless`) — how an AI agent runs in
+the box without its key: the box has a dummy, and the proxy swaps in the real key for the
+provider's API host. You paste the real key once, on your computer.
 
 **Metadata emulator** — a small server on the stack's network that answers Google Cloud's
 "metadata server" requests, so code in the box or a service gets a short-lived token for its own

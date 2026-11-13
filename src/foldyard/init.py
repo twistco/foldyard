@@ -48,6 +48,7 @@ GITIGNORE_ENTRIES = (
     ".devbox-ca/",
     ".devbox-claude/",
     ".devbox-codex/",
+    ".devbox-copilot/",
     ".devbox-foldyard/",
     ".dev-mode.json",
     # The per-developer overlay itself. It holds each person's keyless credential CHOICE (never a
@@ -63,7 +64,7 @@ LOCAL_EXAMPLE = "foldyard.local.toml.example"
 # The commented blocks `fy init --with` can write ACTIVE: only those that work exactly as the
 # scaffold writes them. [[inject]] needs your App's ids and [box].image a Dockerfile, so an active
 # copy of either would be a config that fails, not a shortcut.
-BLOCKS = ("claude", "codex", "vscode")
+BLOCKS = ("claude", "codex", "copilot", "vscode")
 
 
 def parse_blocks(values: list[str]) -> frozenset[str]:
@@ -160,7 +161,8 @@ def _slug(name: str) -> str:
 
 
 #: The agent prompt the scaffold offers, as written COMMENTED (`system_prompt = """` … `"""`):
-#: [claude]'s, and — only when ``--with codex`` writes it active — [codex]'s too.
+#: [claude]'s, and — only when ``--with codex`` / ``--with copilot`` writes it active — the
+#: variant for that agent too.
 _AGENT_PROMPT = [
     '# system_prompt = """',
     "# You are root in this project's foldyard dev box, started by `fy claude` with permission",
@@ -210,6 +212,16 @@ def _codex_prompt() -> list[str]:
     return out
 
 
+def _copilot_prompt() -> list[str]:
+    """[claude]'s prompt for a Copilot session. Only the launcher changes: Copilot discovers the
+    same ``.claude/skills/`` directory (``copilot skill list`` says so), so the skill paragraph
+    stays true as written."""
+    out = list(_AGENT_PROMPT)
+    (i,) = [n for n, ln in enumerate(out) if "`fy claude`" in ln]  # exactly one, or it moved
+    out[i] = out[i].replace("`fy claude`", "`fy copilot`")
+    return out
+
+
 # The blocks `fy init --with <name>` can write ACTIVE (BLOCKS), each as written COMMENTED.
 _CLAUDE = [
     "# [claude]",
@@ -226,6 +238,14 @@ _CODEX = [
     '# # keyless = "chatgpt"  # ChatGPT subscription: a token service refreshes ~/.codex/auth.json',
     '# system_prompt = """…"""   # same key + same job as [claude]\'s above (paste that one);',
     "#                          # Codex takes it as a developer instruction, not a system prompt",
+]
+
+_COPILOT = [
+    "# [copilot]",
+    '# keyless = "api-key"    # Authorization: Bearer ← a GitHub PAT (Copilot access, read:user)',
+    '# system_prompt = """…"""   # same key + same job as [claude]\'s above (paste that one);',
+    "#                          # written to $COPILOT_HOME/instructions/ as a personal",
+    "#                          # instructions file — the CLI has no prompt flag",
 ]
 
 _VSCODE = [
@@ -260,16 +280,30 @@ def _codex(active: bool) -> list[str]:
     ]
 
 
+def _copilot(active: bool) -> list[str]:
+    """[copilot], same treatment as [codex]: the active block carries the prompt itself instead of
+    the ``"…"`` placeholder."""
+    if not active:
+        return _COPILOT
+    return [
+        *_activate(_COPILOT[:2]),
+        "# [claude]'s prompt, told it's Copilot: it lands in $COPILOT_HOME/instructions/, so the",
+        "# CLI loads it for every session in this box.",
+        *_activate(_copilot_prompt()),
+    ]
+
+
 def _step_two(agents: list[str]) -> list[str]:
     """The header's step 2: uncomment an agent and recreate the box — or, when ``--with`` already
     declared one, just turn it on, since the first ``fy box up`` creates the box with it."""
     if not agents:
         return [
-            "#   2. Uncomment ONE agent ([claude] or [codex]), `fy config adopt`, then",
+            "#   2. Uncomment ONE agent ([claude], [codex] or [copilot]), `fy config adopt`, then",
             "#      `fy box down && fy box up` — the agent is installed when the box is CREATED, so a",
-            "#      running box won't pick it up (with `keyless`, then `fy mode claude=on` or",
-            "#      `codex=on`). Now an AI agent runs INSIDE the safe sandbox (it offers that agent's",
-            "#      install hosts the same way). Use it to work out the rest of this config with you.",
+            "#      running box won't pick it up (with `keyless`, then `fy mode claude=on`,",
+            "#      `codex=on` or `copilot=on`). Now an AI agent runs INSIDE the safe sandbox (it",
+            "#      offers that agent's install hosts the same way). Use it to work out the rest of",
+            "#      this config with you.",
         ]
     one = len(agents) == 1
     return [
@@ -310,7 +344,7 @@ def render(opts: InitOptions) -> str:
         "#      allowlist LEARNING for an hour: setup isn't refused, every host it would have refused",
         "#      is recorded, and then it ENFORCES by itself. `fy allow learn` grants what it saw in",
         "#      one reviewed batch ([proxy] below).",
-        *_step_two([a for a in ("claude", "codex") if a in opts.blocks]),
+        *_step_two([a for a in ("claude", "codex", "copilot") if a in opts.blocks]),
         "#   3. Uncomment a stack + the features at the bottom as the project needs them. Box",
         "#      settings are create-time too: adopt, then `fy box down && fy box up`.",
         "# Resolution everywhere: explicit env var wins → foldyard.local.toml (gitignored,",
@@ -411,7 +445,7 @@ def render(opts: InitOptions) -> str:
         "",
         (
             "# ── Agents (step 2) ──────────────────────────────────────────────────────────────────────"
-            if {"claude", "codex"} & opts.blocks
+            if {"claude", "codex", "copilot"} & opts.blocks
             else "# ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────"
         ),
         "# Claude Code (`fy claude`). Declaring [claude] installs it on box-up + mounts its persisted",
@@ -451,6 +485,15 @@ def render(opts: InitOptions) -> str:
         "# [codex.config]",
         '# model_reasoning_summary = "auto"',
         "# tui = { raw_output_mode = false }",
+        "#",
+        "# GitHub Copilot CLI (`fy copilot`). Declaring [copilot] installs it on box-up + mounts",
+        "# $COPILOT_HOME (login + sessions). Keyless like Claude: the proxy injects the PAT on your",
+        "# computer, in flight. Leave `keyless` out for an in-box `copilot login`. On a team, `keyless`",
+        "# goes in foldyard.local.toml, as for [claude].",
+        "# system_prompt works as it does for [claude], but the CLI has no prompt flag: `fy copilot`",
+        "# writes it to $COPILOT_HOME/instructions/foldyard.instructions.md, a personal instruction",
+        "# source it loads for every session.",
+        *_copilot("copilot" in opts.blocks),
         "",
         "# ── GitHub — uncomment as you need it (step 3) ───────────────────────────────────────────",
         "# Two switches, both off until you turn one on; `fy docs github-app` sets up the App.",
@@ -554,13 +597,14 @@ def render_local(opts: InitOptions) -> str:
         "",
         "# ── Turn a shared block OFF: `disabled = true` ───────────────────────────────────────────",
         "# The merge can otherwise only ADD, and several tables are PRESENCE-gated — declaring",
-        "# [claude] / [codex] / [vscode] / [plugins.<name>] at all IS the opt-in — so blanking their",
-        "# keys doesn't switch them off. `disabled = true` removes the block from the resolved config",
-        "# as if it had never been written; the team keeps it, you don't get it. The case it exists",
-        "# for: the repo commits [codex], you don't have a Codex subscription, and you'd rather not",
-        "# have the CLI installed on box-up, be asked for a credential, or carry a dead codex row in",
-        "# `fy mode`. Works at any depth ([plugins.<name>] too), and `disabled = false` here puts a",
-        "# block back that the SHARED file disabled. `fy config widenings` lists what you've removed.",
+        "# [claude] / [codex] / [copilot] / [vscode] / [plugins.<name>] at all IS the opt-in — so",
+        "# blanking their keys doesn't switch them off. `disabled = true` removes the block from the",
+        "# resolved config as if it had never been written; the team keeps it, you don't get it. The",
+        "# case it exists for: the repo commits [codex], you don't have a Codex subscription, and",
+        "# you'd rather not have the CLI installed on box-up, be asked for a credential, or carry a",
+        "# dead codex row in `fy mode`. Works at any depth ([plugins.<name>] too), and",
+        "# `disabled = false` here puts a block back that the SHARED file disabled.",
+        "# `fy config widenings` lists what you've removed.",
         "# [codex]",
         "# disabled = true",
         "",
@@ -590,6 +634,21 @@ def render_local(opts: InitOptions) -> str:
         '# keyless = "chatgpt"',
         '# system_prompt = """',
         "# …your orientation prompt for `fy codex`.",
+        '# """',
+        "#",
+        "# GitHub Copilot CLI (`fy copilot`) — `api-key` only: a GitHub PAT with Copilot access",
+        "# (classic: the `copilot` scope; fine-grained: the Copilot Requests permission). Captured",
+        "# host-side like the others; the box holds a dummy and the proxy swaps in the real one.",
+        "# Then `fy mode copilot=on`. Omit `keyless` for a plain in-box `copilot login` (its",
+        "# browser callback is a loopback inside the box, so use the device-code fallback).",
+        "# A `[copilot] keyless` table needs api.github.com to itself: the two GitHub `[[inject]]`",
+        "# rows below inject on that same host, so turn them off (or leave [copilot] manual).",
+        "# system_prompt works here exactly as it does for [claude]; `fy copilot` writes it into",
+        "# $COPILOT_HOME/instructions/, which every session in this box loads.",
+        "# [copilot]",
+        '# keyless = "api-key"',
+        '# system_prompt = """',
+        "# …your orientation prompt for `fy copilot`.",
         '# """',
         "",
         "# ── Your machine, not the project's ──────────────────────────────────────────────────────",

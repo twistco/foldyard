@@ -684,7 +684,7 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
     A worktree's FIRST adoption (no pin before this one) then seeds its keyless posture from main
     (:func:`_after_first_adoption`). Here rather than in each caller because every first adoption
     comes through here — ``add``, the launch gate's prompt, ``fy config adopt``, the TUI — and a
-    door that forgot to seed left a box with ``claude``/``codex`` off."""
+    door that forgot to seed left a box with ``claude``/``codex``/``copilot`` off."""
     _require_host()
     drift = inspect(cfg)
     if reviewed is not None and drift.tree_digest() != reviewed:

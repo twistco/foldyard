@@ -94,6 +94,14 @@ def test_pane_command_is_a_login_shell_execing_fy():
         ("claude", ["--resume"], False, False),
         ("claude", ["--resume", SID, "--fork-session"], False, False),
         ("codex", [], False, False),
+        ("copilot", [], True, False),
+        ("copilot", ["--model", "auto"], True, False),
+        ("copilot", ["--resume", SID.upper()], False, True),
+        ("copilot", [f"--resume={SID}"], False, True),
+        ("copilot", ["-r", SID], False, True),
+        ("copilot", ["--session-id", SID], False, True),
+        ("copilot", ["--continue"], False, False),
+        ("copilot", ["--resume"], False, False),
     ],
 )
 def test_session_args(agent, args, passed_id, same_id):
@@ -356,6 +364,55 @@ def test_resume_codex_with_no_session_left_takes_its_id_or_a_name(in_box, monkey
     assert _resumed(calls[-1])[2].endswith("exec fy codex resume 'my thread'")
     assert agents.resume("--last", "", [], agent="codex", attach_after=False) == 1  # not a flag
     assert agents.resume(THREAD, "", [], agent="gemini", attach_after=False) == 2
+
+
+def test_start_a_copilot_session_hands_it_its_own_session_id(in_box, monkeypatch, capsys, tmp_path):
+    # Copilot resumes by its own session id, so `fy agent start` passes --session-id and tags the
+    # pane with it — the same one-id arrangement Claude has.
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    assert agents.start("copilot", "", [], attach_after=False) == 0
+    name, sid, script = _resumed(calls[-1])
+    assert name == f"copilot-{sid[:8]}"
+    assert script.rstrip().endswith(f"exec fy copilot --session-id {sid}")
+    assert calls[-1][-5:] == ["set-option", "-t", f"={name}:", "@fy_conversation", sid]
+
+
+def test_resume_a_copilot_session_by_its_own_id(in_box, monkeypatch, tmp_path):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    replies["list-panes"] = _Proc(0, _pane(name="mine", agent="copilot", dead="1") + "\n")
+    assert agents.resume(SID[:8], "", ["--model", "auto"], attach_after=False) == 0
+    assert agents.stop_argv("mine") in calls  # the exited holder goes first; the name stays
+    name, sid, script = _resumed(calls[-1])
+    assert (name, sid) == ("mine", SID)
+    assert script.endswith(f"exec fy copilot --resume {SID} --model auto")
+
+
+def test_resume_a_copilot_session_with_no_conversation_says_why(in_box, capsys):
+    calls, replies = in_box
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    replies["list-panes"] = _Proc(
+        0, _pane(agent="copilot", dead="1", conv=agents.NO_CONVERSATION) + "\n"
+    )
+    assert agents.resume(SID, "", [], attach_after=False) == 1
+    err = capsys.readouterr().err
+    assert "Copilot picked it itself" in err
+    assert "fy agent start copilot -- --resume" in err
+    assert not any("kill-session" in c or "new-session" in c for c in calls)
+
+
+def test_resume_copilot_with_no_session_left_takes_the_full_id(in_box, monkeypatch, tmp_path):
+    calls, replies = in_box
+    monkeypatch.chdir(tmp_path)
+    replies["-V"] = _Proc(0, "tmux 3.5a\n")
+    assert agents.resume(SID, "", [], agent="copilot", attach_after=False) == 0
+    name, sid, script = _resumed(calls[-1])
+    assert (name, sid) == (f"copilot-{SID[:8]}", SID)
+    assert script.endswith(f"exec fy copilot --resume {SID}")
+    assert agents.resume(SID[:8], "", [], agent="copilot", attach_after=False) == 1  # full id only
 
 
 def test_parse_panes_reads_the_conversation_tag():

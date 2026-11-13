@@ -254,7 +254,7 @@ def _warn_predates_box_dirs(engine: str, box: str, env: dict) -> None:
         return
     if _baked_env(engine, box, env, boxmounts.ENV_FROM_BOX) is not None:
         return
-    agents = config.claude_enabled() or config.codex_enabled()
+    agents = config.claude_enabled() or config.codex_enabled() or config.copilot_enabled()
     print(
         f"⚠ dev box {box} predates foldyard's to-box and from-box: it has no "
         f"{boxmounts.TO_BOX_IN_BOX}"
@@ -1164,7 +1164,9 @@ def env_drift(
     # — always, in the box) costs only its own names. The transcripts dirs are left out: their
     # box_args would create them on disk, and they only ever add a mount.
     plugin_env = {
-        k: v for k, v in resolved.items() if k not in ("FY_TRANSCRIPTS", "FY_CODEX_TRANSCRIPTS")
+        k: v
+        for k, v in resolved.items()
+        if k not in ("FY_TRANSCRIPTS", "FY_CODEX_TRANSCRIPTS", "FY_COPILOT_TRANSCRIPTS")
     }
     plugin_env["FY_BOX_HOME"] = box_home
     plugin_env["FY_CLAUDE_HOME"] = baked.get("CLAUDE_CONFIG_DIR") or f"{box_home}/.claude"
@@ -1872,6 +1874,73 @@ def codex(args: list[str] | None = None) -> int:
     os.execvpe(argv[0], argv, os.environ.copy())
 
 
+def _copilot_argv(args: list[str]) -> list[str]:
+    """The `copilot` argv: ``--allow-all`` = tools + file paths + URLs, no prompts (the box's
+    rootless isolation IS the safety boundary), then the caller's extra args.
+
+    The orientation prompt is NOT an argv: the CLI has no ``--append-system-prompt`` and no ad-hoc
+    config override, so ``fy copilot`` writes it to ``$COPILOT_HOME/instructions/`` instead
+    (:func:`_seed_copilot_instructions`). ``COPILOT_ALLOW_ALL=true`` in the launch environment adds
+    the one thing ``--allow-all`` doesn't: trusting the working directory (its skills, plugins, MCP
+    servers and hooks) — the same trust ``_seed_claude_config`` gives Claude's checkout."""
+    return ["copilot", "--allow-all", *args]
+
+
+def _seed_copilot_instructions(prompt: str) -> None:
+    """Write the ``[copilot].system_prompt`` orientation into the Copilot home the volume mounts, as
+    a personal instructions file the CLI loads for every session
+    (``$COPILOT_HOME/instructions/foldyard.instructions.md``). An empty prompt REMOVES the file, so
+    clearing the key in config is enough to stop orienting — no stale text left behind.
+
+    Written atomically (temp file + rename). Every box of a project shares this volume, so two
+    launches from different worktrees with DIFFERENT prompts race — last writer wins, and the text
+    is a prompt, not state: identical prompts make the race invisible. Best-effort, never blocks
+    the launch."""
+    home = os.environ.get("COPILOT_HOME")
+    if not home:
+        return
+    path = Path(home) / "instructions" / "foldyard.instructions.md"
+    tmp: Path | None = None
+    try:
+        if not prompt.strip():
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as f:
+            tmp = Path(f.name)
+            f.write(prompt if prompt.endswith("\n") else prompt + "\n")
+        os.replace(tmp, path)
+        tmp = None
+    except OSError:  # no writable home: the session starts un-oriented rather than not at all
+        return
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+def copilot(args: list[str] | None = None) -> int:
+    """`fy copilot` — run the GitHub Copilot CLI in the dev box, pre-oriented + skipping permission
+    prompts (the box's rootless isolation IS the safety boundary). Refuses outside the box; needs
+    `[copilot]` in foldyard.toml (its plugin installs the CLI + mounts its volume)."""
+    if not _in_box():
+        _err("✗ fy copilot runs INSIDE the dev box ('fy box shell' first).")
+        _err("  It skips permission prompts and trusts the rootless-machine boundary.")
+        return 1
+    if not shutil.which("copilot"):
+        _err("✗ copilot not on PATH — add a [copilot] table to foldyard.toml, then `fy box up`.")
+        return 1
+    if not _await_credential("copilot", "Copilot", config.copilot_keyless()):
+        return 130
+    _seed_copilot_instructions(config.copilot_system_prompt())
+    argv = _copilot_argv(args or [])
+    env = os.environ.copy()
+    env["COPILOT_ALLOW_ALL"] = "true"  # also trusts the working directory (see _copilot_argv)
+    # Run the CLI the box's bootstrap installed, not a background self-update (its cache dir is
+    # ephemeral anyway, so an update would be re-downloaded every box).
+    env["COPILOT_AUTO_UPDATE"] = "false"
+    os.execvpe(argv[0], argv, env)
+
+
 def _step_line(label: str, check: str, run: str) -> str:
     """One monitored step as a ``run_step`` call, shell-quoted so an arbitrary install command
     (pipes, quotes, newlines) survives intact into the box's bash, where ``run_step`` ``eval``s it."""
@@ -2292,6 +2361,13 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
                 "⚠ [codex] is declared but this box was created without it (no Codex install, "
                 "~/.codex volume or keyless seed). Recreate to add them: `fy box down && fy box up`."
             )
+        # And the same for copilot: a box created WITH [copilot] bakes COPILOT_HOME.
+        if config.copilot_enabled() and _baked_env(engine, box, env, "COPILOT_HOME") is None:
+            quiet.add("copilot")
+            print(
+                "⚠ [copilot] is declared but this box was created without it (no Copilot install "
+                "or ~/.copilot volume). Recreate to add them: `fy box down && fy box up`."
+            )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
         _warn_mask_gaps(engine, box, ctx)  # and its mounts: shadows + other checkouts' masks
         _warn_predates_box_dirs(engine, box, env)
@@ -2325,12 +2401,14 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     from_box = vm_from_box
     claude_out = f"{checkout}/{here}/.devbox-claude/projects"
     codex_out = f"{checkout}/{here}/.devbox-codex/sessions"
+    copilot_out = f"{checkout}/{here}/.devbox-copilot/session-state"
     if from_box:
         # A name no slot can carry is one `fy worktree add` refuses, so this is all but
         # unreachable: it falls back to the legacy place, which the sync reads too.
         try:
             claude_out = str(boxmounts.from_box_dir() / boxmounts.claude_rel(worktree))
             codex_out = str(boxmounts.from_box_dir() / boxmounts.codex_rel(worktree))
+            copilot_out = str(boxmounts.from_box_dir() / boxmounts.copilot_rel(worktree))
         except ValueError:
             from_box = False
     transcripts_dir = os.environ.get("DEVBOX_TRANSCRIPTS") or claude_out
@@ -2341,6 +2419,7 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
     env["FY_CLAUDE_HOME"] = claude_in_box
     env["FY_TRANSCRIPTS"] = transcripts_dir
     env["FY_CODEX_TRANSCRIPTS"] = os.environ.get("DEVBOX_CODEX_TRANSCRIPTS") or codex_out
+    env["FY_COPILOT_TRANSCRIPTS"] = os.environ.get("DEVBOX_COPILOT_TRANSCRIPTS") or copilot_out
     if from_box:
         from . import transcripts
 
@@ -2362,6 +2441,10 @@ def _up(ctx, engine: str, box: str, net: str) -> int:
         )
     if config.codex_enabled():
         print(f"  codex sessions → {env['FY_CODEX_TRANSCRIPTS']} (on your computer; survives nuke)")
+    if config.copilot_enabled():
+        print(
+            f"  copilot sessions → {env['FY_COPILOT_TRANSCRIPTS']} (on your computer; survives nuke)"
+        )
 
     # Mount the MAIN repo root (a worktree's `.git` points into it) + the WORKTREES ROOT, so every
     # box sees every sibling checkout: an agent can read/edit a worktree copy (the machine already

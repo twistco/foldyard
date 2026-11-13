@@ -1885,6 +1885,116 @@ def test_codex_refuses_outside_box_and_execs_inside(monkeypatch):
     assert captured["argv"][-1] == "resume"  # caller args passed through
 
 
+# ── fy copilot: --allow-all, env, and the instruction file instead of an argv prompt ────
+
+
+def test_copilot_argv_allows_all_and_passes_the_caller_args_through():
+    # --allow-all covers tools, file paths and URLs. The prompt is NOT here: the CLI has no
+    # prompt flag, so it arrives as an instruction file (see the seed tests).
+    assert box._copilot_argv([]) == ["copilot", "--allow-all"]
+    assert box._copilot_argv(["--resume"]) == ["copilot", "--allow-all", "--resume"]
+    assert box._copilot_argv(["-p", "hi"]) == ["copilot", "--allow-all", "-p", "hi"]
+
+
+def test_copilot_refuses_outside_box(monkeypatch, capsys):
+    monkeypatch.delenv("IN_DEVBOX", raising=False)
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    assert box.copilot([]) == 1
+    assert "INSIDE the dev box" in capsys.readouterr().err
+
+
+def test_copilot_errors_when_not_installed(monkeypatch, capsys):
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setattr(box.shutil, "which", lambda name: None)
+    assert box.copilot([]) == 1
+    assert "[copilot]" in capsys.readouterr().err  # points at the enabling config
+
+
+def test_copilot_execs_with_env_and_seeds_the_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot-home"))  # the LIVE volume
+    monkeypatch.setattr(box.shutil, "which", lambda name: "/usr/bin/copilot")
+    monkeypatch.setattr(box.config, "copilot_keyless", lambda: "")
+    monkeypatch.setattr(box.config, "copilot_system_prompt", lambda: "be grounded")
+    captured = {}
+
+    def fake_exec(file, argv, env):
+        captured["argv"], captured["env"] = argv, env
+        raise SystemExit(0)
+
+    monkeypatch.setattr(box.os, "execvpe", fake_exec)
+    with pytest.raises(SystemExit):
+        box.copilot(["--resume"])
+    assert captured["argv"] == ["copilot", "--allow-all", "--resume"]
+    # --allow-all doesn't trust the WORKING DIRECTORY (skills, plugins, MCP, hooks); this does.
+    assert captured["env"]["COPILOT_ALLOW_ALL"] == "true"
+    # The box runs its bootstrap's build; an update would cache into a dir recreated with the box.
+    assert captured["env"]["COPILOT_AUTO_UPDATE"] == "false"
+    instructions = tmp_path / "copilot-home" / "instructions" / "foldyard.instructions.md"
+    assert instructions.read_text() == "be grounded\n"
+
+
+def _copilot_instructions(home: Path) -> Path:
+    return home / "instructions" / "foldyard.instructions.md"
+
+
+def test_copilot_seed_writes_a_personal_instruction_file(monkeypatch, tmp_path):
+    # The CLI has no --append-system-prompt; $COPILOT_HOME/instructions/ is a personal source it
+    # loads for every session, which is the closest equivalent.
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+    box._seed_copilot_instructions("be grounded")
+    assert _copilot_instructions(tmp_path).read_text() == "be grounded\n"
+
+
+def test_copilot_seed_keeps_an_existing_trailing_newline(monkeypatch, tmp_path):
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+    box._seed_copilot_instructions("line one\nline two\n")
+    assert _copilot_instructions(tmp_path).read_text() == "line one\nline two\n"
+
+
+def test_copilot_seed_overwrites_a_previous_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+    _copilot_instructions(tmp_path).parent.mkdir(parents=True)
+    _copilot_instructions(tmp_path).write_text("stale\n")
+    box._seed_copilot_instructions("fresh")
+    assert _copilot_instructions(tmp_path).read_text() == "fresh\n"
+
+
+def test_copilot_seed_clears_the_file_on_an_empty_prompt(monkeypatch, tmp_path):
+    # Clearing system_prompt in config stops the orientation — no stale text survives.
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+    _copilot_instructions(tmp_path).parent.mkdir(parents=True)
+    _copilot_instructions(tmp_path).write_text("old\n")
+    box._seed_copilot_instructions("   ")
+    assert not _copilot_instructions(tmp_path).exists()
+
+
+def test_copilot_seed_clears_nothing_without_the_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))  # no instructions/ dir at all
+    box._seed_copilot_instructions("")
+    assert not (tmp_path / "instructions").exists()
+
+
+def test_copilot_seed_does_nothing_without_a_copilot_home(monkeypatch, tmp_path):
+    # The minefield is foldyard's only through COPILOT_HOME (the volume it mounts); no var, no write.
+    monkeypatch.delenv("COPILOT_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    box._seed_copilot_instructions("be grounded")
+    assert not (tmp_path / "home").exists()
+
+
+def test_copilot_seed_leaves_no_temp_file_when_the_write_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+
+    def refuse(src, dst):
+        raise OSError("read-only volume")
+
+    monkeypatch.setattr(box.os, "replace", refuse)
+    box._seed_copilot_instructions("be grounded")
+    assert list((tmp_path / "instructions").iterdir()) == []
+    assert not _copilot_instructions(tmp_path).exists()
+
+
 # ── the launch gate: a keyless agent whose credential mode is off ─────────────────────
 
 
@@ -1899,14 +2009,17 @@ def gate(monkeypatch, tmp_path):
     mirror.write_text("{}")
     monkeypatch.setattr(box.config, "mirror_file", lambda: mirror)
     monkeypatch.setattr(box.shutil, "which", lambda name: f"/usr/bin/{name}")
-    for agent in ("claude", "codex"):
-        monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "oauth")
+    for agent, kind in (("claude", "oauth"), ("codex", "api-key"), ("copilot", "api-key")):
+        monkeypatch.setattr(box.config, f"{agent}_keyless", lambda kind=kind: kind)
         monkeypatch.setattr(box.config, f"{agent}_system_prompt", lambda: "")
     monkeypatch.setattr(box.config, "claude_settings", lambda: {})
     monkeypatch.setattr(box.config, "codex_config", lambda: {})
     # `fy claude` writes into CLAUDE_CONFIG_DIR — in a dev box that's the LIVE volume.
     (tmp_path / "claude-home").mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    # …and `fy copilot` into COPILOT_HOME, likewise.
+    (tmp_path / "copilot-home").mkdir()
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "copilot-home"))
     monkeypatch.setattr(box.config, "repo_root", lambda: tmp_path / "checkout")
     ns = types.SimpleNamespace(
         modes=["off"], tty=False, enter=False, execed=None, polls=0, stamps=None, clock=[0.0]
@@ -1951,6 +2064,7 @@ _AGENT_KINDS = [
     ("claude", "oauth"),
     ("codex", "api-key"),
     ("codex", "chatgpt"),
+    ("copilot", "api-key"),
 ]
 
 
@@ -2040,7 +2154,7 @@ def test_launch_off_at_a_terminal_ctrl_c_cancels(gate, monkeypatch):
     assert _launch("claude") == 130 and gate.execed is None
 
 
-@pytest.mark.parametrize("agent", ["claude", "codex"])
+@pytest.mark.parametrize("agent", ["claude", "codex", "copilot"])
 def test_launch_gate_says_nothing_without_keyless_or_a_mirror(gate, agent, monkeypatch, capsys):
     # A bare [agent] logs in for real (no mode to wait for); no mirror = the box knows nothing.
     monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "")

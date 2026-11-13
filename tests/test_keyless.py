@@ -24,6 +24,12 @@ from foldyard import keyless
         ("sk-proj-deadbeef", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
         ("sk-svcacct-foo", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
         ("  sk-ant-api03-x  ", ("ANTHROPIC_API_KEY", "Claude API key")),  # trims first
+        # GitHub token shapes Copilot accepts all name the Copilot var — including `gho_`, which
+        # `gh auth token` mints (a gitz-hosted gh token, which Copilot refuses, lands here too).
+        ("github_pat_11ABC", ("COPILOT_GITHUB_TOKEN", "GitHub fine-grained PAT (Copilot)")),
+        ("gho_abc", ("COPILOT_GITHUB_TOKEN", "GitHub OAuth token (Copilot)")),
+        ("ghu_abc", ("COPILOT_GITHUB_TOKEN", "GitHub user token (Copilot)")),
+        # Classic PATs are refused by Copilot itself, so they are not stored under any name.
         ("ghp_nope", None),
         ("", None),
     ],
@@ -328,6 +334,13 @@ def test_secret_ok_rejects_base64_of_the_wrong_thing():
 def test_secret_ok_non_b64_uses_the_pattern_directly():
     assert keyless.secret_ok("ghp_abc123", "ghp_*", False) == "ghp_abc123"
     assert keyless.secret_ok("nope", "ghp_*", False) is None
+    # `|` separates whole-value alternatives (Copilot accepts three token shapes): any of them
+    # matches, and nothing else does — including a value that only contains one as a substring.
+    pattern = "github_pat_*|gho_*|ghu_*"
+    for value in ("github_pat_11ABC", "gho_abc", "ghu_abc"):
+        assert keyless.secret_ok(value, pattern, False) == value
+    for value in ("ghp_abc", "xgithub_pat_abc", ""):
+        assert keyless.secret_ok(value, pattern, False) is None
     # No pattern ⇒ anything non-empty is accepted (the caller still rejects blanks).
     assert keyless.secret_ok("whatever", "", False) == "whatever"
 

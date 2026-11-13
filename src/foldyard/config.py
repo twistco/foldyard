@@ -1784,6 +1784,11 @@ def codex_transcript_sync_seconds() -> float:
     return _transcript_sync_seconds("codex")
 
 
+def copilot_transcript_sync_seconds() -> float:
+    """``[copilot].transcript_sync_seconds`` — see :func:`_transcript_sync_seconds`."""
+    return _transcript_sync_seconds("copilot")
+
+
 def vscode_enabled() -> bool:
     """True when the consumer declares a ``[vscode]`` table — mounts the vscode-server volume so
     ``fy code`` (VS Code attach) reuses its server across box recreations. Absent ⇒ no volume."""
@@ -1893,6 +1898,41 @@ def codex_config() -> dict:
     Empty/absent ⇒ ``{}`` (no ``-c`` beyond the prompt)."""
     raw = _table("codex").get("config")
     return raw if isinstance(raw, dict) else {}
+
+
+def copilot_enabled() -> bool:
+    """True when the consumer declares a ``[copilot]`` table — installs the GitHub Copilot CLI on
+    box-up and mounts its persisted ``~/.copilot`` (login, settings, sessions) volume. Absent ⇒ no
+    Copilot in the box."""
+    return _toml().get("copilot") is not None
+
+
+def copilot_keyless() -> str:
+    """``[copilot].keyless`` — opt the box into KEYLESS Copilot auth: NO real token in the box, the
+    egress proxy injects the real ``COPILOT_GITHUB_TOKEN`` (held in ``host.env`` on the host) in
+    flight, like the Claude/Codex/``[[inject]]`` injectors. Modes:
+
+      - ``"api-key"`` (``true`` aliases it) — dummy ``COPILOT_GITHUB_TOKEN``; rewrite
+        ``Authorization`` with ``Bearer `` + the real token on every Copilot API host
+        (:data:`foldyard.keyless.COPILOT_KEYLESS_HOSTS`). The token is a fine-grained PAT
+        (``github_pat_…``), an OAuth token (``gho_``) or a user token (``ghu_``); classic ``ghp_``
+        PATs are not accepted by Copilot and are refused at the capture prompt.
+
+    Absent/false/unrecognised ⇒ ``""`` (off — normal `copilot login`, persisted in the volume)."""
+    raw = _table("copilot").get("keyless")
+    if raw is True or raw == "api-key":
+        return "api-key"
+    return ""
+
+
+def copilot_system_prompt() -> str:
+    """Box-orientation prompt for a Copilot session. From ``[copilot].system_prompt`` (""), the same
+    key and the same job as :func:`claude_system_prompt` — only the delivery differs, because the
+    Copilot CLI has no ``--append-system-prompt`` and no ad-hoc config override: ``fy copilot``
+    writes it to ``$COPILOT_HOME/instructions/foldyard.instructions.md``, one of the personal
+    instruction sources the CLI loads for every session (see ``box._seed_copilot_instructions``)."""
+    raw = _table("copilot").get("system_prompt")
+    return str(raw) if isinstance(raw, str) else ""
 
 
 # ── gcp-metadata plugin config ([plugins.gcp-metadata]) ────────────────────────────────

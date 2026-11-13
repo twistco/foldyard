@@ -989,6 +989,22 @@ def test_add_seeds_only_mains_keyless_axes_that_are_on(fake_main, monkeypatch, c
     assert "seeded keyless mode from main: claude=on" in capsys.readouterr().err
 
 
+def test_add_seeds_a_copilot_keyless_axis(fake_main, monkeypatch):
+    """Copilot is the third keyless agent and gets the same treatment: a worktree box whose
+    `[copilot] keyless` is declared would otherwise come up with no injection rule and 401."""
+    from foldyard import devmode
+
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 7)
+    _adopt_main(fake_main, '[project]\nname = "acme"\n\n[copilot]\nkeyless = "api-key"\n')
+    with config.using(devmode.worktree_config("")):
+        devmode.set_mode({"copilot": "on"}, reconcile=False)
+
+    assert worktree.add("feat") == 0
+
+    posture = _wt_posture()
+    assert posture is not None and posture["copilot"] == "on"
+
+
 def test_add_seeds_once(fake_main, monkeypatch, capsys):
     """`add` adopts through the same door as everything else — one seed, one line."""
     from foldyard import devmode

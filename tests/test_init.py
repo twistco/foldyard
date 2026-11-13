@@ -47,11 +47,19 @@ def test_render_agents_and_features_are_present_but_commented():
     # The kitchen sink: agents + the rest ship as guidance, not active tables, so a first
     # `fy box up` is a plain safe box until the user opts in.
     doc = _parse(init.InitOptions(name="x"))
-    for table in ("claude", "codex", "box", "vscode"):
+    for table in ("claude", "codex", "copilot", "box", "vscode"):
         assert table not in doc, f"[{table}] must start commented, not active"
     body = init.render(init.InitOptions(name="x"))
     # …but discoverable in the text, with the bootstrap order spelled out.
-    for hint in ("# [claude]", "# [codex]", "# [vscode]", "# [ports]", "step 2", "step 3"):
+    for hint in (
+        "# [claude]",
+        "# [codex]",
+        "# [copilot]",
+        "# [vscode]",
+        "# [ports]",
+        "step 2",
+        "step 3",
+    ):
         assert hint in body
 
 
@@ -255,7 +263,14 @@ def test_render_local_example_teaches_the_opt_out_and_the_personal_half():
     assert "disabled = true" in body
     assert "# [codex]" in body
     # …and the things that belong here BECAUSE they're per-developer, not per-project.
-    for personal in ("[claude]", "[machine]", "[worktree-offsets]", "[[inject]]"):
+    for personal in (
+        "[claude]",
+        "[codex]",
+        "[copilot]",
+        "[machine]",
+        "[worktree-offsets]",
+        "[[inject]]",
+    ):
         assert f"# {personal}" in body, f"the overrides template no longer offers {personal}"
     # It's pinned like foldyard.toml, so an edit is inert until adopted — say so where it's edited.
     assert "fy config adopt" in body
@@ -393,7 +408,7 @@ def test_step_two_recreates_the_box_because_an_agent_is_installed_at_create():
 def test_keyless_says_where_it_belongs_on_a_team():
     # Which subscription you pay for is personal; a shared `keyless` prompts every colleague.
     body = init.render(init.InitOptions(name="x"))
-    for table in ("# [claude]", "# [codex]"):
+    for table in ("# [claude]", "# [codex]", "# [copilot]"):
         i = body.index(f"\n{table}\n")
         block = body[i - 300 : i + 400]  # the table's intro comment, or the lines under it
         assert "foldyard.local.toml" in block, f"{table}'s keyless doesn't say where a team puts it"
@@ -507,6 +522,28 @@ def test_with_codex_prompt_names_its_own_launcher_and_a_skill_it_can_read():
     assert "`fy claude`" not in "\n".join(codex)
 
 
+def test_with_copilot_carries_the_real_prompt_not_the_placeholder():
+    # Same treatment as [codex]: the commented block's `system_prompt = """…"""` points at
+    # [claude]'s, so an ACTIVE "…" would orient the agent with an ellipsis.
+    doc = _parse(_with("copilot"))
+    assert doc["copilot"]["keyless"] == "api-key"
+    assert "…" not in doc["copilot"]["system_prompt"]
+    assert "config" not in doc["copilot"]
+    assert "claude" not in doc and "codex" not in doc
+
+
+def test_with_copilot_prompt_names_its_own_launcher_and_keeps_the_skill_it_can_read():
+    # Only the launcher changes: Copilot discovers `.claude/skills/` too, so the skill paragraph
+    # stays true word for word.
+    claude = _scaffolded_prompt().splitlines()
+    copilot = _parse(_with("copilot"))["copilot"]["system_prompt"].splitlines()
+    assert len(copilot) == len(claude)
+    changed = [(c, x) for c, x in zip(claude, copilot, strict=True) if c != x]
+    assert len(changed) == 1
+    assert "`fy copilot`" in changed[0][1] and "`fy claude`" not in changed[0][1]
+    assert ".claude/skills/" in "\n".join(copilot)
+
+
 def test_with_vscode_is_the_vscode_block_uncommented():
     doc = _parse(_with("vscode"))
     assert doc["vscode"]["extensions"] == ["anthropic.claude-code"]
@@ -516,7 +553,7 @@ def test_with_vscode_is_the_vscode_block_uncommented():
 
 def test_with_every_block_at_once_is_valid_toml_and_keeps_the_rest_commented():
     doc = _parse(_with(*init.BLOCKS))
-    assert {"claude", "codex", "vscode"} <= doc.keys()
+    assert {"claude", "codex", "copilot", "vscode"} <= doc.keys()
     for table in ("box", "ports", "inject"):
         assert table not in doc
 
@@ -537,6 +574,8 @@ def test_with_an_agent_step_two_no_longer_says_uncomment_and_recreate():
     assert "fy mode claude=on" in header and "fy claude" in header
     both = init.render(_with("claude", "codex")).split("[project]", 1)[0]
     assert "fy mode claude=on" in both and "fy mode codex=on" in both
+    copilot = init.render(_with("copilot")).split("[project]", 1)[0]
+    assert "fy mode copilot=on && fy copilot" in copilot
     # …and a non-agent block leaves step 2 as the default teaches it.
     assert "Uncomment ONE agent" in init.render(_with("vscode"))
 
@@ -551,7 +590,7 @@ def test_init_with_accepts_repeats_and_commas_and_says_what_it_declared(tmp_path
 def test_init_with_an_unknown_block_refuses_and_writes_nothing(tmp_path, capsys):
     assert init.init(path=str(tmp_path), name="x", blocks=["claude", "box"]) == 1
     out = capsys.readouterr().out
-    assert "'box'" in out and "claude, codex, vscode" in out
+    assert "'box'" in out and "claude, codex, copilot, vscode" in out
     assert not (tmp_path / "foldyard.toml").exists()
 
 

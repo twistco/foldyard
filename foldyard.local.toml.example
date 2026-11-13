@@ -19,11 +19,11 @@
 
 # ── Turn a shared block OFF: `disabled = true` ───────────────────────────────────────────
 # The merge can otherwise only ADD, and several tables are PRESENCE-gated — declaring
-# [claude] / [codex] / [vscode] / [plugins.<name>] at all IS the opt-in — so blanking their
-# keys doesn't switch them off. `disabled = true` removes the block from the resolved config
-# as if it had never been written; the team keeps it, you don't get it. The case it exists
-# for: the repo commits [codex], you don't have a Codex subscription, and you'd rather not
-# have the CLI installed on box-up, be asked for a credential, or carry a dead codex row in
+# [claude] / [codex] / [copilot] / [vscode] / [plugins.<name>] at all IS the opt-in — so
+# blanking their keys doesn't switch them off. `disabled = true` removes the block from the
+# resolved config as if it had never been written; the team keeps it, you don't get it. The case
+# it exists for: the repo commits [codex], you don't have a Codex subscription, and you'd rather
+# not have the CLI installed on box-up, be asked for a credential, or carry a dead codex row in
 # `fy mode`. Works at any depth ([plugins.github] too), and `disabled = false` here puts a
 # block back that the SHARED file disabled. `fy config widenings` lists what you've removed.
 # [codex]
@@ -54,6 +54,21 @@
 # keyless = "chatgpt"
 # system_prompt = """
 # …your orientation prompt for `fy codex`.
+# """
+#
+# GitHub Copilot CLI (`fy copilot`) — `api-key` only: a GitHub PAT Copilot accepts (a
+# fine-grained PAT, a `gh auth token` OAuth token, or a `ghu_` token; classic `ghp_` PATs are
+# refused by Copilot itself). Captured host-side like the others; the box holds a dummy and the
+# proxy swaps in the real one. Then `fy mode copilot=on`. Omit `keyless` for a plain in-box
+# `copilot login` (use its device-code fallback: the browser callback is a loopback in the box).
+# `system_prompt` works here exactly as it does for [claude]; `fy copilot` writes it into
+# $COPILOT_HOME/instructions/, which every session in this box loads.
+# A keyless [copilot] needs api.github.com to itself: the GitHub `[[inject]]` rows deliver a
+# credential to that same host, so turn them off while a Copilot rung is on.
+# [copilot]
+# keyless = "api-key"
+# system_prompt = """
+# …your orientation prompt for `fy copilot`.
 # """
 
 # ── Your machine, not the project's ──────────────────────────────────────────────────────

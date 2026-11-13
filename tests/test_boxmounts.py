@@ -37,6 +37,7 @@ def test_slots_mirror_the_posture_dirs_so_a_worktree_named_main_cant_collide():
     assert boxmounts.slot_rel("main") == Path("worktrees/main")
     assert boxmounts.claude_rel("feat") == Path("worktrees/feat/claude/projects")
     assert boxmounts.codex_rel("") == Path("main/codex/sessions")
+    assert boxmounts.copilot_rel("feat") == Path("worktrees/feat/copilot/session-state")
 
 
 @pytest.mark.parametrize("name", ["..", ".", "a/b", "/abs"])

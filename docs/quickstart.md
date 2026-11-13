@@ -114,8 +114,8 @@ scripts, `curl` — can reach your computer, your keys or your other repos.
 
 ## Step 2 — put an agent in the box
 
-Uncomment **one** agent table in `foldyard.toml` — `[claude]` for Claude Code or `[codex]` for
-OpenAI Codex — including its `keyless` line. Then:
+Uncomment **one** agent table in `foldyard.toml` — `[claude]` for Claude Code, `[codex]` for
+OpenAI Codex or `[copilot]` for the GitHub Copilot CLI — including its `keyless` line. Then:
 
 ```bash
 fy config diff              # read the change your computer would start running…
@@ -125,13 +125,13 @@ fy mode claude=on           # switch on the proxy's key swap for the agent
 fy claude                   # Claude Code, running inside the box
 ```
 
-For Codex, it's `fy mode codex=on` and `fy codex`. A plain `fy box up` on a box that's already
-running doesn't add the agent: the install and the dummy credential are set when the box is
-created.
+For Codex, it's `fy mode codex=on` and `fy codex`; for Copilot, `fy mode copilot=on` and
+`fy copilot`. A plain `fy box up` on a box that's already running doesn't add the agent: the
+install and the dummy credential are set when the box is created.
 
-**Knowing up front which agent you want?** `foldyard init --with claude` (or `--with codex`)
-writes that table already uncommented, so the first `fy box up` creates the box with it: the
-adopt it asks for anyway covers it, with no second adopt and no recreate, just
+**Knowing up front which agent you want?** `foldyard init --with claude` (or `--with codex`,
+`--with copilot`) writes that table already uncommented, so the first `fy box up` creates the box
+with it: the adopt it asks for anyway covers it, with no second adopt and no recreate, just
 `fy mode claude=on` and `fy claude`. `--with vscode` does the same for
 `[vscode]` (for `fy code`); combine them as `--with claude,vscode`.
 

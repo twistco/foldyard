@@ -23,8 +23,8 @@ front of a colleague. A missing or malformed file contributes nothing.
 `foldyard.local.toml` itself (at any depth, so worktree copies are ignored too).
 
 **Presence-gated tables.** Declaring the table, even empty, is the opt-in: `[proxy]`,
-`[claude]`, `[codex]`, `[vscode]` and every `[plugins.<name>]`. Delete the table to turn the
-feature off.
+`[claude]`, `[codex]`, `[copilot]`, `[vscode]` and every `[plugins.<name>]`. Delete the table to
+turn the feature off.
 
 **Edits don't reach your computer until you adopt them.** The box and the stack read the files
 live; what runs on your computer (the proxy, the token services, credential injection) reads an
@@ -210,7 +210,7 @@ directories of foldyard's own beside them, one per direction
   monitor's file sink (`fy monitor hook add NAME --to-box`).
 - **`from-box`** (`~/.foldyard/<project>/from-box/`) — the box writes it: one slot per checkout
   (`main/`, `worktrees/<name>/`), where the agents' transcripts are bound out (see
-  [`transcript_sync_seconds`](#claude--codex--vscode)). Your computer reads it as untrusted
+  [`transcript_sync_seconds`](#claude--codex--copilot--vscode)). Your computer reads it as untrusted
   input, never through a link.
 
 A VM that predates them is refused while it runs (`fy machine stop && fy up` once adds them;
@@ -635,9 +635,10 @@ enforce = "learn"
   ]
   ```
 
-  `init` seeds it with the box-bootstrap hosts. Declared `[claude]`/`[codex]` tables (and any
-  plugin with an `egress_recommend` hook) add the hosts their own installers reach
-  (`claude.ai`/`downloads.claude.ai`, `chatgpt.com`/`releases.openai.com`) — don't list those.
+  `init` seeds it with the box-bootstrap hosts. Declared `[claude]`/`[codex]`/`[copilot]` tables
+  (and any plugin with an `egress_recommend` hook) add the hosts their own installers reach
+  (`claude.ai`/`downloads.claude.ai`, `chatgpt.com`/`releases.openai.com`,
+  `github.com`/`raw.githubusercontent.com`) — don't list those.
   `fy allow sync --yes` grants every pending host permanently for unattended setup; without it,
   a run with no terminal grants nothing. `fy config widenings` shows each entry's answer.
 - **`passthrough`** — trusted hosts the proxy tunnels *without* decrypting; everything else is
@@ -1037,9 +1038,9 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
   box checks that `git` on PATH is the shim and its hooks are installed, and a new box runs it
   once as the last step of `fy box up`.
 
-## `[claude]` / `[codex]` / `[vscode]`
+## `[claude]` / `[codex]` / `[copilot]` / `[vscode]`
 
-All three are **presence-gated**: declare the table (even empty) to opt in.
+All four are **presence-gated**: declare the table (even empty) to opt in.
 
 ```toml
 [claude]
@@ -1054,6 +1055,10 @@ showThinkingSummaries = true
 [codex.config]            # → codex -c 'model_reasoning_summary="auto"' -c tui.raw_output_mode=false
 model_reasoning_summary = "auto"
 tui = { raw_output_mode = false }
+
+[copilot]
+keyless = "api-key"       # a GitHub PAT: the proxy injects it, the box holds a dummy
+system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.instructions.md
 ```
 
 - **`[claude]`** — installs Claude Code at box-up and mounts its config/transcript volumes.
@@ -1096,10 +1101,35 @@ tui = { raw_output_mode = false }
     by default, and needs `ps` to manage it, which a box needn't have. With the server, an
     agent's work would also run outside its terminal, so stopping an `fy agent` session wouldn't
     stop the agent. `features.daemon_auto_start = true` in `[codex.config]` turns it back on.
-- **`transcript_sync_seconds`** (both tables) — while the box is up, the supervisor copies that
-  agent's transcripts into their archive on your computer (`~/.claude/projects` /
-  `~/.foldyard/<project>/transcripts/codex/sessions`) at this interval, so a crashed box or a
-  `git clean -fdx` loses nothing.
+- **`[copilot]`** — installs the GitHub Copilot CLI at box-up (its installer's static release
+  tarball) and mounts its `$COPILOT_HOME` (login, settings, `session-state`).
+  - **`keyless`** — `"api-key"` (or `true`) keeps the real token out of the box: the box holds a
+    dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with `Bearer ` + your
+    token from `host.env`. Copilot validates the token on `api.github.com` before its first call
+    and then talks to a **plan-specific** API host (individual/business/enterprise), so the
+    injection covers every host that can carry it, not one. Default: off (normal login). A PAT
+    must be one Copilot accepts: a fine-grained PAT, a `gh auth token` OAuth token (`gho_`) or a
+    `ghu_` token. Classic `ghp_` PATs are refused by Copilot itself, so foldyard refuses to
+    store one too. A keyless `[copilot]` also needs `api.github.com` to itself: the two GitHub
+    `[[inject]]` rows deliver a credential to that same host, and one host takes one injection
+    rule — turn those rows off while a Copilot rung is on (`fy mode` reports the conflict and
+    the fix).
+  - **`system_prompt`** — same key and job as `[claude]`'s, but a different delivery: the Copilot
+    CLI has no `--append-system-prompt` and no ad-hoc config override, so `fy copilot` writes it
+    to `$COPILOT_HOME/instructions/foldyard.instructions.md`, one of the personal instruction
+    sources the CLI loads for every session. Setting it to `""` removes the file again. Every box
+    of a project shares that volume, so two launches from different worktrees with **different**
+    prompts race (last writer wins) — identical prompts make it invisible. Default: `""`.
+  - `fy copilot` runs the CLI with `--allow-all` (tools, file paths and URLs — the rootless box
+    IS the boundary) and `COPILOT_ALLOW_ALL=true`, which additionally trusts the working
+    directory it starts in (its skills, plugins, MCP servers and hooks). It also sets
+    `COPILOT_AUTO_UPDATE=false`, so the box runs the build its bootstrap installed instead of
+    downloading another on a cache dir that is recreated with the box.
+- **`transcript_sync_seconds`** (all three agent tables) — while the box is up, the supervisor
+  copies that agent's transcripts into their archive on your computer (`~/.claude/projects`,
+  `~/.foldyard/<project>/transcripts/codex/sessions`,
+  `~/.foldyard/<project>/transcripts/copilot/session-state`) at this interval, so a crashed box
+  or a `git clean -fdx` loses nothing.
   Default: `0` (off — transcripts are archived at `fy box down`, or by hand with
   `fy transcripts`). Rounded down to a multiple of the 2-second supervisor tick (minimum one
   tick). A failing sync logs once to `host-supervisor.log` when it breaks and once when it
@@ -1115,12 +1145,13 @@ tui = { raw_output_mode = false }
   (`~/.foldyard/<project>/from-box/main/` or `…/worktrees/<name>/`), out of the checkout, so
   `git clean -fdx` and `fy worktree remove` don't take them (`remove` archives the slot, then
   deletes it). A box created before that, and every box on the podman backend, binds them into
-  the checkout (`.devbox-claude/`, `.devbox-codex/`); for this release the sync reads both
-  places. Creating a box on Lima moves what that old place holds out of the checkout: copied
-  into the new box's slot (an in-box resume still lists those sessions) and into the archive,
-  then deleted. Whatever can't be copied whole stays, with a warning, and the next new box tries
-  again. `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` still name a place of your own (the
-  old place is then only archived).
+  the checkout (`.devbox-claude/`, `.devbox-codex/`, `.devbox-copilot/`); for this release the
+  sync reads both places. Creating a box on Lima moves what that old place holds out of the
+  checkout: copied into the new box's slot (an in-box resume still lists those sessions) and into
+  the archive, then deleted. Whatever can't be copied whole stays, with a warning, and the next
+  new box tries again. `DEVBOX_TRANSCRIPTS` / `DEVBOX_CODEX_TRANSCRIPTS` /
+  `DEVBOX_COPILOT_TRANSCRIPTS` still name a place of your own (the old place is then only
+  archived).
 
   Codex records a session's directory inside the file instead, where the host can't check it,
   so box Codex sessions never go into your own `~/.codex/sessions`: a Codex there would offer a
@@ -1141,15 +1172,32 @@ tui = { raw_output_mode = false }
   for the project that box was given: the same trade-off as Claude's archive. Box sessions
   archived into `~/.codex/sessions` by earlier foldyard versions stay there; each also still
   sits, under the same name, in the checkout's `.devbox-codex/sessions` unless that was cleaned.
-  With an explicit archive dir (`fy transcripts <dir>` or `FOLDYARD_TRANSCRIPTS_ARCHIVE`) both
-  agents go there, Codex's under `codex-sessions/`.
+
+  Copilot's `session-state/` carries the same shape of risk: each session directory records its
+  working directory (`workspace.yaml`), and `copilot --resume` moves there, so a session from
+  another project would switch a Copilot on your computer into that directory. Box sessions
+  therefore go to a Copilot home of foldyard's own, one per project —
+  `~/.foldyard/<project>/transcripts/copilot` — and never into `~/.copilot`. Only UUID-named
+  session directories are copied, so the CLI's housekeeping siblings (its lock directory) stay
+  behind. To resume one:
+
+  ```bash
+  cd <checkout> && COPILOT_HOME=~/.foldyard/<project>/transcripts/copilot copilot --resume
+  ```
+
+  It is a separate Copilot home, so log in there once (`COPILOT_HOME=… copilot login`), and your
+  own `~/.copilot` settings are not read.
+
+  With an explicit archive dir (`fy transcripts <dir>` or `FOLDYARD_TRANSCRIPTS_ARCHIVE`) all
+  three agents go there, Codex's under `codex-sessions/` and Copilot's under
+  `copilot-sessions/`.
 
   ```toml
   [claude]
   transcript_sync_seconds = 30
   ```
 
-Both tables deep-merge, so `foldyard.local.toml` can set one key (your model) without
+All three agent tables deep-merge, so `foldyard.local.toml` can set one key (your model) without
 redeclaring the team's. `fy config widenings` lists their keys under **agent steering**.
 
 - **`[vscode]`** — mounts the vscode-server volume so `fy code` reuses its server across box
@@ -1386,8 +1434,8 @@ Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 until `main/dev-mode.json` exists.)
 
 In the repo, foldyard also generates gitignored files next to `foldyard.toml` (`init` adds them
-to `.gitignore`): `.devbox-ca/`, `.devbox-claude/` and `.devbox-codex/` (transcripts, where they
-are still bound into the checkout), `.devbox-foldyard/`, and
+to `.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/` and `.devbox-copilot/`
+(transcripts, where they are still bound into the checkout), `.devbox-foldyard/`, and
 `.dev-mode.json` — a read-only copy of the mode for tools in the box. Nothing grants access based
 on it.
 

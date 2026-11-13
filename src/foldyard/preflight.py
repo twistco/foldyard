@@ -23,13 +23,18 @@ from . import config, devmode, hostwall, machine_backend
 def _proxy_required(mode: dict) -> bool:
     """Would this project's box route egress through the host proxy? Must MIRROR the proxy plugin's
     ``derive_env`` routing signal exactly — ``config.proxy_enabled()`` OR any active injection rule
-    (``registry().proxy_rules``, which aggregates keyless Claude/Codex AND every ``[[inject]]``
-    switch). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
+    (``registry().proxy_rules``, which aggregates keyless Claude/Codex/Copilot AND every
+    ``[[inject]]`` switch). An earlier hand-rolled list checked only proxy/keyless/github and MISSED
     ``[[inject]]``: an inject-only box then skipped the mitmproxy-missing check (cryptic PyPI
     connect-refuse at bootstrap) and, under ``[machine] firewall``, got wrongly aborted as 'nothing
     routes through the proxy'. When true, a box with no reachable proxy can't reach ANYTHING — so
     the proxy's prerequisites (mitmproxy installed, an address that routes to the host) are HARD."""
-    if config.proxy_enabled() or config.claude_keyless() != "" or config.codex_keyless() != "":
+    if (
+        config.proxy_enabled()
+        or config.claude_keyless() != ""
+        or config.codex_keyless() != ""
+        or config.copilot_keyless() != ""
+    ):
         return True
     from .plugins import registry  # lazy: plugins load on the hot path
 
@@ -71,6 +76,7 @@ def issues() -> list[str]:
     for table, normalised, allowed in (
         ("claude", config.claude_keyless(), "api-key | oauth | true"),
         ("codex", config.codex_keyless(), "api-key | chatgpt | true"),
+        ("copilot", config.copilot_keyless(), "api-key | true"),
     ):
         raw = config._table(table).get("keyless")
         if raw not in (None, False, True) and normalised == "":

@@ -4,18 +4,21 @@ stable host archive (RUN ON THE HOST).
 Faithful port of the `transcripts` recipe. In-box agents write session transcripts to
 gitignored bound-out dirs inside the repo. Those dirs survive `nuke`, but they're fragile
 for long-term keeping (`git clean -fdx` wipes them, the worktree may be removed, they carry
-two-hop ownership). This copies Claude's transcripts into its native host history dir, and a
+two-hop ownership). This copies Claude's transcripts into its native host history dir, a
 configured Codex's into foldyard's own per-project archive (never Codex's native history — see
-:func:`codex_archive_home`) — or both into a dir you pass / set in FOLDYARD_TRANSCRIPTS_ARCHIVE.
+:func:`codex_archive_home`), and a configured Copilot's into a Copilot home of foldyard's own
+(never ``~/.copilot`` — see :func:`copilot_archive_home`) — or all into a dir you pass / set in
+FOLDYARD_TRANSCRIPTS_ARCHIVE.
 
-SAFE by construction: we only ever read an agent's transcript subtree (Claude ``projects/``
-or Codex ``sessions/``) — never sibling credential/config files or settings — and never through a
-link: the checkout is box-writable, so the walk opens every component without following one (see
-``_open_source``). Of Claude's tree only the checkout's OWN project folder is copied: the box
-names the folders, and one named after another project would be resumed there (see
-:func:`claude_project_dir`). The copy is ADDITIVE (rsync's ``-rtu`` semantics, NO delete), so
-the archive only grows and nothing there is removed or overwritten by an older copy (DRY_RUN=1
-previews).
+SAFE by construction: we only ever read an agent's transcript subtree (Claude ``projects/``,
+Codex ``sessions/``, Copilot ``session-state/``) — never sibling credential/config files or
+settings — and never through a link: the checkout is box-writable, so the walk opens every
+component without following one (see ``_open_source``). Of Claude's tree only the checkout's OWN
+project folder is copied: the box names the folders, and one named after another project would be
+resumed there (see :func:`claude_project_dir`). Copilot's ``session-state/`` is filtered to its
+UUID-named session dirs, so housekeeping siblings (``.session-operation-locks``) never land in the
+archive. The copy is ADDITIVE (rsync's ``-rtu`` semantics, NO delete), so the archive only grows
+and nothing there is removed or overwritten by an older copy (DRY_RUN=1 previews).
 
 RUN ON THE HOST: the archive lives in the host's home, which the box can't reach.
 Becomes part of the `claude-code` plugin later (ADR-0015). Stdlib only.
@@ -26,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -69,6 +73,14 @@ def codex_archive_home() -> Path:
     return config.state_dir() / "transcripts" / "codex"
 
 
+def copilot_archive_home() -> Path:
+    """Where box Copilot sessions are archived by default: a Copilot home of foldyard's own, per
+    project (``~/.foldyard/<project>/transcripts/copilot``), never ``~/.copilot`` on your computer
+    — see the note on Copilot below. Shaped as a ``COPILOT_HOME`` (sessions under
+    ``session-state/``), so ``COPILOT_HOME=<this> copilot --resume`` lists them."""
+    return config.state_dir() / "transcripts" / "copilot"
+
+
 def _explicit_archive(dest: str = "") -> bool:
     return bool(dest or os.environ.get("FOLDYARD_TRANSCRIPTS_ARCHIVE"))
 
@@ -79,6 +91,14 @@ def _codex_archive_dest(dest: str = "") -> Path:
     if _explicit_archive(dest):
         return _archive_dest(dest) / "codex-sessions"
     return codex_archive_home() / "sessions"
+
+
+def _copilot_archive_dest(dest: str = "") -> Path:
+    """foldyard's per-project Copilot archive, or a distinct child of an explicit shared archive.
+    Never ``~/.copilot/session-state``: there is deliberately no setting that archives into it."""
+    if _explicit_archive(dest):
+        return _archive_dest(dest) / "copilot-sessions"
+    return copilot_archive_home() / "session-state"
 
 
 # ── the copy: a no-follow walk, in Python, instead of rsync ──────────────────────────────────
@@ -182,8 +202,17 @@ class _Refused(Exception):
 # per-project home (`CODEX_HOME=<it> codex resume`) still puts box-written text in front of a Codex
 # on your computer — for the project that box was given, which is the trade-off Claude's archive
 # makes too.
+#
+# Copilot's `session-state/` holds one directory per session, named by its UUID, beside housekeeping
+# entries (`.session-operation-locks/`, index files) that aren't sessions at all. Its sessions also
+# record the working directory (`workspace.yaml`), and `copilot --resume` switches to it, so the
+# same exposure exists as with Codex — but it has a cheap, exact filter Codex lacks: only the
+# UUID-named top-level directories are sessions, so only those are copied, and the archive lives in
+# a Copilot home of foldyard's own (:func:`copilot_archive_home`), never `~/.copilot`.
 
 _NAME_MAX = 200  # Claude Code's own cap; a longer name is cut and suffixed with a hash of the path
+# A Copilot session directory, as `session-state/<uuid>/`.
+_SESSION_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def claude_project_dir(path: str) -> str:
@@ -292,10 +321,19 @@ def _has_entries(anchor: Path, src: Path) -> bool:
         os.close(fd)
 
 
-def _mirror(src_fd: int, dest_dir: Path, dry: bool, *, only: str | None = None) -> _Tally:
+def _mirror(
+    src_fd: int,
+    dest_dir: Path,
+    dry: bool,
+    *,
+    only: str | None = None,
+    uuid_dirs: bool = False,
+) -> _Tally:
     """Additively copy the tree under ``src_fd`` into ``dest_dir`` (see the block comment above).
     ``only``: the one top-level FOLDER copied (a Claude tree's own project); every other top-level
-    entry is refused, by name. ``None`` copies the whole tree."""
+    entry is refused, by name. ``uuid_dirs``: copy only top-level directories named by a UUID
+    (Copilot's ``session-state/``); its housekeeping siblings are skipped silently. ``None``/neither
+    copies the whole tree."""
     tally = _Tally()
     if dry:
         try:
@@ -306,7 +344,7 @@ def _mirror(src_fd: int, dest_dir: Path, dry: bool, *, only: str | None = None) 
         dest_dir.mkdir(parents=True, exist_ok=True)
         dst_fd = os.open(dest_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        _mirror_dir(src_fd, dst_fd, "", 0, dry, tally, only)
+        _mirror_dir(src_fd, dst_fd, "", 0, dry, tally, only, uuid_dirs)
     finally:
         if dst_fd is not None:
             os.close(dst_fd)
@@ -321,13 +359,11 @@ def _mirror_dir(
     dry: bool,
     tally: _Tally,
     only: str | None = None,
+    uuid_dirs: bool = False,
 ) -> None:
-    held = only is not None and depth == 0
+    held = (only is not None or uuid_dirs) and depth == 0
     for name in sorted(os.listdir(src_fd)):
         path = f"{rel}{name}"
-        if held and name != only:
-            tally.refused.append(name)
-            continue
         try:
             mode = _lstat_at(src_fd, name).st_mode
         except FileNotFoundError:
@@ -336,6 +372,14 @@ def _mirror_dir(
         except OSError as e:
             tally.errors.append(f"{path}: {e.strerror or e}")
             continue
+        if only is not None and depth == 0 and name != only:
+            tally.refused.append(name)
+            continue
+        if uuid_dirs and depth == 0:
+            # Copilot's non-session siblings (lock dirs, the session index) aren't refused — they
+            # are simply not sessions, and naming them every pass would be noise.
+            if not (stat.S_ISDIR(mode) and _SESSION_UUID.fullmatch(name)):
+                continue
         if stat.S_ISDIR(mode):
             if depth >= MAX_DEPTH:
                 tally.skipped.append(f"{path}/ (deeper than {MAX_DEPTH} levels)")
@@ -521,6 +565,7 @@ def _archive(
     what: str = "transcripts",
     quiet: bool = False,
     announce: bool = True,
+    uuid_dirs: bool = False,
 ) -> tuple[int, str, list[str]]:
     """Additively copy one bound-out transcript tree into its archive. Returns ``(rc, detail,
     refused)``: rc 0 for success or nothing to do, else :data:`RC_REFUSED` / :data:`RC_PARTIAL` /
@@ -528,8 +573,9 @@ def _archive(
     the top-level names left out because they aren't ``project_of``'s Claude project folder (a
     policy skip, not a failure). ``project_of`` is the checkout whose sessions these are, as the
     HOST resolved it — required, so no Claude caller can forget it; ``None`` only for a tree with
-    no project folders (Codex's). ``quiet`` prints nothing (the sweep reports on edges);
-    ``announce`` prints the ▶/✓ lines."""
+    no project folders (Codex's, Copilot's — ``uuid_dirs`` restricts the latter to its session
+    dirs). ``quiet`` prints nothing (the sweep reports on edges); ``announce`` prints the ▶/✓
+    lines."""
     dry = bool(os.environ.get("DRY_RUN"))
     only = None if project_of is None else claude_project_dir(str(project_of))
     dest_dir = _archive_dest(dest)
@@ -552,7 +598,7 @@ def _archive(
             return 0, "", []  # nothing worth keeping
         if announce and not quiet:
             print(f"▶ archiving {what} → {dest_dir}" + ("   (DRY RUN — no changes)" if dry else ""))
-        tally = _mirror(src_fd, dest_dir, dry, only=only)
+        tally = _mirror(src_fd, dest_dir, dry, only=only, uuid_dirs=uuid_dirs)
     except OSError as e:
         detail = f"{dest_dir}: {e.strerror or e}"
         if not quiet:
@@ -583,6 +629,13 @@ def codex_bound_out_dir(checkout: Path, here: str) -> Path:
     return checkout / here / ".devbox-codex/sessions"
 
 
+def copilot_bound_out_dir(checkout: Path, here: str) -> Path:
+    """The LEGACY host-side directory bound to the box Copilot's
+    ``$COPILOT_HOME/session-state`` tree (the podman backend, which keeps its binds in the
+    checkout)."""
+    return checkout / here / ".devbox-copilot/session-state"
+
+
 # ── where a checkout's transcripts are: the from-box slot, then the legacy bind-out ──────────
 #
 # A box on the from-box layout (ADR-0033, the lima backend) binds its agents' trees out to the
@@ -595,17 +648,33 @@ def codex_bound_out_dir(checkout: Path, here: str) -> Path:
 
 
 def sources(
-    checkout: Path, here: str, worktree: str = "", *, codex: bool = False
+    checkout: Path, here: str, worktree: str = "", *, agent: str = "claude"
 ) -> list[tuple[Path, Path]]:
     """``(source, anchor)`` for one agent's bound-out tree, newest layout first. An operator's
-    ``DEVBOX_TRANSCRIPTS`` / ``DEVBOX_CODEX_TRANSCRIPTS`` is the one place the box was told to bind
-    to, so it replaces both."""
-    override = os.environ.get("DEVBOX_CODEX_TRANSCRIPTS" if codex else "DEVBOX_TRANSCRIPTS")
+    ``DEVBOX_TRANSCRIPTS`` / ``DEVBOX_CODEX_TRANSCRIPTS`` / ``DEVBOX_COPILOT_TRANSCRIPTS`` is the
+    one place the box was told to bind to, so it replaces both."""
+    if agent == "codex":
+        override_var, legacy_fn, rel_fn = (
+            "DEVBOX_CODEX_TRANSCRIPTS",
+            codex_bound_out_dir,
+            boxmounts.codex_rel,
+        )
+    elif agent == "copilot":
+        override_var, legacy_fn, rel_fn = (
+            "DEVBOX_COPILOT_TRANSCRIPTS",
+            copilot_bound_out_dir,
+            boxmounts.copilot_rel,
+        )
+    elif agent == "claude":
+        override_var, legacy_fn, rel_fn = "DEVBOX_TRANSCRIPTS", bound_out_dir, boxmounts.claude_rel
+    else:
+        raise ValueError(f"unknown agent {agent!r}")
+    override = os.environ.get(override_var)
     if override:
         return [(Path(override), checkout)]
-    legacy = (codex_bound_out_dir if codex else bound_out_dir)(checkout, here)
+    legacy = legacy_fn(checkout, here)
     try:
-        rel = boxmounts.codex_rel(worktree) if codex else boxmounts.claude_rel(worktree)
+        rel = rel_fn(worktree)
     except ValueError:  # a worktree name no slot can carry: it never had one
         return [(legacy, checkout)]
     root = boxmounts.from_box_dir()
@@ -766,6 +835,7 @@ def sync_archive(
     project_of: Path | None,
     dest: str = "",
     what: str = "transcripts",
+    uuid_dirs: bool = False,
 ) -> int:
     """Additively copy one bound-out agent transcript dir → its durable host archive BEFORE a
     destructive op deletes the source. Returns 0 on success or nothing-to-do, non-zero when a copy
@@ -774,12 +844,14 @@ def sync_archive(
     ``anchor`` is the checkout ``src_dir`` lives in, as the HOST resolved it: everything below it is
     box-writable, so no link there is followed (a link on the way to ``src_dir`` refuses the copy;
     one inside it is skipped). ``project_of`` is the checkout whose Claude project folder is the
-    only top-level entry copied (``None`` for Codex's tree — see :func:`claude_project_dir`).
-    No-op (0) inside the box (the archive lives in the host's home, unreachable there) and when
-    ``src_dir`` is missing/empty."""
+    only top-level entry copied (``None`` for Codex's dated tree or Copilot's UUID-named one — see
+    :func:`claude_project_dir`; ``uuid_dirs`` for the latter). No-op (0) inside the box (the archive
+    lives in the host's home, unreachable there) and when ``src_dir`` is missing/empty."""
     if config.in_box():
         return 0
-    return _archive(src_dir, anchor=anchor, project_of=project_of, dest=dest, what=what)[0]
+    return _archive(
+        src_dir, anchor=anchor, project_of=project_of, dest=dest, what=what, uuid_dirs=uuid_dirs
+    )[0]
 
 
 # ── the supervisor's per-interval auto-sync (`[claude]/[codex] transcript_sync_seconds`) ──────
@@ -807,28 +879,40 @@ _sweep_state: dict[tuple[str, str], dict] = {}
 NOTIFY_AFTER_FAILURES = 3
 
 
-_Plan = list[tuple[str, float, list[tuple[Path, Path]], str, Path | None]]
+_Plan = list[tuple[str, float, list[tuple[Path, Path]], str, Path | None, bool]]
 
 
 def _sweep_plan() -> tuple[Path, _Plan]:
-    """The bound checkout, and ``(label, interval, [(source, anchor)…], archive dest, project_of)``
-    for each configured agent whose auto-sync is ON, resolved under the CURRENTLY BOUND config — so
-    the caller's ``with config.using(worktree_config(wt))`` is what points this at the right
-    checkout (and its from-box slot)."""
+    """The bound checkout, and ``(label, interval, [(source, anchor)…], archive dest, project_of,
+    uuid_dirs)`` for each configured agent whose auto-sync is ON, resolved under the CURRENTLY BOUND
+    config — so the caller's ``with config.using(worktree_config(wt))`` is what points this at the
+    right checkout (and its from-box slot)."""
     checkout = config.repo_root()
     here = config.dev_vm_rel()
     wt = config.active_worktree()
     plan: _Plan = []
     if config.claude_enabled() and (secs := config.claude_transcript_sync_seconds()):
-        plan.append(("Claude", secs, sources(checkout, here, wt), "", checkout))
+        plan.append(("Claude", secs, sources(checkout, here, wt), "", checkout, False))
     if config.codex_enabled() and (secs := config.codex_transcript_sync_seconds()):
         plan.append(
             (
                 "Codex",
                 secs,
-                sources(checkout, here, wt, codex=True),
+                sources(checkout, here, wt, agent="codex"),
                 str(_codex_archive_dest()),
                 None,
+                False,
+            )
+        )
+    if config.copilot_enabled() and (secs := config.copilot_transcript_sync_seconds()):
+        plan.append(
+            (
+                "Copilot",
+                secs,
+                sources(checkout, here, wt, agent="copilot"),
+                str(_copilot_archive_dest()),
+                None,
+                True,
             )
         )
     return checkout, plan
@@ -904,7 +988,7 @@ def sweep(log, wt: str = "", *, tick_seconds: float = 2.0, notify=None) -> None:
     except Exception as e:  # a config hiccup must never wedge the reconcile loop
         log(f"transcript-sync: sweep failed: {type(e).__name__}: {e}")
         return
-    for label, interval, srcs, dest, project_of in plan:
+    for label, interval, srcs, dest, project_of, uuid_dirs in plan:
         key = (wt, label)
         try:
             if not _due(key, interval, tick_seconds):
@@ -912,7 +996,13 @@ def sweep(log, wt: str = "", *, tick_seconds: float = 2.0, notify=None) -> None:
             rc, detail, refused = 0, "", []
             for src, anchor in srcs:  # the from-box slot, then the legacy bind-out
                 got, why, held = _archive(
-                    src, anchor=anchor, project_of=project_of, dest=dest, what=label, quiet=True
+                    src,
+                    anchor=anchor,
+                    project_of=project_of,
+                    dest=dest,
+                    what=label,
+                    quiet=True,
+                    uuid_dirs=uuid_dirs,
                 )
                 if got not in BENIGN_RC and not rc:
                     rc, detail = got, why
@@ -928,9 +1018,10 @@ def sync_current(env: dict, *, what: str = "transcripts", dest: str = "") -> int
     """Best-effort archive of the CURRENT checkout's configured agents' bound-out transcripts.
 
     Used by box-down / nuke, which keep the bound-out dirs but should still promote them to the
-    durable store. Honours the same ``DEVBOX_TRANSCRIPTS``, ``DEVBOX_CODEX_TRANSCRIPTS``, and
-    ``HERE`` overrides the box used at up-time. Each agent is attempted independently so one
-    failed or absent source never prevents the other from being archived.
+    durable store. Honours the same ``DEVBOX_TRANSCRIPTS``, ``DEVBOX_CODEX_TRANSCRIPTS``,
+    ``DEVBOX_COPILOT_TRANSCRIPTS``, and ``HERE`` overrides the box used at up-time. Each agent is
+    attempted independently so one failed or absent source never prevents the others from being
+    archived.
     """
     checkout = Path(env.get("FOLDYARD_CHECKOUT") or stack.main_repo())
     here = env.get("HERE") or config.dev_vm_rel()
@@ -942,13 +1033,28 @@ def sync_current(env: dict, *, what: str = "transcripts", dest: str = "") -> int
 
     if config.codex_enabled():
         codex_what = "Codex transcripts" if what == "transcripts" else f"{what} (Codex transcripts)"
-        for src, anchor in sources(checkout, here, wt, codex=True):
+        for src, anchor in sources(checkout, here, wt, agent="codex"):
             got = sync_archive(
                 src,
                 anchor=anchor,
                 project_of=None,  # dated, no project folders: see the residual-risk note above
                 what=codex_what,
                 dest=str(_codex_archive_dest(dest)),
+            )
+            rc = rc or got
+
+    if config.copilot_enabled():
+        copilot_what = (
+            "Copilot transcripts" if what == "transcripts" else f"{what} (Copilot transcripts)"
+        )
+        for src, anchor in sources(checkout, here, wt, agent="copilot"):
+            got = sync_archive(
+                src,
+                anchor=anchor,
+                project_of=None,  # UUID-named session dirs only: see the note on Copilot above
+                what=copilot_what,
+                dest=str(_copilot_archive_dest(dest)),
+                uuid_dirs=True,
             )
             rc = rc or got
     return rc
@@ -987,8 +1093,8 @@ def transcripts(dest: str = "") -> int:
         box_rel="projects",
         label="Claude transcripts",
         project_of=checkout,
-        # A Codex-only project has no Claude source; continue on to its configured agent.
-        missing_ok=config.codex_enabled(),
+        # A Codex-only or Copilot-only project has no Claude source; continue to its agents.
+        missing_ok=config.codex_enabled() or config.copilot_enabled(),
     )
 
     # A [codex] table opts into Codex installation and transcript persistence. Its archive is a
@@ -997,7 +1103,7 @@ def transcripts(dest: str = "") -> int:
     if config.codex_enabled():
         codex_dest = _codex_archive_dest(dest)
         codex_rc = _sync_source(
-            sources(checkout, here, wt, codex=True),
+            sources(checkout, here, wt, agent="codex"),
             codex_dest,
             dry,
             engine=engine,
@@ -1011,6 +1117,28 @@ def transcripts(dest: str = "") -> int:
             hint=None if _explicit_archive(dest) else _codex_resume_hint(checkout),
         )
         rc = rc or codex_rc
+
+    # Same for Copilot: its sessions live under $COPILOT_HOME/session-state, archived into a Copilot
+    # home of foldyard's own (never ~/.copilot — see the note on Copilot above), which
+    # `COPILOT_HOME=<it> copilot --resume` reads. Only UUID-named session dirs are copied.
+    if config.copilot_enabled():
+        copilot_dest = _copilot_archive_dest(dest)
+        copilot_rc = _sync_source(
+            sources(checkout, here, wt, agent="copilot"),
+            copilot_dest,
+            dry,
+            engine=engine,
+            engine_env=engine_env,
+            box=box,
+            box_home_cmd='printf %s "${COPILOT_HOME:-$HOME/.copilot}"',
+            box_rel="session-state",
+            label="Copilot transcripts",
+            project_of=None,
+            missing_ok=rc == 0,
+            hint=None if _explicit_archive(dest) else _copilot_resume_hint(checkout),
+            uuid_dirs=True,
+        )
+        rc = rc or copilot_rc
     return rc
 
 
@@ -1019,6 +1147,15 @@ def _codex_resume_hint(checkout: Path) -> str:
     return (
         f"  resume one: cd {shlex.quote(str(checkout))} && CODEX_HOME={home} codex resume\n"
         "  (a Codex home of its own: log in there once; your ~/.codex config is not read."
+        " A resumed session's text was written by the box.)"
+    )
+
+
+def _copilot_resume_hint(checkout: Path) -> str:
+    home = shlex.quote(str(copilot_archive_home()))
+    return (
+        f"  resume one: cd {shlex.quote(str(checkout))} && COPILOT_HOME={home} copilot --resume\n"
+        "  (a Copilot home of its own: log in there once; your ~/.copilot is not read."
         " A resumed session's text was written by the box.)"
     )
 
@@ -1037,6 +1174,7 @@ def _sync_source(
     project_of: Path | None,
     missing_ok: bool = False,
     hint: str | None = None,
+    uuid_dirs: bool = False,
 ) -> int:
     """Sync one agent's bound history — every bound-out ``(source, anchor)`` that holds anything,
     newest layout first — falling back to its live in-box directory when none does. ``hint`` is
@@ -1049,7 +1187,9 @@ def _sync_source(
     if held:
         rc = 0
         for src, anchor in held:
-            got = _sync_stage(src, anchor, "bound-out dir", dest_dir, dry, label, project_of, hint)
+            got = _sync_stage(
+                src, anchor, "bound-out dir", dest_dir, dry, label, project_of, hint, uuid_dirs
+            )
             rc = rc or got
         return rc
     src_dir = srcs[0][0]
@@ -1065,7 +1205,8 @@ def _sync_source(
         )
         box_agent_home = out.stdout.strip()
         if not box_agent_home:
-            box_agent_home = f"/home/vscode/{'.claude' if box_rel == 'projects' else '.codex'}"
+            default = {"projects": ".claude", "sessions": ".codex", "session-state": ".copilot"}
+            box_agent_home = f"/home/vscode/{default.get(box_rel, '.claude')}"
         tmp = tempfile.mkdtemp()
         box_src = f"{box_agent_home}/{box_rel}"
         _err(f"+ {engine} cp {box}:{box_src}/. {tmp}")
@@ -1088,7 +1229,7 @@ def _sync_source(
         if not _has_entries(stage, stage):
             print(f"✓ no {label.lower()} yet (source is empty) — nothing to do.")
             return 0
-        return _sync_stage(stage, stage, origin, dest_dir, dry, label, project_of, hint)
+        return _sync_stage(stage, stage, origin, dest_dir, dry, label, project_of, hint, uuid_dirs)
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1103,6 +1244,7 @@ def _sync_stage(
     label: str,
     project_of: Path | None,
     hint: str | None,
+    uuid_dirs: bool = False,
 ) -> int:
     print(f"▶ source: {origin}")
     print(f"  from:   {stage}")
@@ -1116,6 +1258,7 @@ def _sync_stage(
         dest=str(dest_dir),
         what=label,
         announce=False,
+        uuid_dirs=uuid_dirs,
     )
     if rc == 0:
         print(f"✓ {label} {'would be ' if dry else ''}synced → {dest_dir}")

@@ -10,14 +10,16 @@ loosen a host-side control, and each is easy to lose track of:
     ``@all`` is one token that resolves to ~200 hosts; nothing anywhere showed that number, so
     "the proxy decrypts" read as "everything is logged" when it never meant that.
   - **injection targets** — the host each mechanism delivers a real credential to. Some are fixed
-    in package code (claude, codex), some are config (an ``[[inject]]`` row, its host declared or
-    pinned by its kind). The difference
+    in package code (claude, codex, copilot), some are config (an ``[[inject]]`` row, its host
+    declared or pinned by its kind). The difference
     matters, so the report states it per row rather than listing them all as equals.
-  - **agent steering** (``[claude]/[codex] system_prompt``, and the ``[claude.settings]`` /
-    ``[codex.config]`` overrides the launchers pass to the CLI) — repo-controlled input to a
+  - **agent steering** (the ``system_prompt`` of ``[claude]``/``[codex]``/``[copilot]``, and the
+    ``[claude.settings]`` / ``[codex.config]`` overrides the launchers pass to the CLI) — repo-
+    controlled input to a
     privileged actor. Not a credential, same shape (`docs/security.md`). The settings tables are
     reported by KEY rather than by value: they reach the agent as ``--settings``/``-c``, which is
-    where a ``hooks`` or ``permissions`` entry would live.
+    where a ``hooks`` or ``permissions`` entry would live. Copilot's prompt is the one with no
+    settings table: the CLI has no ad-hoc config override, so only the prompt row applies.
 
 And one thing that is not a widening but reads exactly like one: **keys that no longer do
 anything**. ``[proxy] allow`` was deleted when grants moved host-side (ADR-0023); a config still
@@ -246,7 +248,7 @@ def _targets(
     1. the ``[[inject]]`` rows — config-declared hosts (or the host a row's kind pins), on or off
        (a declared-but-off injector is a latent widening the operator should see BEFORE arming
        it). Every row is its own line: two rows on one host are two credentials, not one,
-    2. the rules the CURRENT mode activates (the packaged plugins: claude, codex),
+    2. the rules the CURRENT mode activates (the packaged plugins: claude, codex, copilot),
     3. the rules another rung WOULD activate — asked of the REGISTRY rather than derived from host
        constants here, so a mechanism with an unusual shape reports as it actually behaves (Codex's
        ChatGPT rung injects on ``chatgpt.com/backend-api/codex``, not on the API host, and a report
@@ -413,6 +415,7 @@ def _prompts(shared: dict, local: dict) -> list[tuple[str, int, str]]:
     for key, text in (
         ("[claude].system_prompt", config.claude_system_prompt()),
         ("[codex].system_prompt", config.codex_system_prompt()),
+        ("[copilot].system_prompt", config.copilot_system_prompt()),
     ):
         if text.strip():
             table = key.strip("[]").split("].")[0]

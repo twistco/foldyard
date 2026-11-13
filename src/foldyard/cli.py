@@ -169,7 +169,7 @@ def _resolve_worktree(
 # it in their own UI/log), and the launch verbs, whose gate asks or refuses on its own.
 _NO_UNADOPTED_NOTICE = frozenset(
     {"config", "docs", "changelog", "init", "prereq", "doctor", "tui", "host", "up", "code"}
-    | {"claude", "codex", "agent"}
+    | {"claude", "codex", "copilot", "agent"}
 )
 
 
@@ -205,7 +205,7 @@ def init(
     with_: list[str] = typer.Option(
         None,
         "--with",
-        help="write these blocks uncommented: claude, codex, vscode (repeat or comma-separate)",
+        help="write these blocks uncommented: claude, codex, copilot, vscode (repeat/comma)",
     ),
 ) -> None:
     """Scaffold a commented, locked-down foldyard.toml (lima, VM firewall on) — then `fy box up`.
@@ -346,6 +346,18 @@ def codex(ctx: typer.Context) -> None:
     from . import box
 
     raise typer.Exit(box.codex(ctx.args))
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def copilot(ctx: typer.Context) -> None:
+    """Run the GitHub Copilot CLI in the dev box, pre-oriented + skipping permission prompts (the
+    box's rootless isolation is the safety boundary). Needs `[copilot]` in foldyard.toml. Extra
+    args pass through to `copilot` (`fy copilot --resume`, `fy copilot -p "…"`)."""
+    from . import box
+
+    raise typer.Exit(box.copilot(ctx.args))
 
 
 @app.command()
@@ -882,14 +894,14 @@ app.add_typer(agent_app)
 )
 def agent_start(
     ctx: typer.Context,
-    agent: str = typer.Argument("claude", help="claude or codex"),
+    agent: str = typer.Argument("claude", help="claude, codex or copilot"),
     name: str = typer.Option("", "--name", "-n", help="the session's name (default: <agent>-<id>)"),
     attach: bool = typer.Option(False, "--attach", "-a", help="attach to it once started"),
 ) -> None:
-    """Start `fy claude` (or `fy codex`) in a detached tmux session in this checkout's box, so it
-    keeps running with no terminal attached. Args after `--` pass to the agent
-    (`fy agent start claude -- --model opus`). Prints the session id `fy agent attach` takes —
-    for Claude, its own session id."""
+    """Start `fy claude` (or `fy codex` / `fy copilot`) in a detached tmux session in this
+    checkout's box, so it keeps running with no terminal attached. Args after `--` pass to the
+    agent (`fy agent start claude -- --model opus`). Prints the session id `fy agent attach`
+    takes — for Claude and Copilot, its own session id."""
     from . import agents
 
     raise typer.Exit(agents.start(agent, name, list(ctx.args), attach_after=attach))
@@ -905,7 +917,7 @@ def agent_resume(
         ..., help="an exited session's id, prefix or name, or the agent's own full id"
     ),
     agent: str = typer.Option(
-        "", "--agent", help="claude or codex, when no session is left to say (default: claude)"
+        "", "--agent", help="claude, codex or copilot, when no session is left (default: claude)"
     ),
     name: str = typer.Option(
         "", "--name", "-n", help="the session's name (default: the old one's)"

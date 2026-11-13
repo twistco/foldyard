@@ -13,6 +13,8 @@ import pytest
 
 from foldyard import config, stack, transcripts
 
+COPILOT_SESSION = "3f2c9a1e-0b4d-4c3e-9f1a-2b3c4d5e6f70"  # a session-state/<uuid>/ dir
+
 
 class _Proc:
     def __init__(self, returncode=0, stdout="", stderr=""):
@@ -61,8 +63,10 @@ def mac(tmp_path, monkeypatch):
     monkeypatch.setattr(transcripts.stack, "resolve", lambda *a, **k: resolved.append(k) or ctx)
     monkeypatch.setattr(transcripts.stack, "machine_down", lambda: None)
     monkeypatch.setattr(config, "codex_enabled", lambda: False)
+    monkeypatch.setattr(config, "copilot_enabled", lambda: False)
     monkeypatch.delenv("DEVBOX_TRANSCRIPTS", raising=False)
     monkeypatch.delenv("DEVBOX_CODEX_TRANSCRIPTS", raising=False)
+    monkeypatch.delenv("DEVBOX_COPILOT_TRANSCRIPTS", raising=False)
     monkeypatch.delenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", raising=False)
     monkeypatch.delenv("DRY_RUN", raising=False)
 
@@ -85,12 +89,18 @@ def mac(tmp_path, monkeypatch):
         "codex_archive": home / ".foldyard/acme/transcripts/codex/sessions",
         # Codex's native history on your computer: never an archive's default destination.
         "codex_native": home / ".codex",
+        # Same shape for Copilot: a home of foldyard's own, never ~/.copilot.
+        "copilot_home": home / ".foldyard/acme/transcripts/copilot",
+        "copilot_archive": home / ".foldyard/acme/transcripts/copilot/session-state",
+        "copilot_native": home / ".copilot",
         "src": checkout / "dev-stack/.devbox-claude/projects",
         "codex_src": checkout / "dev-stack/.devbox-codex/sessions",
+        "copilot_src": checkout / "dev-stack/.devbox-copilot/session-state",
         # ADR-0033: the from-box (out of the checkout) and the main checkout's slot in it
         "from_box": home / ".foldyard/acme/from-box",
         "fb_src": home / ".foldyard/acme/from-box/main/claude/projects",
         "fb_codex_src": home / ".foldyard/acme/from-box/main/codex/sessions",
+        "fb_copilot_src": home / ".foldyard/acme/from-box/main/copilot/session-state",
         # The one Claude project folder the box can legitimately write for this checkout.
         "own": transcripts.claude_project_dir(str(checkout)),
     }
@@ -235,6 +245,47 @@ def test_codex_only_project_does_not_require_claude_source(mac, monkeypatch):
 
     assert transcripts.transcripts() == 0
     assert _archived(mac["codex_archive"]) == {"codex.jsonl": "{}"}
+    assert not mac["claude_archive"].exists()
+
+
+def test_copilot_sessions_are_archived_only_when_configured(mac, monkeypatch):
+    _session(mac["src"], f"{mac['own']}/claude.jsonl")
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+
+    monkeypatch.setattr(config, "copilot_enabled", lambda: False)
+    assert transcripts.transcripts() == 0
+    assert not mac["copilot_archive"].exists()
+
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["copilot_archive"]) == {f"{COPILOT_SESSION}/events.jsonl": "{}"}
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/claude.jsonl": "{}"}
+    # Never Copilot's native history on your computer.
+    assert not mac["copilot_native"].exists()
+
+
+def test_copilot_archives_only_uuid_named_session_dirs(mac, monkeypatch):
+    """`session-state/` also holds the CLI's housekeeping — lock dirs, the session index — which
+    must not be copied: a Copilot home reading them would see sessions that aren't there."""
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/checkpoints/one.json")
+    _session(mac["copilot_src"], ".session-operation-locks/123.lock")
+    _session(mac["copilot_src"], "session-store.db")
+
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["copilot_archive"]) == {
+        f"{COPILOT_SESSION}/events.jsonl": "{}",
+        f"{COPILOT_SESSION}/checkpoints/one.json": "{}",
+    }
+
+
+def test_copilot_only_project_does_not_require_claude_source(mac, monkeypatch):
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["copilot_archive"]) == {f"{COPILOT_SESSION}/events.jsonl": "{}"}
     assert not mac["claude_archive"].exists()
 
 
@@ -407,6 +458,59 @@ def test_sync_current_ignores_codex_when_unconfigured(mac):
     env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
     assert transcripts.sync_current(env) == 0
     assert not mac["codex_archive"].exists()
+
+
+def test_sync_current_archives_configured_copilot_into_foldyards_own_dir(mac, monkeypatch, capsys):
+    """`fy box down`, `fy nuke` and `fy worktree remove` all archive through `sync_current`: by
+    default box Copilot sessions go to foldyard's per-project Copilot home, never `~/.copilot`."""
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["src"], f"{mac['own']}/claude.jsonl")
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == 0
+
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/claude.jsonl": "{}"}
+    assert _archived(mac["copilot_archive"]) == {f"{COPILOT_SESSION}/events.jsonl": "{}"}
+    assert not mac["copilot_native"].exists()
+    assert "archiving Copilot transcripts" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("archive_from_env", [False, True])
+def test_sync_current_copilot_uses_child_of_explicit_archive(mac, monkeypatch, archive_from_env):
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+    archive = mac["checkout"].parent / "archive"
+    if archive_from_env:
+        monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(archive))
+        dest = ""
+    else:
+        dest = str(archive)
+
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env, dest=dest) == 0
+    assert _archived(archive) == {f"copilot-sessions/{COPILOT_SESSION}/events.jsonl": "{}"}
+
+
+def test_sync_current_honours_devbox_copilot_transcripts(mac, monkeypatch):
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    archive = mac["checkout"].parent / "archive"
+    monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(archive))
+    alt = mac["checkout"] / "alt-copilot-sessions"
+    _session(alt, f"{COPILOT_SESSION}/events.jsonl")
+    monkeypatch.setenv("DEVBOX_COPILOT_TRANSCRIPTS", str(alt))
+
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == 0
+    assert _archived(archive) == {f"copilot-sessions/{COPILOT_SESSION}/events.jsonl": "{}"}
+
+
+def test_sync_current_ignores_copilot_when_unconfigured(mac):
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+
+    env = {"FOLDYARD_CHECKOUT": str(mac["checkout"]), "HERE": "dev-stack"}
+    assert transcripts.sync_current(env) == 0
+    assert not mac["copilot_archive"].exists()
 
 
 def test_sync_current_attempts_codex_after_claude_archive_failure(mac, monkeypatch):
@@ -786,6 +890,32 @@ def test_fy_transcripts_says_where_codex_sessions_went_and_how_to_resume(mac, mo
     assert not mac["codex_native"].exists()
 
 
+def test_copilot_default_archive_is_per_project_under_foldyards_state(mac, monkeypatch, tmp_path):
+    """One project's box can't put sessions in another project's archive — and none in Copilot's
+    own `~/.copilot`, which a `copilot --resume` on your computer reads for every project."""
+    assert transcripts._copilot_archive_dest() == mac["copilot_archive"]
+    monkeypatch.setenv("FOLDYARD_PROJECT", "other")
+    other = transcripts._copilot_archive_dest()
+    assert other != mac["copilot_archive"] and other.parent.parent.parent.name == "other"
+    # FOLDYARD_STATE_DIR moves it with the rest of the project's host state.
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    assert transcripts._copilot_archive_dest() == (tmp_path / "state").resolve() / (
+        "transcripts/copilot/session-state"
+    )
+
+
+def test_fy_transcripts_says_where_copilot_sessions_went_and_how_to_resume(
+    mac, monkeypatch, capsys
+):
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+    assert transcripts.transcripts() == 0
+    out = capsys.readouterr().out
+    assert f"synced → {mac['copilot_archive']}" in out
+    assert f"COPILOT_HOME={mac['copilot_home']} copilot --resume" in out
+    assert not mac["copilot_native"].exists()
+
+
 def test_no_resume_hint_for_an_explicit_archive(mac, monkeypatch, capsys, tmp_path):
     """`<dir>/codex-sessions` is not a Codex home's layout: no recipe that wouldn't work."""
     monkeypatch.setattr(config, "codex_enabled", lambda: True)
@@ -793,6 +923,17 @@ def test_no_resume_hint_for_an_explicit_archive(mac, monkeypatch, capsys, tmp_pa
     assert transcripts.transcripts(str(tmp_path / "archive")) == 0
     assert "CODEX_HOME" not in capsys.readouterr().out
     assert _archived(tmp_path / "archive") == {"codex-sessions/codex.jsonl": "{}"}
+
+
+def test_no_copilot_resume_hint_for_an_explicit_archive(mac, monkeypatch, capsys, tmp_path):
+    """Same for `<dir>/copilot-sessions`: not a Copilot home's layout."""
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+    assert transcripts.transcripts(str(tmp_path / "archive")) == 0
+    assert "COPILOT_HOME" not in capsys.readouterr().out
+    assert _archived(tmp_path / "archive") == {
+        f"copilot-sessions/{COPILOT_SESSION}/events.jsonl": "{}"
+    }
 
 
 def test_codex_sessions_are_not_held_to_a_folder_name(mac, monkeypatch):
