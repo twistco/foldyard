@@ -1026,9 +1026,13 @@ def proxy_recommend() -> list[dict]:
     reads under that prefix only), kept as the store keys it. ``when = "build"`` marks a host only
     an IMAGE BUILD needs: it isn't offered at launch but by the build gate when a build is refused,
     and granted for builds only — the runtime wall stays narrower. Every entry carries ``when``
-    (``"build"`` or ``""``). Malformed entries and invalid keys are dropped rather than raising —
-    this is read on prompt paths that must not crash — and :func:`proxy_recommend_dropped` names
-    them for the widenings report."""
+    (``"build"`` or ``""``). ``redirects_to = [...]`` makes the entry a FOLLOW grant
+    (:func:`foldyard.allowlist.grant_follow`): ``host`` is then the source (a path grant's shape)
+    and each target a host, ``*.suffix`` glob or either with a path — offered and declined apart
+    from a grant of the same key, and never for a build. Such an entry carries ``redirects_to``
+    (normalised targets); others don't. Malformed entries and invalid keys are dropped rather
+    than raising — this is read on prompt paths that must not crash — and
+    :func:`proxy_recommend_dropped` names them for the widenings report."""
     return _proxy_recommend_parsed()[0]
 
 
@@ -1040,7 +1044,8 @@ def proxy_recommend_dropped() -> list[str]:
 
 
 def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
-    from .allowlist import grant_key  # stdlib-only, no cycle: allowlist never imports config-time
+    # stdlib-only, no cycle: allowlist never imports config-time
+    from .allowlist import follow_source, follow_target, grant_key
 
     raw = _table("proxy").get("recommend")
     if raw is None:
@@ -1051,19 +1056,38 @@ def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
     dropped: list[str] = []
     for entry in raw:
         when = ""
+        follow: list[str] = []
         if isinstance(entry, str):
             host, why = entry, ""
         elif isinstance(entry, dict):
             host, why = str(entry.get("host") or ""), str(entry.get("why") or "")
             when = "build" if entry.get("when") == "build" else ""
+            if "redirects_to" in entry:
+                # A FOLLOW grant: `host` is the source, each target where it may redirect. All or
+                # nothing — half a list would be offered as if it were the one written.
+                targets = entry["redirects_to"]
+                if isinstance(targets, str):
+                    targets = [targets]
+                parsed = (
+                    [follow_target(t) if isinstance(t, str) else None for t in targets]
+                    if isinstance(targets, list)
+                    else [None]
+                )
+                if when or not parsed or None in parsed or follow_source(host) is None:
+                    dropped.append(repr(entry)[:80])  # a build gets no follow: runtime only
+                    continue
+                follow = list(dict.fromkeys(t for t in parsed if t is not None))
         else:
             dropped.append(repr(entry)[:80])
             continue
         key = grant_key(host)
         if key is None:
             dropped.append(repr(host.strip() or entry)[:80])
-        elif key not in {e["host"] for e in out}:
-            out.append({"host": key, "why": why.strip(), "when": when})
+        elif (key, bool(follow)) not in {(e["host"], bool(e.get("redirects_to"))) for e in out}:
+            item: dict = {"host": key, "why": why.strip(), "when": when}
+            if follow:
+                item["redirects_to"] = follow
+            out.append(item)
     return out, dropped
 
 

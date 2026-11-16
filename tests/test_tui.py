@@ -2485,9 +2485,10 @@ async def test_host_log_pane_handles_a_missing_logfile(monkeypatch, tmp_path):
 # ── the Network Log's wall pane (grants + pending `[proxy] recommend` offers) ─────────
 
 
-def _stub_wall(monkeypatch, pending=(), granted=(), enforcing=True):
+def _stub_wall(monkeypatch, pending=(), granted=(), enforcing=True, follows=()):
     monkeypatch.setattr(tui.allowlist, "pending_recommendations", lambda: list(pending))
     monkeypatch.setattr(tui.allowlist, "grants", lambda: list(granted))
+    monkeypatch.setattr(tui.allowlist, "follow_grants", lambda: list(follows))
     monkeypatch.setattr(tui.allowlist, "default_deny", lambda: enforcing)
 
 
@@ -2630,6 +2631,53 @@ async def test_wall_pane_x_declines_a_rec_and_revokes_a_grant(monkeypatch):
         await pilot.press("x")  # row 1: the grant → revoke
         await app.workers.wait_for_complete()
         assert declined == ["unpkg.com"] and revoked == ["pypi.org"]
+
+
+async def test_wall_pane_grants_and_removes_a_follow_as_a_follow(monkeypatch):
+    # A follow row's `a` makes a follow grant with its targets, never a path grant on its source,
+    # and `x` takes the follow alone: a path grant on the same key is another decision.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    targets = ["*.blob.core.windows.net/actions-results/"]
+    _stub_wall(
+        monkeypatch,
+        pending=[{"host": source, "why": "CI logs", "redirects_to": targets}],
+        follows=[{"source": "cdn.example.com/dl/", "to": ["objects.example.net"],
+                  "level": "session", "expires": None}],
+    )  # fmt: skip
+    followed: list[tuple] = []
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    monkeypatch.setattr(tui.allowlist, "grant", lambda *a: calls.append(("grant", a[0])))
+    monkeypatch.setattr(tui.allowlist, "revoke", lambda h: calls.append(("revoke", h)))
+    monkeypatch.setattr(tui.allowlist, "revoke_follow", lambda h: calls.append(("unfollow", h)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        assert app._manage_keys == [("follow?", source), ("follow", "cdn.example.com/dl/")]
+        assert "follow → *.blob.core.windows.net/actions-results/" in str(table.get_row_at(0)[2])
+        table.focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen)
+        assert "Follow redirects from" in _text(app.screen.query_one("#allow-title", tui.Static))
+        await pilot.press("p")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, targets, "permanent")] and calls == []
+        table.move_cursor(row=1)
+        await pilot.press("x")
+        await app.workers.wait_for_complete()
+        assert calls == [("unfollow", "cdn.example.com/dl/")]
 
 
 async def test_x_is_gated_to_the_network_tab(monkeypatch):

@@ -637,8 +637,13 @@ enforce = "learn"
   *adopted* config, and a "never" is remembered. `when = "build"` marks a host only an image build
   needs: it's offered when a build is refused, not at launch, and granted for builds only. `host`
   may be a [path grant](networking.md#path-grants-one-path-of-a-shared-host), `host/path/`: reads
-  under that path only, which a grant of the whole host also answers. An entry that is neither a
-  host nor a path grant is ignored, and `fy config widenings` names it. Default: `[]`.
+  under that path only, which a grant of the whole host also answers. With `redirects_to = ["…"]`
+  the entry asks for a [follow grant](networking.md#follow-grants-where-a-trusted-path-redirects)
+  instead: `host` is a source path, and the box may read the exact URL a redirect from under it
+  names when one of those targets (`host` or `*.suffix`, optionally with a path) covers it. It's
+  offered and declined apart from a grant of the same path, never for a build, and asked again when
+  the list gains a target. An entry that is neither a host nor a path grant, or a follow entry with
+  a target that isn't valid, is ignored, and `fy config widenings` names it. Default: `[]`.
 
   ```toml
   [proxy]
@@ -647,6 +652,7 @@ enforce = "learn"
     { host = "unpkg.com", why = "vis-timeline, loaded by the generated pages under test" },
     { host = "cdn.playwright.dev", why = "Playwright's browsers, baked into the image", when = "build" },
     { host = "storage.googleapis.com/chrome-for-testing-public/", why = "where cdn.playwright.dev redirects", when = "build" },
+    { host = "api.github.com/repos/acme/app/actions/", redirects_to = ["*.blob.core.windows.net/actions-results/", "results-receiver.actions.githubusercontent.com/rest/runs/"], why = "CI logs and artifacts (gh run view --log)" },
   ]
   ```
 

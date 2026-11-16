@@ -132,6 +132,38 @@ def path_grant(key: str) -> tuple[str, str] | None:
     return host.lower().rstrip("."), prefix
 
 
+_TARGET_HOST = re.compile(r"(\*\.)?[A-Za-z0-9.-]+")
+
+
+def follow_target(key: str) -> str | None:
+    """A FOLLOW grant's target as the store keeps it — ``*.blob.core.windows.net/actions-results/``,
+    or a bare host for any path on it — or None. The host may be a ``*.suffix`` glob (the
+    redirect names the exact host, the pattern only bounds it); a DNS name — no port, no scheme,
+    never an address (a top-level label needs a letter, so ``*.0.0.1`` can't hold ``127.0.0.1``)
+    — and a path judged as a path grant's (:func:`path_grant`).
+    egress_proxy's ``_follow_target`` is the same rule; a test holds the two equal."""
+    key = key.strip()
+    host, sep, rest = key.partition("/")
+    bare = host[2:] if host.startswith("*.") else host
+    if not _TARGET_HOST.fullmatch(host) or not valid_host(host) or ":" in host:
+        return None
+    if "*" in bare or local_key(bare) or not any(c.isalpha() for c in bare.rsplit(".", 1)[-1]):
+        return None  # a top-level label of digits is an address, or a glob over addresses
+    host = host.lower().rstrip(".")
+    if not sep:
+        return host
+    scoped = path_grant(f"example.com/{rest}")  # the path's rules, apart from the host's
+    return host + scoped[1] if scoped is not None else None
+
+
+def follow_source(key: str) -> str | None:
+    """A FOLLOW grant's source as the store keys it: a path grant's shape (:func:`path_grant` —
+    an exact host and at least one path segment, never a whole host: the operator vouches for
+    what one endpoint redirects to, not for every redirect a host can send), else None."""
+    scoped = path_grant(key.strip())
+    return scoped[0] + scoped[1] if scoped is not None else None
+
+
 def valid_grant(key: str) -> bool:
     """What `fy allow add` takes: a host key (:func:`valid_host`) or a path grant
     (:func:`path_grant`)."""
@@ -307,6 +339,28 @@ def _checked_raw() -> dict:
         )
         if bad:
             raise StoreUnreadable(f"{path}: malformed entries for {', '.join(bad)}")
+    if "follows" in raw:
+        # Follow grants (`grant_follow`): source key → {to, level, expires, added}. Damage reads
+        # as damage, as for `hosts`: dropped silently it is a grant gone, misread a wider one.
+        follows = raw["follows"]
+        if not isinstance(follows, dict):
+            raise StoreUnreadable(f"{path}: `follows` is not an object")
+        bad = sorted(
+            k
+            for k, entry in follows.items()
+            if follow_source(k) != k
+            or not isinstance(entry, dict)
+            or (entry.get("expires") is not None and _aware(entry.get("expires")) is None)
+            or not isinstance(entry.get("to"), list)
+            or not entry["to"]
+            or any(not isinstance(t, str) or follow_target(t) != t for t in entry["to"])
+        )
+        if bad:
+            raise StoreUnreadable(f"{path}: malformed follow grants for {', '.join(bad)}")
+    if "declined_follows" in raw:
+        df = raw["declined_follows"]
+        if not isinstance(df, dict) or any(not isinstance(v, dict) for v in df.values()):
+            raise StoreUnreadable(f"{path}: `declined_follows` is malformed")
     if "default_deny" in raw and not isinstance(raw["default_deny"], bool):
         raise StoreUnreadable(
             f"{path}: `default_deny` is {type(raw['default_deny']).__name__}, not a bool"
@@ -954,13 +1008,53 @@ def grants() -> list[dict]:
     ]
 
 
+def follow_grants() -> list[dict]:
+    """The non-expired FOLLOW grants with their metadata — ``{source, to, level, expires}`` sorted
+    by source. A follow grant lets the box read the one URL a redirect from under ``source`` names,
+    when one of ``to`` holds it (the proxy's ``_vouch_redirect``), for a minute: the target is the
+    source's choice, never the box's. Damaged store ⇒ ``[]`` (fail closed, as :func:`grants`)."""
+    try:
+        follows, _ = _prune(_checked_raw().get("follows", {}))
+    except StoreUnreadable as e:
+        _warn(f"egress allow-store unreadable ({e}) — following no redirects until it's repaired")
+        return []
+    return [
+        {
+            "source": k,
+            "to": list(e["to"]),
+            "level": e.get("level", "?"),
+            "expires": e.get("expires"),
+        }
+        for k, e in sorted(follows.items())
+    ]
+
+
+def live_follows() -> dict[str, list[str]]:
+    """Every non-expired follow grant, source → targets — what the proxy follows."""
+    return {g["source"]: g["to"] for g in follow_grants()}
+
+
+def follow_covered(source: str, targets: Iterable[str], live: dict[str, list[str]]) -> bool:
+    """Does a live follow grant on ``source`` already reach every one of ``targets``? (A
+    recommendation that adds a target is asked again: the operator agreed to the list they saw.)"""
+    have = live.get(source)
+    return have is not None and set(targets) <= set(have)
+
+
 # ── effective allowlist (what the proxy reads) ───────────────────────────────────────
 
 
 def effective() -> dict:
     """The resolved allowlist the egress proxy enforces — every grant in the host-side store. The
-    injector host + in-stack ``NO_PROXY`` hosts are handled proxy-side, not here."""
-    return {"default_deny": default_deny(), "allow": live_hosts(), "build_allow": build_hosts()}
+    injector host + in-stack ``NO_PROXY`` hosts are handled proxy-side, not here. ``follow`` is
+    the follow grants (:func:`follow_grants`); a proxy that predates them ignores the key, and so
+    follows nothing — it fails closed."""
+    return {
+        "default_deny": default_deny(),
+        "allow": live_hosts(),
+        "build_allow": build_hosts(),
+        "follow": [{"from": k, "to": v} for k, v in live_follows().items()],
+    }
 
 
 def write_effective() -> dict:
@@ -1060,28 +1154,105 @@ def _lasts_as_long(current: dict, level: str, expires: str | None) -> bool:
     return mine is not None and theirs is not None and mine >= theirs
 
 
+def grant_follow(source: str, targets: Iterable[str], level: str, ttl: int | None = None) -> dict:
+    """Follow redirects from under ``source`` (a path grant's shape: :func:`follow_source`) to
+    ``targets`` (:func:`follow_target`), at ``level``. Host only. Returns the new effective.
+
+    It grants no host and no path by itself: when a request under ``source`` draws a redirect to
+    a URL one of ``targets`` holds, the proxy lets the box read THAT URL — GET/HEAD, no body,
+    exactly as named, query included — for a minute. The target is the source's choice, so the
+    claim the operator makes is that nothing under ``source`` redirects where the caller says (no
+    open redirector there); ``targets`` bounds it. A live follow on the same source is replaced,
+    its targets kept beside the new ones."""
+    _require_host()
+    _require_readable_store()
+    if level not in LEVELS:
+        raise SystemExit(f"✗ unknown level {level!r} (have: {', '.join(LEVELS)})")
+    key = follow_source(source)
+    if key is None:
+        raise SystemExit(
+            f"✗ not a valid redirect source: {source.strip()!r} — an exact host and a path of at "
+            "least one segment (`api.github.com/repos/owner/repo/actions/`): you vouch for what "
+            "one endpoint redirects to, never for every redirect a host can send"
+        )
+    wanted: list[str] = []
+    for raw in targets:
+        target = follow_target(raw)
+        if target is None:
+            raise SystemExit(
+                f"✗ not a valid redirect target: {raw.strip()!r} — a host or `*.suffix` glob, "
+                "optionally with a path (`*.blob.core.windows.net/actions-results/`); no port, "
+                "scheme or local address"
+            )
+        if target not in wanted:
+            wanted.append(target)
+    if not wanted:
+        raise SystemExit("✗ a follow grant needs at least one target (`--redirects-to`)")
+    doc = _load_raw()
+    follows, _ = _prune(doc.get("follows", {}))
+    held = follows.get(key, {}).get("to", [])
+    expires = _iso(_now() + timedelta(seconds=ttl or ONCE_TTL_SECONDS)) if level == "once" else None
+    follows[key] = {
+        "to": [*held, *(t for t in wanted if t not in held)],
+        "level": level,
+        "expires": expires,
+        "added": _iso(_now()),
+    }
+    doc["follows"] = follows
+    if isinstance(doc.get("declined_follows"), dict):
+        doc["declined_follows"].pop(key, None)
+    _save_raw(doc)
+    return write_effective()
+
+
 def revoke(host: str) -> dict:
-    """Remove ``host`` from the store at any level. Host only."""
+    """Remove ``host`` from the store at any level — a host or path grant, and a follow grant on
+    the same key. Host only."""
     _require_host()
     _require_readable_store()
     host = host.strip()
     scoped = path_grant(host)
     if scoped is not None:
         host = scoped[0] + scoped[1]  # as `grant` stored it
-    hosts, _ = _prune(_load_store())
-    if host in hosts:
-        del hosts[host]
-        _save_store(hosts)
+    doc = _load_raw()
+    hosts, _ = _prune(doc.get("hosts", {}))
+    follows, _ = _prune(doc.get("follows", {}))
+    if host in hosts or host in follows:
+        hosts.pop(host, None)
+        follows.pop(host, None)
+        doc["hosts"] = hosts
+        if follows or "follows" in doc:
+            doc["follows"] = follows
+        _save_raw(doc)
+    return write_effective()
+
+
+def revoke_follow(source: str) -> dict:
+    """Remove the follow grant on ``source`` alone — a grant of the same key stays. Host only."""
+    _require_host()
+    _require_readable_store()
+    key = follow_source(source) or source.strip()
+    doc = _load_raw()
+    follows, _ = _prune(doc.get("follows", {}))
+    if key in follows:
+        del follows[key]
+        doc["follows"] = follows
+        _save_raw(doc)
     return write_effective()
 
 
 def clear_ephemeral() -> dict:
-    """Drop all once/session grants, KEEPING permanent ones. For supervisor start — 'until restart'
-    grants end here. Host only."""
+    """Drop all once/session grants, KEEPING permanent ones — follow grants too. For supervisor
+    start — 'until restart' grants end here. Host only."""
     _require_host()
     _require_readable_store()
-    hosts, _ = _prune(_load_store())
-    _save_store({h: e for h, e in hosts.items() if e.get("level") == "permanent"})
+    doc = _load_raw()
+    hosts, _ = _prune(doc.get("hosts", {}))
+    doc["hosts"] = {h: e for h, e in hosts.items() if e.get("level") == "permanent"}
+    if "follows" in doc:
+        follows, _ = _prune(doc["follows"])
+        doc["follows"] = {k: e for k, e in follows.items() if e.get("level") == "permanent"}
+    _save_raw(doc)
     return write_effective()
 
 
@@ -1120,6 +1291,58 @@ def decline(host: str) -> None:
     _save_raw(doc)
 
 
+def declined_follows() -> set[str]:
+    """Follow-grant sources the operator answered "never" to (a ``[proxy] recommend`` entry with
+    ``redirects_to``) — apart from :func:`declined`, so declining to follow a source's redirects
+    never silences an offer to read under it, or the other way round. Unreadable ⇒ ``{"*"}``."""
+    try:
+        raw = _checked_raw()
+    except StoreUnreadable:
+        return {"*"}
+    return set(raw.get("declined_follows", {}))
+
+
+def decline_follow(source: str) -> None:
+    """Record "never offer to follow redirects from ``source`` again" (host only). Undone by
+    :func:`grant_follow` on it."""
+    _require_host()
+    _require_readable_store()
+    key = follow_source(source)
+    if key is None:
+        raise SystemExit(f"✗ not a valid redirect source: {source.strip()!r}")
+    doc = _load_raw()
+    refused = doc.setdefault("declined_follows", {})
+    if not isinstance(refused, dict):  # pragma: no cover — _checked_raw already rejected this
+        return
+    refused[key] = {"declined": _iso(_now())}
+    _save_raw(doc)
+
+
+def describe(entry: dict) -> str:
+    """A recommendation as the operator is asked about it: its key, or for a follow grant the
+    source and where it may redirect to."""
+    if entry.get("redirects_to"):
+        return f"redirects from {entry['host']} → {', '.join(entry['redirects_to'])}"
+    return entry["host"]
+
+
+def accept(entry: dict, level: str, ttl: int | None = None) -> None:
+    """Grant a recommendation at ``level``: a follow grant for one with ``redirects_to``, else the
+    host or path grant it names."""
+    if entry.get("redirects_to"):
+        grant_follow(entry["host"], entry["redirects_to"], level, ttl)
+    else:
+        grant(entry["host"], level, ttl)
+
+
+def refuse(entry: dict) -> None:
+    """Decline a recommendation — the follow or the grant it asks for, never the other."""
+    if entry.get("redirects_to"):
+        decline_follow(entry["host"])
+    else:
+        decline(entry["host"])
+
+
 def recommendations() -> list[dict]:
     """Everything ASKING to be granted for the bound config, in offer order: the repo's
     ``[proxy] recommend`` first, then the active plugins' packaged asks
@@ -1156,12 +1379,18 @@ def pending_recommendations() -> list[dict]:
     refused = declined()
     if "*" in refused:
         return []
-    granted = live_hosts()
-    return [
-        e
-        for e in recommendations()
-        if e.get("when") != "build" and not covered(e["host"], granted) and e["host"] not in refused
-    ]
+    granted, follows, unfollowed = live_hosts(), live_follows(), declined_follows()
+
+    def waiting(e: dict) -> bool:
+        if e.get("when") == "build":
+            return False
+        if e.get("redirects_to"):
+            return e["host"] not in unfollowed and not follow_covered(
+                e["host"], e["redirects_to"], follows
+            )
+        return not covered(e["host"], granted) and e["host"] not in refused
+
+    return [e for e in recommendations() if waiting(e)]
 
 
 def offer_recommendations(
@@ -1194,16 +1423,16 @@ def offer_recommendations(
             _accept_build_recommendations(echo)
         return counts
     n = len(pending)
-    echo(f"▶ {n} recommended egress host{'s' if n != 1 else ''} not yet granted:")
+    echo(f"▶ {n} recommended egress grant{'s' if n != 1 else ''} not yet answered:")
     if accept_all:
         for e in pending:
-            grant(e["host"], "permanent")
-            echo(f"  ✓ {e['host']} allowed (permanent)" + (f" — {e['why']}" if e["why"] else ""))
+            accept(e, "permanent")
+            echo(f"  ✓ {describe(e)} allowed (permanent)" + (f" — {e['why']}" if e["why"] else ""))
         _accept_build_recommendations(echo)
         return {"granted": n, "declined": 0, "deferred": 0}
     if not interactive:
         for e in pending:
-            echo(f"    {e['host']}" + (f" — {e['why']}" if e["why"] else ""))
+            echo(f"    {describe(e)}" + (f" — {e['why']}" if e["why"] else ""))
         echo(
             "  No terminal here — review with `fy allow sync` (or the TUI's Network Log), "
             "or grant them all unattended with `fy allow sync --yes`."
@@ -1211,9 +1440,16 @@ def offer_recommendations(
         return counts
     for e in pending:
         why = f" — {e['why']}" if e["why"] else ""
+        what = describe(e)
+        if e.get("redirects_to"):
+            # What a yes means is less obvious than for a host: say it at the decision moment.
+            why += (
+                f"\n    (the box may then read the exact URL a redirect from under {e['host']} "
+                "names, when it is under one of those, for a minute — the source chooses it)"
+            )
         answer = (
             prompt(
-                f"  allow {e['host']}{why}?  [y]es permanent · [s]ession · "
+                f"  allow {what}{why}?  [y]es permanent · [s]ession · "
                 f"[o]nce ({OFFER_ONCE_SECONDS // 60} min) · [n]ot now (default) · ne[v]er: "
             )
             .strip()
@@ -1222,29 +1458,27 @@ def offer_recommendations(
         # EXACT matches, like the adoption gate: anything unrecognised defers, which changes
         # nothing and asks again next time.
         if answer in ("y", "yes"):
-            grant(e["host"], "permanent")
-            echo(f"  ✓ {e['host']} allowed (permanent)")
+            accept(e, "permanent")
+            echo(f"  ✓ {what} allowed (permanent)")
             counts["granted"] += 1
             counts["deferred"] -= 1
         elif answer in ("s", "session"):
-            grant(e["host"], "session")
-            echo(f"  ✓ {e['host']} allowed (session — until the supervisor restarts)")
+            accept(e, "session")
+            echo(f"  ✓ {what} allowed (session — until the supervisor restarts)")
             counts["granted"] += 1
             counts["deferred"] -= 1
         elif answer in ("o", "once"):
-            grant(e["host"], "once", OFFER_ONCE_SECONDS)
-            echo(
-                f"  ✓ {e['host']} allowed (once — {OFFER_ONCE_SECONDS // 60} min, then asked again)"
-            )
+            accept(e, "once", OFFER_ONCE_SECONDS)
+            echo(f"  ✓ {what} allowed (once — {OFFER_ONCE_SECONDS // 60} min, then asked again)")
             counts["granted"] += 1
             counts["deferred"] -= 1
         elif answer in ("v", "never"):
-            decline(e["host"])
-            echo(f"  ✗ {e['host']} declined — not offered again (`fy allow add` re-allows)")
+            refuse(e)
+            echo(f"  ✗ {what} declined — not offered again (`fy allow add` re-allows)")
             counts["declined"] += 1
             counts["deferred"] -= 1
         else:
-            echo(f"    ({e['host']} deferred — you'll be offered it again)")
+            echo(f"    ({what} deferred — you'll be offered it again)")
     return counts
 
 
@@ -1274,12 +1508,16 @@ def sweep() -> bool:
         _warn(f"egress allow-store unreadable ({e}) — skipping the expiry sweep")
         return False
     pruned, changed = _prune(raw.get("hosts", {}))
+    follows, follows_changed = _prune(raw.get("follows", {}))
+    changed = changed or follows_changed
     # A lapsed learn window is closed into its `learned` record — enforcement is ALREADY back
     # (default_deny() stops honouring a window at its deadline); this just tidies the store.
     lapsed = "learn" in raw and _open_window(raw) is None
     if changed or lapsed:
         doc = _load_raw()
         doc["hosts"] = pruned
+        if "follows" in doc:
+            doc["follows"] = follows
         if lapsed:
             _close_window(doc)
         _save_raw(doc)

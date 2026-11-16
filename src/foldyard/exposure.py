@@ -501,7 +501,17 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     """Gather ``cfg``'s widenings. Bind ``cfg`` first (``with config.using(cfg)``) — every helper
     reads through the module config functions, so the caller's binding is what selects the
     checkout."""
-    from .allowlist import build_hosts, covered, declined, default_deny, live_hosts
+    from .allowlist import (
+        build_hosts,
+        covered,
+        declined,
+        declined_follows,
+        default_deny,
+        describe,
+        follow_covered,
+        live_follows,
+        live_hosts,
+    )
     from .plugins.proxy import _resolve_passthrough
 
     drift = configpin.inspect(cfg)
@@ -511,23 +521,24 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
     resolved = _resolve_passthrough(entries)
     proxy = cfg.toml.get("proxy")
     runtime, for_builds, refused = live_hosts(), build_hosts(), declined()
-    recommended = [
-        (
-            e["host"],
-            e["why"],
-            "store unreadable"
-            if "*" in refused
-            else "granted"
-            # A build grant lets only a host-started build through; it answers a build ask only.
-            # A whole-host grant answers a path ask (allowlist.covered).
-            if covered(e["host"], runtime)
-            or (e.get("when") == "build" and covered(e["host"], for_builds))
-            else "declined"
-            if e["host"] in refused
-            else "pending",
-        )
-        for e in config.proxy_recommend()
-    ]
+    follows, unfollowed = live_follows(), declined_follows()
+
+    def status(e: dict) -> str:
+        if "*" in refused:
+            return "store unreadable"
+        if e.get("redirects_to"):  # a follow grant: answered apart from the source's own grant
+            if follow_covered(e["host"], e["redirects_to"], follows):
+                return "granted"
+            return "declined" if e["host"] in unfollowed else "pending"
+        # A build grant lets only a host-started build through; it answers a build ask only.
+        # A whole-host grant answers a path ask (allowlist.covered).
+        if covered(e["host"], runtime) or (
+            e.get("when") == "build" and covered(e["host"], for_builds)
+        ):
+            return "granted"
+        return "declined" if e["host"] in refused else "pending"
+
+    recommended = [(describe(e), e["why"], status(e)) for e in config.proxy_recommend()]
     # SystemExit is a BaseException: raised here it would end `fy doctor` partway through.
     try:
         openings, openings_error = config.machine_firewall_allow(), ""

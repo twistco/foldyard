@@ -253,6 +253,63 @@ in the middle — but *one* middle, not a switch between two.
   put each Java and GnuTLS step's whole-host grants through a handshake that fails, for no narrower
   grant.
 
+- **A trusted path's redirect may be followed** (amended 2026-11-16). A path grant needs the target
+  to stay put, and some don't. GitHub's job logs and artifacts are the case that asked for it:
+  `api.github.com/repos/<owner>/<repo>/actions/jobs/<id>/logs` answers with a 302 to one of GitHub's
+  Azure storage accounts, `productionresultssa<N>.blob.core.windows.net/actions-results/…`. Sampled
+  from this repository's own runs, the shard was anything from `sa1` to `sa32`, and the names
+  resolve from `sa0` to `sa199`. A list of path grants covered some of them and went stale. And
+  `*.blob.core.windows.net` is every storage account, including one anyone can create, so it is an
+  upload channel. No hostname pattern says which account is GitHub's. A pattern that looks narrow,
+  `productionresultssa{N}`, isn't either: nothing exists at `sa200`, so anyone could register it.
+  Only GitHub's own redirect says which account is GitHub's.
+
+  So the grant is taken from that response. A **follow grant**,
+  `fy allow add api.github.com/repos/o/r/actions/ --redirects-to '*.blob.core.windows.net/actions-results/'`,
+  names a SOURCE (a path grant's shape: an exact host and at least one segment) and one or more
+  TARGETS (a host or `*.suffix`, optionally a path). When a response to a request under the source
+  is a redirect to a URL a target holds, the proxy VOUCHES for that URL, and the box may read it:
+
+  - exactly that URL, query included: the box chooses nothing about it but whether to fetch it;
+  - read-only, by the path grant's rules (GET/HEAD, no body, no `Upgrade`), over HTTPS on :443, to a
+    name: a target can't hold an address (its top-level label needs a letter, so `*.0.0.1` is
+    refused), and a vouched address is refused again;
+  - for 60 s, while the follow grant stands (revoking it ends what it vouched for), from a bounded
+    table;
+  - only a redirect read over HTTPS from the real upstream counts. The proxy reads the `Location` in
+    `responseheaders`, which never fires for its own answers;
+  - a chain is followed under the same rule, up to three links (api.github.com → `results-receiver`
+    → a blob shard is `gh run view --log`'s).
+
+  A vouched host is reached as a path-granted one is: its CONNECT answered in the proxy, never
+  blind-tunnelled, dialled only once a ClientHello has earned it, raw bytes never relayed. A
+  connection a vouched read went out on stays judged request by request after the vouch lapses, so a
+  download outlives its minute and nothing else goes out on it. It ends when its rule is revoked.
+  Follow grants live in the store's own `follows` table and the effective file's own `follow` key,
+  never in `allow`. A proxy or a foldyard that predates them ignores the key and follows nothing, so
+  an older reader can't take one for a path grant on its source. `[proxy] recommend` asks for one
+  with `redirects_to = [...]`. It is offered with what a yes means, and declined apart from a grant
+  of the same key. It is never offered for builds: a runtime grant answers a build as it does the
+  box.
+
+  **This narrows the rejection below; it doesn't reverse it.** That rejection was of a granted HOST
+  sending the box where it likes, because an open redirector anywhere on the host (`?next=`, a
+  shortener) would let the box choose the target. A follow grant trusts one PATH the operator names,
+  and that is a claim the operator can check: nothing under `/repos/…/actions/` takes a target from
+  the caller. The targets are a second bound, not the boundary. Anyone could create an
+  `actions-results` container in their own storage account, so a `?next=` under the source would
+  still reach it. That is why the source can't be a whole host, and why a grant's targets should be
+  as narrow as the redirects it's for. `tests/test_proxy_follow.py` pins each rule against the real
+  addon (every one mutation-tested red first), and `tests/test_proxy_wall_e2e.py` shows the sequence
+  on a real mitmdump: the 302 read on one connection, the new CONNECT answered, the dial by name,
+  the one read, and with no follow grant the same redirect refused and nothing reaching the target.
+
+  Weighed and rejected: the proxy fetching the redirect itself and answering the 302's request with
+  the target's body. It changes what the client sees (a 200 for a 302, a body from somewhere else),
+  must stream an artifact of any size through one more layer, and is the same trust decision as
+  vouching. Vouching keeps the wall judging the box's own follow-up request, which is the property
+  the rejection below valued.
+
 ## Rejected
 
 - **Keep `capture`, default it to `on`.** Keeps the second control for no stated use; the one real
@@ -267,4 +324,5 @@ in the middle — but *one* middle, not a switch between two.
   redirectors, so `granted/redirect?to=https://anywhere/?d=<data>` would reach anywhere. Remembering
   the one target a redirect named has the same flaw, because with an open redirector the box chose
   that target. Today the wall judges the box's own follow-up request, which holds even when a
-  granted host redirects anywhere.
+  granted host redirects anywhere. (Narrowed 2026-11-16: a follow grant trusts one source PATH, not
+  a host, and lets through only the exact URL its redirect named. See the amendment above.)

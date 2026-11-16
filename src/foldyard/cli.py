@@ -1247,6 +1247,12 @@ def allow_add(
     build: bool = typer.Option(
         False, "--build", help="for image builds only (fy box build, the stack build), not the box"
     ),
+    redirects_to: list[str] = typer.Option(
+        [],
+        "--redirects-to",
+        help="follow redirects from HOST/path/ to this host, *.suffix or either with a path "
+        "(repeatable) — grants HOST nothing itself",
+    ),
 ) -> None:
     """Allow a host through the allowlist.
 
@@ -1263,9 +1269,28 @@ def allow_add(
     (a CDN sending its downloads to one bucket of a storage service). With `--build` it is for
     image builds only: the proxy decrypts the build's connection to that host to check each path
     (on a walled VM a build step trusts the proxy's CA).
+
+    With `--redirects-to`, it is a follow grant instead:
+    `fy allow add api.github.com/repos/o/r/actions/ --redirects-to '*.blob.core.windows.net'`.
+    When a request under that path draws a redirect to a URL one of the targets covers, the box
+    may read that exact URL (GET/HEAD, query included) for a minute. The redirect picks the URL,
+    so a target can be a glob without the box choosing where it goes. Make one only for a path
+    whose redirects you trust: a `?next=`-style redirect there would let the box pick the URL
+    within the targets. It grants nothing on the source host itself.
     """
     from . import allowlist
 
+    if redirects_to:
+        if build:
+            raise typer.BadParameter("a follow grant is for the box, not for builds only")
+        eff = allowlist.grant_follow(host, redirects_to, level, ttl or None)
+        source = allowlist.follow_source(host) or host
+        targets = ", ".join(_followed_to(eff, source))
+        print(
+            f"✓ redirects from {source} followed to {targets} ({level}): "
+            "the box may read the exact URL such a redirect names, for a minute"
+        )
+        return
     eff = allowlist.grant(host, level, ttl or None, build=build)
     scoped = allowlist.path_grant(host.strip())
     reads = "GET/HEAD under that path only, " if scoped else ""
@@ -1277,6 +1302,11 @@ def allow_add(
             f"  ⚠ {host} is on your computer or its network: the box can now reach whatever "
             "listens there, through the proxy. `fy allow remove` it when you're done."
         )
+
+
+def _followed_to(eff: dict, source: str) -> list[str]:
+    """The targets ``eff`` (an effective allowlist) follows ``source``'s redirects to."""
+    return next((f["to"] for f in eff.get("follow", []) if f["from"] == source), [])
 
 
 @allow_app.command("list")
@@ -1303,13 +1333,17 @@ def allow_list() -> None:
         print("for image builds only (the build proves itself; the box can't use these):")
         for host in eff["build_allow"]:
             print(f"  {host}")
+    if eff.get("follow"):
+        print("redirects followed (the box may read the exact URL such a redirect names):")
+        for f in eff["follow"]:
+            print(f"  {f['from']} → {', '.join(f['to'])}")
     with _config_bound():
         pending = allowlist.pending_recommendations()
     if pending:
         n = len(pending)
         print(f"recommended, not yet answered ({n}) — `fy allow sync`:")
         for e in pending:
-            print(f"  {e['host']}" + (f" — {e['why']}" if e["why"] else ""))
+            print(f"  {allowlist.describe(e)}" + (f" — {e['why']}" if e["why"] else ""))
 
 
 @allow_app.command("sync")
@@ -1533,10 +1567,12 @@ def allow_learn(
 @allow_app.command("remove")
 def allow_remove(
     host: str = typer.Argument(
-        ..., help="host/glob (or host/path/) to revoke, at whatever level it was granted"
+        ...,
+        help="host/glob (or host/path/) to revoke, at whatever level it was granted — a follow "
+        "grant on that host/path/ too",
     ),
 ) -> None:
-    """Revoke a host's grant."""
+    """Revoke a host's grant, and any follow grant on the same host/path/."""
     from . import allowlist
 
     eff = allowlist.revoke(host)
