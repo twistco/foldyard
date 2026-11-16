@@ -356,13 +356,16 @@ def session_args(agent: str, args: list[str]) -> tuple[str, list[str], bool]:
     """``(id, the agent's args, whether the id is the agent's own)``. Claude and Copilot get
     ``--session-id <id>`` so the two ids are one — unless the caller already names the session:
     ``--resume <uuid>`` (or ``--session-id <uuid>``) makes that uuid the id; ``--continue``, a bare
-    ``--resume`` or (Claude) ``--fork-session`` leave foldyard's id its own, since the agent picks
-    the session then (and `fy agent resume` can't resume it by that id)."""
+    ``--resume``, (Claude) ``--fork-session`` or (Copilot) ``--connect`` leave foldyard's id its
+    own, since the agent picks or joins the session then (and `fy agent resume` can't resume it by
+    that id)."""
     own = str(uuid.uuid4())
     flags = _RESUME_FLAGS.get(agent)
     if flags is None:
         return own, args, False
     if any(a.partition("=")[0] == "--fork-session" for a in args):
+        return own, args, False
+    if any(a.partition("=")[0] == "--connect" for a in args):
         return own, args, False
     for i, arg in enumerate(args):
         flag, eq, value = arg.partition("=")

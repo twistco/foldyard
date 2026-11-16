@@ -102,6 +102,11 @@ def test_pane_command_is_a_login_shell_execing_fy():
         ("copilot", ["--session-id", SID], False, True),
         ("copilot", ["--continue"], False, False),
         ("copilot", ["--resume"], False, False),
+        # `--connect` joins a REMOTE session; its optional id is not a local session id, so it is
+        # never foldyard's id — even when it looks like a UUID.
+        ("copilot", ["--connect"], False, False),
+        ("copilot", ["--connect", SID], False, False),
+        ("copilot", [f"--connect={SID}"], False, False),
     ],
 )
 def test_session_args(agent, args, passed_id, same_id):
