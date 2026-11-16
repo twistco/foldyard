@@ -541,6 +541,15 @@ def test_without_a_terminal_the_printed_command_is_safe_to_paste(env, capsys):
     assert all(argv[4:] == ["--build", "--level", "once", "--ttl", ttl] for argv in printed)
 
 
+def test_a_write_beyond_names_its_host_shell_quoted(env, capsys):
+    # The host is the build's refused row's, and valid_host doesn't keep out `$ ( ) ;`.
+    host = "x$(id).example.com"
+    allowlist.grant(f"{host}/bucket/", "permanent", build=True)
+    put = {**_path_row("/bucket/x", host), "method": "PUT", "outside": True}
+    buildgate.run(_Build(env["log"], [(1, [put])]), what="box image", interactive=False)
+    assert f"`fy allow add '{host}' --build`" in capsys.readouterr().out
+
+
 def test_a_write_beyond_a_build_path_grant_is_reported_never_offered(env, capsys):
     # The PR-review finding: with the path granted for builds, a build step's PUT under it used
     # to fall back to "allow storage.googleapis.com for builds?" — the whole-host upload channel.

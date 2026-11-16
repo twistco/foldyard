@@ -545,6 +545,35 @@ def test_a_suggested_path_grant_is_shell_quoted(gh):
         "`fy allow add 'cdn.example.com/$(id)/'`"
         in gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET").decode()
     )
+    # …and so is the whole host: valid_host keeps out whitespace and `/`, not `$ ( ) ;`.
+    host = "x$(id).example.com"
+    for body in (
+        gh.module._build_only_body(host, "/a/x", "POST"),
+        gh.module._redirect_body(host, "/a/x", "POST", "a.example.com"),
+    ):
+        assert f"`fy allow add '{host}'`" in body.decode()
+
+
+def test_a_suggested_path_grant_is_one_fy_allow_add_accepts(gh):
+    # The proxy judges paths over a wider set than a grant may hold (allowlist._PATH_CHARS): a
+    # suggestion outside it would only be refused, so the whole host is offered instead.
+    text = gh.module._build_only_body("cdn.example.com", "/a|b/x", "GET").decode()
+    assert "a|b" not in text and "`fy allow add cdn.example.com`" in text
+    assert gh.module._GRANT_PATH_CHARS.pattern == allowlist._PATH_CHARS.pattern
+
+
+async def test_an_off_port_redirect_target_is_offered_its_port(walled):
+    # A path grant has no port, and a bare host grant means :443 / :80: for `host:8080`, only
+    # `host:8080` lets the request through.
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    inj.responseheaders(_redirect("cdn.playwright.dev", "http://objects.example.com:8080/b/x"))
+    follow = _request("objects.example.com", "/b/x", port=8080, scheme="http")
+    assert not await _judged(inj, follow)
+    assert follow.response is not None
+    body = follow.response.content.decode()
+    assert "cdn.playwright.dev redirected here" in body
+    assert "`fy allow add objects.example.com:8080`" in body and "/b/" not in body
 
 
 def test_a_builds_whole_host_grant_is_tunnelled_as_before(building):

@@ -239,7 +239,7 @@ def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
         f"  ✗ {host}: refused {', '.join(entry['beyond'])} — beyond the paths it is granted, "
         "which allow reads (GET/HEAD, no body) only. Not offered: all of the host would let a "
         "build step upload there. If a build really needs it, on your computer: "
-        f"`fy allow add {host} --build`"
+        f"`fy allow add {shlex.quote(host)} --build`"
     )
 
 

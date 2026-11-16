@@ -266,6 +266,10 @@ _PATH_METHODS = frozenset({"GET", "HEAD"})
 # Percent-encodings a server may decode into a separator or a dot segment AFTER the prefix was
 # checked (`%2e%2e`, `%2f`, `%5c`), or decode twice (`%25`): a path carrying one is refused.
 _ENCODED_SEPARATOR = re.compile(r"%(?:2e|2f|5c|25)", re.IGNORECASE)
+# What a path grant's path may hold — foldyard's `allowlist._PATH_CHARS`, duplicated because this
+# addon runs standalone (a test pins the two equal). Narrower than what `_plain_path` judges: a
+# suggested grant outside it would only be refused by `fy allow add`.
+_GRANT_PATH_CHARS = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%/]+")
 # How long a redirect's target is remembered, and how many: enough to name the redirect on the
 # refusal of the request that follows it, never a growing table.
 _REDIRECT_MEMORY_SECONDS = 120.0
@@ -496,20 +500,24 @@ def _outside_body(host: str, prefixes: tuple[str, ...]) -> bytes:
 def _suggested_path_grant(host: str, path: str, method: str) -> str | None:
     """The narrowest useful path grant for a refused request — its host and first segment, shell-
     quoted — or None when none would let it through: not a read (a path grant passes GET/HEAD
-    alone), off the default port (a path grant has none), or a path it can't be shaped on. The
-    path is the box's and a grant may hold ``$ ( ) ; &`` (allowlist._PATH_CHARS), so the command
-    is quoted: pasted bare, ``host/$(id)/`` would run ``id`` on your computer."""
+    alone), off the default port (a path grant has none), or a path it can't be shaped on — one
+    ``fy allow add`` would refuse included (:data:`_GRANT_PATH_CHARS`). The path is the box's and
+    a grant may hold ``$ ( ) ; &``, so the command is quoted: pasted bare, ``host/$(id)/`` would
+    run ``id`` on your computer."""
     if method not in _PATH_METHODS or ":" in host:
         return None
     plain = _plain_path(path)
     first = plain.split("/")[1] if plain else ""
-    return shlex.quote(f"{host}/{first}/") if first else None
+    if not first or not _GRANT_PATH_CHARS.fullmatch(f"/{first}/"):
+        return None
+    return shlex.quote(f"{host}/{first}/")
 
 
 def _grant_advice(key: str, path: str, method: str) -> str:
     """``fy allow add`` for a refused request: a path grant first when one would serve, then the
-    whole host (``key``: ``host:port`` off the default port — a valid host, so never quoted)."""
-    whole = f"`fy allow add {key}`"
+    whole host (``key``: ``host:port`` off the default port). Both quoted: a host that passes
+    ``valid_host`` may still hold ``$ ( ) ;`` — a plain one prints unchanged."""
+    whole = f"`fy allow add {shlex.quote(key)}`"
     narrow = _suggested_path_grant(key, path, method)
     return f"`fy allow add {narrow}` (or the whole host: {whole})" if narrow else whole
 
@@ -1993,7 +2001,7 @@ class Injector:
             return _build_only_body(key, str(request.path), str(request.method))
         via = self._redirected_from(host, request.path)
         if host and via:
-            return _redirect_body(host, str(request.path), str(request.method), via)
+            return _redirect_body(key, str(request.path), str(request.method), via)
         return _REFUSED_BODY
 
     def _settle_answered(self, client_id: str | None) -> None:
