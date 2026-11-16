@@ -359,6 +359,8 @@ def _net_leaf_body(e: dict, escape) -> str:
             if e.get("push")
             else "outside the paths this host is granted for"
             if e.get("outside")
+            else "granted for image builds only"
+            if e.get("build_only")
             else "not on the allowlist"
         )
         # A granted host's redirect sent the request here (box-reached text: escaped, capped).

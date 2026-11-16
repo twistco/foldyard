@@ -402,6 +402,8 @@ def test_the_network_log_says_outside_and_where_the_redirect_came_from():
     assert "outside the paths this host is granted for" in line
     line = proxy._net_leaf_body({**row, "via": "cdn.playwright.dev"}, lambda s: s)
     assert "not on the allowlist (redirected from cdn.playwright.dev)" in line
+    line = proxy._net_leaf_body({**row, "build_only": True}, lambda s: s)
+    assert "granted for image builds only" in line and "not on the allowlist" not in line
 
 
 # ── for builds: a build-scoped path grant, judged decrypted ───────────────────────────────────
@@ -471,6 +473,41 @@ async def test_a_build_path_grant_is_nothing_to_the_box(building):
     bare.response = None
     inj.http_connect(bare)
     assert not await _judged(inj, _inside(client_id="box-2"))
+
+
+async def test_a_box_refusal_of_a_host_granted_for_builds_only_says_so(building):
+    # A grant made at the build gate is the build's alone. The box asking for that host is still
+    # refused, but its row says why: "not on the allowlist" beside a grant the TUI lists read as a
+    # broken wall (a box's runtime Playwright download, 2026-11-16).
+    inj, allow, log = building
+    _write_build_allow(allow, ["cdn.playwright.dev", GRANT])
+    for host, path, narrow in (
+        ("cdn.playwright.dev", "/builds/cft/x.zip", "cdn.playwright.dev/builds/"),
+        (GCS, ZIP, GRANT),
+    ):
+        refused = _inside(host, path, client_id="box-1")
+        assert not await _judged(inj, refused)
+        row = _rows(log)[-1]
+        assert row["blocked"] and row["build_only"] is True and not row.get("build")
+        # …and so does what the box is answered: the grant to widen, narrowest first.
+        assert refused.response is not None
+        body = refused.response.content.decode()
+        assert f"{host} is granted for image builds only" in body
+        assert f"`fy allow add {narrow}`" in body and f"`fy allow add {host}`" in body
+    other = _inside("elsewhere.example.com", "/x", client_id="box-1")
+    assert not await _judged(inj, other)
+    assert "build_only" not in _rows(log)[-1]
+    assert other.response is not None and b"image builds" not in other.response.content
+    # The build's own refusal (a path outside its grant) is not one.
+    _build_connect(inj)
+    assert not await _judged(inj, _inside(path="/another-bucket/x"))
+    assert "build_only" not in _rows(log)[-1]
+
+
+def test_a_build_only_refusal_off_the_default_port_offers_no_path_grant(gh):
+    # A path grant has no port (allowlist.path_grant), so off :443/:80 only `host:port` is offered.
+    body = gh.module._build_only_body("cdn.example.com:8443", "/builds/x.zip").decode()
+    assert "`fy allow add cdn.example.com:8443`" in body and "/builds/" not in body
 
 
 def test_a_builds_whole_host_grant_is_tunnelled_as_before(building):

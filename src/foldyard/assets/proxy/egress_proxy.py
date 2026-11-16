@@ -510,6 +510,19 @@ def _redirect_body(host: str, path: str, via: str) -> bytes:
     ).encode()
 
 
+def _build_only_body(key: str, path: str) -> bytes:
+    """The 403 for the box's request to a host (``key``: ``host:port`` off the default port)
+    granted to image builds alone: the grant it sees listed doesn't reach it, and widening it is
+    the operator's call — narrowest first. A path grant has no port, so off it, the key alone."""
+    grant = f"`fy allow add {key}`"
+    if ":" not in key:
+        grant = f"`fy allow add {_suggested_path_grant(key, path)}` (or the whole host: {grant})"
+    return (
+        f"refused by the foldyard allowlist - {key} is granted for image builds only, not for "
+        f"the box. To let the box reach it, on your computer: {grant}\n"
+    ).encode()
+
+
 def _injects_on(dest: str | None, host: str | None) -> bool:
     """Does a rule naming ``host`` inject on a request sent to ``dest`` (its :func:`_destination`)?
     That one host exactly: a rule has no wildcard form. The ONE host match for injection
@@ -1908,7 +1921,9 @@ class Injector:
         bare marker, or the box could put its own hosts in that offer). ``mismatch``: refused for
         naming another host in its Host header, not by the allowlist — granting the host is not
         the fix. ``push``: refused for being a git push
-        (:func:`_is_git_push`) — nor is it then. No host → None."""
+        (:func:`_is_git_push`) — nor is it then. ``build_only``: anyone but a build refused a host
+        granted to builds alone (:meth:`_build_only`), so the row says why the grant didn't count.
+        No host → None."""
         if not host:
             return None
         entry = {
@@ -1942,16 +1957,30 @@ class Injector:
                 via = self._redirected_from(_destination(request), request.path)
                 if via:
                     entry["via"] = via  # a redirect from that granted host sent it here
+        if not (mismatch or push or entry.get("build")) and self._build_only(host):
+            entry["build_only"] = True
         return entry
+
+    def _build_only(self, key: str) -> bool:
+        """Is ``key`` (a host, or ``host:port``) granted to a host-started build — as a whole or
+        for some paths? Asked of a refusal that wasn't the build's: such a grant never widens
+        the box's wall (``build_allow``), but the operator sees it listed, so the row says so."""
+        self._refresh_allow()
+        return _host_matches(key, self._build_patterns) or key in self._build_path_grants
 
     def _refusal_body(self, request, build: bool = False) -> bytes:
         """The 403 a refused request gets: the generic one, or — when the host is granted (to
-        this client) for some paths, or a granted host's redirect sent the request here — one that
-        names that, and the path grant that would let it through."""
+        this client) for some paths, granted to builds alone (and this isn't one), or a granted
+        host's redirect sent the request here — one that names that, and the grant that would let
+        it through."""
         host = _destination(request)
         prefixes = self._path_prefixes(host, build)
         if host and prefixes:
             return _outside_body(host, prefixes)
+        default = _HTTPS_PORT if request.scheme == "https" else _HTTP_PORT
+        key = host if request.port == default else f"{host}:{request.port}"
+        if host and not build and self._build_only(key):
+            return _build_only_body(key, str(request.path))
         via = self._redirected_from(host, request.path)
         if host and via:
             return _redirect_body(host, str(request.path), via)

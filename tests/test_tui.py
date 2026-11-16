@@ -2513,6 +2513,71 @@ async def test_wall_pane_lists_pending_offers_before_grants(monkeypatch):
         assert "1 recommended pending" in summary and "1 granted" in summary
 
 
+async def test_wall_pane_marks_a_build_only_grant(monkeypatch):
+    # A grant made at the build gate covers image builds alone; listed like any other, the box's
+    # refusal of that host read as a broken wall (2026-11-16).
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    _stub_wall(
+        monkeypatch,
+        granted=[
+            {"host": "cdn.playwright.dev", "level": "permanent", "expires": None, "scope": "build"},
+            {"host": "pypi.org", "level": "permanent", "expires": None, "scope": "runtime"},
+            {"host": "unpkg.com", "level": "once", "expires": "2026-11-16T13:00:00+00:00",
+             "scope": "build"},
+        ],
+    )  # fmt: skip
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        build, runtime, once = (str(table.get_row_at(i)[2]) for i in range(3))
+        assert build == "for image builds only"
+        assert runtime == ""
+        assert once.startswith("for image builds only · expires ")
+
+
+async def test_relevelling_a_build_only_grant_says_it_widens_to_the_box(monkeypatch):
+    # `a` on a build-scoped grant replaces it with a runtime one (allowlist.grant): the picker
+    # says so, rather than read as a change of level alone. A runtime grant's picker doesn't.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    _stub_wall(
+        monkeypatch,
+        granted=[
+            {"host": "cdn.playwright.dev", "level": "permanent", "expires": None, "scope": "build"},
+            {"host": "pypi.org", "level": "permanent", "expires": None, "scope": "runtime"},
+        ],
+    )  # fmt: skip
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        table.focus()
+        await pilot.pause()
+        await pilot.press("a")  # row 0: the build-only grant
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, tui.AllowHostScreen)
+        widens = _text(screen.query_one("#allow-widens", tui.Static))
+        assert "image builds only" in widens and "lets the box reach it too" in widens
+        await pilot.press("escape")
+        await pilot.pause()
+        table.move_cursor(row=1)
+        await pilot.press("a")  # row 1: a runtime grant — nothing to say
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen)
+        assert not app.screen.query("#allow-widens")
+
+
 async def test_wall_pane_accepts_a_recommendation_via_the_level_picker(monkeypatch):
     monkeypatch.setattr(
         tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))

@@ -79,6 +79,16 @@ def _leaf_row(group: PanelGroup, i: int) -> object:
     return group.rows[i] if i < len(group.rows) else None
 
 
+def _build_only_grant(key: str) -> bool:
+    """Is ``key`` (a host or a path grant) granted now for image builds alone? Then allowing it
+    from the TUI widens it to the box (:func:`allowlist.grant` replaces a build grant), and the
+    level picker says so. Best-effort: an unreadable store reads as no (nothing to warn of)."""
+    try:
+        return any(g["host"] == key and g.get("scope") == "build" for g in allowlist.grants())
+    except Exception:
+        return False
+
+
 def _row_scopes(row: dict | None) -> list[str]:
     """The path grants a Network Log request row offers (:func:`allowlist.path_scopes`): only a
     request the wall refused, with a path — never a CONNECT or raw-TCP row (no path was read),
@@ -1446,7 +1456,8 @@ class DevModeTui(App):
             if self._typed_only(sel_host):
                 return
             self.push_screen(
-                AllowHostScreen(sel_host), lambda level: self._after_allow(sel_host, level)
+                AllowHostScreen(sel_host, widens=_build_only_grant(sel_host)),
+                lambda level: self._after_allow(sel_host, level),
             )
             return
         tree = self.query_one("#network-tree", Tree)
@@ -1472,7 +1483,10 @@ class DevModeTui(App):
         """The level picker for ``key`` (a host or a path grant), then the grant."""
         if not key or self._typed_only(key):
             return
-        self.push_screen(AllowHostScreen(key), lambda level: self._after_allow(key, level))
+        self.push_screen(
+            AllowHostScreen(key, widens=_build_only_grant(key)),
+            lambda level: self._after_allow(key, level),
+        )
 
     def action_copy_row(self) -> None:
         """Copy what the Network Log's cursor is on, as JSON: a request's log row, or a host's
@@ -1809,8 +1823,12 @@ class DevModeTui(App):
             rows.append(("rec?", e["host"], e["why"]))
             keys.append(("rec", e["host"]))
         for g in granted:
-            exp = g["expires"]
-            rows.append((g["level"], g["host"], f"expires {term.stamp(exp)}" if exp else ""))
+            # A build-scoped grant (the build gate's) never reaches the box: listed bare, the
+            # box's refusal of that host read as a broken wall.
+            notes = ["for image builds only"] if g.get("scope") == "build" else []
+            if g["expires"]:
+                notes.append(f"expires {term.stamp(g['expires'])}")
+            rows.append((g["level"], g["host"], " · ".join(notes)))
             keys.append(("grant", g["host"]))
         wall = "ENFORCING" if enforcing else "observing only"
         summary = (
@@ -2093,9 +2111,10 @@ class AllowHostScreen(ModalScreen):
         ("permanent", "permanent — kept in the host allow-store, survives restarts"),
     )
 
-    def __init__(self, host: str) -> None:
+    def __init__(self, host: str, *, widens: bool = False) -> None:
         super().__init__()
         self.host = host
+        self.widens = widens  # it has a build-only grant, which this replaces (allowlist.grant)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="allow-dialog"):
@@ -2103,6 +2122,14 @@ class AllowHostScreen(ModalScreen):
                 Text.from_markup(f"Allow [b]{escape(self.host)}[/b] through the allowlist"),
                 id="allow-title",
             )
+            if self.widens:
+                yield Static(
+                    Text.from_markup(
+                        "[yellow]granted now for image builds only — this lets the box reach "
+                        "it too[/yellow]"
+                    ),
+                    id="allow-widens",
+                )
             yield ListView(id="allow-list")
             yield Static("o once · s session · p permanent · esc cancel", id="allow-hint")
 
