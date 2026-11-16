@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import secrets
+import shlex
 import sys
 import tempfile
 import time
@@ -367,7 +368,12 @@ def _run(
                     _report_beyond(e, echo)
             offered = [key for e in refused for key in _keys(e)]
             for key in offered:
-                echo(f"    fy allow add {key} --build --level once --ttl {ONCE_TTL_SECONDS}")
+                # Quoted: a path key is the build's — the checkout's — and may hold `$ ( ) ;`
+                # (allowlist._PATH_CHARS). Printed for pasting, or for a host-side agent to run.
+                echo(
+                    f"    fy allow add {shlex.quote(key)} --build --level once "
+                    f"--ttl {ONCE_TTL_SECONDS}"
+                )
             if offered:
                 echo("  No terminal here — grant with the commands above, then build again.")
             break

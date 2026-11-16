@@ -11,8 +11,9 @@ bump: patch
   builds only", the box's 403 names the grant that would let it through (a path first, then the
   whole host), and the TUI's level picker warns that allowing such a host widens it to the box. The
   wall is unchanged.
-- **A `fy allow add` command the proxy suggests is shell-quoted, and offers a path grant only when
-  one would let the request through.** The path in it is the box's, and a path grant may hold
-  `$ ( ) ;`, so pasting `fy allow add host/$(…)/` from a refusal would have run that command on your
-  computer. A path grant passes GET and HEAD alone, so a refused POST or an off-port request is now
-  offered only the whole host.
+- **A `fy allow add` command the proxy suggests, or a build prints without a terminal, is
+  shell-quoted, and offers a path grant only when one would let the request through.** The path in
+  it is the box's, and a path grant may hold `$ ( ) ;`, so pasting `fy allow add host/$(…)/` from a
+  refusal or a build's output — or a host-side agent running it — would have run that command on
+  your computer. A path grant passes GET and HEAD alone, so a refused POST or an off-port request is
+  now offered only the whole host.

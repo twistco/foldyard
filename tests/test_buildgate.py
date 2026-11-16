@@ -520,6 +520,27 @@ def test_without_a_terminal_the_printed_command_is_the_path(env, capsys):
     assert f"fy allow add {_CFT} --build" in capsys.readouterr().out
 
 
+def test_without_a_terminal_the_printed_command_is_safe_to_paste(env, capsys):
+    # The path is the build's, so the checkout's: a path grant may hold `$ ( ) ; & '`
+    # (allowlist._PATH_CHARS), and pasted bare, `fy allow add host/$(id)/` runs `id` on your
+    # computer — or a host-side agent told to "grant with the commands above" runs it for you.
+    import shlex
+
+    host = "cdn.example.com"
+    rows = [_path_row("/$(id)/x.zip", host), _path_row("/it's/x.zip", host)]
+    buildgate.run(_Build(env["log"], [(1, rows)]), what="box image", interactive=False)
+    out = capsys.readouterr().out
+    assert f"fy allow add '{host}/$(id)/' --build" in out  # split alone can't see a `$(…)`
+    printed = [shlex.split(line) for line in out.splitlines() if "fy allow add" in line]
+    assert [argv[:3] for argv in printed] == [
+        ["fy", "allow", "add"],
+        ["fy", "allow", "add"],
+    ]
+    assert {argv[3] for argv in printed} == {f"{host}/$(id)/", f"{host}/it's/"}
+    ttl = str(buildgate.ONCE_TTL_SECONDS)
+    assert all(argv[4:] == ["--build", "--level", "once", "--ttl", ttl] for argv in printed)
+
+
 def test_a_write_beyond_a_build_path_grant_is_reported_never_offered(env, capsys):
     # The PR-review finding: with the path granted for builds, a build step's PUT under it used
     # to fall back to "allow storage.googleapis.com for builds?" — the whole-host upload channel.
