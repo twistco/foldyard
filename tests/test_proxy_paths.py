@@ -504,10 +504,47 @@ async def test_a_box_refusal_of_a_host_granted_for_builds_only_says_so(building)
     assert "build_only" not in _rows(log)[-1]
 
 
-def test_a_build_only_refusal_off_the_default_port_offers_no_path_grant(gh):
+def test_a_build_only_refusal_off_the_default_port_offers_no_path_grant(gh, building):
     # A path grant has no port (allowlist.path_grant), so off :443/:80 only `host:port` is offered.
-    body = gh.module._build_only_body("cdn.example.com:8443", "/builds/x.zip").decode()
+    body = gh.module._build_only_body("cdn.example.com:8443", "/builds/x.zip", "GET").decode()
     assert "`fy allow add cdn.example.com:8443`" in body and "/builds/" not in body
+    # …and a CONNECT there — refused in http_connect, never decrypted — is answered the same way.
+    inj, allow, _log = building
+    _write_build_allow(allow, ["cdn.example.com:8443"])
+    connect = _Flow("cdn.example.com", method="CONNECT", path="", port=8443)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is not None
+    assert b"cdn.example.com:8443 is granted for image builds only" in connect.response.content
+
+
+def test_a_suggested_path_grant_is_only_offered_for_a_read(gh):
+    # A path grant lets GET/HEAD through, nothing else: offering one for a POST fixes nothing.
+    for body in (
+        gh.module._build_only_body("cdn.example.com", "/builds/x", "POST"),
+        gh.module._redirect_body("cdn.example.com", "/builds/x", "POST", "a.example.com"),
+    ):
+        text = body.decode()
+        assert "`fy allow add cdn.example.com`" in text and "/builds/" not in text
+
+
+def test_a_suggested_path_grant_is_shell_quoted(gh):
+    # The path is the box's, and a path grant may hold `$ ( ) ; & '` (allowlist._PATH_CHARS): a
+    # pasted `fy allow add host/$(id)/` would run `id` on your computer.
+    for body in (
+        gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET"),
+        gh.module._redirect_body("cdn.example.com", "/$(id)/x", "GET", "a.example.com"),
+        gh.module._redirect_body("cdn.example.com", "/it's/x", "GET", "a.example.com"),
+    ):
+        text = body.decode()
+        assert (
+            "fy allow add cdn.example.com/$(" not in text
+            and "fy allow add cdn.example.com/it'" not in text
+        )
+    assert (
+        "`fy allow add 'cdn.example.com/$(id)/'`"
+        in gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET").decode()
+    )
 
 
 def test_a_builds_whole_host_grant_is_tunnelled_as_before(building):

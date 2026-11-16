@@ -493,33 +493,43 @@ def _outside_body(host: str, prefixes: tuple[str, ...]) -> bytes:
     ).encode()
 
 
-def _suggested_path_grant(host: str, path: str) -> str:
-    """The narrowest useful path grant for a refused request: its host and first segment."""
+def _suggested_path_grant(host: str, path: str, method: str) -> str | None:
+    """The narrowest useful path grant for a refused request — its host and first segment, shell-
+    quoted — or None when none would let it through: not a read (a path grant passes GET/HEAD
+    alone), off the default port (a path grant has none), or a path it can't be shaped on. The
+    path is the box's and a grant may hold ``$ ( ) ; &`` (allowlist._PATH_CHARS), so the command
+    is quoted: pasted bare, ``host/$(id)/`` would run ``id`` on your computer."""
+    if method not in _PATH_METHODS or ":" in host:
+        return None
     plain = _plain_path(path)
     first = plain.split("/")[1] if plain else ""
-    return f"{host}/{first}/" if first else f"{host}/<path>/"
+    return shlex.quote(f"{host}/{first}/") if first else None
 
 
-def _redirect_body(host: str, path: str, via: str) -> bytes:
+def _grant_advice(key: str, path: str, method: str) -> str:
+    """``fy allow add`` for a refused request: a path grant first when one would serve, then the
+    whole host (``key``: ``host:port`` off the default port — a valid host, so never quoted)."""
+    whole = f"`fy allow add {key}`"
+    narrow = _suggested_path_grant(key, path, method)
+    return f"`fy allow add {narrow}` (or the whole host: {whole})" if narrow else whole
+
+
+def _redirect_body(host: str, path: str, method: str, via: str) -> bytes:
     """The 403 for a refused request that a granted host's redirect sent here: the redirect is the
     likely reason, and a path grant the narrow fix."""
     return (
         f"refused by the foldyard allowlist - {via} redirected here, and {host} isn't granted. "
-        f"Grant just that path on your computer: `fy allow add {_suggested_path_grant(host, path)}`"
-        f" (or the whole host: `fy allow add {host}`)\n"
+        f"Grant it on your computer: {_grant_advice(host, path, method)}\n"
     ).encode()
 
 
-def _build_only_body(key: str, path: str) -> bytes:
+def _build_only_body(key: str, path: str, method: str) -> bytes:
     """The 403 for the box's request to a host (``key``: ``host:port`` off the default port)
     granted to image builds alone: the grant it sees listed doesn't reach it, and widening it is
-    the operator's call — narrowest first. A path grant has no port, so off it, the key alone."""
-    grant = f"`fy allow add {key}`"
-    if ":" not in key:
-        grant = f"`fy allow add {_suggested_path_grant(key, path)}` (or the whole host: {grant})"
+    the operator's call — narrowest first (:func:`_grant_advice`)."""
     return (
         f"refused by the foldyard allowlist - {key} is granted for image builds only, not for "
-        f"the box. To let the box reach it, on your computer: {grant}\n"
+        f"the box. To let the box reach it, on your computer: {_grant_advice(key, path, method)}\n"
     ).encode()
 
 
@@ -1980,10 +1990,10 @@ class Injector:
         default = _HTTPS_PORT if request.scheme == "https" else _HTTP_PORT
         key = host if request.port == default else f"{host}:{request.port}"
         if host and not build and self._build_only(key):
-            return _build_only_body(key, str(request.path))
+            return _build_only_body(key, str(request.path), str(request.method))
         via = self._redirected_from(host, request.path)
         if host and via:
-            return _redirect_body(host, str(request.path), via)
+            return _redirect_body(host, str(request.path), str(request.method), via)
         return _REFUSED_BODY
 
     def _settle_answered(self, client_id: str | None) -> None:
@@ -2127,7 +2137,10 @@ class Injector:
                 self._build_clients.add(client.id)
             self._answer_connect(flow, self._blocked_entry(key, flow.request))
             return
-        flow.response = http.Response.make(403, _REFUSED_BODY)
+        # Off :443 nothing inside is decrypted, so this is the box's only answer: say so here too.
+        build_only = not build and self._build_only(key)
+        body = _build_only_body(key, "", "CONNECT") if build_only else _REFUSED_BODY
+        flow.response = http.Response.make(403, body)
         self._log_blocked(key, flow.request, client_id=client_id)
 
     def _answer_connect(self, flow: http.HTTPFlow, owed: dict | None) -> None:
