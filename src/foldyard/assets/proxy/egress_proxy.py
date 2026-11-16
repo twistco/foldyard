@@ -266,6 +266,10 @@ _PATH_METHODS = frozenset({"GET", "HEAD"})
 # Percent-encodings a server may decode into a separator or a dot segment AFTER the prefix was
 # checked (`%2e%2e`, `%2f`, `%5c`), or decode twice (`%25`): a path carrying one is refused.
 _ENCODED_SEPARATOR = re.compile(r"%(?:2e|2f|5c|25)", re.IGNORECASE)
+# What a path grant's path may hold — foldyard's `allowlist._PATH_CHARS`, duplicated because this
+# addon runs standalone (a test pins the two equal). Narrower than what `_plain_path` judges: a
+# suggested grant outside it would only be refused by `fy allow add`.
+_GRANT_PATH_CHARS = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%/]+")
 # How long a redirect's target is remembered, and how many: enough to name the redirect on the
 # refusal of the request that follows it, never a growing table.
 _REDIRECT_MEMORY_SECONDS = 120.0
@@ -493,20 +497,52 @@ def _outside_body(host: str, prefixes: tuple[str, ...]) -> bytes:
     ).encode()
 
 
-def _suggested_path_grant(host: str, path: str) -> str:
-    """The narrowest useful path grant for a refused request: its host and first segment."""
+def _suggested_path_grant(host: str, path: str, method: str) -> str | None:
+    """The narrowest useful path grant for a refused request — its host and first segment, shell-
+    quoted — or None when none would let it through: not a read (a path grant passes GET/HEAD
+    alone), off the default port (a path grant has none), or a path it can't be shaped on — one
+    ``fy allow add`` would refuse included (:data:`_GRANT_PATH_CHARS`). The path is the box's and
+    a grant may hold ``$ ( ) ; &``, so the command is quoted: pasted bare, ``host/$(id)/`` would
+    run ``id`` on your computer."""
+    if method not in _PATH_METHODS or ":" in host:
+        return None
     plain = _plain_path(path)
-    first = plain.split("/")[1] if plain else ""
-    return f"{host}/{first}/" if first else f"{host}/<path>/"
+    segments = plain[1:].split("/") if plain else []
+    first = segments[0] if segments else ""
+    # Its first directory — or, for a top-level file, the file itself: `host/f/` covers only what
+    # is below `/f` (`_under`), so it would leave the request it was printed for refused. The
+    # shape allowlist.path_scopes offers in the TUI.
+    prefix = f"/{first}/" if len(segments) > 1 else f"/{first}"
+    if not first or not _GRANT_PATH_CHARS.fullmatch(prefix):
+        return None
+    return shlex.quote(f"{host}{prefix}")
 
 
-def _redirect_body(host: str, path: str, via: str) -> bytes:
+def _grant_advice(key: str, path: str, method: str) -> str:
+    """``fy allow add`` for a refused request: a path grant first when one would serve, then the
+    whole host (``key``: ``host:port`` off the default port). Both quoted: a host that passes
+    ``valid_host`` may still hold ``$ ( ) ;`` — a plain one prints unchanged."""
+    whole = f"`fy allow add {shlex.quote(key)}`"
+    narrow = _suggested_path_grant(key, path, method)
+    return f"`fy allow add {narrow}` (or the whole host: {whole})" if narrow else whole
+
+
+def _redirect_body(host: str, path: str, method: str, via: str) -> bytes:
     """The 403 for a refused request that a granted host's redirect sent here: the redirect is the
     likely reason, and a path grant the narrow fix."""
     return (
         f"refused by the foldyard allowlist - {via} redirected here, and {host} isn't granted. "
-        f"Grant just that path on your computer: `fy allow add {_suggested_path_grant(host, path)}`"
-        f" (or the whole host: `fy allow add {host}`)\n"
+        f"Grant it on your computer: {_grant_advice(host, path, method)}\n"
+    ).encode()
+
+
+def _build_only_body(key: str, path: str, method: str) -> bytes:
+    """The 403 for the box's request to a host (``key``: ``host:port`` off the default port)
+    granted to image builds alone: the grant it sees listed doesn't reach it, and widening it is
+    the operator's call — narrowest first (:func:`_grant_advice`)."""
+    return (
+        f"refused by the foldyard allowlist - {key} is granted for image builds only, not for "
+        f"the box. To let the box reach it, on your computer: {_grant_advice(key, path, method)}\n"
     ).encode()
 
 
@@ -1908,7 +1944,9 @@ class Injector:
         bare marker, or the box could put its own hosts in that offer). ``mismatch``: refused for
         naming another host in its Host header, not by the allowlist — granting the host is not
         the fix. ``push``: refused for being a git push
-        (:func:`_is_git_push`) — nor is it then. No host → None."""
+        (:func:`_is_git_push`) — nor is it then. ``build_only``: anyone but a build refused a host
+        granted to builds alone (:meth:`_build_only`), so the row says why the grant didn't count.
+        No host → None."""
         if not host:
             return None
         entry = {
@@ -1942,19 +1980,33 @@ class Injector:
                 via = self._redirected_from(_destination(request), request.path)
                 if via:
                     entry["via"] = via  # a redirect from that granted host sent it here
+        if not (mismatch or push or entry.get("build")) and self._build_only(host):
+            entry["build_only"] = True
         return entry
+
+    def _build_only(self, key: str) -> bool:
+        """Is ``key`` (a host, or ``host:port``) granted to a host-started build — as a whole or
+        for some paths? Asked of a refusal that wasn't the build's: such a grant never widens
+        the box's wall (``build_allow``), but the operator sees it listed, so the row says so."""
+        self._refresh_allow()
+        return _host_matches(key, self._build_patterns) or key in self._build_path_grants
 
     def _refusal_body(self, request, build: bool = False) -> bytes:
         """The 403 a refused request gets: the generic one, or — when the host is granted (to
-        this client) for some paths, or a granted host's redirect sent the request here — one that
-        names that, and the path grant that would let it through."""
+        this client) for some paths, granted to builds alone (and this isn't one), or a granted
+        host's redirect sent the request here — one that names that, and the grant that would let
+        it through."""
         host = _destination(request)
         prefixes = self._path_prefixes(host, build)
         if host and prefixes:
             return _outside_body(host, prefixes)
+        default = _HTTPS_PORT if request.scheme == "https" else _HTTP_PORT
+        key = host if request.port == default else f"{host}:{request.port}"
+        if host and not build and self._build_only(key):
+            return _build_only_body(key, str(request.path), str(request.method))
         via = self._redirected_from(host, request.path)
         if host and via:
-            return _redirect_body(host, str(request.path), via)
+            return _redirect_body(key, str(request.path), str(request.method), via)
         return _REFUSED_BODY
 
     def _settle_answered(self, client_id: str | None) -> None:
@@ -2098,7 +2150,10 @@ class Injector:
                 self._build_clients.add(client.id)
             self._answer_connect(flow, self._blocked_entry(key, flow.request))
             return
-        flow.response = http.Response.make(403, _REFUSED_BODY)
+        # Off :443 nothing inside is decrypted, so this is the box's only answer: say so here too.
+        build_only = not build and self._build_only(key)
+        body = _build_only_body(key, "", "CONNECT") if build_only else _REFUSED_BODY
+        flow.response = http.Response.make(403, body)
         self._log_blocked(key, flow.request, client_id=client_id)
 
     def _answer_connect(self, flow: http.HTTPFlow, owed: dict | None) -> None:

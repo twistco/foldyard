@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 from collections.abc import Callable, Iterable
@@ -1029,8 +1030,8 @@ def grant(host: str, level: str, ttl: int | None = None, *, build: bool = False)
         # keeping it would drop the build grant when it lapses. Say so rather than choose.
         raise SystemExit(
             f"✗ {host} already has a shorter runtime grant ({current.get('level')}), which "
-            f"covers builds until it lapses. `fy allow remove {host}` first to make it a "
-            "build-only grant, or grant it for runtime at the level you want."
+            f"covers builds until it lapses. `fy allow remove {shlex.quote(host)}` first to make "
+            "it a build-only grant, or grant it for runtime at the level you want."
         )
     hosts[host] = {"level": level, "expires": expires, "added": _iso(_now())}
     if build:

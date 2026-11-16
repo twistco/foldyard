@@ -402,6 +402,8 @@ def test_the_network_log_says_outside_and_where_the_redirect_came_from():
     assert "outside the paths this host is granted for" in line
     line = proxy._net_leaf_body({**row, "via": "cdn.playwright.dev"}, lambda s: s)
     assert "not on the allowlist (redirected from cdn.playwright.dev)" in line
+    line = proxy._net_leaf_body({**row, "build_only": True}, lambda s: s)
+    assert "granted for image builds only" in line and "not on the allowlist" not in line
 
 
 # ── for builds: a build-scoped path grant, judged decrypted ───────────────────────────────────
@@ -471,6 +473,129 @@ async def test_a_build_path_grant_is_nothing_to_the_box(building):
     bare.response = None
     inj.http_connect(bare)
     assert not await _judged(inj, _inside(client_id="box-2"))
+
+
+async def test_a_box_refusal_of_a_host_granted_for_builds_only_says_so(building):
+    # A grant made at the build gate is the build's alone. The box asking for that host is still
+    # refused, but its row says why: "not on the allowlist" beside a grant the TUI lists read as a
+    # broken wall (a box's runtime Playwright download, 2026-11-16).
+    inj, allow, log = building
+    _write_build_allow(allow, ["cdn.playwright.dev", GRANT])
+    for host, path, narrow in (
+        ("cdn.playwright.dev", "/builds/cft/x.zip", "cdn.playwright.dev/builds/"),
+        (GCS, ZIP, GRANT),
+    ):
+        refused = _inside(host, path, client_id="box-1")
+        assert not await _judged(inj, refused)
+        row = _rows(log)[-1]
+        assert row["blocked"] and row["build_only"] is True and not row.get("build")
+        # …and so does what the box is answered: the grant to widen, narrowest first.
+        assert refused.response is not None
+        body = refused.response.content.decode()
+        assert f"{host} is granted for image builds only" in body
+        assert f"`fy allow add {narrow}`" in body and f"`fy allow add {host}`" in body
+    other = _inside("elsewhere.example.com", "/x", client_id="box-1")
+    assert not await _judged(inj, other)
+    assert "build_only" not in _rows(log)[-1]
+    assert other.response is not None and b"image builds" not in other.response.content
+    # The build's own refusal (a path outside its grant) is not one.
+    _build_connect(inj)
+    assert not await _judged(inj, _inside(path="/another-bucket/x"))
+    assert "build_only" not in _rows(log)[-1]
+
+
+def test_a_build_only_refusal_off_the_default_port_offers_no_path_grant(gh, building):
+    # A path grant has no port (allowlist.path_grant), so off :443/:80 only `host:port` is offered.
+    body = gh.module._build_only_body("cdn.example.com:8443", "/builds/x.zip", "GET").decode()
+    assert "`fy allow add cdn.example.com:8443`" in body and "/builds/" not in body
+    # …and a CONNECT there — refused in http_connect, never decrypted — is answered the same way.
+    inj, allow, _log = building
+    _write_build_allow(allow, ["cdn.example.com:8443"])
+    connect = _Flow("cdn.example.com", method="CONNECT", path="", port=8443)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is not None
+    assert b"cdn.example.com:8443 is granted for image builds only" in connect.response.content
+
+
+def test_a_suggested_path_grant_is_only_offered_for_a_read(gh):
+    # A path grant lets GET/HEAD through, nothing else: offering one for a POST fixes nothing.
+    for body in (
+        gh.module._build_only_body("cdn.example.com", "/builds/x", "POST"),
+        gh.module._redirect_body("cdn.example.com", "/builds/x", "POST", "a.example.com"),
+    ):
+        text = body.decode()
+        assert "`fy allow add cdn.example.com`" in text and "/builds/" not in text
+
+
+def test_a_suggested_path_grant_is_shell_quoted(gh):
+    # The path is the box's, and a path grant may hold `$ ( ) ; & '` (allowlist._PATH_CHARS): a
+    # pasted `fy allow add host/$(id)/` would run `id` on your computer.
+    for body in (
+        gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET"),
+        gh.module._redirect_body("cdn.example.com", "/$(id)/x", "GET", "a.example.com"),
+        gh.module._redirect_body("cdn.example.com", "/it's/x", "GET", "a.example.com"),
+    ):
+        text = body.decode()
+        assert (
+            "fy allow add cdn.example.com/$(" not in text
+            and "fy allow add cdn.example.com/it'" not in text
+        )
+    assert (
+        "`fy allow add 'cdn.example.com/$(id)/'`"
+        in gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET").decode()
+    )
+    # …and so is the whole host: valid_host keeps out whitespace and `/`, not `$ ( ) ;`.
+    host = "x$(id).example.com"
+    for body in (
+        gh.module._build_only_body(host, "/a/x", "POST"),
+        gh.module._redirect_body(host, "/a/x", "POST", "a.example.com"),
+    ):
+        assert f"`fy allow add '{host}'`" in body.decode()
+
+
+def test_a_suggested_path_grant_is_one_fy_allow_add_accepts(gh):
+    # The proxy judges paths over a wider set than a grant may hold (allowlist._PATH_CHARS): a
+    # suggestion outside it would only be refused, so the whole host is offered instead.
+    text = gh.module._build_only_body("cdn.example.com", "/a|b/x", "GET").decode()
+    assert "a|b" not in text and "`fy allow add cdn.example.com`" in text
+    assert gh.module._GRANT_PATH_CHARS.pattern == allowlist._PATH_CHARS.pattern
+
+
+async def test_a_suggested_path_grant_lets_the_refused_request_through(gh, walled):
+    # What the advice is for: granted as printed, it answers the request it was printed for. A
+    # top-level file is its own grant (`host/downloads/` covers only what is below it); a deeper
+    # path gets its first directory, as allowlist.path_scopes shapes it for the TUI.
+    import re
+    import shlex
+
+    inj, allow, _log = walled
+    for path, want in (
+        ("/downloads", "cdn.example.com/downloads"),
+        ("/a/b.zip", "cdn.example.com/a/"),
+        ("/dir/", "cdn.example.com/dir/"),
+    ):
+        body = gh.module._build_only_body("cdn.example.com", path, "GET").decode()
+        found = re.search(r"`fy allow add ([^`]+)`", body)
+        assert found is not None, body
+        key = shlex.split(found.group(1))[0]
+        assert key == want
+        _write_allow(allow, [key])
+        assert await _judged(inj, _request("cdn.example.com", path)), path
+
+
+async def test_an_off_port_redirect_target_is_offered_its_port(walled):
+    # A path grant has no port, and a bare host grant means :443 / :80: for `host:8080`, only
+    # `host:8080` lets the request through.
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    inj.responseheaders(_redirect("cdn.playwright.dev", "http://objects.example.com:8080/b/x"))
+    follow = _request("objects.example.com", "/b/x", port=8080, scheme="http")
+    assert not await _judged(inj, follow)
+    assert follow.response is not None
+    body = follow.response.content.decode()
+    assert "cdn.playwright.dev redirected here" in body
+    assert "`fy allow add objects.example.com:8080`" in body and "/b/" not in body
 
 
 def test_a_builds_whole_host_grant_is_tunnelled_as_before(building):

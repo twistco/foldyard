@@ -851,6 +851,15 @@ def test_a_shorter_runtime_grant_does_not_swallow_a_lasting_build_grant(env):
     assert allowlist.effective()["allow"] == ["cdn.example.com", "pypi.org"]
 
 
+def test_a_refusal_names_its_host_shell_quoted(env):
+    # valid_host keeps out whitespace and `/`, not `$ ( ) ;`: the command it names is pasted.
+    host = "x$(id).example.com"
+    allowlist.grant(host, "once", 120)
+    with pytest.raises(SystemExit) as refused:
+        allowlist.grant(host, "permanent", build=True)
+    assert f"`fy allow remove '{host}'`" in str(refused.value)
+
+
 def test_sync_yes_on_a_damaged_store_does_not_die_on_build_recommendations(env):
     _recommend(env, '[{ host = "cdn.playwright.dev", why = "browsers", when = "build" }]')
     config.allow_store_file().parent.mkdir(parents=True, exist_ok=True)

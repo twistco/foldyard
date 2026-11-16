@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import secrets
+import shlex
 import sys
 import tempfile
 import time
@@ -238,7 +239,7 @@ def _report_beyond(entry: dict, echo: Callable[[str], None]) -> None:
         f"  ✗ {host}: refused {', '.join(entry['beyond'])} — beyond the paths it is granted, "
         "which allow reads (GET/HEAD, no body) only. Not offered: all of the host would let a "
         "build step upload there. If a build really needs it, on your computer: "
-        f"`fy allow add {host} --build`"
+        f"`fy allow add {shlex.quote(host)} --build`"
     )
 
 
@@ -367,7 +368,12 @@ def _run(
                     _report_beyond(e, echo)
             offered = [key for e in refused for key in _keys(e)]
             for key in offered:
-                echo(f"    fy allow add {key} --build --level once --ttl {ONCE_TTL_SECONDS}")
+                # Quoted: a path key is the build's — the checkout's — and may hold `$ ( ) ;`
+                # (allowlist._PATH_CHARS). Printed for pasting, or for a host-side agent to run.
+                echo(
+                    f"    fy allow add {shlex.quote(key)} --build --level once "
+                    f"--ttl {ONCE_TTL_SECONDS}"
+                )
             if offered:
                 echo("  No terminal here — grant with the commands above, then build again.")
             break
