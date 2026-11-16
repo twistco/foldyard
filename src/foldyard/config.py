@@ -2030,7 +2030,7 @@ def copilot_enabled() -> bool:
     """True when the consumer declares a ``[copilot]`` table — installs the GitHub Copilot CLI on
     box-up and mounts its persisted ``~/.copilot`` (login, settings, sessions) volume. Absent ⇒ no
     Copilot in the box."""
-    return _toml().get("copilot") is not None
+    return isinstance(_toml().get("copilot"), dict)
 
 
 def copilot_keyless() -> str:
