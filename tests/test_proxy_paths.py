@@ -562,6 +562,28 @@ def test_a_suggested_path_grant_is_one_fy_allow_add_accepts(gh):
     assert gh.module._GRANT_PATH_CHARS.pattern == allowlist._PATH_CHARS.pattern
 
 
+async def test_a_suggested_path_grant_lets_the_refused_request_through(gh, walled):
+    # What the advice is for: granted as printed, it answers the request it was printed for. A
+    # top-level file is its own grant (`host/downloads/` covers only what is below it); a deeper
+    # path gets its first directory, as allowlist.path_scopes shapes it for the TUI.
+    import re
+    import shlex
+
+    inj, allow, _log = walled
+    for path, want in (
+        ("/downloads", "cdn.example.com/downloads"),
+        ("/a/b.zip", "cdn.example.com/a/"),
+        ("/dir/", "cdn.example.com/dir/"),
+    ):
+        body = gh.module._build_only_body("cdn.example.com", path, "GET").decode()
+        found = re.search(r"`fy allow add ([^`]+)`", body)
+        assert found is not None, body
+        key = shlex.split(found.group(1))[0]
+        assert key == want
+        _write_allow(allow, [key])
+        assert await _judged(inj, _request("cdn.example.com", path)), path
+
+
 async def test_an_off_port_redirect_target_is_offered_its_port(walled):
     # A path grant has no port, and a bare host grant means :443 / :80: for `host:8080`, only
     # `host:8080` lets the request through.

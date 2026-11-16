@@ -507,10 +507,15 @@ def _suggested_path_grant(host: str, path: str, method: str) -> str | None:
     if method not in _PATH_METHODS or ":" in host:
         return None
     plain = _plain_path(path)
-    first = plain.split("/")[1] if plain else ""
-    if not first or not _GRANT_PATH_CHARS.fullmatch(f"/{first}/"):
+    segments = plain[1:].split("/") if plain else []
+    first = segments[0] if segments else ""
+    # Its first directory — or, for a top-level file, the file itself: `host/f/` covers only what
+    # is below `/f` (`_under`), so it would leave the request it was printed for refused. The
+    # shape allowlist.path_scopes offers in the TUI.
+    prefix = f"/{first}/" if len(segments) > 1 else f"/{first}"
+    if not first or not _GRANT_PATH_CHARS.fullmatch(prefix):
         return None
-    return shlex.quote(f"{host}/{first}/")
+    return shlex.quote(f"{host}{prefix}")
 
 
 def _grant_advice(key: str, path: str, method: str) -> str:
