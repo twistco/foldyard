@@ -53,8 +53,10 @@ from .inject import _spec_to_rule  # reuse the static-token minter wiring (same 
 # block. `cd /tmp` keeps a download from landing in the repo if curl is interrupted.
 # Run it under `bash`, not `sh`: the script is `#!/usr/bin/env bash` and uses bash arrays
 # (`CURL_AUTH=()`), which the box's dash rejects with `Syntax error: "(" unexpected`.
+# `pipefail` makes a failed `curl` fail the step: without it the pipeline's status is bash's, and
+# an empty download would "install" nothing yet report success.
 _INSTALL = (
-    "(cd /tmp && curl -fsSL --retry 3 "
+    "(set -o pipefail && cd /tmp && curl -fsSL --retry 3 "
     "https://raw.githubusercontent.com/github/copilot-cli/refs/heads/main/install.sh "
     '| PREFIX="$HOME/.local" PATH="$HOME/.local/bin:$PATH" bash)'
 )

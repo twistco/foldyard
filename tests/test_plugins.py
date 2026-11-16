@@ -2837,6 +2837,8 @@ def test_copilot_bootstrap_runs_the_installer_under_bash(monkeypatch):
     assert "install.sh" in script
     assert "| PREFIX=" in script and script.split("install.sh", 1)[1].rstrip().endswith("bash)")
     assert " sh)" not in script
+    # A failed download must fail the step, not pipe an empty script into bash (which exits 0).
+    assert "set -o pipefail" in script
 
 
 def test_copilot_bootstrap_is_image_agnostic(monkeypatch):
