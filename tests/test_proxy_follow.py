@@ -553,6 +553,10 @@ async def test_a_chain_carries_on_through_a_hop_granted_on_its_own(walled):
     # Admitted by its own grant: nothing of a vouched read's handling, only the link.
     assert not hop.metadata.get("egress_proxy_path_read")
     assert inj._vouch_conns == {} and ("client-1", RECEIVER) not in inj._path_dials
+    # …and its log row says nothing of a follow grant: its own grant let it through.
+    hop.response = t._Resp(200)
+    inj._log_flow(hop)
+    assert "followed" not in _rows(_log)[-1]
     hop.response = t._Resp(302)
     hop.response.headers["location"] = LOG_URL
     inj.responseheaders(hop)

@@ -1859,10 +1859,16 @@ class DevModeTui(App):
         self._manage_follow = {}
         for e in pending:
             if e.get("redirects_to"):
-                # A follow recommendation: its row names where the source may send the box.
-                rows.append(("rec?", e["host"], f"follow → {', '.join(e['redirects_to'])}"))
+                # A follow recommendation: its row names where the source may send the box —
+                # the targets not followed yet, which are all `a` grants (as `fy allow sync`
+                # does: an answer never re-levels a target already held).
+                new, held = allowlist.unfollowed(e)
+                note = f"follow → {', '.join(new)}"
+                if held:
+                    note += f" (already following {', '.join(held)})"
+                rows.append(("rec?", e["host"], note))
                 keys.append(("follow?", e["host"]))
-                self._manage_follow[("follow?", e["host"])] = list(e["redirects_to"])
+                self._manage_follow[("follow?", e["host"])] = new
                 continue
             rows.append(("rec?", e["host"], e["why"]))
             keys.append(("rec", e["host"]))

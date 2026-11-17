@@ -2680,6 +2680,42 @@ async def test_wall_pane_grants_and_removes_a_follow_as_a_follow(monkeypatch):
         assert calls == [("unfollow", "cdn.example.com/dl/")]
 
 
+async def test_wall_pane_grants_only_the_targets_a_recommendation_adds(monkeypatch):
+    # As `fy allow sync` does: a follow recommendation that adds a target is answered for that
+    # target alone, and the one already followed keeps its level (the row says it's held).
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch,
+        pending=[{"host": source, "why": "", "redirects_to": ["a.example.net", "b.example.net"]}],
+    )
+    monkeypatch.setattr(
+        tui.allowlist, "unfollowed", lambda e: (["b.example.net"], ["a.example.net"])
+    )
+    followed: list[tuple] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        note = str(table.get_row_at(0)[2])
+        assert "follow → b.example.net" in note and "already following a.example.net" in note
+        table.focus()
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, ["b.example.net"], "once")]
+
+
 async def test_wall_pane_re_levels_every_target_of_a_follow_source(monkeypatch):
     # Targets granted at different levels are one row per level, but a source is one decision:
     # `a` on either row names (and re-levels) all of its targets, never only that row's.

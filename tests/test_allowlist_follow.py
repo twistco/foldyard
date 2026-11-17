@@ -105,6 +105,25 @@ def test_a_once_answer_to_a_recommendation_leaves_a_permanent_target_permanent(e
     assert f"already following {BLOB}" in asked
 
 
+def test_an_answer_grants_the_targets_the_prompt_showed_never_more(env, monkeypatch):
+    # BLOB is held `once` and lapses while the prompt waits: the answer was about RECEIVER
+    # alone (the prompt said BLOB was left as granted), so BLOB is not granted by it.
+    allowlist.grant_follow(SOURCE, [BLOB], "once", ttl=60)
+    _recommend(env, f'[{{ host = "{SOURCE}", redirects_to = ["{BLOB}", "{RECEIVER}"] }}]')
+
+    def answer_after_blob_lapses(_question: str) -> str:
+        store = _store()
+        store["follows"][SOURCE][BLOB]["expires"] = "2000-01-01T00:00:00+00:00"
+        config.allow_store_file().write_text(json.dumps(store))
+        return "y"
+
+    lines: list[str] = []
+    allowlist.offer_recommendations(
+        interactive=True, prompt=answer_after_blob_lapses, echo=lines.append
+    )
+    assert allowlist.live_follows() == {SOURCE: [RECEIVER]}
+
+
 def test_granting_a_target_again_sets_its_level(env):
     # As `fy allow add host` does for a host: an explicit grant re-levels what it names.
     allowlist.grant_follow(SOURCE, [BLOB, RECEIVER], "permanent")

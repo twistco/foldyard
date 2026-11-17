@@ -1356,7 +1356,7 @@ def describe(entry: dict) -> str:
     return entry["host"]
 
 
-def _unfollowed(entry: dict) -> tuple[list[str], list[str]]:
+def unfollowed(entry: dict) -> tuple[list[str], list[str]]:
     """A follow recommendation's targets: (those not followed yet, those already followed)."""
     source = follow_source(entry["host"]) or entry["host"]
     held = set(live_follows().get(source, []))
@@ -1364,12 +1364,16 @@ def _unfollowed(entry: dict) -> tuple[list[str], list[str]]:
     return [t for t in targets if t not in held], [t for t in targets if t in held]
 
 
-def accept(entry: dict, level: str, ttl: int | None = None) -> None:
+def accept(
+    entry: dict, level: str, ttl: int | None = None, *, targets: list[str] | None = None
+) -> None:
     """Grant a recommendation at ``level``: a follow grant for one with ``redirects_to`` — on the
     targets not followed yet only, so answering it never changes how long one already granted
-    lasts — else the host or path grant it names."""
+    lasts — else the host or path grant it names. ``targets`` is the list the operator was shown
+    (:func:`unfollowed` when asked): the answer covers exactly those, never a target that lapsed
+    while the question waited."""
     if entry.get("redirects_to"):
-        new, _held = _unfollowed(entry)
+        new = targets if targets is not None else unfollowed(entry)[0]
         if new:
             grant_follow(entry["host"], new, level, ttl)
     else:
@@ -1481,12 +1485,12 @@ def offer_recommendations(
         return counts
     for e in pending:
         why = f" — {e['why']}" if e["why"] else ""
-        what = describe(e)
+        what, asked = describe(e), None  # asked: the follow targets this answer is about
         if e.get("redirects_to"):
-            new, held = _unfollowed(e)
+            asked, held = unfollowed(e)
             if held:
                 # The answer is about the new targets alone (`accept`): name the rest as kept.
-                what = describe({**e, "redirects_to": new})
+                what = describe({**e, "redirects_to": asked})
                 why += f" (already following {', '.join(held)}: left as granted)"
             # What a yes means is less obvious than for a host: say it at the decision moment.
             why += (
@@ -1505,17 +1509,17 @@ def offer_recommendations(
         # EXACT matches, like the adoption gate: anything unrecognised defers, which changes
         # nothing and asks again next time.
         if answer in ("y", "yes"):
-            accept(e, "permanent")
+            accept(e, "permanent", targets=asked)
             echo(f"  ✓ {what} allowed (permanent)")
             counts["granted"] += 1
             counts["deferred"] -= 1
         elif answer in ("s", "session"):
-            accept(e, "session")
+            accept(e, "session", targets=asked)
             echo(f"  ✓ {what} allowed (session — until the supervisor restarts)")
             counts["granted"] += 1
             counts["deferred"] -= 1
         elif answer in ("o", "once"):
-            accept(e, "once", OFFER_ONCE_SECONDS)
+            accept(e, "once", OFFER_ONCE_SECONDS, targets=asked)
             echo(f"  ✓ {what} allowed (once — {OFFER_ONCE_SECONDS // 60} min, then asked again)")
             counts["granted"] += 1
             counts["deferred"] -= 1

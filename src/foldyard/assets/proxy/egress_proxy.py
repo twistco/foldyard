@@ -2079,9 +2079,11 @@ class Injector:
             entry["misdirected"] = True  # the proxy's own 502 too: it named one that isn't here
         if self._build_flow(flow):
             entry["build"] = True  # a host-started build's request, decrypted (a path grant)
-        vouch = flow.metadata.get("egress_proxy_vouched")
-        if isinstance(vouch, tuple):
-            entry["followed"] = vouch[1]  # a follow grant: the host whose redirect named this URL
+        followed = flow.metadata.get("egress_proxy_followed")
+        if followed:
+            entry["followed"] = (
+                followed  # a follow grant let it in: the host whose redirect named it
+            )
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
@@ -3071,10 +3073,11 @@ class Injector:
         if vouch is not None:
             # Looked up whatever else allows the request: a link of a chain may be granted on its
             # own, and its redirect is still judged under the rule (`_follow_rule`, hops).
-            flow.metadata["egress_proxy_vouched"] = vouch  # the log's `followed` too
+            flow.metadata["egress_proxy_vouched"] = vouch
         if vouch is not None and not allowed:
             # The exact URL a follow grant's source redirected to: a read, as a path grant's.
             allowed = True
+            flow.metadata["egress_proxy_followed"] = vouch[1]  # the log's `followed from`
             flow.metadata["egress_proxy_path_read"] = True  # `requestheaders` drops any body
             client_id = _client_id(flow)
             if client_id is not None and host:
