@@ -155,7 +155,13 @@ class CopilotPlugin(Plugin):
         # credential store is available), settings, permissions, the session index and
         # `session-state/`. One volume therefore persists everything; we set the var explicitly so
         # it never depends on HOME resolving to the same dir (root here has HOME=/home/vscode).
-        args = ["-e", f"COPILOT_HOME={copilot_home}", "-v", f"devbox_copilot_home:{copilot_home}"]
+        # A keyless box gets its OWN volume: the manual-login volume holds a real token, which a
+        # keyless box (running with a dummy and a proxy injector) must never be able to read. This
+        # is a create-time choice, like the box's auth posture itself.
+        volume = (
+            "devbox_copilot_keyless_home" if config.copilot_keyless() else "devbox_copilot_home"
+        )
+        args = ["-e", f"COPILOT_HOME={copilot_home}", "-v", f"{volume}:{copilot_home}"]
         transcripts = env.get("FY_COPILOT_TRANSCRIPTS") or ""
         if transcripts:  # never through a link the box planted in its from-box slot (ADR-0033)
             boxmounts.ensure_bind_source(transcripts)
