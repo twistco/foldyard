@@ -215,10 +215,12 @@ SHAs and tree ids between them by hand:
 1. Make sure both commits are here: `git cat-file -t <sha>` says `commit` for each. For one that
    isn't, `git fetch --no-tags origin <sha>`.
 
-2. Refresh the base: `git fetch --no-tags origin <baseRefName>`. Both replays need a base at least
-   as new as the one either commit was built on; on an older one, what the base gained since cancels
-   out of neither tree and shows as the PR's change. Then replay each onto `origin/<baseRefName>`.
-   Each prints a tree id, and exits non-zero if the commit conflicts with that base:
+2. Refresh the base: `git fetch --no-tags origin +<baseRefName>:refs/remotes/origin/<baseRefName>`
+   (the explicit refspec updates `origin/<baseRefName>` even in a single-branch clone). Both replays
+   need a base at least as new as the one either commit was built on; on an older one, what the base
+   gained since cancels out of neither tree and shows as the PR's change. Then replay each onto
+   `origin/<baseRefName>`. Each prints a tree id, and exits non-zero if the commit conflicts with
+   that base:
 
    ```bash
    git merge-tree --write-tree --no-messages origin/<base> <reviewed-sha>
@@ -232,7 +234,10 @@ SHAs and tree ids between them by hand:
 Read the surrounding code as usual, but limit findings to the new changes. If that diff touches
 lines from an earlier finding, check whether the finding is fixed. If a commit or the base can't be
 fetched (a force-push GitHub no longer serves, or a dev box that can't fetch) or a replay conflicts,
-review the full `gh pr diff`, but still only report what is new since the last review.
+review the full `gh pr diff` as a first pass would: every line of it, since nothing says which lines
+are new. What's new is then the findings: leave out any an earlier review already raised (Step 1b),
+noting it as still open if it is. In CI, `.pr-review-since.md` asking to review the full diff and
+report only what's new means the same.
 
 Use this to:
 
