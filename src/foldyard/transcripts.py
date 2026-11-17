@@ -1095,6 +1095,10 @@ def transcripts(dest: str = "") -> int:
         project_of=checkout,
         # A Codex-only or Copilot-only project has no Claude source; continue to its agents.
         missing_ok=config.codex_enabled() or config.copilot_enabled(),
+        # Such a box has no Claude `projects/` to fetch: probe for it and treat a CONFIRMED absence
+        # as nothing to do instead of letting a failed `cp` sink the sync. A present directory (or
+        # any ambiguous probe) still goes through `cp`, so real failures are never hidden.
+        absent_in_box_ok=not config.claude_enabled(),
     )
 
     # A [codex] table opts into Codex installation and transcript persistence. Its archive is a
@@ -1173,6 +1177,11 @@ def _sync_source(
     label: str,
     project_of: Path | None,
     missing_ok: bool = False,
+    # Unlike `missing_ok` (nothing bound out + box stopped), this marks a source the project does
+    # not use: in a RUNNING box, probe for the in-box directory and treat a CONFIRMED absence as
+    # "nothing to do". A `cp` failure is never inferred to mean absence — a real error stays an
+    # error, and a present directory is still copied.
+    absent_in_box_ok: bool = False,
     hint: str | None = None,
     uuid_dirs: bool = False,
 ) -> int:
@@ -1209,6 +1218,20 @@ def _sync_source(
             box_agent_home = f"/home/vscode/{default.get(box_rel, '.claude')}"
         tmp = tempfile.mkdtemp()
         box_src = f"{box_agent_home}/{box_rel}"
+        if absent_in_box_ok:
+            # Check the source BEFORE cp, without changing how cp is invoked: `test -d` returns 1
+            # only for a genuinely absent directory. Any other result (present, or an exec that
+            # failed) falls through to cp, so a broken cp is never mistaken for an empty source.
+            probe = subprocess.run(
+                [engine, "exec", box, "test", "-d", box_src],
+                env=engine_env,
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 1:
+                print(f"✓ no {label.lower()} in {box} yet — nothing to do.")
+                shutil.rmtree(tmp, ignore_errors=True)
+                return 0
         _err(f"+ {engine} cp {box}:{box_src}/. {tmp}")
         cp = [engine, "cp", f"{box}:{box_src}/.", tmp]
         if subprocess.run(cp, env=engine_env).returncode != 0:

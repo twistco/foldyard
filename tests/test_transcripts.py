@@ -289,6 +289,66 @@ def test_copilot_only_project_does_not_require_claude_source(mac, monkeypatch):
     assert not mac["claude_archive"].exists()
 
 
+def test_running_copilot_only_box_without_claude_projects_dir(mac, monkeypatch, capsys):
+    # A RUNNING box has no Claude `projects/`: that absence is optional, but it must be CONFIRMED
+    # by probing the box — never inferred from a `cp` failure, which could be a real error.
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    _session(mac["copilot_src"], f"{COPILOT_SESSION}/events.jsonl")
+
+    calls: list[list[str]] = []
+    probe_code = [1]  # `test -d`: 1 = absent, 0 = present, 125 = exec failed
+    cp_code = [0]
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[1:2] == ["ps"]:
+            return _Proc(0, "deadbeef\n")  # box IS running
+        if cmd[1:2] == ["cp"]:
+            if cp_code[0]:
+                return _Proc(cp_code[0], stderr="cp failed")
+            _session(Path(cmd[-1]), f"{mac['own']}/s.jsonl")
+            return _Proc(0)
+        if cmd[3:5] == ["test", "-d"]:
+            return _Proc(probe_code[0])
+        return _Proc(0, "/home/vscode/.claude")
+
+    monkeypatch.setattr(transcripts.subprocess, "run", fake_run)
+
+    # Confirmed absent ⇒ nothing to do, and no `cp` attempted for it.
+    assert transcripts.transcripts() == 0
+    assert _archived(mac["copilot_archive"]) == {f"{COPILOT_SESSION}/events.jsonl": "{}"}
+    assert not mac["claude_archive"].exists()
+    assert not any(c[1:2] == ["cp"] for c in calls)
+    assert "no claude transcripts in" in capsys.readouterr().out
+
+    # Confirmed present ⇒ still copied, even though Claude isn't configured: absence, not
+    # disinterest, is what makes it optional.
+    probe_code[0] = 0  # confirmed present
+    calls.clear()
+    assert transcripts.transcripts() == 0
+    assert any(c[1:2] == ["cp"] for c in calls)
+    assert _archived(mac["claude_archive"]) == {f"{mac['own']}/s.jsonl": "{}"}
+
+    # A failed `cp` with the source present is a real failure.
+    cp_code[0] = 1
+    assert transcripts.transcripts() == 1
+
+    # An inconclusive probe (engine error) is not treated as absence either: cp still runs, and a
+    # failure there would be reported normally.
+    probe_code[0], cp_code[0] = 125, 0
+    calls.clear()
+    assert transcripts.transcripts() == 0
+    assert any(c[1:2] == ["cp"] for c in calls)
+
+    # …and so is one for Claude when Claude IS configured (no probe, no tolerance).
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    probe_code[0], cp_code[0] = 1, 1
+    calls.clear()
+    assert transcripts.transcripts() == 1
+    assert not any(c[3:5] == ["test", "-d"] for c in calls)
+
+
 # ── sync_archive / sync_current: the reusable destructive-op guard ───────────────────
 
 
