@@ -415,6 +415,8 @@ def test_ensure_secret_reads_a_key_file_by_path_and_stores_its_base64(tmp_path):
     assert f.read_text() == f"GH_PEM_B64={base64.b64encode(key.read_bytes()).decode()}\n"
     assert any(str(key) in line for line in out)  # says which file it read
     assert any("path" in line for line in out if "value (hidden)" not in line)  # offered up front
+    # The prompt is hidden, so a drag shows nothing: say so, or it looks like the drag failed.
+    assert any("press Enter" in line and "nothing shows" in line for line in out)
 
 
 @pytest.mark.parametrize(
@@ -478,6 +480,7 @@ def test_an_entry_that_names_no_file_is_never_echoed(tmp_path, entry):
 def test_a_directory_is_refused(tmp_path):
     to_store, note = keyless.secret_entry(str(tmp_path), _secret())
     assert to_store is None and "not a file" in note
+    assert str(tmp_path) in note  # it opened, so the entry was a real path: safe to name
 
 
 def test_a_fifo_is_refused_without_blocking(tmp_path):
@@ -486,7 +489,7 @@ def test_a_fifo_is_refused_without_blocking(tmp_path):
     os.mkfifo(fifo)
     start = time.monotonic()
     to_store, note = keyless.secret_entry(str(fifo), _secret())
-    assert to_store is None and "not a file" in note
+    assert to_store is None and "not a file" in note and str(fifo) in note
     assert time.monotonic() - start < 1.0
 
 
@@ -494,7 +497,7 @@ def test_a_file_far_larger_than_a_key_is_refused_unread(tmp_path):
     big = tmp_path / "big.pem"
     big.write_bytes(b"x" * (keyless.SECRET_FILE_MAX + 1))
     to_store, note = keyless.secret_entry(str(big), _secret())
-    assert to_store is None and "larger than" in note
+    assert to_store is None and "larger than" in note and str(big) in note
 
 
 def test_a_pasted_base64_value_still_works_and_needs_no_file(tmp_path):

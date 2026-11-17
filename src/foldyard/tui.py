@@ -2403,8 +2403,9 @@ class SecretScreen(ModalScreen):
             lines.append(f"get it with: [i]{escape(sec.how)}[/i]")
         if sec.b64:
             lines.append(
-                "give its file's full path (dragging the file in types it) — read and encoded "
-                "here, so the key never shows on screen — or paste it as single-line base64"
+                "give its file's full path (drag the file in, then press Enter — the field stays "
+                "masked) — read and encoded here, so the key never shows on screen — or paste it "
+                "as single-line base64"
             )
         placeholder = "its file's path, or its base64 (hidden)" if sec.b64 else "paste it (hidden)"
         with Vertical(id="sec-dialog"):

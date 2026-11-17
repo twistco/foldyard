@@ -380,22 +380,23 @@ def _entry_path(value: str) -> Path | None:
 
 
 def _read_secret_file(path: Path) -> tuple[bytes | None, str]:
-    """``path``'s bytes, or ``None`` and a reason that doesn't repeat the path (it may not be
-    one). Non-blocking open + ``fstat`` on the opened descriptor: a FIFO would otherwise wait for
-    a writer, and checking the type before opening would race a swap."""
+    """``path``'s bytes, or ``None`` and the reason. A path that didn't open isn't named: the entry
+    may not have been a path at all. One that opened was, so it's named — the operator can't see
+    what a hidden prompt received. Non-blocking open + ``fstat`` on the opened descriptor: a FIFO
+    would otherwise wait for a writer, and checking the type before opening would race a swap."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except IsADirectoryError:
-        return None, "the path entered is not a file"
+        return None, f"{path} is not a file"
     except OSError:
         return None, "no readable file at the path entered"
     if not stat.S_ISREG(os.fstat(fd).st_mode):  # a directory opens read-only on some systems
         os.close(fd)
-        return None, "the path entered is not a file"
+        return None, f"{path} is not a file"
     with os.fdopen(fd, "rb") as fh:
         raw = fh.read(SECRET_FILE_MAX + 1)
     if len(raw) > SECRET_FILE_MAX:
-        return None, f"the file entered is larger than a key file ({SECRET_FILE_MAX // 1024} KiB)"
+        return None, f"{path} is larger than a key file ({SECRET_FILE_MAX // 1024} KiB at most)"
     return raw, ""
 
 
@@ -435,7 +436,7 @@ def ensure_secret(
     if secret.how:
         echo(f"  (get it with: {secret.how})")
     if secret.b64:
-        echo("  (dragging the file onto this window types its path)")
+        echo("  (drag the file onto this window, then press Enter — nothing shows as you do)")
     value = prompt("  value (hidden): ").strip()
     if not value:
         echo(
