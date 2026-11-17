@@ -1299,7 +1299,7 @@ def test_copilot_enabled_is_table_presence(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path)
     assert config.copilot_enabled() is False
     # A non-table value is not the documented opt-in (`[copilot]`), so it does not enable it.
-    (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\ncopilot = true\n')
+    (tmp_path / "foldyard.toml").write_text('copilot = true\n[project]\nname = "x"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)
     assert config.copilot_enabled() is False
 
