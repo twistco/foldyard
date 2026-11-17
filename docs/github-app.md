@@ -104,17 +104,17 @@ fy mode github=on
 ```
 
 The first time, foldyard sees that `FY_INJECT_GITHUB` is missing and asks for it on your terminal
-before switching, with a hidden prompt. `host.env` holds one `KEY=VALUE` per line, so the key goes
-in as single-line base64 (the `.pem` file is several lines):
-
-```bash
-base64 < my-app.private-key.pem | tr -d '\n'
-```
-
-Paste the output. foldyard checks it decodes to a whole private key (a half-pasted one is refused
-and nothing is stored) and writes it to `host.env` in `~/.foldyard/<project>/`, readable only by
-you. You can also add the line there yourself; the next token request reads it. Then put the `.pem`
+before switching, with a hidden prompt. Give it the **full path of the `.pem` file**: type it, or
+drag the file onto the terminal window, which types it for you. foldyard reads the file on your
+computer, checks it's a whole private key (anything else is refused and nothing is stored), and
+writes it to `host.env` in `~/.foldyard/<project>/`, readable only by you. `host.env` holds one
+`KEY=VALUE` per line, so the key is stored as single-line base64, and foldyard does that encoding
+itself, so the key never shows on your screen or passes through your clipboard. Then put the `.pem`
 somewhere safe, such as your password manager, or delete it: you can always generate another.
+
+The prompt also takes the key already encoded, as single-line base64, which is what a vault hint
+(below) produces. A relative path isn't read: the prompt runs in the checkout, which the box can
+write.
 
 If your team keeps the key in a vault, retarget the prompt's "get it with" hint with a `[[secret]]`
 row naming the same variable. The hint is printed for you to run, never run by foldyard:
@@ -212,10 +212,10 @@ what changed (`fy host logs`) and, on macOS, shows one desktop notification.
 
 ## Rotating the key, and switching it off
 
-To rotate: on the App's page, generate a new private key, replace the `FY_INJECT_GITHUB` line in
-`~/.foldyard/<project>/host.env` with the new key's base64, and check `fy mode` doesn't show the
-switch DEGRADED (the check runs every 5 minutes). Then delete the old key on GitHub. A token already
-made lasts at most an hour.
+To rotate: on the App's page, generate a new private key, delete the `FY_INJECT_GITHUB` line in
+`~/.foldyard/<project>/host.env`, run `fy mode github=on` and give it the new `.pem`'s path. Check
+`fy mode` doesn't show the switch DEGRADED (the check runs every 5 minutes), then delete the old key
+on GitHub. A token already made lasts at most an hour.
 
 To stop access: `fy mode github=off` stops the proxy adding the token at once. To take it away for
 good, uninstall the App or remove the repository from the installation on github.com.

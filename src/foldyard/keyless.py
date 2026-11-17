@@ -31,6 +31,8 @@ import base64
 import fcntl
 import json
 import os
+import shlex
+import stat
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -324,6 +326,79 @@ def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
     return value if (not pattern or fnmatchcase(value, pattern)) else None
 
 
+SECRET_FILE_MAX = 64 * 1024
+"""The largest file a capture prompt reads for a base64 secret. A PEM private key is 2–4 KiB; a cap
+keeps a mistyped path to something huge from being read whole into memory and onto one line."""
+
+
+def secret_entry(value: str, secret) -> tuple[str | None, str]:
+    """What one entry at a capture prompt stores for ``secret``: ``(to_store, note)``.
+
+    A value that :func:`secret_ok` accepts is stored as it is (``note`` empty). For a ``b64`` secret
+    the entry may instead be the FULL PATH of the file to store — the operator's own key file, read
+    and encoded here, so the key never passes through their terminal: printing
+    ``base64 < key.pem`` to copy it leaves it in scrollback and the clipboard, which a hidden prompt
+    exists to avoid. The stored line is the same either way. ``note`` then names the file read.
+
+    ``to_store`` is ``None`` when nothing should be stored, and ``note`` says why — WITHOUT
+    repeating the entry: base64 may start with ``/``, so a mangled paste can look like a path, and
+    what went into a hidden prompt stays hidden. Only a path that named a real file is shown.
+
+    A relative path is never read: the prompt runs in the checkout, which the box can write, so a
+    bare ``key.pem`` would be whatever the box put there. ``~/…`` and absolute paths are the
+    operator's own choice; a terminal's quoting or backslash-escaping of a dragged-in path is
+    undone first."""
+    stored = secret_ok(value, secret.pattern, secret.b64)
+    if stored is not None:
+        return stored, ""
+    shape = "doesn't look like " + secret.label
+    if not secret.b64:
+        return None, f"that {shape}"
+    path = _entry_path(value)
+    if path is None:
+        return None, f"that {shape} (expected the key file's full path, or single-line base64)"
+    raw, problem = _read_secret_file(path)
+    if raw is None:
+        return None, problem
+    encoded = secret_ok(base64.b64encode(raw).decode(), secret.pattern, True)
+    if encoded is None:
+        return None, f"{path} {shape}"
+    return encoded, f"read {path}"
+
+
+def _entry_path(value: str) -> Path | None:
+    """The absolute path a prompt entry names, else ``None``. Undoes a terminal's quoting or
+    backslash-escaping of a dragged-in path (one shell word), else takes the entry as typed;
+    expands ``~``."""
+    try:
+        words = shlex.split(value)
+    except ValueError:  # an unbalanced quote: take the entry as it was typed
+        words = []
+    # Not one shell word: a path pasted as it is (a file manager's "copy path" leaves spaces bare).
+    path = Path(words[0] if len(words) == 1 else value.strip()).expanduser()
+    return path if path.is_absolute() else None
+
+
+def _read_secret_file(path: Path) -> tuple[bytes | None, str]:
+    """``path``'s bytes, or ``None`` and a reason that doesn't repeat the path (it may not be
+    one). Non-blocking open + ``fstat`` on the opened descriptor: a FIFO would otherwise wait for
+    a writer, and checking the type before opening would race a swap."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except IsADirectoryError:
+        return None, "the path entered is not a file"
+    except OSError:
+        return None, "no readable file at the path entered"
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a directory opens read-only on some systems
+        os.close(fd)
+        return None, "the path entered is not a file"
+    with os.fdopen(fd, "rb") as fh:
+        raw = fh.read(SECRET_FILE_MAX + 1)
+    if len(raw) > SECRET_FILE_MAX:
+        return None, f"the file entered is larger than a key file ({SECRET_FILE_MAX // 1024} KiB)"
+    return raw, ""
+
+
 def ensure_secret(
     host_env: Path,
     secret,
@@ -351,14 +426,16 @@ def ensure_secret(
             "TTY to be prompted."
         )
         return "skipped"
-    echo(
-        f"▶ {secret.label}: paste it (stored on your computer at 0600, never in the box or the "
-        "repo)."
-    )
+    where = "stored on your computer at 0600, never in the box or the repo"
+    if secret.b64:
+        # The file's path first: foldyard encodes it, so the key never shows on a screen.
+        echo(f"▶ {secret.label}: give its file's full path, or paste it as base64 ({where}).")
+    else:
+        echo(f"▶ {secret.label}: paste it ({where}).")
     if secret.how:
         echo(f"  (get it with: {secret.how})")
     if secret.b64:
-        echo("  (single-line base64 — pipe the value through `base64` if the hint didn't)")
+        echo("  (dragging the file onto this window types its path)")
     value = prompt("  value (hidden): ").strip()
     if not value:
         echo(
@@ -366,18 +443,14 @@ def ensure_secret(
             "or `fy box up`.)"
         )
         return "empty"
-    to_store = secret_ok(value, secret.pattern, secret.b64)
+    to_store, note = secret_entry(value, secret)
     if to_store is None:
-        echo(
-            f"✗ that doesn't look like {secret.label}"
-            + (" (expected single-line base64)" if secret.b64 else "")
-            + " — stored nothing, so nothing wrong-shaped reaches the token service."
-        )
+        echo(f"✗ {note} — stored nothing, so nothing wrong-shaped reaches the token service.")
         return "mismatch"
     append_host_env(host_env, secret.var, to_store)
     echo(
-        f"✓ stored {secret.label} in {host_env} (0600). The token service on your computer "
-        "reads it when it mints."
+        f"✓ {note + ', ' if note else ''}stored {secret.label} in {host_env} (0600). The token "
+        "service on your computer reads it when it mints."
     )
     return "stored"
 

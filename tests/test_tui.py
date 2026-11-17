@@ -2184,6 +2184,43 @@ async def test_mode_button_secret_wrong_shape_stays_on_the_modal(monkeypatch, tm
         assert not host_env.exists() and sets == []
 
 
+async def test_mode_button_secret_takes_a_key_file_by_path(monkeypatch, tmp_path):
+    # The modal is the TUI's door to the same capture as `fy mode`: a base64 secret's FILE, by its
+    # path, read and encoded on the host — so the key itself never shows in any terminal.
+    import base64
+
+    from foldyard.plugins import Secret
+
+    host_env = tmp_path / "host.env"
+    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"  # gitleaks:allow
+    key = tmp_path / "app.private-key.pem"
+    key.write_text(pem)
+    secret = Secret(
+        var="FY_INJECT_GITHUB",
+        label="GitHub App private key (PEM)",
+        pattern="*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*",
+        b64=True,
+    )
+    monkeypatch.setattr(
+        devmode, "missing_secrets", lambda updates: [secret] if updates == {"github": "on"} else []
+    )
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        await pilot.pause()
+        assert isinstance(app.screen, tui.SecretScreen)
+        assert "path" in _text(app.screen.query_one("#sec-body", tui.Static))
+        app.screen.query_one("#sec-input", tui.Input).value = f"'{key}'"  # as a drag types it
+        await pilot.press("enter")
+        await pilot.pause()
+    assert host_env.read_text() == f"FY_INJECT_GITHUB={base64.b64encode(pem.encode()).decode()}\n"
+    assert sets == [{"github": "on"}]
+
+
 _REAL_SET_MODE = devmode.set_mode  # captured before the autouse stub replaces it per test
 
 

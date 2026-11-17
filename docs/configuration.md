@@ -774,9 +774,9 @@ box_env = { GH_TOKEN = "x" }       # so `gh` in the box sends a header to overwr
   as a string or a TOML integer).
 - **`repositories`** — bare repository names (not `owner/repo`) to narrow the token to. It can only
   narrow: GitHub refuses a repository the installation doesn't cover.
-- The secret is the App's private key, base64 in `FY_INJECT_<SWITCH>` (`host.env` is single-line):
-  `base64 < key.pem | tr -d '\n'`. `fy mode <switch>=on` prompts for it, and `fy doctor` checks it's
-  there and shaped like a key.
+- The secret is the App's private key, base64 in `FY_INJECT_<SWITCH>` (`host.env` is single-line).
+  `fy mode <switch>=on` prompts for it: give it the `.pem` file's full path and foldyard encodes it,
+  so the key never shows on your screen. `fy doctor` checks it's there and shaped like a key.
 
 **The App's installation permissions are the token's scope** — foldyard asks for none and caps none.
 To change what the box can do on GitHub, change the App on github.com (an org owner approves it
@@ -884,7 +884,10 @@ when    = { sentry = "on" }                  # mode gate, same semantics as `[[o
   `base64`. A non-matching paste stores nothing. A glob, not a regex, so a crafted pattern from repo
   config can't hang `fy box up`.
 - **`base64`** — store the value base64-encoded, the only way `host.env` (single-line `KEY=VALUE`)
-  can hold a multi-line secret such as a PEM; a truncated paste then fails loudly.
+  can hold a multi-line secret such as a PEM; a truncated paste then fails loudly. The prompt also
+  takes the full path of the secret's file, which foldyard reads and encodes on your computer, so
+  the secret never shows on your screen (a relative path isn't read: the prompt runs in the
+  checkout, which the box can write).
 - **`when`** — mode gate: `switch = level` or `switch = [levels]`, AND across keys. When overriding
   a plugin's secret, repeat its gate.
 

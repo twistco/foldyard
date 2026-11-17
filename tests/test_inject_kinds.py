@@ -194,6 +194,9 @@ def test_github_app_declares_its_pem_as_a_base64_secret_only_when_on(monkeypatch
     assert secret.pattern == kinds.PEM_PATTERN
     assert "private key" in secret.label and "github" in secret.label
     assert "App settings" in secret.how  # printed at the prompt, never run
+    # It teaches the path, never `base64 < key.pem`: printing the encoded key to copy it leaves it
+    # in the terminal's scrollback and the clipboard, which the hidden prompt exists to avoid.
+    assert "path" in secret.how and "base64" not in secret.how
 
 
 def test_a_secret_row_can_retarget_the_pem_hint(monkeypatch):
@@ -516,6 +519,8 @@ def test_pem_doctor_accepts_a_captured_key_and_flags_a_broken_one(monkeypatch, t
     # A truncated/half-pasted key is caught OFFLINE rather than as an opaque 401 at mint time.
     rows = _doctor(monkeypatch, tmp_path, [_APP], host_env="FY_INJECT_GITHUB=-----BEGIN RSA PRIV\n")
     assert [s for s, *_ in rows] == ["ok", "fail"]
+    # The prompt only asks for a var host.env lacks, so the fix names the line to delete first.
+    assert "delete its line" in rows[1][2] and "`fy mode github=on`" in rows[1][2]
 
 
 def test_pem_doctor_names_the_consumers_hint_where_there_is_one(monkeypatch, tmp_path):

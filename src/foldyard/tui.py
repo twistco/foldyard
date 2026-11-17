@@ -2380,11 +2380,12 @@ class RemoveWorktreeScreen(ModalScreen):
 
 
 class SecretScreen(ModalScreen):
-    """Paste one host-side secret a posture needs (:class:`foldyard.plugins.Secret`). The `how`
-    hint is SHOWN, never run. Enter validates the paste against the secret's pattern (a
-    wrong-shaped value keeps the dialog open with the reason, so nothing wrong-shaped reaches the
-    minter) and dismisses the value to STORE; an empty enter dismisses "" (skip); esc dismisses
-    None (leave the posture unchanged). The Input is masked — a real secret."""
+    """Paste one host-side secret a posture needs (:class:`foldyard.plugins.Secret`) — or, for a
+    base64 one, its file's path (:func:`foldyard.keyless.secret_entry`). The `how` hint is SHOWN,
+    never run. Enter validates the entry against the secret's pattern (a wrong-shaped value keeps
+    the dialog open with the reason, so nothing wrong-shaped reaches the minter) and dismisses the
+    value to STORE; an empty enter dismisses "" (skip); esc dismisses None (leave the posture
+    unchanged). The Input is masked — a real secret."""
 
     BINDINGS = [Binding("escape", "cancel", "cancel")]
 
@@ -2401,11 +2402,15 @@ class SecretScreen(ModalScreen):
         if sec.how:
             lines.append(f"get it with: [i]{escape(sec.how)}[/i]")
         if sec.b64:
-            lines.append("single-line base64 — pipe the value through `base64` if the hint didn't")
+            lines.append(
+                "give its file's full path (dragging the file in types it) — read and encoded "
+                "here, so the key never shows on screen — or paste it as single-line base64"
+            )
+        placeholder = "its file's path, or its base64 (hidden)" if sec.b64 else "paste it (hidden)"
         with Vertical(id="sec-dialog"):
             yield Static(Text.from_markup(f"This mode needs {escape(sec.label)}"), id="sec-title")
             yield Static(Text.from_markup("\n".join(lines)), id="sec-body")
-            yield Input(placeholder="paste the value (hidden)", password=True, id="sec-input")
+            yield Input(placeholder=placeholder, password=True, id="sec-input")
             yield Static(
                 "enter store · empty enter skip · esc leave the mode unchanged", id="sec-hint"
             )
@@ -2420,12 +2425,10 @@ class SecretScreen(ModalScreen):
         if not value:
             self.dismiss("")
             return
-        to_store = keyless.secret_ok(value, self._secret.pattern, self._secret.b64)
+        to_store, note = keyless.secret_entry(value, self._secret)
         if to_store is None:
-            why = " (expected single-line base64)" if self._secret.b64 else ""
             self.query_one("#sec-hint", Static).update(
-                f"✗ that doesn't look like {escape(self._secret.label)}{why} — nothing stored; "
-                "try again, or esc"
+                f"✗ {escape(note)} — nothing stored; try again, or esc"
             )
             self.query_one("#sec-input", Input).value = ""
             return
