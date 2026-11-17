@@ -1,7 +1,7 @@
 ---
 description: Run a Claude code review on the current branch/PR (also run by CI on every ready PR)
 argument-hint: "[PR number|URL] [--base <ref>] [--focus \"<areas>\"] [--post|--no-post]"
-allowed-tools: Read, Glob, Grep, WebSearch, WebFetch, Bash(git diff:*), Bash(git log:*), Bash(git merge-base:*), Bash(git branch:*), Bash(git rev-parse:*), Bash(git symbolic-ref:*), Bash(git remote:*), Bash(command -v gh), Bash(gh auth status:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh pr comment:*), Bash(gh issue view:*), Bash(gh issue list:*), Bash(gh api repos/{owner}/{repo}/compare/:*), Bash(gh api repos/{owner}/{repo}/pulls/:*), Bash(gh api repos/{owner}/{repo}/issues/:*), Bash(echo:*), mcp__github_inline_comment__create_inline_comment
+allowed-tools: Read, Glob, Grep, WebSearch, WebFetch, Bash(git diff:*), Bash(git log:*), Bash(git merge-base:*), Bash(git merge-tree:*), Bash(git cat-file:*), Bash(git fetch:*), Bash(git branch:*), Bash(git rev-parse:*), Bash(git symbolic-ref:*), Bash(git remote:*), Bash(command -v gh), Bash(gh auth status:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh pr comment:*), Bash(gh issue view:*), Bash(gh issue list:*), Bash(gh api repos/{owner}/{repo}/pulls/:*), Bash(gh api repos/{owner}/{repo}/issues/:*), Bash(echo:*), mcp__github_inline_comment__create_inline_comment
 model: opus
 ---
 
@@ -185,9 +185,9 @@ CodeRabbit marks a fixed finding with "✅ Addressed in commits …", and author
 …" with a reason.
 
 **Step 1b.4 — incremental review.** Every posted Claude review ends with a footer naming the commit
-it reviewed (see Step 3). **In CI, read `.pr-review-since.md`** in place of the two commands below.
-The workflow found the newest footer, counting only the Claude App's own comments, since anyone can
-post a footer. The file says there's nothing new, that it's a first pass, or to review the full
+it reviewed (see Step 3). **In CI, read `.pr-review-since.md`** in place of the commands below. The
+workflow found the newest footer, counting only the Claude App's own comments, since anyone can post
+a footer. The file says there's nothing new, that it's a first pass, or to review the full
 `gh pr diff`. Otherwise it points at `.pr-review-since.diff` and lists the PR's commits since. That
 diff is the PR's own change since the last review, whether the branch merged the base in or was
 rebased onto it: what the base brought in cancels out, so review the diff as it stands. A merge
@@ -200,16 +200,31 @@ gh pr view <number> --json comments,headRefOid --jq '
   ([.comments[].body | capture("Claude PR review · reviewed up to `(?<sha>[0-9a-f]{40})`") | .sha] | last // "none")'
 ```
 
-If there is one and it differs from the head, review only what changed since:
+If there is none, it's a first pass: review the full `gh pr diff`. If it equals the head, there's
+nothing new: post nothing. Otherwise review only the PR's own change since then, worked out as CI
+does: replay both commits onto the same base and diff the two trees, so whatever the base brought in
+(merged in or rebased onto) cancels out. Run each command on its own, never chained, and carry the
+SHAs and tree ids between them by hand:
 
-```bash
-gh api repos/{owner}/{repo}/compare/<reviewed-sha>...<head-sha> -H 'Accept: application/vnd.github.diff'
-```
+1. Make sure both commits are here: `git cat-file -t <sha>` says `commit` for each. For one that
+   isn't, `git fetch --no-tags origin <sha>`.
+
+2. Replay each onto the PR's base branch (`origin/<baseRefName>`; it needn't be fresh, as both use
+   the same one). Each prints a tree id, and exits non-zero if the commit conflicts with that base:
+
+   ```bash
+   git merge-tree --write-tree --no-messages origin/<base> <reviewed-sha>
+   git merge-tree --write-tree --no-messages origin/<base> <head-sha>
+   ```
+
+3. `git diff <reviewed-tree> <head-tree>` is the change to review. Empty means only the base moved
+   since: post nothing. `git log --reverse --oneline <head-sha> ^<reviewed-sha> ^origin/<base>`
+   lists the commits since (after a rebase, all of them, as each was rewritten).
 
 Read the surrounding code as usual, but limit findings to the new changes. If that diff touches
-lines from an earlier finding, check whether the finding is fixed. If the compare fails or the old
-commit is gone (a rebase or force-push), review the full `gh pr diff`, but still only report what is
-new since the last review. If the reviewed SHA equals the head, there's nothing new: post nothing.
+lines from an earlier finding, check whether the finding is fixed. If a commit can't be fetched (a
+force-push GitHub no longer serves, or a dev box that can't fetch) or a replay conflicts, review the
+full `gh pr diff`, but still only report what is new since the last review.
 
 Use this to:
 
