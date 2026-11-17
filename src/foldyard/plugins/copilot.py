@@ -87,36 +87,36 @@ class CopilotPlugin(Plugin):
         # One rule per host that can carry the token: `keyless.inject_spec` is single-host, and
         # Copilot spreads the credential over a plan-specific API host plus api.github.com (token
         # validation + `copilot_internal/*`), cafe.github.com (entitlement) and the business-plan
-        # experiments host. `any_scheme` because a GitHub client may send the token as
-        # `Bearer x`, `token x` or bare — the dummy must be recognised in each, since it is a client
-        # foldyard doesn't control.
+        # experiments host. `any_scheme` because a GitHub client may send the bare token as
+        # `Bearer x`, `token x` or bare — name the rule by the BARE taxonomy dummy (what the box
+        # bakes), and let the proxy's `any_scheme` match whichever form the client puts on the
+        # header.
         kind = config.copilot_keyless()
         if not kind or mode.get("copilot", "off") == "off":
             return []
+        spec = _KEYLESS[kind]
         out: list[InjectRule] = []
         for host in _KEYLESS_HOSTS:
-            spec = keyless.inject_spec(
+            inject_spec = keyless.inject_spec(
                 _KEYLESS, host, kind, f"Copilot keyless proxy ({kind}, {host})"
             )
-            rule = _spec_to_rule(spec) if spec else None
+            rule = _spec_to_rule(inject_spec) if inject_spec else None
             if rule:
-                out.append(replace(rule, any_scheme=True))
+                out.append(replace(rule, dummies=(spec["dummy"],), any_scheme=True))
         return out
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:
         # As claude's/codex's: at rest the box's dummy is answered by the proxy, in a JSON error
-        # shape the CLI prints. `any_scheme` for the same reason as the rules.
+        # shape the CLI prints. The box bakes the BARE taxonomy dummy; `any_scheme` lets the held
+        # entry match it however the client prefixes it (`Bearer x`, `token x` or bare).
         kind = config.copilot_keyless()
         if not kind or mode.get("copilot", "off") != "off":
             return []
-        held = keyless.held_dummy(_KEYLESS, kind)
-        if not held:
-            return []
-        header, dummy = held
+        spec = _KEYLESS[kind]
         message = keyless.at_rest_message("Copilot", "copilot")
         body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}})
         return [
-            HeldCredential(host, header, dummy, "copilot", body, any_scheme=True)
+            HeldCredential(host, spec["header"], spec["dummy"], "copilot", body, any_scheme=True)
             for host in _KEYLESS_HOSTS
         ]
 

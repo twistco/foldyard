@@ -2873,8 +2873,8 @@ def test_copilot_keyless_one_rule_per_host_any_scheme(monkeypatch):
     for rule in rules:
         assert rule.header == "Authorization" and rule.env == ("COPILOT_GITHUB_TOKEN",)
         assert rule.value_prefix == "Bearer " and rule.replay_on_401 is False
-        assert rule.dummies == ("Bearer gho_foldyarddummy",)
-        # A GitHub client may send `Bearer x`, `token x` or the bare value.
+        assert rule.dummies == ("gho_foldyarddummy",)  # the BARE dummy the box bakes
+        # A GitHub client may send `Bearer x`, `token x` or the bare value; any_scheme covers all.
         assert rule.any_scheme is True
         assert "foldyard.plugins.static_token" in rule.minter
     # The token is validated on api.github.com BEFORE any Copilot call: that host is not optional.
@@ -2909,7 +2909,7 @@ def test_copilot_keyless_at_rest_is_held_by_the_proxy(monkeypatch):
     held = p.held_credentials({"copilot": "off"})
     assert [h.host for h in held] == list(keyless.COPILOT_KEYLESS_HOSTS)
     for h in held:
-        assert h.header == "Authorization" and h.dummy == "Bearer gho_foldyarddummy"
+        assert h.header == "Authorization" and h.dummy == "gho_foldyarddummy"  # bare + any_scheme
         assert h.axis == "copilot" and h.any_scheme is True
         assert "`fy mode copilot=on`" in json.loads(h.body)["error"]["message"]
     assert p.held_credentials({"copilot": "on"}) == []
