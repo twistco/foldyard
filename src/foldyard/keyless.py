@@ -98,9 +98,10 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
 # proxy rewrites ``Authorization`` with ``Bearer `` + the real token from host.env. Copilot talks to
 # a PLAN-SPECIFIC API host (business/individual/enterprise), and it ALWAYS validates the token
 # against ``api.github.com`` before any Copilot call — so every host that can carry it is listed,
-# rather than guessing which plan the operator's seat is on. A rule fires only on a request
-# carrying the dummy, and ``any_scheme`` (set by the plugin) covers the schemes a GitHub client
-# may use: ``Bearer <dummy>``, ``token <dummy>``, or the bare value.
+# rather than guessing which plan the operator's seat is on. A rule names the dummy, and
+# ``any_scheme`` (set by the plugin) covers the schemes a GitHub client may use: ``Bearer <dummy>``,
+# ``token <dummy>``, or the bare value; it also preserves an already-exchanged Copilot token
+# rather than overwriting it (see ``CopilotPlugin.proxy_rules``).
 #   ``api-key`` — the token is a GitHub credential Copilot accepts: a FINE-GRAINED PAT
 #                 (``github_pat_…``), an OAuth token (``gho_…``) or a user token (``ghu_…``).
 #                 Classic ``ghp_`` PATs are refused by Copilot itself, which is why they are absent

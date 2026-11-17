@@ -269,6 +269,12 @@ class InjectRule:
     # A dummy may also follow ONE auth-scheme word (`token x`, `Bearer x`) — for a dummy handed to
     # a client the mechanism doesn't control, as :class:`HeldCredential`'s ``any_scheme``.
     any_scheme: bool = False
+    # Preserve a credential ALREADY in this rule's place when it is neither our dummy nor our own
+    # injection: a client that exchanges the injected token for a short-lived one (Copilot's
+    # `/copilot_internal/v2/token`) sends THAT to the API host, and overwriting it with the token
+    # we mint would break it. Requests carrying the dummy — or nothing — are still injected.
+    # Default False so every other injector keeps overwriting its place as before.
+    preserve_foreign: bool = False
     # The credential this rule delivers can push (the operator's own gh token). While a rule with
     # it is injecting, the proxy stops refusing git pushes sent to THIS rule's host (its live
     # file's ``push_hosts``) — where the token goes, the mode already says a push is possible —

@@ -2876,6 +2876,9 @@ def test_copilot_keyless_one_rule_per_host_any_scheme(monkeypatch):
         assert rule.dummies == ("gho_foldyarddummy",)  # the BARE dummy the box bakes
         # A GitHub client may send `Bearer x`, `token x` or the bare value; any_scheme covers all.
         assert rule.any_scheme is True
+        # The CLI's exchanged Copilot token is a foreign credential: don't overwrite it with the
+        # GitHub token we minted for the initial exchange.
+        assert rule.preserve_foreign is True
         assert "foldyard.plugins.static_token" in rule.minter
     # The token is validated on api.github.com BEFORE any Copilot call: that host is not optional.
     assert "api.github.com" in [r.host for r in rules]
@@ -2889,6 +2892,11 @@ def test_copilot_keyless_one_rule_per_host_any_scheme(monkeypatch):
     assert "devbox_copilot_home:/home/vscode/.copilot" not in args
     # Keyless: the API hosts are the injector's, so they drop off the recommend offer.
     assert "api.github.com" not in [h["host"] for h in p.egress_recommend()]
+    # The flag reaches the addon through the proxy's live file, not just the in-memory rule.
+    monkeypatch.setattr(config, "proxy_enabled", lambda: True)
+    reg = Registry([copilot.CopilotPlugin(), proxy.ProxyPlugin()], config=_cfg({}))
+    live = _live_rules(reg.desired_daemons({"copilot": "on"})["egress-proxy"])
+    assert all(live[h]["preserve_foreign"] is True for h in keyless.COPILOT_KEYLESS_HOSTS)
 
 
 def test_copilot_keyless_accepts_the_three_token_shapes(monkeypatch):
