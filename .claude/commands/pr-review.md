@@ -74,6 +74,9 @@ command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 && echo "gh: rea
     checked-out branch). A non-zero exit / empty output means there's simply no PR for this branch —
     treat that as "no PR" and fall back to the local-diff review below; don't surface the raw `gh`
     error to the user as if something went wrong.
+  - **Pin the head you review** before reading the diff: in CI it is the `HEAD SHA` the workflow
+    gave you; locally, `gh pr view <number> --json headRefOid`. The footer (Step 3) names this SHA,
+    never one read later, so a push during the review is left for the next run.
   - Get the diff to review with `gh pr diff <number>` when a PR exists.
   - **Read existing comments before reviewing** — see Step 1b.
 - If `gh` is **unavailable** (not installed, or not logged in):
@@ -338,9 +341,9 @@ there's nothing material to flag, say so plainly rather than inventing nits.
   new breakdown — so the thread reads as a continuation, not a fresh dump. Pass the body via
   `--body-file -` (stdin) if it's long or has tricky shell characters.
 
-  End the comment with this footer line, using the full head SHA you reviewed
-  (`gh pr view <number> --json headRefOid`). The next run reads it to find where to continue (Step
-  1b.4):
+  End the comment with this footer line, using the full head SHA you pinned in Step 1 (never the
+  live head: the PR may have moved on while you reviewed). The next run reads it to find where to
+  continue (Step 1b.4):
 
   ```markdown
   <sub>Claude PR review · reviewed up to `<40-char head sha>`</sub>
