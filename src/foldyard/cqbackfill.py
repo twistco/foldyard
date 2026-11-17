@@ -11,7 +11,8 @@ only by resuming each one. This reads the transcripts the agents left behind ins
      result kept longest — and, over budget, keep what surrounds the failures, since that is where
      reflect finds its candidates. A session with no tool calls has nothing to mine;
   3. **mine** the excerpt with a headless Claude (``claude -p --model …``) with no tools, no MCP
-     servers, no hooks, no saved session and an empty working directory, under cq's OWN reflect
+     servers, no hooks, no auto-memory, no saved session and an empty working directory (so it
+     leaves nothing in ``~/.claude/projects``), under cq's OWN reflect
      prompt (:func:`reflect_prompt`, shipped with foldyard at the pinned CLI version) cut to its
      non-interactive steps, returning candidates as structured output. The transcript is stdin and
      is data: what it says is never an instruction;
@@ -418,7 +419,8 @@ def _final(stdout: str) -> dict:
 
 def _ask(instructions: str, stdin: str, model: str, schema: dict, run: Runner, what: str) -> list:
     """One locked-down headless Claude call answering ``{"candidates": [...]}``: no tools, no MCP
-    servers, no hooks, no saved session, from an empty directory, input on stdin."""
+    servers, no hooks, no auto-memory, no saved session, from an empty directory, input on
+    stdin."""
     argv = [
         "claude",
         "-p",
@@ -430,9 +432,11 @@ def _ask(instructions: str, stdin: str, model: str, schema: dict, run: Runner, w
         "--strict-mcp-config",
         "--no-session-persistence",
         "--disable-slash-commands",
-        # The operator's own hooks (on the host: every one they have) stay out of a mining run.
+        # The operator's own hooks (on the host: every one they have) stay out of a mining run,
+        # and so does auto-memory, which otherwise leaves a ~/.claude/projects folder for the
+        # throwaway cwd below on every call (--no-session-persistence doesn't stop that).
         "--settings",
-        json.dumps({"disableAllHooks": True}),
+        json.dumps({"disableAllHooks": True, "autoMemoryEnabled": False}),
         "--output-format",
         "json",
         "--json-schema",

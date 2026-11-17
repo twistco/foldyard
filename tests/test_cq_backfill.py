@@ -233,7 +233,12 @@ def test_the_miner_runs_without_tools_mcp_or_a_saved_session():
     for flag in ("--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"):
         assert flag in argv
     assert "--plugin-dir" not in argv  # cq's own MCP server would let it propose by itself
-    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
+    # no auto-memory either: it makes a ~/.claude/projects folder for the throwaway cwd on
+    # every call, which --no-session-persistence alone doesn't stop (Claude Code 2.1.326)
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "disableAllHooks": True,
+        "autoMemoryEnabled": False,
+    }
     assert json.loads(argv[argv.index("--json-schema") + 1])["required"] == ["candidates"]
     assert kw["input"] == "EXCERPT"  # the transcript is stdin, never part of the instructions
     # from an empty dir: no checkout CLAUDE.md is auto-loaded into every mining call
