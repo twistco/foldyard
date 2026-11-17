@@ -1456,9 +1456,15 @@ class DevModeTui(App):
             # below rebinds `host` — never reached after this return, but one refactor away from
             # the picker granting a different row than it named.
             kind, sel_host = sel
-            targets = self._manage_follow.get(sel)
-            if kind in ("follow?", "follow") and targets:
-                # A follow grant: the source's redirects to these targets, not the source itself.
+            if kind in ("follow?", "follow"):
+                # A follow grant: the source's redirects to these targets, never the source
+                # itself — so a row left with none (followed elsewhere since the pane was drawn)
+                # grants nothing, and never falls through to the picker's path grant.
+                targets = self._manage_follow.get(sel)
+                if not targets:
+                    self.notify(f"redirects from {sel_host} are already followed")
+                    self.refresh_panels()
+                    return
                 self.push_screen(
                     AllowHostScreen(sel_host, follow=targets),
                     lambda level: self._after_follow(sel_host, targets, level),

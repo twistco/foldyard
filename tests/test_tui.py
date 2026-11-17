@@ -2716,6 +2716,35 @@ async def test_wall_pane_grants_only_the_targets_a_recommendation_adds(monkeypat
         assert followed == [(source, ["b.example.net"], "once")]
 
 
+async def test_a_follow_row_with_nothing_left_to_grant_never_becomes_a_path_grant(monkeypatch):
+    # Another process followed the last target after the pane was drawn: the row is still a
+    # follow, so `a` grants nothing — never the picker's path grant on the source.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch, pending=[{"host": source, "why": "", "redirects_to": ["a.example.net"]}]
+    )
+    monkeypatch.setattr(tui.allowlist, "unfollowed", lambda e: ([], ["a.example.net"]))
+    calls: list = []
+    monkeypatch.setattr(tui.allowlist, "grant", lambda *a: calls.append(("grant", a)))
+    monkeypatch.setattr(tui.allowlist, "grant_follow", lambda *a: calls.append(("follow", a)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        app.query_one("#network-manage", tui.DataTable).focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert not isinstance(app.screen, tui.AllowHostScreen)
+        await app.workers.wait_for_complete()
+        assert calls == []
+
+
 async def test_wall_pane_re_levels_every_target_of_a_follow_source(monkeypatch):
     # Targets granted at different levels are one row per level, but a source is one decision:
     # `a` on either row names (and re-levels) all of its targets, never only that row's.

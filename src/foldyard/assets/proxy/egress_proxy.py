@@ -2079,11 +2079,10 @@ class Injector:
             entry["misdirected"] = True  # the proxy's own 502 too: it named one that isn't here
         if self._build_flow(flow):
             entry["build"] = True  # a host-started build's request, decrypted (a path grant)
+        # A follow grant let it in: the host whose redirect named it.
         followed = flow.metadata.get("egress_proxy_followed")
         if followed:
-            entry["followed"] = (
-                followed  # a follow grant let it in: the host whose redirect named it
-            )
+            entry["followed"] = followed
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
