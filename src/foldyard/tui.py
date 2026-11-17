@@ -717,6 +717,9 @@ class DevModeTui(App):
         # The wall-management pane (present only when the proxy contributes the Network Log).
         # `_manage_keys` maps its cursor rows back to (kind, host) — see _manage_data.
         self._manage_keys: list[tuple[str, str]] = []
+        # A follow row's targets, by source (``follow?`` a pending recommendation, ``follow`` a
+        # grant): what `a` grants and re-levels — see _manage_data.
+        self._manage_follow: dict[tuple[str, str], list[str]] = {}
         self._manage_sig: tuple = ()
         manage = self.query("#network-manage")
         if manage:
@@ -1452,7 +1455,21 @@ class DevModeTui(App):
             # Its own name, not `host`: the lambda closes over the VARIABLE, and the tree branch
             # below rebinds `host` — never reached after this return, but one refactor away from
             # the picker granting a different row than it named.
-            _kind, sel_host = sel
+            kind, sel_host = sel
+            if kind in ("follow?", "follow"):
+                # A follow grant: the source's redirects to these targets, never the source
+                # itself — so a row left with none (followed elsewhere since the pane was drawn)
+                # grants nothing, and never falls through to the picker's path grant.
+                targets = self._manage_follow.get(sel)
+                if not targets:
+                    self.notify(f"redirects from {sel_host} are already followed")
+                    self.refresh_panels()
+                    return
+                self.push_screen(
+                    AllowHostScreen(sel_host, follow=targets),
+                    lambda level: self._after_follow(sel_host, targets, level),
+                )
+                return
             if self._typed_only(sel_host):
                 return
             self.push_screen(
@@ -1537,6 +1554,22 @@ class DevModeTui(App):
 
         self.run_worker(work, thread=True)
 
+    def _after_follow(self, source: str, targets: list[str], level: str | None) -> None:
+        if not level:
+            return
+        self.notify(f"following redirects from {source} ({level})…")
+
+        def work() -> None:
+            try:
+                allowlist.grant_follow(source, targets, level)
+                ok, msg = True, f"✓ following redirects from {source} ({level})"
+            except Exception as e:  # SystemExit (bad source/target/in-box) or OSError
+                ok, msg = False, f"✗ follow failed: {e}"
+            self.call_from_thread(self.notify, msg, severity=("information" if ok else "error"))
+            self.call_from_thread(self.refresh_panels)
+
+        self.run_worker(work, thread=True)
+
     def _manage_selection(self) -> tuple[str, str] | None:
         """The wall pane's selected ``(kind, host)`` — ``kind`` is ``rec`` (a pending
         recommendation) or ``grant`` — but only while that table has focus, so `a` on the log
@@ -1571,6 +1604,12 @@ class DevModeTui(App):
                 if kind == "rec":
                     allowlist.decline(host)
                     msg = f"✗ {host} declined — not offered again (`fy allow add` re-allows)"
+                elif kind == "follow?":
+                    allowlist.decline_follow(host)
+                    msg = f"✗ redirects from {host} declined — not offered again"
+                elif kind == "follow":
+                    allowlist.revoke_follow(host)
+                    msg = f"✓ redirects from {host} no longer followed"
                 else:
                     allowlist.revoke(host)
                     msg = f"✓ {host} revoked"
@@ -1817,9 +1856,26 @@ class DevModeTui(App):
             enforcing = allowlist.default_deny()
         except Exception:
             return "", [], []
+        try:
+            follows = allowlist.follow_grants()
+        except Exception:
+            follows = []
         rows: list[tuple[str, str, str]] = []
         keys: list[tuple[str, str]] = []
+        self._manage_follow = {}
         for e in pending:
+            if e.get("redirects_to"):
+                # A follow recommendation: its row names where the source may send the box —
+                # the targets not followed yet, which are all `a` grants (as `fy allow sync`
+                # does: an answer never re-levels a target already held).
+                new, held = allowlist.unfollowed(e)
+                note = f"follow → {', '.join(new)}"
+                if held:
+                    note += f" (already following {', '.join(held)})"
+                rows.append(("rec?", e["host"], note))
+                keys.append(("follow?", e["host"]))
+                self._manage_follow[("follow?", e["host"])] = new
+                continue
             rows.append(("rec?", e["host"], e["why"]))
             keys.append(("rec", e["host"]))
         for g in granted:
@@ -1830,6 +1886,16 @@ class DevModeTui(App):
                 notes.append(f"expires {term.stamp(g['expires'])}")
             rows.append((g["level"], g["host"], " · ".join(notes)))
             keys.append(("grant", g["host"]))
+        for f in follows:
+            # A row per source and level (each target keeps its own), but `a` re-levels the
+            # source as one decision: every target it follows, named in the dialog.
+            notes = [f"follow → {', '.join(f['to'])}"]
+            if f["expires"]:
+                notes.append(f"expires {term.stamp(f['expires'])}")
+            rows.append((f["level"], f["source"], " · ".join(notes)))
+            keys.append(("follow", f["source"]))
+            held = self._manage_follow.setdefault(("follow", f["source"]), [])
+            held.extend(t for t in f["to"] if t not in held)
         wall = "ENFORCING" if enforcing else "observing only"
         summary = (
             f"[b]allowlist[/b] — {wall} · {len(granted)} granted"
@@ -1860,7 +1926,9 @@ class DevModeTui(App):
         if not pane or not summary_out:
             return
         summary_out.first(Static).update(Text.from_markup(summary))
-        sig = tuple(rows)
+        # The keys too: one row's text can stand for two kinds (a recommendation's `why` reading
+        # like a follow's), and `a`/`x` act on the key, not the text.
+        sig = (tuple(rows), tuple(keys))
         if sig == self._manage_sig:
             return
         self._manage_sig = sig
@@ -2111,17 +2179,21 @@ class AllowHostScreen(ModalScreen):
         ("permanent", "permanent — kept in the host allow-store, survives restarts"),
     )
 
-    def __init__(self, host: str, *, widens: bool = False) -> None:
+    def __init__(self, host: str, *, widens: bool = False, follow: list[str] | None = None) -> None:
         super().__init__()
         self.host = host
         self.widens = widens  # it has a build-only grant, which this replaces (allowlist.grant)
+        self.follow = follow or []  # a follow grant: the targets its redirects may name
 
     def compose(self) -> ComposeResult:
         with Vertical(id="allow-dialog"):
-            yield Static(
-                Text.from_markup(f"Allow [b]{escape(self.host)}[/b] through the allowlist"),
-                id="allow-title",
+            title = (
+                f"Follow redirects from [b]{escape(self.host)}[/b] to "
+                f"{escape(', '.join(self.follow))} — the box reads the exact URL each names"
+                if self.follow
+                else f"Allow [b]{escape(self.host)}[/b] through the allowlist"
             )
+            yield Static(Text.from_markup(title), id="allow-title")
             if self.widens:
                 yield Static(
                     Text.from_markup(

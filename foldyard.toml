@@ -94,6 +94,13 @@ recommend = [
   { host = "production.cloudfront.docker.com", why = "box image build — Docker Hub blob CDN" },
   { host = "ghcr.io", why = "box image build — the uv binary image layer" },
   { host = "pkg-containers.githubusercontent.com", why = "box image build — ghcr.io blob storage" },
+  # A follow grant (`fy docs networking`): CI logs and artifacts redirect to one of ~200 GitHub
+  # storage accounts, so the box may read the exact URL GitHub's redirect names, nothing else
+  # there. A foldyard before follow grants offers this as a path grant on the source instead.
+  { host = "api.github.com/repos/twistco/foldyard/actions/", redirects_to = [
+    "*.blob.core.windows.net/actions-results/",
+    "results-receiver.actions.githubusercontent.com/rest/runs/",
+  ], why = "CI logs + artifacts (gh run view --log, gh run download)" },
 ]
 # passthrough = ["@all"]   # hosts tunnelled UN-decrypted under capture=on (the toolchain)
 

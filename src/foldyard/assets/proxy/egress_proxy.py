@@ -108,7 +108,9 @@ Without LIVE_FILE:
                     "build_allow": [...]}. An entry with a path, "host/prefix/", is a PATH GRANT:
                     only GET/HEAD under that prefix, decrypted, never blind (see
                     Injector._path_granted) — in "build_allow", for a host-started build only.
-                    Re-read
+                    "follow": [{"from": "host/prefix/", "to": ["*.suffix/path/", ...]}] are the
+                    FOLLOW grants: a redirect read from under "from" to a URL a "to" covers lets
+                    the box read that exact URL for a minute (Injector._vouch_redirect). Re-read
                     per request (mtime-cached) so a host-side `allow` takes effect with NO daemon
                     restart. Missing/malformed ⇒ NO extra allows (fail toward MORE blocking). Only
                     consulted when DEFAULT_DENY is on. Empty → no allowlist file (allow nothing
@@ -275,6 +277,15 @@ _GRANT_PATH_CHARS = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%/]+")
 _REDIRECT_MEMORY_SECONDS = 120.0
 _REDIRECT_MEMORY_MAX = 256
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# A FOLLOW grant (ALLOW_FILE's `follow`: a source path prefix and the targets it may redirect to)
+# lets the box read the one URL such a redirect named, exactly, for a short while — the target
+# chosen by the source's response, never by the box (ADR-0029, amended 2026-11-16). How long a
+# vouched URL stays usable, how many are kept, and how many redirects a chain may follow.
+_VOUCH_SECONDS = 60.0
+_VOUCH_MAX = 256
+_VOUCH_HOPS = 3
+# What a follow target's host may hold (after `*.`): a DNS name, nothing a glob or a port hides in.
+_TARGET_HOST_CHARS = re.compile(r"[a-z0-9.-]+")
 
 # The 403 body the box sees for a host the allowlist refuses. Grants are made on the host
 # machine (never from the box), so the body says where the fix is run.
@@ -486,6 +497,57 @@ def _path_grants(keys: list[str]) -> dict[str, tuple[str, ...]]:
         if parsed is not None and parsed[0]:
             out.setdefault(parsed[0], set()).add(parsed[1])
     return {host: tuple(sorted(prefixes)) for host, prefixes in out.items()}
+
+
+def _follow_target(key: object) -> tuple[str, str] | None:
+    """A follow grant's target ``(host, prefix)`` — ``*.blob.core.windows.net/actions-results/``
+    → ``("*.blob.core.windows.net", "/actions-results/")``, a bare host → ``(host, "")`` (any
+    path) — or None. The host may be a ``*.suffix`` glob: the redirect names the exact host and
+    the pattern only bounds it. A DNS name: no port, and a top-level label with a letter, so no
+    pattern holds an address (and a vouched address is refused again:
+    :meth:`Injector._vouch_redirect`). A prefix is judged as a path grant's.
+    foldyard's ``allowlist.follow_target`` is the same rule; a test holds the two equal."""
+    if not isinstance(key, str) or not key or key != key.strip():
+        return None
+    raw_host, sep, rest = key.partition("/")
+    host = _norm_host(raw_host) or ""
+    bare = host[2:] if host.startswith("*.") else host
+    if not _TARGET_HOST_CHARS.fullmatch(bare) or "." not in bare or not all(bare.split(".")):
+        return None
+    if not any(c.isalpha() for c in bare.rsplit(".", 1)[-1]):
+        return None  # a top-level label of digits: an address (`*.0.0.1` holds 127.0.0.1)
+    if not sep:
+        return host, ""
+    prefix = "/" + rest
+    if prefix == "/" or "?" in rest or _plain_path(prefix) != prefix:
+        return None
+    return host, prefix
+
+
+def _follow_rules(value: object) -> tuple[tuple[str, str, str, tuple[tuple[str, str], ...]], ...]:
+    """ALLOW_FILE's ``follow`` → ``(key, source host, source prefix, targets)`` per rule, the key
+    the source as foldyard stores it. Fails closed: an entry whose source isn't a path grant
+    (:func:`_path_grant` — an exact host and at least one segment, never a whole host), or that
+    names no valid target, follows nothing; an invalid target is never followed to."""
+    if not isinstance(value, list):
+        return ()
+    out = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        source, to = entry.get("from"), entry.get("to")
+        parsed = _path_grant(source) if isinstance(source, str) else None
+        if parsed is None or not parsed[0] or not isinstance(to, list):
+            continue
+        targets = tuple(t for t in map(_follow_target, to) if t is not None)
+        if targets:
+            out.append((parsed[0] + parsed[1], parsed[0], parsed[1], targets))
+    return tuple(out)
+
+
+def _follows_to(host: str, path: str, targets: tuple[tuple[str, str], ...]) -> bool:
+    """Does one of a follow grant's ``targets`` hold ``host`` + ``path`` (a judged plain path)?"""
+    return any(_host_matches(host, [h]) and (not p or _under(path, p)) for h, p in targets)
 
 
 def _outside_body(host: str, prefixes: tuple[str, ...]) -> bytes:
@@ -1268,6 +1330,19 @@ class Injector:
         # (host, path) a granted host's redirect pointed at → (the redirecting host, when): named
         # on the refusal of the request that follows, so the operator sees why the host came up.
         self._redirects: dict[tuple[str, str], tuple[str, float]] = {}
+        # The follow grants (ALLOW_FILE's `follow`, see `_follow_rules`), and what they vouched
+        # for: (host, path with query) a follow grant's source redirected to → (rule key, the
+        # redirecting host, links so far, when, the judged path without its query). Bounded and
+        # short-lived, like `_redirects` — but this one ALLOWS: that exact URL, read-only, while
+        # its rule still targets it (`_vouch_for`).
+        self._follows: tuple[tuple[str, str, str, tuple[tuple[str, str], ...]], ...] = ()
+        self._vouched: dict[tuple[str, str], tuple[str, str, int, float, str]] = {}
+        # (client id, host) → the keys of the rules whose vouched reads went out on that
+        # connection (h2 may carry several): that host stays judged request by request for it
+        # (never blind, raw bytes never relayed) until it closes, so a download outlives the
+        # vouch — and ends when any of those rules stops reaching the host (`_sweep`). Dropped
+        # on disconnect and on close.
+        self._vouch_conns: dict[tuple[str, str], set[str]] = {}
         # host key → monotonic time of its last would-block row (see _WOULD_BLOCK_EVERY).
         self._would_block_seen: dict[str, float] = {}
         # The live build secrets' hashes → expiry (BUILD_TOKENS_FILE, written by the host's build
@@ -1705,6 +1780,9 @@ class Injector:
                 build = [str(p) for p in build] if isinstance(build, list) else []
                 self._build_patterns = [p for p in build if "/" not in p]
                 self._build_path_grants = _path_grants([p for p in build if "/" in p])
+                # Runtime only: a follow lets whoever sent the request read where it was sent,
+                # and a runtime grant answers a build as it does the box.
+                self._follows = _follow_rules(data.get("follow"))
         if self._grant_state() != before:
             self._policy_dirty = True  # a grant came or went: `refresh` re-judges open tunnels
 
@@ -1714,11 +1792,13 @@ class Injector:
             self._build_patterns,
             self._path_grants,
             self._build_path_grants,
+            self._follows,
         )
 
     def _clear_grants(self) -> None:
         self._allow_patterns, self._build_patterns = [], []
         self._path_grants, self._build_path_grants = {}, {}
+        self._follows = ()
 
     def _allowed(self, host: str | None) -> bool:
         """True if `host` may egress under default-deny: any injector host is always exempt (we must
@@ -1744,16 +1824,70 @@ class Injector:
         return prefixes
 
     def _path_only(self, host: str | None, build: bool = False) -> bool:
-        """Is ``host`` granted (to this client: a ``build`` or the box) for some paths and not as
-        a whole? Such a host is reached only decrypted, request by request
-        (:meth:`_path_granted`): its CONNECT is answered in the proxy, its dial waits for a
-        ClientHello, and it is never blind-tunnelled."""
-        return bool(self._path_prefixes(host, build))
+        """Is ``host`` reached (by this client: a ``build`` or the box) for some requests and not
+        as a whole — granted for some paths, or holding a URL a follow grant vouched for
+        (:meth:`_vouched_only`)? Such a host is reached only decrypted, request by request
+        (:meth:`_path_granted`, :meth:`_vouch_for`): its CONNECT is answered in the proxy, its
+        dial waits for a ClientHello, and it is never blind-tunnelled."""
+        return bool(self._path_prefixes(host, build)) or self._vouched_only(host, build)
+
+    def _vouched_only(self, host: str | None, build: bool = False) -> bool:
+        """Does ``host`` hold a live vouched URL, or a connection one went out on, and no grant of
+        the whole host (to this client)?"""
+        if not host or host not in self._vouch_hosts():
+            return False
+        return not (self._allowed(host) or (build and self._build_granted(host, 443, 443)))
+
+    def _vouch_hosts(self) -> set[str]:
+        """The hosts a follow grant reaches right now: each live vouched URL's, and each open
+        connection's a vouched read went out on — while the rule that vouched still targets it
+        (:meth:`_rule_reaches`)."""
+        self._refresh_allow()
+        now = time.monotonic()
+        live = {
+            host
+            for (host, _), (key, _, _, at, path) in self._vouched.items()
+            if now - at <= _VOUCH_SECONDS and self._rule_reaches(key, host, path)
+        }
+        return live | {
+            host
+            for (_, host), keys in self._vouch_conns.items()
+            if any(self._rule_reaches(key, host) for key in keys)
+        }
+
+    def _rule_reaches(self, key: str, host: str, path: str | None = None) -> bool:
+        """Does the follow grant ``key`` reach ``host`` NOW — one of its current targets' host
+        patterns holds it, and, given a judged ``path``, that target's prefix holds the path too?
+        A rule's key is its source, which outlives a change to its targets. Judged on the rules
+        as last read: the caller refreshes them once (`_refresh_allow` stats the file), not this
+        per voucher."""
+        for rule_key, _source, _prefix, targets in self._follows:
+            if rule_key != key:
+                continue
+            if path is None:
+                if any(_host_matches(host, [h]) for h, _ in targets):
+                    return True
+            elif _follows_to(host, path, targets):
+                return True
+        return False
+
+    @staticmethod
+    def _plain_read(request) -> bool:
+        """Is ``request`` a READ and nothing more: GET or HEAD, no body, no ``Upgrade`` (a
+        WebSocket or h2c would turn one read into a channel)? What a path grant and a vouched URL
+        let through, and nothing else."""
+        if request.method not in _PATH_METHODS:
+            return False
+        headers = request.headers
+        if "upgrade" in headers or "transfer-encoding" in headers:
+            return False
+        if headers.get("content-length", "0").strip() not in ("", "0"):
+            return False
+        return not request.raw_content  # judged with its body in (`request`, no `requestheaders`)
 
     def _path_granted(self, request, build: bool = False) -> bool:
-        """Does a path grant let ``request`` through? Only a read: GET or HEAD, no body, no
-        ``Upgrade`` (a WebSocket or h2c would turn one read into a channel), on the ports a bare
-        grant covers (HTTPS :443, cleartext :80), at or under a granted prefix of its
+        """Does a path grant let ``request`` through? Only a read (:meth:`_plain_read`), on the
+        ports a bare grant covers (HTTPS :443, cleartext :80), at or under a granted prefix of its
         destination, judged on the raw path before the query — and a path :func:`_plain_path`
         can judge at all."""
         host = _destination(request)
@@ -1761,17 +1895,96 @@ class Injector:
         if not host or not prefixes:
             return False
         default = _HTTPS_PORT if request.scheme == "https" else _HTTP_PORT
-        if request.port != default or request.method not in _PATH_METHODS:
-            return False
-        headers = request.headers
-        if "upgrade" in headers or "transfer-encoding" in headers:
-            return False
-        if headers.get("content-length", "0").strip() not in ("", "0"):
-            return False
-        if request.raw_content:  # judged with its body in (`request` without `requestheaders`)
+        if request.port != default or not self._plain_read(request):
             return False
         path = _plain_path(request.path)
         return path is not None and any(_under(path, p) for p in prefixes)
+
+    def _vouch_for(self, request) -> tuple[str, str, int] | None:
+        """The follow grant that vouched for ``request`` — ``(rule key, the redirecting host,
+        links so far)`` — or None. Only a read (:meth:`_plain_read`), over HTTPS on :443, of
+        EXACTLY the URL the redirect named, query included, while the vouch is live and its rule
+        still targets that host and path: nothing about the request is the box's choice but
+        whether to send it."""
+        host = _destination(request)
+        if not host or request.scheme != "https" or request.port != _HTTPS_PORT:
+            return None
+        if not self._plain_read(request):
+            return None
+        hit = self._vouched.get((host, str(request.path)))
+        if hit is None:
+            return None
+        key, via, hops, at, path = hit
+        self._refresh_allow()
+        if time.monotonic() - at > _VOUCH_SECONDS or not self._rule_reaches(key, host, path):
+            return None
+        return key, via, hops
+
+    def _follow_rule(self, flow: http.HTTPFlow) -> tuple[tuple, int] | None:
+        """The follow grant ``flow``'s redirect is judged under, with the links before it: the
+        rule whose source prefix holds the request (none before it), else — for a request a
+        follow grant vouched for — that rule again, one link further, up to :data:`_VOUCH_HOPS`.
+        HTTPS on :443 only: a redirect read in the clear could be anyone's."""
+        request = flow.request
+        source = _destination(request)
+        if not source or request.scheme != "https" or request.port != _HTTPS_PORT:
+            return None
+        self._refresh_allow()
+        path = _plain_path(request.path)
+        if path is not None:
+            for rule in self._follows:
+                if rule[1] == source and _under(path, rule[2]):
+                    return rule, 0
+        prior = flow.metadata.get("egress_proxy_vouched")
+        if isinstance(prior, tuple) and prior[2] < _VOUCH_HOPS:
+            for rule in self._follows:
+                if rule[0] == prior[0]:
+                    return rule, prior[2]
+        return None
+
+    def _vouch_redirect(self, flow: http.HTTPFlow) -> None:
+        """Vouch for where a follow grant's source redirected: the ``Location`` an upstream sent
+        (decrypted: the proxy read it from the real host, never from the box), when it is an
+        ``https`` URL on :443 to a NAME one of the rule's targets holds, on a path
+        :func:`_plain_path` can judge. The box may then read that URL, exactly, for
+        :data:`_VOUCH_SECONDS` (:meth:`_vouch_for`) — the one URL the source chose. An address is
+        never followed: a target names DNS hosts, and an address is a grant of its own."""
+        response = flow.response
+        if response is None or response.status_code not in _REDIRECT_STATUSES:
+            return
+        location = response.headers.get("location")
+        if not location:
+            return
+        found = self._follow_rule(flow)
+        if found is None:
+            return
+        (key, _source_host, _prefix, targets), hops = found
+        from urllib.parse import urljoin, urlsplit
+
+        try:
+            target = urlsplit(urljoin(flow.request.url, location))
+            port = target.port
+        except ValueError:
+            return
+        host = _norm_host(target.hostname)
+        if target.scheme != "https" or port not in (None, _HTTPS_PORT) or not host:
+            return
+        if target.username is not None or target.password is not None or _address(host):
+            return
+        path = _plain_path(target.path or "/")
+        if path is None or not _follows_to(host, path, targets):
+            return
+        now = time.monotonic()
+        stale = [k for k, v in self._vouched.items() if now - v[3] > _VOUCH_SECONDS]
+        for stale_key in stale:
+            del self._vouched[stale_key]
+        while len(self._vouched) >= _VOUCH_MAX:
+            del self._vouched[next(iter(self._vouched))]
+        url = path + (f"?{target.query}" if target.query else "")
+        via = _destination(flow.request) or ""
+        self._vouched.pop((host, url), None)  # re-inserted last: the newest is evicted last
+        self._vouched[(host, url)] = (key, via, hops + 1, now, path)
+        ctx.log.info(f"egress_proxy: {via} redirected to {host} — followed (follow grant {key})")
 
     def _note_redirect(self, flow: http.HTTPFlow) -> None:
         """Remember where a redirect points when it leaves its host for one the box can't reach
@@ -1866,6 +2079,10 @@ class Injector:
             entry["misdirected"] = True  # the proxy's own 502 too: it named one that isn't here
         if self._build_flow(flow):
             entry["build"] = True  # a host-started build's request, decrypted (a path grant)
+        # A follow grant let it in: the host whose redirect named it.
+        followed = flow.metadata.get("egress_proxy_followed")
+        if followed:
+            entry["followed"] = followed
         ua = _user_agent(flow.request)
         if ua:
             entry["ua"] = ua
@@ -1975,7 +2192,7 @@ class Injector:
             if self._trusted_build(request):
                 entry["build"] = True
             if request.method != "CONNECT":
-                if self._path_only(host, build):
+                if self._path_prefixes(host, build):
                     entry["outside"] = True  # the host is granted for some paths, not this one
                 via = self._redirected_from(_destination(request), request.path)
                 if via:
@@ -2450,6 +2667,7 @@ class Injector:
         self._conns.pop(client.id, None)
         self._origins.pop(client.id, None)
         self._path_dials = {pair for pair in self._path_dials if pair[0] != client.id}
+        self._vouch_conns = {k: v for k, v in self._vouch_conns.items() if k[0] != client.id}
 
     def _tunnel(self, target: str | None, build: bool) -> bool:
         """Would a TLS connection to ``target`` be blind-tunnelled now? (``tls_clienthello``.)"""
@@ -2477,6 +2695,21 @@ class Injector:
             key = host if port == _HTTPS_PORT else f"{host}:{port}"
             why = "the allowlist refuses it now" if refused else "it is decrypted now"
             self._close(client_id, key, why)
+        # Each connection a vouched read went out on, judged by the rules whose reads it carried
+        # — never by what else reaches its host (another rule's vouch, a path grant): one of them
+        # gone, or no longer targeting the host, ends it, and the client reconnects to be judged
+        # afresh. Its CONNECT may never have been let through (answered before the vouch, so not
+        # in `_conns`): this is then the only thing that ties it to a rule.
+        for (client_id, host), keys in list(self._vouch_conns.items()):
+            if not self.default_deny or (client_id, host) not in self._vouch_conns:
+                continue  # observing, or closed above (`_close` drops its entries)
+            if all(self._rule_reaches(key, host) for key in keys):
+                continue
+            build = client_id in self._build_clients or client_id in self._build_requesters
+            whole = build and self._build_granted(host, _HTTPS_PORT, _HTTPS_PORT)
+            if self._allowed(host) or whole:
+                continue  # granted as a whole: the wall would let its CONNECT through now
+            self._close(client_id, host, "its follow grant no longer reaches it")
         for client_id, dials in list(self._local_dials.items()):
             if client_id not in self._local_dials:  # closed by the loop above
                 continue
@@ -2498,6 +2731,7 @@ class Injector:
         self._local_dials.pop(client_id, None)
         self._raw_clients.discard(client_id)
         self._build_clients.discard(client_id)
+        self._vouch_conns = {k: v for k, v in self._vouch_conns.items() if k[0] != client_id}
         try:
             handler = ctx.master.addons.get("proxyserver").connections[client_id]
             handler.close_connection(handler.client)
@@ -2653,7 +2887,12 @@ class Injector:
         ip = _address(host) if host else None
         # A local address is judged in every mode (its dial was), so its raw bytes are too.
         enforced = self.default_deny or (ip is not None and _is_local(ip))
-        if not enforced or not self._path_only(host, build):
+        # A connection dialled only to be judged request by request stays so, whatever changed
+        # since: a vouched URL lapsing must not turn its tunnel into a raw one.
+        earned = (
+            client_id is not None and host is not None and (client_id, host) in self._path_dials
+        )
+        if not enforced or not (self._path_only(host, build) or earned):
             return
         if flow.messages:
             flow.messages[-1].content = b""
@@ -2675,6 +2914,7 @@ class Injector:
         (:func:`_relays_as_it_arrives`). mitmproxy reads ``response.stream`` right after this hook;
         a response the proxy answered itself (a refusal, a held or failed mint) never reaches it."""
         self._mark_push_allowed(flow)
+        self._vouch_redirect(flow)
         self._note_redirect(flow)
         if flow.response is not None and _relays_as_it_arrives(flow.response.status_code):
             flow.response.stream = True
@@ -2828,6 +3068,21 @@ class Injector:
             client_id = _client_id(flow)
             if client_id is not None and host:
                 self._path_dials.add((client_id, host))  # a cleartext request: its dial follows
+        vouch = self._vouch_for(flow.request)
+        if vouch is not None:
+            # Looked up whatever else allows the request: a link of a chain may be granted on its
+            # own, and its redirect is still judged under the rule (`_follow_rule`, hops).
+            flow.metadata["egress_proxy_vouched"] = vouch
+        if vouch is not None and not allowed:
+            # The exact URL a follow grant's source redirected to: a read, as a path grant's.
+            allowed = True
+            flow.metadata["egress_proxy_followed"] = vouch[1]  # the log's `followed from`
+            flow.metadata["egress_proxy_path_read"] = True  # `requestheaders` drops any body
+            client_id = _client_id(flow)
+            if client_id is not None and host:
+                self._path_dials.add((client_id, host))
+                self._vouch_conns.setdefault((client_id, host), set()).add(vouch[0])
+            self._owe_nothing(flow)  # a CONNECT answered before the vouch owes no refusal row
         if not allowed and build:
             allowed = self._build_granted(host, port, default)
             client = getattr(flow, "client_conn", None)
@@ -2923,6 +3178,11 @@ class Injector:
             and not flow.metadata.get("egress_proxy_retried")  # at most once — loop guard
         ):
             await self._reissue_401(flow, rule)
+            if flow.metadata.get("egress_proxy_retried"):
+                # The re-issue's response replaced the 401 `responseheaders` judged (a 401 is no
+                # redirect, so nothing was vouched for there): a redirect it brought back is
+                # judged now, once.
+                self._vouch_redirect(flow)
         self._mark_push_allowed(flow)
         if flow.metadata.get("egress_proxy_liveness"):
             return  # the supervisor's probe, every tick: nothing went anywhere

@@ -3,8 +3,10 @@ and nothing else on it.
 
 The case they exist for is a redirect: a granted CDN (``cdn.playwright.dev``) sends a browser
 download to one bucket of a shared host (``storage.googleapis.com/chrome-for-testing-public/``),
-where granting the host would grant every bucket on it, uploads included. Following redirects in
-the proxy instead was rejected: an open redirector on any granted host would then reach anywhere.
+where granting the host would grant every bucket on it, uploads included. Following a granted
+host's redirects instead was rejected: an open redirector on it would then reach anywhere. (A
+follow grant trusts one source PATH's redirects instead, for targets that move:
+``test_proxy_follow.py``.)
 
 What the grant must hold, each pinned below against the REAL addon over a stubbed mitmproxy (the
 wire path — the dial counted on a real socket — is ``test_proxy_wall_e2e.py``):

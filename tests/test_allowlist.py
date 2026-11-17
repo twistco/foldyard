@@ -800,6 +800,7 @@ def test_a_runtime_grant_replaces_a_build_one(env):
         "default_deny": allowlist.default_deny(),
         "allow": ["pypi.org"],
         "build_allow": [],
+        "follow": [],
     }
 
 

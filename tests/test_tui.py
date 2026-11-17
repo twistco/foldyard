@@ -2485,9 +2485,10 @@ async def test_host_log_pane_handles_a_missing_logfile(monkeypatch, tmp_path):
 # ── the Network Log's wall pane (grants + pending `[proxy] recommend` offers) ─────────
 
 
-def _stub_wall(monkeypatch, pending=(), granted=(), enforcing=True):
+def _stub_wall(monkeypatch, pending=(), granted=(), enforcing=True, follows=()):
     monkeypatch.setattr(tui.allowlist, "pending_recommendations", lambda: list(pending))
     monkeypatch.setattr(tui.allowlist, "grants", lambda: list(granted))
+    monkeypatch.setattr(tui.allowlist, "follow_grants", lambda: list(follows))
     monkeypatch.setattr(tui.allowlist, "default_deny", lambda: enforcing)
 
 
@@ -2630,6 +2631,181 @@ async def test_wall_pane_x_declines_a_rec_and_revokes_a_grant(monkeypatch):
         await pilot.press("x")  # row 1: the grant → revoke
         await app.workers.wait_for_complete()
         assert declined == ["unpkg.com"] and revoked == ["pypi.org"]
+
+
+async def test_wall_pane_grants_and_removes_a_follow_as_a_follow(monkeypatch):
+    # A follow row's `a` makes a follow grant with its targets, never a path grant on its source,
+    # and `x` takes the follow alone: a path grant on the same key is another decision.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    targets = ["*.blob.core.windows.net/actions-results/"]
+    _stub_wall(
+        monkeypatch,
+        pending=[{"host": source, "why": "CI logs", "redirects_to": targets}],
+        follows=[{"source": "cdn.example.com/dl/", "to": ["objects.example.net"],
+                  "level": "session", "expires": None}],
+    )  # fmt: skip
+    followed: list[tuple] = []
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    monkeypatch.setattr(tui.allowlist, "grant", lambda *a: calls.append(("grant", a[0])))
+    monkeypatch.setattr(tui.allowlist, "revoke", lambda h: calls.append(("revoke", h)))
+    monkeypatch.setattr(tui.allowlist, "revoke_follow", lambda h: calls.append(("unfollow", h)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        assert app._manage_keys == [("follow?", source), ("follow", "cdn.example.com/dl/")]
+        assert "follow → *.blob.core.windows.net/actions-results/" in str(table.get_row_at(0)[2])
+        table.focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen)
+        assert "Follow redirects from" in _text(app.screen.query_one("#allow-title", tui.Static))
+        await pilot.press("p")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, targets, "permanent")] and calls == []
+        table.move_cursor(row=1)
+        await pilot.press("x")
+        await app.workers.wait_for_complete()
+        assert calls == [("unfollow", "cdn.example.com/dl/")]
+
+
+async def test_wall_pane_grants_only_the_targets_a_recommendation_adds(monkeypatch):
+    # As `fy allow sync` does: a follow recommendation that adds a target is answered for that
+    # target alone, and the one already followed keeps its level (the row says it's held).
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch,
+        pending=[{"host": source, "why": "", "redirects_to": ["a.example.net", "b.example.net"]}],
+    )
+    monkeypatch.setattr(
+        tui.allowlist, "unfollowed", lambda e: (["b.example.net"], ["a.example.net"])
+    )
+    followed: list[tuple] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        note = str(table.get_row_at(0)[2])
+        assert "follow → b.example.net" in note and "already following a.example.net" in note
+        table.focus()
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, ["b.example.net"], "once")]
+
+
+async def test_a_follow_row_with_nothing_left_to_grant_never_becomes_a_path_grant(monkeypatch):
+    # Another process followed the last target after the pane was drawn: the row is still a
+    # follow, so `a` grants nothing — never the picker's path grant on the source.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch, pending=[{"host": source, "why": "", "redirects_to": ["a.example.net"]}]
+    )
+    monkeypatch.setattr(tui.allowlist, "unfollowed", lambda e: ([], ["a.example.net"]))
+    calls: list = []
+    monkeypatch.setattr(tui.allowlist, "grant", lambda *a: calls.append(("grant", a)))
+    monkeypatch.setattr(tui.allowlist, "grant_follow", lambda *a: calls.append(("follow", a)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        app.query_one("#network-manage", tui.DataTable).focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert not isinstance(app.screen, tui.AllowHostScreen)
+        await app.workers.wait_for_complete()
+        assert calls == []
+
+
+async def test_wall_pane_re_levels_every_target_of_a_follow_source(monkeypatch):
+    # Targets granted at different levels are one row per level, but a source is one decision:
+    # `a` on either row names (and re-levels) all of its targets, never only that row's.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch,
+        follows=[
+            {"source": source, "to": ["a.example.net"], "level": "permanent", "expires": None},
+            {"source": source, "to": ["b.example.net"], "level": "session", "expires": None},
+        ],
+    )
+    followed: list[tuple] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        assert app._manage_keys == [("follow", source), ("follow", source)]
+        table.focus()
+        table.move_cursor(row=1)
+        await pilot.press("a")
+        await pilot.pause()
+        assert "a.example.net, b.example.net" in _text(
+            app.screen.query_one("#allow-title", tui.Static)
+        )
+        await pilot.press("p")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, ["a.example.net", "b.example.net"], "permanent")]
+
+
+async def test_wall_pane_repaints_when_only_a_rows_kind_changed(monkeypatch):
+    # The same text can belong to two kinds of row: an ordinary recommendation whose `why` reads
+    # like a follow's, then a follow recommendation on the same source. The pane must take the new
+    # kind, or `a` grants a path where a follow was asked for.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "cdn.example.com/dl/"
+    _stub_wall(monkeypatch, pending=[{"host": source, "why": "follow → objects.example.net"}])
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        assert app._manage_keys == [("rec", source)]
+        _stub_wall(
+            monkeypatch,
+            pending=[{"host": source, "why": "", "redirects_to": ["objects.example.net"]}],
+        )
+        app.refresh_panels()
+        assert app._manage_keys == [("follow?", source)]
 
 
 async def test_x_is_gated_to_the_network_tab(monkeypatch):

@@ -404,6 +404,10 @@ def _net_leaf_body(e: dict, escape) -> str:
         # The proxy's own 502 too: the request carried the dummy of a credential that doesn't
         # cover its path, where another credential applies.
         mark = "placeholder out of scope"
+    followed = e.get("followed")
+    if isinstance(followed, str) and followed and not mark:
+        # A follow grant let this read through: the URL a redirect from that host named (ADR-0029).
+        mark = f"followed from {escape(followed[:60])}"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"

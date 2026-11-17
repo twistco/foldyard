@@ -240,9 +240,11 @@ marks it `outside the paths this host is granted for`.
 reach, the proxy remembers the target for two minutes. If the box's request to it is then refused,
 the `403` names the host that redirected and suggests the path grant
 (`fy allow add storage.googleapis.com/chrome-for-testing-public/`), and the Network Log row says
-`redirected from cdn.playwright.dev`. The proxy doesn't follow redirects for the box, because then a
-host you granted would decide where the box can go. Any host with an open redirect (a `?next=`
-login, a link shortener) would send a request, and whatever it carries, anywhere.
+`redirected from cdn.playwright.dev`. A granted host's redirects aren't followed on its say-so,
+because then a host you granted would decide where the box can go. Any host with an open redirect (a
+`?next=` login, a link shortener) would send a request, and whatever it carries, anywhere. When the
+target moves around, a [follow grant](#follow-grants-where-a-trusted-path-redirects) trusts one
+path's redirects instead.
 
 In `fy tui`, put the cursor on the refused request in the Network Log and press `a`. It offers the
 request's first three directories (`storage.googleapis.com/chrome-for-testing-public/`, then one
@@ -255,6 +257,45 @@ revokes it, and a repo can ask for one in [`[proxy] recommend`](configuration.md
 (`{ host = "storage.googleapis.com/chrome-for-testing-public/", why = "…" }`), which a grant of the
 whole host also answers. Making it answers the host in the Network Log, so a refusal outside the
 path doesn't ask about the whole host again.
+
+### Follow grants: where a trusted path redirects
+
+A path grant needs the target to stay put. Some don't: GitHub's job logs and artifacts
+(`gh run view --log`, `gh run download`) redirect to one of GitHub's Azure storage accounts,
+`productionresultssa<N>.blob.core.windows.net`, a different one from run to run, and there are about
+two hundred of them. Listing them goes stale, and `*.blob.core.windows.net` would let the box reach
+every storage account, including one anyone can create and upload to. Only GitHub's own redirect
+says which account is GitHub's, so a **follow grant** takes the target from that response:
+
+```bash
+fy allow add api.github.com/repos/<owner>/<repo>/actions/ \
+  --redirects-to '*.blob.core.windows.net/actions-results/' \
+  --redirects-to results-receiver.actions.githubusercontent.com/rest/runs/ \
+  --level permanent
+```
+
+When a request under that path gets a redirect to a URL one of the targets covers, the box may read
+**that exact URL**, query included, for a minute: `GET` or `HEAD`, no body, over HTTPS on `:443`. A
+chain is followed under the same grant, up to three redirects. Here GitHub's run-log redirect goes
+through `results-receiver` to a storage account. The box chooses nothing about the URL but whether
+to fetch it. The target host is reached the way a path-granted one is: always decrypted, nothing
+dialled until the client's TLS handshake, nothing on it but the reads that were vouched for. A
+download that outlasts the minute isn't cut off, and revoking the grant ends it.
+
+The source is a path, never a whole host, and that's the part to judge before you grant one: you're
+trusting where that path redirects. If something under it takes a target from the caller (a `?next=`
+or `return_to=` parameter), the box could pick the URL within the targets. The same goes for each
+link of a chain: a URL the source sent the box to may redirect again within the targets, so you're
+trusting the targets' redirects too. Keep the source as narrow as the redirects you want and the
+targets as narrow as where they go. A target is a name (`host` or `*.suffix`, optionally a path),
+never an address or a port. The grant itself lets nothing through to the source: `api.github.com` is
+reached as usual, by its own grant or an `[[inject]]` row.
+
+The Network Log marks a read let through this way `followed from <host>`. `fy allow list` shows
+follow grants apart from the others. `fy allow remove <source>` revokes one, along with a path grant
+on the same key if there is one; in `fy tui`, `x` on the row removes the follow alone. A repo asks
+for one with `redirects_to` in [`[proxy] recommend`](configuration.md#proxy). It is offered on its
+own line, saying what a yes means, and declined apart from a grant of the same path.
 
 ### The VM firewall
 
