@@ -14,9 +14,9 @@ project, running rootless Podman. It mounts your repo (and its worktrees) and no
 computer. Everything that runs untrusted code runs in here. The README calls it *the yard*, after
 the farmyard where animals are penned for the night.
 
-**The box** (*the dev box*) — the long-lived container inside the VM where you and your agent
-work: `fy box shell`, `fy claude`, `fy codex`, `fy copilot`. It has the repo, your toolchain and
-the VM's container socket, and no credentials.
+**The box** (*the dev box*) — the long-lived container inside the VM where you and your agent work:
+`fy box shell`, `fy claude`, `fy codex`, `fy copilot`. It has the repo, your toolchain and the VM's
+container socket, and no credentials.
 
 **The stack** — your compose services (databases, API servers, emulators), run in the same VM by
 `fy up`. Services reach each other by container name; your computer reaches them on the ports in

@@ -175,9 +175,9 @@ manager:
 - **Claude with an API key:** create one at https://console.anthropic.com/settings/keys (it starts
   `sk-ant-api`). Make sure the account has credit.
 - **Codex with an API key:** create one at https://platform.openai.com/api-keys (it starts `sk-`).
-- **Codex with a ChatGPT subscription:** install the [Codex CLI](https://github.com/openai/codex)
-  on your computer, not only in an editor, and run `codex login` there once. foldyard reads that
-  login on your computer and keeps it fresh; nothing is pasted.
+- **Codex with a ChatGPT subscription:** install the [Codex CLI](https://github.com/openai/codex) on
+  your computer, not only in an editor, and run `codex login` there once. foldyard reads that login
+  on your computer and keeps it fresh; nothing is pasted.
 - **GitHub Copilot:** a fine-grained PAT with Copilot access from
   https://github.com/settings/personal-access-tokens/new (it starts `github_pat_`), or a
   `gh auth token` (starts `gho_`). Classic `ghp_` PATs are refused by Copilot itself.

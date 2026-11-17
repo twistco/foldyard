@@ -278,11 +278,11 @@ line per attempt. Pasting a missing secret into `host.env` takes effect straight
 service holds up only the requests that need its credential; the rest of the box's traffic carries
 on.
 
-`fy claude`, `fy codex` and `fy copilot` check first: with the agent's switch off they say so
-before launching and, in a terminal, wait for you to switch it on from your computer (Enter
-launches anyway). That covers starting a session; the proxy's answer covers the rest — a time
-limit running out mid-session, or an agent started some other way — and the first such answer per
-switch also raises a notification on your computer.
+`fy claude`, `fy codex` and `fy copilot` check first: with the agent's switch off they say so before
+launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
+anyway). That covers starting a session; the proxy's answer covers the rest — a time limit running
+out mid-session, or an agent started some other way — and the first such answer per switch also
+raises a notification on your computer.
 
 Codex on a ChatGPT subscription shows the proxy's message only in passing (a failed model-list
 refresh), then stops on its startup workspace discovery, which reports any failure as a fixed

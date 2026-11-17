@@ -694,9 +694,10 @@ enforce = "learn"
   `init` seeds it with the box-bootstrap hosts. Declared `[claude]`/`[codex]`/`[copilot]` tables
   (and any plugin with an `egress_recommend` hook) add the hosts their own installers reach
   (`claude.ai`/`downloads.claude.ai`, `chatgpt.com`/`releases.openai.com`,
-  `github.com`/`raw.githubusercontent.com`) — don't list those.
-  `fy allow sync --yes` grants every pending host permanently for unattended setup; without it,
-  a run with no terminal grants nothing. `fy config widenings` shows each entry's answer.
+  `github.com`/`raw.githubusercontent.com`) — don't list those. `fy allow sync --yes` grants every
+  pending host permanently for unattended setup; without it, a run with no terminal grants nothing.
+  `fy config widenings` shows each entry's answer.
+
 - **`passthrough`** — trusted hosts the proxy tunnels *without* decrypting; everything else is
   decrypted and logged, always ([ADR-0029](./adrs/0029-the-proxy-always-decrypts.md)). Entries are
   exact hosts, `*.suffix` globs, or `@bundle` names (`@all` = every built-in toolchain bundle).
@@ -1188,38 +1189,37 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
 
 - **`[copilot]`** — installs the GitHub Copilot CLI at box-up (its installer's static release
   tarball) and mounts its `$COPILOT_HOME` (login, settings, `session-state`).
+
   - **`keyless`** — `"api-key"` (or `true`) keeps the real token out of the box: the box holds a
-    dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with `Bearer ` + your
-    token from `host.env`. Copilot validates the token on `api.github.com` before its first call
-    and then talks to a **plan-specific** API host (individual/business/enterprise), so the
-    injection covers every host that can carry it, not one. Default: off (normal login). A PAT
-    must be one Copilot accepts: a fine-grained PAT, a `gh auth token` OAuth token (`gho_`) or a
-    `ghu_` token. Classic `ghp_` PATs are refused by Copilot itself, so foldyard refuses to
-    store one too. A keyless `[copilot]` also needs `api.github.com` to itself: the two GitHub
-    `[[inject]]` rows deliver a credential to that same host, and one host takes one injection
-    rule — turn those rows off while a Copilot rung is on (`fy mode` reports the conflict and
-    the fix).
+    dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with `Bearer ` + your token
+    from `host.env`. Copilot validates the token on `api.github.com` before its first call and then
+    talks to a **plan-specific** API host (individual/business/enterprise), so the injection covers
+    every host that can carry it, not one. Default: off (normal login). A PAT must be one Copilot
+    accepts: a fine-grained PAT, a `gh auth token` OAuth token (`gho_`) or a `ghu_` token. Classic
+    `ghp_` PATs are refused by Copilot itself, so foldyard refuses to store one too. A keyless
+    `[copilot]` also needs `api.github.com` to itself: the two GitHub `[[inject]]` rows deliver a
+    credential to that same host, and one host takes one injection rule — turn those rows off while
+    a Copilot rung is on (`fy mode` reports the conflict and the fix).
   - **`system_prompt`** — same key and job as `[claude]`'s, but a different delivery: the Copilot
-    CLI has no `--append-system-prompt` and no ad-hoc config override, so `fy copilot` writes it
-    to `$COPILOT_HOME/instructions/foldyard.instructions.md`, one of the personal instruction
-    sources the CLI loads for every session. Setting it to `""` removes the file again. Every box
-    of a project shares that volume, so two launches from different worktrees with **different**
-    prompts race (last writer wins) — identical prompts make it invisible. Default: `""`.
-  - `fy copilot` runs the CLI with `--allow-all` (tools, file paths and URLs — the rootless box
-    IS the boundary) and `COPILOT_ALLOW_ALL=true`, which additionally trusts the working
-    directory it starts in (its skills, plugins, MCP servers and hooks). It also sets
+    CLI has no `--append-system-prompt` and no ad-hoc config override, so `fy copilot` writes it to
+    `$COPILOT_HOME/instructions/foldyard.instructions.md`, one of the personal instruction sources
+    the CLI loads for every session. Setting it to `""` removes the file again. Every box of a
+    project shares that volume, so two launches from different worktrees with **different** prompts
+    race (last writer wins) — identical prompts make it invisible. Default: `""`.
+  - `fy copilot` runs the CLI with `--allow-all` (tools, file paths and URLs — the rootless box IS
+    the boundary) and `COPILOT_ALLOW_ALL=true`, which additionally trusts the working directory it
+    starts in (its skills, plugins, MCP servers and hooks). It also sets
     `COPILOT_AUTO_UPDATE=false`, so the box runs the build its bootstrap installed instead of
     downloading another on a cache dir that is recreated with the box.
 
 - **`transcript_sync_seconds`** (all three agent tables) — while the box is up, the supervisor
   copies that agent's transcripts into their archive on your computer (`~/.claude/projects`,
   `~/.foldyard/<project>/transcripts/codex/sessions`,
-  `~/.foldyard/<project>/transcripts/copilot/session-state`) at this interval, so a crashed box
-  or a `git clean -fdx` loses nothing. Default: `0` (off — transcripts are archived at
-  `fy box down`, or by hand with `fy transcripts`). Rounded down to a multiple of the 2-second
-  supervisor tick (minimum one tick). A failing sync logs once to `host-supervisor.log` when it
-  breaks and once when it heals, and notifies only if it stays broken. Read from the adopted
-  config.
+  `~/.foldyard/<project>/transcripts/copilot/session-state`) at this interval, so a crashed box or a
+  `git clean -fdx` loses nothing. Default: `0` (off — transcripts are archived at `fy box down`, or
+  by hand with `fy transcripts`). Rounded down to a multiple of the 2-second supervisor tick
+  (minimum one tick). A failing sync logs once to `host-supervisor.log` when it breaks and once when
+  it heals, and notifies only if it stays broken. Read from the adopted config.
 
   Of Claude's sessions, only those started at the checkout's root are archived — the folder named
   after the checkout itself (worktrees archive their own). The box names those folders, and a folder
@@ -1262,20 +1262,19 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
   working directory (`workspace.yaml`), and `copilot --resume` moves there, so a session from
   another project would switch a Copilot on your computer into that directory. Box sessions
   therefore go to a Copilot home of foldyard's own, one per project —
-  `~/.foldyard/<project>/transcripts/copilot` — and never into `~/.copilot`. Only UUID-named
-  session directories are copied, so the CLI's housekeeping siblings (its lock directory) stay
-  behind. To resume one:
+  `~/.foldyard/<project>/transcripts/copilot` — and never into `~/.copilot`. Only UUID-named session
+  directories are copied, so the CLI's housekeeping siblings (its lock directory) stay behind. To
+  resume one:
 
   ```bash
   cd <checkout> && COPILOT_HOME=~/.foldyard/<project>/transcripts/copilot copilot --resume
   ```
 
-  It is a separate Copilot home, so log in there once (`COPILOT_HOME=… copilot login`), and your
-  own `~/.copilot` settings are not read.
+  It is a separate Copilot home, so log in there once (`COPILOT_HOME=… copilot login`), and your own
+  `~/.copilot` settings are not read.
 
-  With an explicit archive dir (`fy transcripts <dir>` or `FOLDYARD_TRANSCRIPTS_ARCHIVE`) all
-  three agents go there, Codex's under `codex-sessions/` and Copilot's under
-  `copilot-sessions/`.
+  With an explicit archive dir (`fy transcripts <dir>` or `FOLDYARD_TRANSCRIPTS_ARCHIVE`) all three
+  agents go there, Codex's under `codex-sessions/` and Copilot's under `copilot-sessions/`.
 
   ```toml
   [claude]
@@ -1522,11 +1521,11 @@ Per project, `~/.foldyard/<project>/` (env `FOLDYARD_STATE_DIR` relocates it):
 (An older install may still have a top-level `dev-mode.json`; the main checkout keeps using it until
 `main/dev-mode.json` exists.)
 
-In the repo, foldyard also generates gitignored files next to `foldyard.toml` (`init` adds them
-to `.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/` and `.devbox-copilot/`
+In the repo, foldyard also generates gitignored files next to `foldyard.toml` (`init` adds them to
+`.gitignore`): `.devbox-ca/`, `.devbox-claude/`, `.devbox-codex/` and `.devbox-copilot/`
 (transcripts, where they are still bound into the checkout), `.devbox-foldyard/`, and
-`.dev-mode.json` — a read-only copy of the mode for tools in the box. Nothing grants access based
-on it.
+`.dev-mode.json` — a read-only copy of the mode for tools in the box. Nothing grants access based on
+it.
 
 ## Environment variables
 

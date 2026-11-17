@@ -191,19 +191,19 @@ that needs none of that, an agent can make a plain git worktree in its box inste
 [quick worktrees in a box](#quick-worktrees-in-a-box).
 
 Your computer runs each checkout's *adopted* `foldyard.toml`, never the working tree
-([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)), so `fy worktree add`
-settles the new checkout's adoption before it finishes. A worktree whose config is byte-identical
-to the one adopted for main is adopted without a prompt, since it grants nothing main hasn't
-already been granted: it says `✓ config adopted — identical to main's`. One that differs is shown
-as a diff against main and adopted only if you answer the prompt; with no terminal, or if you
-decline, the worktree is still made, nothing is adopted, and `WORKTREE=<name> fy config diff`
-then `WORKTREE=<name> fy config adopt` (or the prompt at `WORKTREE=<name> fy box up`) finishes it.
-`-y` only answers the question about registering an existing worktree; it never adopts a config.
-When a worktree's config is adopted for the first time, main's keyless `claude`/`codex`/`copilot`
-modes are copied into the worktree, so its box can use them from the start. That happens wherever
-the first adoption is: at `fy worktree add`, at the prompt from `WORKTREE=<name> fy box up` or
-`fy up`, from `WORKTREE=<name> fy config adopt`, or in the TUI. Only modes main has on are copied,
-never one the worktree's mode already sets, and a later adoption copies nothing.
+([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)), so
+`fy worktree add` settles the new checkout's adoption before it finishes. A worktree whose config is
+byte-identical to the one adopted for main is adopted without a prompt, since it grants nothing main
+hasn't already been granted: it says `✓ config adopted — identical to main's`. One that differs is
+shown as a diff against main and adopted only if you answer the prompt; with no terminal, or if you
+decline, the worktree is still made, nothing is adopted, and `WORKTREE=<name> fy config diff` then
+`WORKTREE=<name> fy config adopt` (or the prompt at `WORKTREE=<name> fy box up`) finishes it. `-y`
+only answers the question about registering an existing worktree; it never adopts a config. When a
+worktree's config is adopted for the first time, main's keyless `claude`/`codex`/`copilot` modes are
+copied into the worktree, so its box can use them from the start. That happens wherever the first
+adoption is: at `fy worktree add`, at the prompt from `WORKTREE=<name> fy box up` or `fy up`, from
+`WORKTREE=<name> fy config adopt`, or in the TUI. Only modes main has on are copied, never one the
+worktree's mode already sets, and a later adoption copies nothing.
 
 `fy worktree add <name> --box` then brings the worktree's box up, the same as running
 `WORKTREE=<name> fy box up`. If its config wasn't adopted it doesn't start the box, and says so.

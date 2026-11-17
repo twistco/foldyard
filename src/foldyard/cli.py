@@ -52,7 +52,18 @@ _PANELS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("The stack", ("up", "down", "ps", "logs", "shell", "build", "open", "reclaim", "nuke")),
     (
         "The box and its agents",
-        ("box", "claude", "codex", "agent", "paste", "code", "worktree", "transcripts", "skill"),
+        (
+            "box",
+            "claude",
+            "codex",
+            "copilot",
+            "agent",
+            "paste",
+            "code",
+            "worktree",
+            "transcripts",
+            "skill",
+        ),
     ),
     ("Posture and egress", ("mode", "allow", "config", "verify", "state", "host")),
     ("Machines and projects", ("machine", "ls", "prune")),
@@ -421,9 +432,12 @@ def codex(ctx: typer.Context) -> None:
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def copilot(ctx: typer.Context) -> None:
-    """Run the GitHub Copilot CLI in the dev box, pre-oriented + skipping permission prompts (the
-    box's rootless isolation is the safety boundary). Needs `[copilot]` in foldyard.toml. Extra
-    args pass through to `copilot` (`fy copilot --resume`, `fy copilot -p "…"`)."""
+    """Run the GitHub Copilot CLI in the dev box, skipping permission prompts.
+
+    Pre-oriented to the box, whose rootless isolation is the safety boundary. Needs `[copilot]` in
+    foldyard.toml. `COPILOT_ALLOW_ALL=true` additionally trusts its working directory. Extra args
+    pass through to `copilot` (`fy copilot --resume`, `fy copilot -p "…"`).
+    """
     from . import box
 
     raise typer.Exit(box.copilot(ctx.args))
