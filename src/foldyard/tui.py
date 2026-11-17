@@ -1875,12 +1875,15 @@ class DevModeTui(App):
             rows.append((g["level"], g["host"], " · ".join(notes)))
             keys.append(("grant", g["host"]))
         for f in follows:
+            # A row per source and level (each target keeps its own), but `a` re-levels the
+            # source as one decision: every target it follows, named in the dialog.
             notes = [f"follow → {', '.join(f['to'])}"]
             if f["expires"]:
                 notes.append(f"expires {term.stamp(f['expires'])}")
             rows.append((f["level"], f["source"], " · ".join(notes)))
             keys.append(("follow", f["source"]))
-            self._manage_follow[("follow", f["source"])] = list(f["to"])
+            held = self._manage_follow.setdefault(("follow", f["source"]), [])
+            held.extend(t for t in f["to"] if t not in held)
         wall = "ENFORCING" if enforcing else "observing only"
         summary = (
             f"[b]allowlist[/b] — {wall} · {len(granted)} granted"
@@ -1911,7 +1914,9 @@ class DevModeTui(App):
         if not pane or not summary_out:
             return
         summary_out.first(Static).update(Text.from_markup(summary))
-        sig = tuple(rows)
+        # The keys too: one row's text can stand for two kinds (a recommendation's `why` reading
+        # like a follow's), and `a`/`x` act on the key, not the text.
+        sig = (tuple(rows), tuple(keys))
         if sig == self._manage_sig:
             return
         self._manage_sig = sig

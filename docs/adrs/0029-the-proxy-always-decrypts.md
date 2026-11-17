@@ -286,11 +286,12 @@ in the middle — but *one* middle, not a switch between two.
   connection a vouched read went out on stays judged request by request after the vouch lapses, so a
   download outlives its minute and nothing else goes out on it. It ends when its rule is revoked.
   Follow grants live in the store's own `follows` table and the effective file's own `follow` key,
-  never in `allow`. A proxy or a foldyard that predates them ignores the key and follows nothing, so
-  an older reader can't take one for a path grant on its source. `[proxy] recommend` asks for one
-  with `redirects_to = [...]`. It is offered with what a yes means, and declined apart from a grant
-  of the same key. It is never offered for builds: a runtime grant answers a build as it does the
-  box.
+  never in `allow`. Each target keeps the level it was granted at: an answer about one target never
+  extends or shortens another (a recommendation that adds a target grants that target alone). A
+  proxy or a foldyard that predates them ignores the key and follows nothing, so an older reader
+  can't take one for a path grant on its source. `[proxy] recommend` asks for one with
+  `redirects_to = [...]`. It is offered with what a yes means, and declined apart from a grant of
+  the same key. It is never offered for builds: a runtime grant answers a build as it does the box.
 
   **This narrows the rejection below; it doesn't reverse it.** That rejection was of a granted HOST
   sending the box where it likes, because an open redirector anywhere on the host (`?next=`, a

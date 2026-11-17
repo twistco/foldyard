@@ -2680,6 +2680,69 @@ async def test_wall_pane_grants_and_removes_a_follow_as_a_follow(monkeypatch):
         assert calls == [("unfollow", "cdn.example.com/dl/")]
 
 
+async def test_wall_pane_re_levels_every_target_of_a_follow_source(monkeypatch):
+    # Targets granted at different levels are one row per level, but a source is one decision:
+    # `a` on either row names (and re-levels) all of its targets, never only that row's.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch,
+        follows=[
+            {"source": source, "to": ["a.example.net"], "level": "permanent", "expires": None},
+            {"source": source, "to": ["b.example.net"], "level": "session", "expires": None},
+        ],
+    )
+    followed: list[tuple] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        assert app._manage_keys == [("follow", source), ("follow", source)]
+        table.focus()
+        table.move_cursor(row=1)
+        await pilot.press("a")
+        await pilot.pause()
+        assert "a.example.net, b.example.net" in _text(
+            app.screen.query_one("#allow-title", tui.Static)
+        )
+        await pilot.press("p")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, ["a.example.net", "b.example.net"], "permanent")]
+
+
+async def test_wall_pane_repaints_when_only_a_rows_kind_changed(monkeypatch):
+    # The same text can belong to two kinds of row: an ordinary recommendation whose `why` reads
+    # like a follow's, then a follow recommendation on the same source. The pane must take the new
+    # kind, or `a` grants a path where a follow was asked for.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "cdn.example.com/dl/"
+    _stub_wall(monkeypatch, pending=[{"host": source, "why": "follow → objects.example.net"}])
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        assert app._manage_keys == [("rec", source)]
+        _stub_wall(
+            monkeypatch,
+            pending=[{"host": source, "why": "", "redirects_to": ["objects.example.net"]}],
+        )
+        app.refresh_panels()
+        assert app._manage_keys == [("follow?", source)]
+
+
 async def test_x_is_gated_to_the_network_tab(monkeypatch):
     monkeypatch.setattr(
         tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))

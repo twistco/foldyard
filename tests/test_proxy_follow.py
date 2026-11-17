@@ -26,6 +26,7 @@ stubbed mitmproxy (the wire path is ``test_proxy_wall_e2e.py``'s):
 from __future__ import annotations
 
 import json
+import sys
 import types
 
 import pytest
@@ -36,6 +37,8 @@ from foldyard import allowlist
 
 gh = t.gh
 walled = t.walled
+closer = t.closer
+fake_minter = t.fake_minter
 _Flow = t._Flow
 _ClientHello = t._ClientHello
 _dial = t._dial
@@ -401,3 +404,157 @@ async def test_a_host_granted_as_a_whole_is_not_narrowed_by_a_follow(walled):
     _redirected(inj, LOG_URL)
     assert not inj._path_only(SHARD)
     assert await p._judged(inj, _read(path="/anything/else", method="PUT"))
+
+
+def _client(flow: _Flow, client_id: str) -> _Flow:
+    flow.client_conn = types.SimpleNamespace(id=client_id)
+    return flow
+
+
+async def _download(inj, closer, client_id: str, path: str = LOG_PATH + SAS) -> None:
+    """A vouched read on its own decrypted connection to the shard, which ``closer`` can end."""
+    closer.track(client_id)
+    p._connect(inj, SHARD, client_id=client_id)
+    inj.tls_clienthello(_ClientHello(SHARD, client_id=client_id))
+    assert await p._judged(inj, _client(_read(path=path), client_id))
+
+
+OTHER_SOURCE = f"{API}/repos/twistco/other/actions/"
+OTHER_PATH = "/actions-results/0bb1/workflow-job-run-a4c2/logs/job/job-logs.txt"
+
+
+async def test_revoking_one_follow_grant_ends_its_downloads_and_not_anothers(walled, closer):
+    # Two grants vouch URLs on one shard: each connection is judged by the grant that vouched for
+    # what it read, never by whatever else still reaches the host.
+    inj, allow, _log = walled
+    both = [{"from": SOURCE, "to": TARGETS}, {"from": OTHER_SOURCE, "to": TARGETS}]
+    _write(allow, both)
+    inj._allow_mtime = -1.0
+    _redirected(inj, LOG_URL)
+    _redirected(inj, f"https://{SHARD}{OTHER_PATH}{SAS}", path=f"{OTHER_SOURCE[len(API) :]}x/logs")
+    await _download(inj, closer, "client-1")
+    await _download(inj, closer, "client-2", OTHER_PATH + SAS)
+
+    _write(allow, both[1:])
+    inj._allow_mtime = -1.0
+    inj.refresh()
+    assert closer.closed == ["client-1"]
+
+    _write(allow, [])
+    inj._allow_mtime = -1.0
+    inj.refresh()
+    assert closer.closed == ["client-1", "client-2"]  # each closed once, whichever loop saw it
+
+
+async def test_a_connection_answered_before_its_vouch_still_ends_with_its_rule(
+    gh, walled, closer, monkeypatch
+):
+    # Its CONNECT came before the redirect, so it was answered as a refused host's and the sweep
+    # has no CONNECT of it to re-judge: what it read is what ties it to its rule.
+    inj, allow, _log = walled
+    clock = [1000.0]
+    monkeypatch.setattr(gh.module.time, "monotonic", lambda: clock[0])
+    _granted(inj, allow)
+    closer.track("client-1")
+    p._connect(inj, SHARD)
+    inj.tls_clienthello(_ClientHello(SHARD))
+    assert "client-1" not in inj._conns
+    _redirected(inj, LOG_URL)
+    assert await p._judged(inj, _read())
+    clock[0] += gh.module._VOUCH_SECONDS * 10  # the vouch lapsed; its rule stands
+
+    _write(allow, [{"from": SOURCE, "to": TARGETS}], grants=["pypi.org"])
+    inj._allow_mtime = -1.0
+    inj.refresh()
+    assert closer.closed == []  # a download outlives its vouch
+
+    _write(allow, [], grants=["pypi.org"])
+    inj._allow_mtime = -1.0
+    inj.refresh()
+    assert closer.closed == ["client-1"]
+
+
+async def test_a_vouch_ends_when_its_rule_no_longer_targets_it(walled, closer):
+    # The source stays (its key with it) while a target goes — a `once` target lapsing beside
+    # the source's others: what that target vouched for goes with it.
+    inj, allow, _log = walled
+    _granted(inj, allow)
+    _redirected(inj, LOG_URL)
+    await _download(inj, closer, "client-1")
+
+    _granted(inj, allow, targets=[f"{RECEIVER}/rest/runs/"])
+    inj.refresh()
+    assert closer.closed == ["client-1"]
+    assert not inj._path_only(SHARD)
+    assert not await p._judged(inj, _client(_read(), "client-2"))
+
+    # The host still matches, the path no longer does: the URL is no longer held.
+    _granted(inj, allow)
+    _redirected(inj, LOG_URL)
+    _granted(inj, allow, targets=["*.blob.core.windows.net/other-container/"])
+    assert not await p._judged(inj, _client(_read(), "client-3"))
+
+
+@pytest.fixture
+def injected(gh, monkeypatch, tmp_path, fake_minter):
+    """The wall on, with a credential injected on the source host (whose 401 is re-issued)."""
+    log = tmp_path / "egress.jsonl"
+    allow = tmp_path / "allow-effective.json"
+    _write(allow, [])
+    monkeypatch.setenv("INJECT_HOST", API)
+    monkeypatch.setenv("INJECT_COMMAND", fake_minter.command)
+    monkeypatch.setenv("DEFAULT_DENY", "1")
+    monkeypatch.setenv("ALLOW_FILE", str(allow))
+    monkeypatch.setenv("PROXY_LOG_FILE", str(log))
+    return gh.Injector(), allow, log
+
+
+async def test_a_redirect_a_401_re_issue_brought_back_is_followed(injected, monkeypatch):
+    # The 401 was what the response headers showed; the re-issue's redirect is what the box gets.
+    inj, allow, _log = injected
+    _granted(inj, allow)
+
+    class _Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def request(self, method, url, **kw):
+            return types.SimpleNamespace(
+                status_code=302, content=b"", headers={"location": LOG_URL}
+            )
+
+    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(Session=_Session))
+    flow = _Flow(API, status=401, path=JOB_LOGS)
+    flow.request.headers["Authorization"] = "Bearer DUMMY"
+    inj.responseheaders(flow)
+    assert inj._vouched == {}
+    await inj.response(flow)
+    assert flow.metadata.get("egress_proxy_retried")
+    assert flow.response is not None and flow.response.status_code == 302
+    assert (SHARD, LOG_PATH + SAS) in inj._vouched
+    assert await p._judged(inj, _client(_read(), "client-2"))
+
+
+async def test_a_chain_carries_on_through_a_hop_granted_on_its_own(walled):
+    # The receiver is granted as a whole: its request needs no vouch, but it is still the link
+    # its own redirect is judged under.
+    inj, allow, _log = walled
+    _write(allow, [{"from": SOURCE, "to": TARGETS}], grants=[RECEIVER])
+    inj._allow_mtime = -1.0
+    run_logs = "/rest/runs/eaf9/logs"
+    _redirected(inj, f"https://{RECEIVER}{run_logs}")
+    hop = _read(host=RECEIVER, path=run_logs)
+    assert await p._judged(inj, hop)
+    # Admitted by its own grant: nothing of a vouched read's handling, only the link.
+    assert not hop.metadata.get("egress_proxy_path_read")
+    assert inj._vouch_conns == {} and ("client-1", RECEIVER) not in inj._path_dials
+    hop.response = t._Resp(302)
+    hop.response.headers["location"] = LOG_URL
+    inj.responseheaders(hop)
+    assert inj._vouched[(SHARD, LOG_PATH + SAS)][1:3] == (RECEIVER, 2)
+    assert await p._judged(inj, _client(_read(), "client-2"))

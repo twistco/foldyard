@@ -12,7 +12,8 @@ bump: minor
   to one of about two hundred storage accounts, so a list of path grants went stale, and
   `*.blob.core.windows.net` would be every storage account, anyone's included. A repo can recommend
   one with `redirects_to = [...]` in `[proxy] recommend`. It's offered and declined apart from a
-  grant of the same path. `fy allow list`, `fy allow remove`, `fy config widenings`, the Network Log
-  (`followed from <host>`) and the TUI's allowlist pane all show it. The source has to be a path,
-  never a whole host: you're trusting where that path redirects. See `fy docs networking` and
-  ADR-0029's 2026-11-16 amendment.
+  grant of the same path. Each target keeps the level it was granted at, so when a recommendation
+  adds a target, you're asked about that target alone. `fy allow list`, `fy allow remove`,
+  `fy config widenings`, the Network Log (`followed from <host>`) and the TUI's allowlist pane all
+  show it. The source has to be a path, never a whole host: you're trusting where that path
+  redirects. See `fy docs networking` and ADR-0029's 2026-11-16 amendment.

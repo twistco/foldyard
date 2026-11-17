@@ -340,20 +340,25 @@ def _checked_raw() -> dict:
         if bad:
             raise StoreUnreadable(f"{path}: malformed entries for {', '.join(bad)}")
     if "follows" in raw:
-        # Follow grants (`grant_follow`): source key → {to, level, expires, added}. Damage reads
-        # as damage, as for `hosts`: dropped silently it is a grant gone, misread a wider one.
+        # Follow grants (`grant_follow`): source key → target → {level, expires, added}, each
+        # target at the level it was granted. Damage reads as damage, as for `hosts`: dropped
+        # silently it is a grant gone, misread a wider one.
         follows = raw["follows"]
         if not isinstance(follows, dict):
             raise StoreUnreadable(f"{path}: `follows` is not an object")
         bad = sorted(
             k
-            for k, entry in follows.items()
+            for k, targets in follows.items()
             if follow_source(k) != k
-            or not isinstance(entry, dict)
-            or (entry.get("expires") is not None and _aware(entry.get("expires")) is None)
-            or not isinstance(entry.get("to"), list)
-            or not entry["to"]
-            or any(not isinstance(t, str) or follow_target(t) != t for t in entry["to"])
+            or not isinstance(targets, dict)
+            or not targets
+            or any(
+                follow_target(t) != t
+                or not isinstance(entry, dict)
+                or entry.get("level") not in LEVELS
+                or (entry.get("expires") is not None and _aware(entry.get("expires")) is None)
+                for t, entry in targets.items()
+            )
         )
         if bad:
             raise StoreUnreadable(f"{path}: malformed follow grants for {', '.join(bad)}")
@@ -1008,30 +1013,51 @@ def grants() -> list[dict]:
     ]
 
 
-def follow_grants() -> list[dict]:
-    """The non-expired FOLLOW grants with their metadata — ``{source, to, level, expires}`` sorted
-    by source. A follow grant lets the box read the one URL a redirect from under ``source`` names,
-    when one of ``to`` holds it (the proxy's ``_vouch_redirect``), for a minute: the target is the
-    source's choice, never the box's. Damaged store ⇒ ``[]`` (fail closed, as :func:`grants`)."""
+def _prune_follows(follows: dict[str, dict]) -> tuple[dict[str, dict], bool]:
+    """:func:`_prune` for each source's targets; a source left with none goes. Returns
+    (follows, changed)."""
+    keep, changed = {}, False
+    for source, targets in follows.items():
+        live, pruned = _prune(targets)
+        changed = changed or pruned
+        if live:
+            keep[source] = live
+    return keep, changed or len(keep) != len(follows)
+
+
+def _live_follow_table() -> dict[str, dict]:
+    """The store's non-expired follow grants, source → target → entry; ``{}`` when the store is
+    damaged (fail closed, as :func:`grants`)."""
     try:
-        follows, _ = _prune(_checked_raw().get("follows", {}))
+        return _prune_follows(_checked_raw().get("follows", {}))[0]
     except StoreUnreadable as e:
         _warn(f"egress allow-store unreadable ({e}) — following no redirects until it's repaired")
-        return []
+        return {}
+
+
+def follow_grants() -> list[dict]:
+    """The non-expired FOLLOW grants with their metadata — ``{source, to, level, expires}``, one
+    per source and lifetime (each target keeps the level it was granted at), by source and then
+    the longest-lived first. A follow grant lets the box read the one URL a redirect from under
+    ``source`` names, when one of ``to`` holds it (the proxy's ``_vouch_redirect``), for a minute:
+    the target is the source's choice, never the box's. Damaged store ⇒ ``[]`` (fail closed, as
+    :func:`grants`)."""
+    follows = _live_follow_table()
+    groups: dict[tuple[str, str, str | None], list[str]] = {}
+    for source, targets in follows.items():
+        for target, e in targets.items():
+            groups.setdefault((source, e["level"], e.get("expires")), []).append(target)
+    order = sorted(groups, key=lambda g: (g[0], -_RANK[g[1]], g[2] or ""))
     return [
-        {
-            "source": k,
-            "to": list(e["to"]),
-            "level": e.get("level", "?"),
-            "expires": e.get("expires"),
-        }
-        for k, e in sorted(follows.items())
+        {"source": s, "to": groups[(s, lv, x)], "level": lv, "expires": x} for s, lv, x in order
     ]
 
 
 def live_follows() -> dict[str, list[str]]:
-    """Every non-expired follow grant, source → targets — what the proxy follows."""
-    return {g["source"]: g["to"] for g in follow_grants()}
+    """Every non-expired follow grant, source → targets (in the order granted) — what the proxy
+    follows."""
+    follows = _live_follow_table()
+    return {source: list(targets) for source, targets in sorted(follows.items())}
 
 
 def follow_covered(source: str, targets: Iterable[str], live: dict[str, list[str]]) -> bool:
@@ -1162,8 +1188,12 @@ def grant_follow(source: str, targets: Iterable[str], level: str, ttl: int | Non
     a URL one of ``targets`` holds, the proxy lets the box read THAT URL — GET/HEAD, no body,
     exactly as named, query included — for a minute. The target is the source's choice, so the
     claim the operator makes is that nothing under ``source`` redirects where the caller says (no
-    open redirector there); ``targets`` bounds it. A live follow on the same source is replaced,
-    its targets kept beside the new ones."""
+    open redirector there); ``targets`` bounds it.
+
+    Each target keeps its own level: this sets it for the ``targets`` named (re-levelling one
+    already held, as :func:`grant` does a host), and leaves the source's other targets as they
+    were — an answer about one target never extends or shortens another the operator wasn't
+    asked about."""
     _require_host()
     _require_readable_store()
     if level not in LEVELS:
@@ -1189,15 +1219,11 @@ def grant_follow(source: str, targets: Iterable[str], level: str, ttl: int | Non
     if not wanted:
         raise SystemExit("✗ a follow grant needs at least one target (`--redirects-to`)")
     doc = _load_raw()
-    follows, _ = _prune(doc.get("follows", {}))
-    held = follows.get(key, {}).get("to", [])
+    follows, _ = _prune_follows(doc.get("follows", {}))
     expires = _iso(_now() + timedelta(seconds=ttl or ONCE_TTL_SECONDS)) if level == "once" else None
-    follows[key] = {
-        "to": [*held, *(t for t in wanted if t not in held)],
-        "level": level,
-        "expires": expires,
-        "added": _iso(_now()),
-    }
+    held = follows.setdefault(key, {})
+    for target in wanted:
+        held[target] = {"level": level, "expires": expires, "added": _iso(_now())}
     doc["follows"] = follows
     if isinstance(doc.get("declined_follows"), dict):
         doc["declined_follows"].pop(key, None)
@@ -1216,7 +1242,7 @@ def revoke(host: str) -> dict:
         host = scoped[0] + scoped[1]  # as `grant` stored it
     doc = _load_raw()
     hosts, _ = _prune(doc.get("hosts", {}))
-    follows, _ = _prune(doc.get("follows", {}))
+    follows, _ = _prune_follows(doc.get("follows", {}))
     if host in hosts or host in follows:
         hosts.pop(host, None)
         follows.pop(host, None)
@@ -1233,7 +1259,7 @@ def revoke_follow(source: str) -> dict:
     _require_readable_store()
     key = follow_source(source) or source.strip()
     doc = _load_raw()
-    follows, _ = _prune(doc.get("follows", {}))
+    follows, _ = _prune_follows(doc.get("follows", {}))
     if key in follows:
         del follows[key]
         doc["follows"] = follows
@@ -1250,8 +1276,12 @@ def clear_ephemeral() -> dict:
     hosts, _ = _prune(doc.get("hosts", {}))
     doc["hosts"] = {h: e for h, e in hosts.items() if e.get("level") == "permanent"}
     if "follows" in doc:
-        follows, _ = _prune(doc["follows"])
-        doc["follows"] = {k: e for k, e in follows.items() if e.get("level") == "permanent"}
+        follows, _ = _prune_follows(doc["follows"])
+        kept = {
+            source: {t: e for t, e in targets.items() if e.get("level") == "permanent"}
+            for source, targets in follows.items()
+        }
+        doc["follows"] = {source: targets for source, targets in kept.items() if targets}
     _save_raw(doc)
     return write_effective()
 
@@ -1326,11 +1356,22 @@ def describe(entry: dict) -> str:
     return entry["host"]
 
 
+def _unfollowed(entry: dict) -> tuple[list[str], list[str]]:
+    """A follow recommendation's targets: (those not followed yet, those already followed)."""
+    source = follow_source(entry["host"]) or entry["host"]
+    held = set(live_follows().get(source, []))
+    targets = [follow_target(t) or t for t in entry["redirects_to"]]
+    return [t for t in targets if t not in held], [t for t in targets if t in held]
+
+
 def accept(entry: dict, level: str, ttl: int | None = None) -> None:
-    """Grant a recommendation at ``level``: a follow grant for one with ``redirects_to``, else the
-    host or path grant it names."""
+    """Grant a recommendation at ``level``: a follow grant for one with ``redirects_to`` — on the
+    targets not followed yet only, so answering it never changes how long one already granted
+    lasts — else the host or path grant it names."""
     if entry.get("redirects_to"):
-        grant_follow(entry["host"], entry["redirects_to"], level, ttl)
+        new, _held = _unfollowed(entry)
+        if new:
+            grant_follow(entry["host"], new, level, ttl)
     else:
         grant(entry["host"], level, ttl)
 
@@ -1442,10 +1483,16 @@ def offer_recommendations(
         why = f" — {e['why']}" if e["why"] else ""
         what = describe(e)
         if e.get("redirects_to"):
+            new, held = _unfollowed(e)
+            if held:
+                # The answer is about the new targets alone (`accept`): name the rest as kept.
+                what = describe({**e, "redirects_to": new})
+                why += f" (already following {', '.join(held)}: left as granted)"
             # What a yes means is less obvious than for a host: say it at the decision moment.
             why += (
                 f"\n    (the box may then read the exact URL a redirect from under {e['host']} "
-                "names, when it is under one of those, for a minute — the source chooses it)"
+                "names, when it is under one of those, for a minute — the source chooses it; "
+                "that URL may redirect again within them, up to three links)"
             )
         answer = (
             prompt(
@@ -1507,17 +1554,17 @@ def sweep() -> bool:
         # posture, and the operator sees the reason.
         _warn(f"egress allow-store unreadable ({e}) — skipping the expiry sweep")
         return False
-    pruned, changed = _prune(raw.get("hosts", {}))
-    follows, follows_changed = _prune(raw.get("follows", {}))
-    changed = changed or follows_changed
+    changed = _prune(raw.get("hosts", {}))[1] or _prune_follows(raw.get("follows", {}))[1]
     # A lapsed learn window is closed into its `learned` record — enforcement is ALREADY back
     # (default_deny() stops honouring a window at its deadline); this just tidies the store.
     lapsed = "learn" in raw and _open_window(raw) is None
     if changed or lapsed:
+        # Pruned from the store as it is NOW, not from the read above: a `fy allow remove` that
+        # landed in between would otherwise be written back as granted.
         doc = _load_raw()
-        doc["hosts"] = pruned
+        doc["hosts"] = _prune(doc.get("hosts", {}))[0]
         if "follows" in doc:
-            doc["follows"] = follows
+            doc["follows"] = _prune_follows(doc["follows"])[0]
         if lapsed:
             _close_window(doc)
         _save_raw(doc)

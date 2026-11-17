@@ -1276,7 +1276,9 @@ def allow_add(
     may read that exact URL (GET/HEAD, query included) for a minute. The redirect picks the URL,
     so a target can be a glob without the box choosing where it goes. Make one only for a path
     whose redirects you trust: a `?next=`-style redirect there would let the box pick the URL
-    within the targets. It grants nothing on the source host itself.
+    within the targets. A URL it vouched for may redirect again, up to three links, so you trust
+    the targets' redirects too. Each target keeps the level it was granted at. It grants nothing
+    on the source host itself.
     """
     from . import allowlist
 
@@ -1285,11 +1287,14 @@ def allow_add(
             raise typer.BadParameter("a follow grant is for the box, not for builds only")
         eff = allowlist.grant_follow(host, redirects_to, level, ttl or None)
         source = allowlist.follow_source(host) or host
-        targets = ", ".join(_followed_to(eff, source))
+        named = list(dict.fromkeys(allowlist.follow_target(t) or t.strip() for t in redirects_to))
         print(
-            f"✓ redirects from {source} followed to {targets} ({level}): "
+            f"✓ redirects from {source} followed to {', '.join(named)} ({level}): "
             "the box may read the exact URL such a redirect names, for a minute"
         )
+        others = [t for t in _followed_to(eff, source) if t not in named]
+        if others:
+            print(f"  also following {', '.join(others)}, each at the level it was granted")
         return
     eff = allowlist.grant(host, level, ttl or None, build=build)
     scoped = allowlist.path_grant(host.strip())

@@ -284,10 +284,12 @@ download that outlasts the minute isn't cut off, and revoking the grant ends it.
 
 The source is a path, never a whole host, and that's the part to judge before you grant one: you're
 trusting where that path redirects. If something under it takes a target from the caller (a `?next=`
-or `return_to=` parameter), the box could pick the URL within the targets. Keep the source as narrow
-as the redirects you want and the targets as narrow as where they go. A target is a name (`host` or
-`*.suffix`, optionally a path), never an address or a port. The grant itself lets nothing through to
-the source: `api.github.com` is reached as usual, by its own grant or an `[[inject]]` row.
+or `return_to=` parameter), the box could pick the URL within the targets. The same goes for each
+link of a chain: a URL the source sent the box to may redirect again within the targets, so you're
+trusting the targets' redirects too. Keep the source as narrow as the redirects you want and the
+targets as narrow as where they go. A target is a name (`host` or `*.suffix`, optionally a path),
+never an address or a port. The grant itself lets nothing through to the source: `api.github.com` is
+reached as usual, by its own grant or an `[[inject]]` row.
 
 The Network Log marks a read let through this way `followed from <host>`. `fy allow list` shows
 follow grants apart from the others. `fy allow remove <source>` revokes one, along with a path grant

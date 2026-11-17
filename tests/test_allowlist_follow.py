@@ -77,22 +77,94 @@ def test_a_follow_needs_a_target(env):
         allowlist.grant_follow(SOURCE, [], "session")
 
 
-def test_granting_again_keeps_the_targets_already_held(env):
-    allowlist.grant_follow(SOURCE, [BLOB], "session")
+def _levels() -> dict[str, str]:
+    """Each followed target's level, for SOURCE."""
+    return {t: g["level"] for g in allowlist.follow_grants() for t in g["to"]}
+
+
+def test_each_target_keeps_the_level_it_was_granted_at(env):
+    # A grant names the targets it is about; the ones it doesn't name keep their own lifetime —
+    # a permanent answer about RECEIVER never makes a once BLOB permanent (it wasn't asked about).
+    allowlist.grant_follow(SOURCE, [BLOB], "once", ttl=60)
     allowlist.grant_follow(SOURCE, [RECEIVER], "permanent")
     assert allowlist.live_follows() == {SOURCE: [BLOB, RECEIVER]}
-    assert allowlist.follow_grants()[0]["level"] == "permanent"
+    assert _levels() == {BLOB: "once", RECEIVER: "permanent"}
+    (once,) = [g for g in allowlist.follow_grants() if g["level"] == "once"]
+    assert once["expires"] is not None
+
+
+def test_a_once_answer_to_a_recommendation_leaves_a_permanent_target_permanent(env):
+    allowlist.grant_follow(SOURCE, [BLOB], "permanent")
+    _recommend(env, f'[{{ host = "{SOURCE}", redirects_to = ["{BLOB}", "{RECEIVER}"] }}]')
+    prompt, echo, lines = _offer(["o"])
+    allowlist.offer_recommendations(interactive=True, prompt=prompt, echo=echo)
+    assert _levels() == {BLOB: "permanent", RECEIVER: "once"}
+    # The question names what the answer grants, and says what it leaves alone.
+    asked = "\n".join(lines)
+    assert f"allow redirects from {SOURCE} → {RECEIVER} (already" in asked
+    assert f"already following {BLOB}" in asked
+
+
+def test_granting_a_target_again_sets_its_level(env):
+    # As `fy allow add host` does for a host: an explicit grant re-levels what it names.
+    allowlist.grant_follow(SOURCE, [BLOB, RECEIVER], "permanent")
+    allowlist.grant_follow(SOURCE, [BLOB], "session")
+    assert _levels() == {BLOB: "session", RECEIVER: "permanent"}
+
+
+def test_follow_grants_group_a_sources_targets_by_level(env):
+    allowlist.grant_follow(SOURCE, [BLOB], "session")
+    allowlist.grant_follow(SOURCE, [RECEIVER], "permanent")
+    assert [(g["source"], g["level"], g["to"]) for g in allowlist.follow_grants()] == [
+        (SOURCE, "permanent", [RECEIVER]),
+        (SOURCE, "session", [BLOB]),
+    ]
 
 
 def test_a_once_follow_expires_and_the_sweep_tidies_it(env):
     allowlist.grant_follow(SOURCE, [BLOB], "once", ttl=60)
     store = _store()
-    store["follows"][SOURCE]["expires"] = "2000-01-01T00:00:00+00:00"
+    store["follows"][SOURCE][BLOB]["expires"] = "2000-01-01T00:00:00+00:00"
     config.allow_store_file().write_text(json.dumps(store))
     assert allowlist.live_follows() == {}
     assert allowlist.effective()["follow"] == []
     assert allowlist.sweep() is True
     assert _store()["follows"] == {}
+
+
+def test_a_lapsed_once_target_leaves_the_sources_other_targets_followed(env):
+    allowlist.grant_follow(SOURCE, [BLOB], "once", ttl=60)
+    allowlist.grant_follow(SOURCE, [RECEIVER], "permanent")
+    store = _store()
+    store["follows"][SOURCE][BLOB]["expires"] = "2000-01-01T00:00:00+00:00"
+    config.allow_store_file().write_text(json.dumps(store))
+    assert allowlist.effective()["follow"] == [{"from": SOURCE, "to": [RECEIVER]}]
+    assert allowlist.sweep() is True
+    assert list(_store()["follows"][SOURCE]) == [RECEIVER]
+
+
+def test_the_sweep_never_restores_a_follow_revoked_while_it_ran(env, monkeypatch):
+    # Another writer lands between the sweep's read and its write: the sweep saves what the
+    # store holds then, with only the lapsed grants taken out — never its earlier snapshot.
+    allowlist.grant_follow(SOURCE, [BLOB], "permanent")
+    allowlist.grant_follow("objects.example.com/dl/", ["cdn.example.net"], "once", ttl=60)
+    store = _store()
+    store["follows"]["objects.example.com/dl/"]["cdn.example.net"]["expires"] = (
+        "2000-01-01T00:00:00+00:00"
+    )
+    config.allow_store_file().write_text(json.dumps(store))
+    checked = allowlist._checked_raw
+
+    def read_then_revoke() -> dict:
+        snapshot = checked()
+        monkeypatch.setattr(allowlist, "_checked_raw", checked)
+        allowlist.revoke_follow(SOURCE)  # the concurrent `fy allow remove`
+        return snapshot
+
+    monkeypatch.setattr(allowlist, "_checked_raw", read_then_revoke)
+    assert allowlist.sweep() is True
+    assert _store()["follows"] == {}
+    assert allowlist.live_follows() == {}
 
 
 def test_a_supervisor_restart_ends_session_follows_and_keeps_permanent_ones(env):
@@ -123,11 +195,14 @@ def test_a_host_grant_leaves_follows_alone(env):
     "follows",
     [
         [],
-        {SOURCE: {"to": "*.blob.core.windows.net"}},
-        {SOURCE: {"to": []}},
-        {SOURCE: {"to": ["*.com"]}},  # a target the CLI would refuse: damage, never a grant
-        {"api.github.com": {"to": [BLOB]}},  # a whole-host source
-        {SOURCE: {"to": [BLOB], "expires": "2000-01-01T00:00:00"}},  # naive: never compared
+        {SOURCE: [BLOB]},
+        {SOURCE: {}},
+        {SOURCE: {BLOB: "permanent"}},
+        {SOURCE: {"to": [BLOB], "level": "permanent"}},  # one level for a list: not this store
+        {SOURCE: {"*.com": {"level": "session"}}},  # a target the CLI would refuse: damage
+        {"api.github.com": {BLOB: {"level": "session"}}},  # a whole-host source
+        {SOURCE: {BLOB: {"level": "forever"}}},
+        {SOURCE: {BLOB: {"level": "once", "expires": "2000-01-01T00:00:00"}}},  # naive time
     ],
 )
 def test_a_damaged_follow_table_fails_closed(env, follows):
@@ -241,3 +316,17 @@ def test_never_to_a_follow_leaves_the_same_keys_path_offer_alone(env):
     allowlist.offer_recommendations(interactive=True, prompt=prompt, echo=echo)
     assert [allowlist.describe(e) for e in allowlist.pending_recommendations()] == [SOURCE]
     assert SOURCE in _store()["declined_follows"] and SOURCE not in _store().get("declined", {})
+
+
+def test_allow_add_names_the_level_of_the_targets_it_granted_alone(env):
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    allowlist.grant_follow(SOURCE, [BLOB], "permanent")
+    out = CliRunner().invoke(
+        cli.app, ["allow", "add", SOURCE, "--redirects-to", RECEIVER, "--level", "session"]
+    )
+    assert out.exit_code == 0, out.output
+    assert f"followed to {RECEIVER} (session)" in out.output
+    assert f"also following {BLOB}" in out.output
