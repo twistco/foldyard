@@ -543,6 +543,12 @@ def test_a_path_under_a_directory_you_cannot_enter_is_refused_not_raised(tmp_pat
     assert to_store is None and "restricted" not in note  # never echoed: it didn't open
 
 
+def test_an_entry_with_a_nul_byte_is_refused_not_raised(tmp_path):
+    # os.open raises ValueError, not OSError, for an embedded NUL: it escaped the prompt.
+    to_store, note = keyless.secret_entry(f"{tmp_path}/key\x00.pem", _secret())
+    assert to_store is None and "key" not in note
+
+
 def test_a_read_error_after_the_file_opened_is_refused_not_raised(tmp_path, monkeypatch):
     # An I/O error mid-read (a flaky mount) must reach the refusal, not escape the prompt.
     key = _key_file(tmp_path)

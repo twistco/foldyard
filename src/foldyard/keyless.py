@@ -399,7 +399,7 @@ def _read_secret_file(path: Path) -> tuple[bytes | None, str]:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except IsADirectoryError:
         return None, f"{path} is not a file"
-    except OSError:
+    except (OSError, ValueError):  # ValueError: an embedded NUL, which no path can hold
         return None, "no readable file at the path entered"
     if not stat.S_ISREG(os.fstat(fd).st_mode):  # a directory opens read-only on some systems
         os.close(fd)
