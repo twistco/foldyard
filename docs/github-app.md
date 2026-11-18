@@ -106,11 +106,12 @@ fy mode github=on
 The first time, foldyard sees that `FY_INJECT_GITHUB` is missing and asks for it on your terminal
 before switching, with a hidden prompt. Give it the **full path of the `.pem` file**: type it, or
 drag the file onto the terminal window, which types it for you. foldyard reads the file on your
-computer, checks it's a whole private key (anything else is refused and nothing is stored), and
-writes it to `host.env` in `~/.foldyard/<project>/`, readable only by you. `host.env` holds one
-`KEY=VALUE` per line, so the key is stored as single-line base64, and foldyard does that encoding
-itself, so the key never shows on your screen or passes through your clipboard. Then put the `.pem`
-somewhere safe, such as your password manager, or delete it: you can always generate another.
+computer, checks it's a whole private key (anything else is refused: nothing is stored and the
+switch stays as it was), and writes it to `host.env` in `~/.foldyard/<project>/`, readable only by
+you. `host.env` holds one `KEY=VALUE` per line, so the key is stored as single-line base64, and
+foldyard does that encoding itself, so the key never shows on your screen or passes through your
+clipboard. Then put the `.pem` somewhere safe, such as your password manager, or delete it: you can
+always generate another.
 
 The prompt also takes the key already encoded, as single-line base64, which is what a vault hint
 (below) produces. A relative path isn't read: the prompt runs in the checkout, which the box can

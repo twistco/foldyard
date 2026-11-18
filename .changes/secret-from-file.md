@@ -10,3 +10,7 @@ bump: patch
   there to avoid. Pasting base64 still works, and `host.env` holds the same line either way. This
   applies to any `base64` secret, including a `[[secret]]` row's. A relative path isn't read, since
   the prompt runs in the checkout the box can write.
+- **`fy mode <switch>=on` no longer switches on when it refuses the key you gave it.** A wrong file
+  or a mangled paste stored nothing but still turned the switch on, with no key behind it. Now the
+  mode is left as it was, as `fy tui`'s dialog already did, and the message says to run the command
+  again. Pressing Enter with nothing still switches on, for adding the key later.

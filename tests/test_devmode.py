@@ -2655,6 +2655,30 @@ def test_mode_set_interrupted_at_the_prompt_leaves_the_posture_unchanged(
     assert not isolated_state["host_env"].exists()
 
 
+def test_mode_set_refused_at_the_prompt_leaves_the_posture_unchanged(
+    isolated_state, monkeypatch, capsys
+):
+    # A refused entry (the wrong file, not a key) used to store nothing and switch the mode on
+    # anyway, leaving a switch with no key behind it. Like the TUI's dialog, a refusal now applies
+    # nothing, and says how to try again.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: "-----BEGIN RSA PRIVATE KEY-----")
+    with pytest.raises(SystemExit) as refused:
+        devmode.main(["set", "github=on"])
+    assert "`fy mode github=on`" in str(refused.value) and "unchanged" in str(refused.value)
+    assert devmode.read()["mode"]["github"] == "off"
+    assert not isolated_state["host_env"].exists()
+
+
+def test_mode_set_with_an_empty_entry_still_applies(isolated_state, monkeypatch):
+    # Enter on its own is a choice — arm now, add the key later — as in the TUI. Only a refusal
+    # stops the mode.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: "")
+    assert devmode.main(["set", "github=on"]) == 0
+    assert devmode.read()["mode"]["github"] == "on"
+
+
 def test_mode_set_without_a_tty_warns_and_still_applies(isolated_state, monkeypatch, capsys):
     # Same non-blocking contract as box-up: no TTY ⇒ warn, apply, and let the minter degrade that
     # one host. Arming from a script must not hang on a hidden prompt.

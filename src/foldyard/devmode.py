@@ -2896,16 +2896,22 @@ def clock_cli(args: list[str]) -> int:
 def _capture_secrets_for(updates: dict[str, str]) -> None:
     """Ask for what the prospective posture lacks BEFORE it is written: a Ctrl-C at the prompt
     then leaves the posture unchanged, and the proxy's warm-up never runs against an empty
-    host.env. Without a TTY it warns and carries on — same non-blocking contract as box-up."""
+    host.env. A REFUSED entry leaves it unchanged too, as the TUI's dialog does: the operator
+    meant to give the key, and a switch armed without one only fails later. An empty entry is a
+    choice (arm now, add the key later) and applies. Without a TTY it warns and carries on —
+    same non-blocking contract as box-up."""
     from . import keyless
 
-    keyless.capture_secrets(
+    statuses = keyless.capture_secrets(
         config.host_env_file(),
         missing_secrets(updates),
         interactive=sys.stdin.isatty(),
         prompt=getpass.getpass,  # hides the paste — a real secret
         echo=lambda m: print(m, file=sys.stderr),
     )
+    if "mismatch" in statuses:
+        asked = " ".join(f"{axis}={value}" for axis, value in updates.items())
+        raise SystemExit(f"✗ mode unchanged — run `fy mode {asked}` again to give the key.")
 
 
 def _refuse_a_ttl_nothing_carries(updates: dict[str, str]) -> None:
