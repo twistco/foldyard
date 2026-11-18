@@ -14,6 +14,7 @@ import pytest
 from hypothesis import HealthCheck, settings
 from hypothesis.database import DirectoryBasedExampleDatabase
 
+import e2e_adoptions
 from foldyard import config, devmode, plugins
 
 # The env the session started with, before any fixture: what a live module must still see
@@ -227,6 +228,21 @@ def isolated_home(tmp_path_factory, monkeypatch, request):
     monkeypatch.setenv("HOME", str(home))
 
 
+# The credentials the agents read from their environment. The suite drives `fy verify` in the
+# box, which fails on a real-looking one: a value from the operator's shell, or one a test let the
+# supervisor load from a host.env, must never reach another test.
+_AGENT_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def no_agent_credentials(monkeypatch):
+    """Each test starts without the agents' credential env, and ends without it too: setenv records
+    the value to restore (or "absent"), so whatever a test leaves there is undone."""
+    for name in _AGENT_CREDENTIAL_ENV:
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
 @pytest.fixture(autouse=True)
 def isolated_allow_store(tmp_path, monkeypatch, request):
     """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no
@@ -353,6 +369,16 @@ def isolated_config_pin(tmp_path, monkeypatch):
     supervisor._held_cursor.clear()
     supervisor._held_notified.clear()
     supervisor._inject_overlaps_seen.clear()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def forget_live_adoptions(request):
+    """After a live module that drives the real CLI, forget what it adopted on your computer
+    (tests/e2e_adoptions.py): its copies' adoptions, which nothing else ever removed. Module-scoped
+    and autouse, so it is torn down after the module's own fixtures and their `fy down`."""
+    yield
+    if _runs_the_real_cli(request.module):
+        e2e_adoptions.forget_recorded()
 
 
 @pytest.fixture(autouse=True)

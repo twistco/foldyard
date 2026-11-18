@@ -199,14 +199,14 @@ PREFIX = "/bucket/"
 class _Recorder:
     """A TLS listener on SCOPED:443 that records every connection's bytes and answers a GET."""
 
-    def __init__(self, cert, key) -> None:
+    def __init__(self, cert, key, addr: str = SCOPED) -> None:
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self.sock.bind((SCOPED, 443))
+            self.sock.bind((addr, 443))
         except OSError as e:
             self.sock.close()
-            pytest.skip(f"can't listen on {SCOPED}:443 here ({e})")
+            pytest.skip(f"can't listen on {addr}:443 here ({e})")
         self.sock.listen()
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
@@ -474,3 +474,303 @@ def test_a_body_an_http2_read_doesnt_announce_never_reaches_the_host(scoped):
     assert f"GET {PREFIX}chrome.zip".encode() in recorder.received, seen
     assert not any(b"EXFILTRATED" in r for r in seen), seen
     assert not any(recorder.after), seen  # not a byte of it, however the DATA was split
+
+
+# ── a host-started build: a path grant for builds, and a refusal that names its path ──────────
+# The unit tier knows a build inside a decrypted connection by its CONNECT's connection; this is
+# that on the wire: the secret travels only in the CONNECT's Proxy-Authorization (as a real
+# build's proxy URL makes it), and every request after the handshake carries none.
+
+_SECRET = "build-secret"
+
+
+def _build_tokens(path) -> None:
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    when = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    path.write_text(json.dumps({"tokens": {hashlib.sha256(_SECRET.encode()).hexdigest(): when}}))
+
+
+@pytest.fixture
+def build_scoped(tmp_path):
+    from test_proxy_e2e import _self_signed
+
+    cert, key = tmp_path / "scoped.crt", tmp_path / "scoped.key"
+    _self_signed(cert, key)
+    recorder = _Recorder(cert, key)
+    counter = _Counter()
+    allow, tokens = tmp_path / "allow-effective.json", tmp_path / "build-tokens.json"
+    _build_tokens(tokens)
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    try:
+        with _running_proxy(
+            rig,
+            "import json; print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n",
+            env={"DEFAULT_DENY": "1", "ALLOW_FILE": str(allow), "BUILD_TOKENS_FILE": str(tokens)},
+        ) as proxy:
+            allow.write_text(
+                json.dumps(
+                    {"default_deny": True, "allow": [], "build_allow": [f"{SCOPED}{PREFIX}"]}
+                )
+            )
+            yield proxy, recorder, counter
+    finally:
+        recorder.close()
+        counter.close()
+
+
+def _as(proxy, host: str, path: str, *, build: bool, method: str = "GET"):
+    user = f"fy-build:{_SECRET}@" if build else ""
+    return _session().request(
+        method,
+        f"https://{host}{path}",
+        proxies={"https": f"http://{user}{HOST}:{proxy.pport}"},
+        verify=str(proxy.ca),
+        timeout=20,
+    )
+
+
+def test_a_build_path_grant_reads_under_it_and_nothing_else(build_scoped):
+    proxy, recorder, _counter = build_scoped
+    resp = _as(proxy, SCOPED, f"{PREFIX}chrome.zip", build=True)
+    assert resp.status_code == 200, proxy.mitm_log.read_text()
+    assert any(r.startswith(f"GET {PREFIX}chrome.zip".encode()) for r in recorder.received)
+
+    def read() -> list[dict]:
+        rows = _log_entries(proxy.log)
+        return [r for r in rows if r.get("host") == SCOPED and r.get("status") == 200]
+
+    # The row is written once the response is done, which can be after the client has it.
+    _wait(lambda: read(), 5, "the read's row", proxy.mitm_log.read_text())
+    assert read()[-1]["build"] is True and read()[-1]["path"] == f"{PREFIX}chrome.zip"
+
+    for method, path in (("GET", "/other/secret"), ("PUT", f"{PREFIX}upload")):
+        resp = _as(proxy, SCOPED, path, build=True, method=method)
+        assert resp.status_code == 403, (method, path)
+    _settle()
+    assert not any(b"/other/" in r or b"PUT" in r for r in recorder.received), recorder.received
+    _wait(lambda: len(_rows_for(proxy, SCOPED)) >= 2, 5, "both refusals' rows", "")
+    assert all(r.get("build") and r.get("outside") for r in _rows_for(proxy, SCOPED))
+
+
+def test_a_build_path_grant_is_nothing_to_the_box(build_scoped):
+    proxy, recorder, _counter = build_scoped
+    before = len(recorder.received)
+    resp = _as(proxy, SCOPED, f"{PREFIX}chrome.zip", build=False)
+    assert resp.status_code == 403
+    _settle()
+    assert all(not r for r in recorder.received[before:]), recorder.received
+    assert not any(r.get("build") for r in _rows_for(proxy, SCOPED))
+
+
+def test_a_refused_build_request_is_decrypted_and_logged_with_its_path(build_scoped):
+    # What the build gate offers a path grant from — and still nothing reaches the host.
+    proxy, _recorder, counter = build_scoped
+    resp = _as(proxy, REFUSED, "/chrome-for-testing-public/1/chrome.zip", build=True)
+    assert resp.status_code == 403
+    _settle()
+    assert counter.accepted == 0, proxy.mitm_log.read_text()
+    _wait(lambda: _rows_for(proxy, REFUSED), 5, "the refusal's row", proxy.mitm_log.read_text())
+    row = _rows_for(proxy, REFUSED)[-1]
+    assert row["build"] is True and row["path"] == "/chrome-for-testing-public/1/chrome.zip"
+
+
+def test_a_build_client_without_the_ca_still_leaves_a_build_row(build_scoped):
+    proxy, _recorder, counter = build_scoped
+    ctx = ssl.create_default_context()  # the system store: no proxy CA, like a Java step
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    import base64
+
+    auth = base64.b64encode(f"fy-build:{_SECRET}".encode()).decode()
+    with socket.create_connection((HOST, proxy.pport), timeout=10) as raw:
+        raw.sendall(
+            f"CONNECT {REFUSED}:443 HTTP/1.1\r\nHost: {REFUSED}:443\r\n"
+            f"Proxy-Authorization: Basic {auth}\r\n\r\n".encode()
+        )
+        assert raw.recv(4096).startswith(b"HTTP/1.1 200")
+        with pytest.raises(ssl.SSLError):
+            ctx.wrap_socket(raw, server_hostname=REFUSED)
+    _wait(
+        lambda: any(r.get("build") for r in _rows_for(proxy, REFUSED)),
+        5,
+        "the CONNECT's build row",
+        proxy.mitm_log.read_text(),
+    )
+    assert counter.accepted == 0
+
+
+# ── follow grants on the wire ─────────────────────────────────────────────────────────────────
+# A follow grant (ADR-0029, amended 2026-11-16): a redirect read from under a trusted source path
+# lets the box read the exact URL it names. The unit tier drives the vouch over stub flows; what
+# only a real mitmdump shows is the order on the wire — the 302 is read on one connection, then
+# the client's NEW CONNECT to the target is answered, its ClientHello earns the dial (by NAME,
+# through the resolver guard), and the named read goes out on it while nothing else does.
+#
+# The target is a name (a follow target never holds an address): `*.follow.localhost` resolves to
+# loopback, which the proxy dials only on a grant naming the address — so the rig grants
+# 127.0.0.1 as an operator would type it, which grants the NAME nothing.
+
+SOURCE = "127.0.0.4"  # the redirecting host, granted for one path
+TARGET = "a.follow.localhost"
+TARGET_ADDR = "127.0.0.1"
+NAMED = "/dl/file?sig=1"
+
+
+class _Redirector:
+    """A TLS listener on SOURCE:443 answering each GET with a 302 to ``locations[path]``."""
+
+    def __init__(self, cert, key, locations: dict[str, str]) -> None:
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.bind((SOURCE, 443))
+        except OSError as e:
+            self.sock.close()
+            pytest.skip(f"can't listen on {SOURCE}:443 here ({e})")
+        self.sock.listen()
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+        self.ctx.set_alpn_protocols(["http/1.1"])
+        self.locations = locations
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
+
+    def _one(self, conn) -> None:
+        try:
+            tls = self.ctx.wrap_socket(conn, server_side=True)
+            tls.settimeout(3)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            path = data.split(b" ", 2)[1].decode() if data.count(b" ") >= 2 else ""
+            location = self.locations.get(path, "")
+            tls.sendall(
+                f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n"
+                "Connection: close\r\n\r\n".encode()
+            )
+            tls.close()
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.sock.close()
+
+
+@pytest.fixture
+def follow(tmp_path):
+    from test_proxy_e2e import _self_signed
+
+    try:
+        resolved = {a[4][0] for a in socket.getaddrinfo(TARGET, 443, socket.AF_INET)}
+    except OSError:
+        resolved = set()
+    if TARGET_ADDR not in resolved:
+        pytest.skip(f"{TARGET} doesn't resolve to {TARGET_ADDR} here ({sorted(resolved)})")
+    cert, key = tmp_path / "follow.crt", tmp_path / "follow.key"
+    _self_signed(cert, key)
+    redirector = _Redirector(
+        cert,
+        key,
+        {
+            "/repo/logs": f"https://{TARGET}{NAMED}",
+            "/repo/outside": f"https://{TARGET}/elsewhere/file?sig=1",
+        },
+    )
+    target = _Recorder(cert, key, addr=TARGET_ADDR)
+    allow = tmp_path / "allow-effective.json"
+    rig = tmp_path / "rig"
+    rig.mkdir()
+
+    def write(follows: bool) -> None:
+        grants = [f"{SOURCE}/repo/", TARGET_ADDR]  # the address, typed: never the name
+        rule = [{"from": f"{SOURCE}/repo/", "to": ["*.follow.localhost/dl/"]}]
+        allow.write_text(
+            json.dumps({"default_deny": True, "allow": grants, "follow": rule if follows else []})
+        )
+        time.sleep(0.05)
+
+    try:
+        with _running_proxy(
+            rig,
+            "import json; print(json.dumps({'value': 'token FAKE', 'ttl': 3600}))\n",
+            env={"DEFAULT_DENY": "1", "ALLOW_FILE": str(allow)},
+        ) as proxy:
+            write(True)
+            yield proxy, target, write
+    finally:
+        redirector.close()
+        target.close()
+
+
+def _get(proxy, url: str, method: str = "GET", **kw):
+    return _session().request(
+        method,
+        url,
+        proxies={"https": f"http://{HOST}:{proxy.pport}"},
+        verify=str(proxy.ca),
+        timeout=20,
+        **kw,
+    )
+
+
+def test_a_followed_redirect_reads_the_url_it_named(follow):
+    proxy, target, _write = follow
+    resp = _get(proxy, f"https://{SOURCE}/repo/logs")
+    assert resp.status_code == 200, proxy.mitm_log.read_text()
+    assert resp.text == f"ok {NAMED}"
+    assert [r.split(b"\r\n", 1)[0] for r in target.received if r] == [
+        f"GET {NAMED} HTTP/1.1".encode()
+    ]
+    _wait(
+        lambda: any(r.get("followed") for r in _log_entries(proxy.log)),
+        5,
+        "the followed read's row",
+        proxy.mitm_log.read_text(),
+    )
+    (row,) = [r for r in _log_entries(proxy.log) if r.get("followed")]
+    assert row["host"] == TARGET and row["followed"] == SOURCE and row["status"] == 200
+
+
+def test_without_the_follow_grant_the_redirect_is_refused(follow):
+    # The red-first control: everything else as above, and nothing reaches the target.
+    proxy, target, write = follow
+    write(False)
+    resp = _get(proxy, f"https://{SOURCE}/repo/logs")
+    assert resp.status_code == 403
+    assert f"{SOURCE} redirected here" in resp.text
+    _settle()
+    assert all(not r for r in target.received), target.received
+
+
+def test_only_the_named_url_and_only_a_read(follow):
+    proxy, target, _write = follow
+    assert _get(proxy, f"https://{SOURCE}/repo/outside").status_code == 403  # outside `to`
+    assert _get(proxy, f"https://{SOURCE}/repo/logs").status_code == 200  # vouches for NAMED
+    for method, url, data in (
+        ("GET", f"https://{TARGET}/dl/other?sig=1", None),
+        ("GET", f"https://{TARGET}/dl/file?sig=2", None),
+        ("PUT", f"https://{TARGET}{NAMED}", b"payload"),
+    ):
+        assert _get(proxy, url, method, data=data).status_code == 403, (method, url)
+    _settle()
+    assert [r.split(b"\r\n", 1)[0] for r in target.received if r] == [
+        f"GET {NAMED} HTTP/1.1".encode()
+    ]

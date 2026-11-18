@@ -55,6 +55,9 @@ GITIGNORE_ENTRIES = (
     # merge, so committing one silently re-points everyone else's posture. Recursive so a worktree's
     # copy is ignored too; the committed `.example` beside it is what the team shares.
     "**/foldyard.local.toml",
+    # Not written by foldyard: where an agent's quick worktree goes in a box (Claude Code's own
+    # default), inside the checkout so its path is the same on both sides (docs/git.md).
+    ".claude/worktrees/",
 )
 
 # The template `init` writes beside the config — committed, unlike what it's a template FOR.
@@ -266,7 +269,7 @@ def _step_two(agents: list[str]) -> list[str]:
     if not agents:
         return [
             "#   2. Uncomment ONE agent ([claude] or [codex]), `fy config adopt`, then",
-            "#      `fy box down && fy box up` — the agent is installed when the box is CREATED, so a",
+            "#      `fy box recreate` — the agent is installed when the box is CREATED, so a",
             "#      running box won't pick it up (with `keyless`, then `fy mode claude=on` or",
             "#      `codex=on`). Now an AI agent runs INSIDE the safe sandbox (it offers that agent's",
             "#      install hosts the same way). Use it to work out the rest of this config with you.",
@@ -312,7 +315,7 @@ def render(opts: InitOptions) -> str:
         "#      one reviewed batch ([proxy] below).",
         *_step_two([a for a in ("claude", "codex") if a in opts.blocks]),
         "#   3. Uncomment a stack + the features at the bottom as the project needs them. Box",
-        "#      settings are create-time too: adopt, then `fy box down && fy box up`.",
+        "#      settings are create-time too: adopt, then `fy box recreate`.",
         "# Resolution everywhere: explicit env var wins → foldyard.local.toml (gitignored,",
         "# per-developer overrides) → this file → built-in default. Keep what's PERSONAL out of",
         "# here: which agent subscription you pay for, how big your VM is, a pinned worktree port.",
@@ -342,12 +345,10 @@ def render(opts: InitOptions) -> str:
         f'# "{_orderable(opts.version)}" = "the version this project started on"',
         "",
         "[machine]",
-        "# A rootless VM that mounts ONLY this repo. Default here is the Lima backend + the VM",
-        "# firewall: fail-closed, so the box's only way out is the allowlisting proxy on your",
+        "# A rootless Lima VM that mounts ONLY this repo, with the VM firewall on by default:",
+        "# fail-closed, so the box's only way out is the allowlisting proxy on your",
         "# computer (below). Sizing applies at FIRST creation; to resize later:",
         "# `foldyard machine recreate`.",
-        '#   backend = "podman"    # the single shared podman machine — no concurrent per-project',
-        "#                         # VMs, and no VM firewall",
         "#   firewall = false      # lima without the VM firewall: the box uses the proxy, but",
         "#                         # nothing stops a process that ignores it (cooperative only)",
         "#   host_firewall = true  # Linux: enforce the same firewall on your computer too",
@@ -357,7 +358,9 @@ def render(opts: InitOptions) -> str:
         '#   runtime = "gvisor"    # (experimental) the box (and what it creates) under gVisor\'s',
         "#                         # userspace kernel: a kernel-exploit layer; ~1.2x on a test",
         "#                         # suite; edits from your computer need dev-server polling",
-        'backend = "lima"',
+        '#   vmtype = "vz"         # the hypervisor, fixed when the VM is created. Unset, each',
+        "#                         # computer gets the best it has: vz on macOS, qemu on Linux",
+        "#                         # and WSL2. Name one only if every developer's computer has it",
         "firewall = true",
         f'name = "{prefix}"',
         f"cpus = {opts.cpus}",
@@ -415,9 +418,9 @@ def render(opts: InitOptions) -> str:
             else "# ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────"
         ),
         "# Claude Code (`fy claude`). Declaring [claude] installs it on box-up + mounts its persisted",
-        "# login/transcripts. Keyless: the real token is injected at the proxy on your computer, NEVER",
-        "# in the box (`fy box up` prompts once, hidden; stored only on your computer). Then",
-        "# `fy mode claude=on`.",
+        "# config/transcripts. Keyless, always: the real token is injected at the proxy on your",
+        "# computer, NEVER in the box (a [claude] without `keyless` is refused). `fy mode claude=on`",
+        "# asks for it once (hidden) and stores it only on your computer.",
         "# system_prompt is appended via --append-system-prompt, so a fresh `fy claude` starts",
         "# oriented instead of re-deriving the box and getting it wrong. The one below WORKS as",
         "# written for a BOX-ONLY project — uncomment and go. It says nothing about a stack, so it",
@@ -442,9 +445,8 @@ def render(opts: InitOptions) -> str:
         "#",
         "# OpenAI Codex CLI (`fy codex`). Declaring [codex] installs it on box-up + mounts ~/.codex.",
         "# Native installer (a static binary — no node needed). Keyless like Claude: the proxy",
-        "# injects on your computer. Leave `keyless` out for an in-box `codex login --api-key` (the",
-        "# ChatGPT browser login can't complete in the box). On a team, `keyless` goes in",
-        "# foldyard.local.toml, as for [claude].",
+        "# injects on your computer, and a [codex] without `keyless` is refused. On a team,",
+        "# `keyless` goes in foldyard.local.toml, as for [claude].",
         *_codex("codex" in opts.blocks),
         "#",
         "# Codex's config.toml keys, one `-c` per leaf (nested tables flatten to dotted paths):",
@@ -462,7 +464,7 @@ def render(opts: InitOptions) -> str:
         "# shows what it was last read to grant), or ALL of yours for `github-user`, writes",
         "# included. The box holds a dummy GH_TOKEN for the proxy to replace; the packaged box",
         '# has no `gh`, so add `packages = ["gh"]` under [box]. A new row takes',
-        "# `fy box down && fy box up`.",
+        "# `fy box recreate`.",
         "# [[inject]]",
         '# switch = "github"                 # the App\'s PEM → host.env FY_INJECT_GITHUB (prompted)',
         '# kind = "github-app"',
@@ -508,6 +510,9 @@ def render(opts: InitOptions) -> str:
         "#",
         "# System packages, baked once into a cached layer on the box image (any package manager):",
         '# packages = ["postgresql-client", "just"]',
+        "#",
+        "# Hooks in the checkout that git runs in the box only (never on your computer):",
+        '# git_hooks = ".githooks"',
         "#",
         "# Other tools, installed once per fresh box as MONITORED steps (reported ✓/✗):",
         "# [[box.tools]]",
@@ -574,7 +579,7 @@ def render_local(opts: InitOptions) -> str:
         "#             your computer.",
         "#   api-key — an Anthropic API key (sk-ant-api…) from console.anthropic.com.",
         "# A TTY `fy box up` prompts once (hidden) and stores it host-side. Then `fy mode claude=on`.",
-        "# Omit `keyless` entirely and you get a plain in-box `claude` login instead.",
+        "# `keyless` is required: a [claude] table without it is refused (there is no in-box login).",
         "# [claude]",
         '# keyless = "oauth"',
         "#",
@@ -582,7 +587,7 @@ def render_local(opts: InitOptions) -> str:
         "#   chatgpt — your ChatGPT subscription: the access token is minted and refreshed host-side",
         "#             from ~/.codex/auth.json on your computer (run `codex login` there once). No key.",
         "#   api-key — an OpenAI API key (sk-…), captured host-side like Claude's.",
-        "# Then `fy mode codex=on`. Omit `keyless` for a plain in-box `codex login`.",
+        "# Then `fy mode codex=on`. Required here too: a [codex] table without `keyless` is refused.",
         "# `system_prompt` works here exactly as it does for [claude] — Codex takes it as a developer",
         "# instruction rather than a system prompt, but the effect (a session that starts oriented in",
         "# this box) is the same. Keep it in the SHARED file if it's about the project, not about you.",
@@ -653,7 +658,8 @@ def _gitignore_block() -> str:
     return "\n".join(
         [
             GITIGNORE_BEGIN,
-            "# Box/host-generated files foldyard writes beside foldyard.toml; never commit.",
+            "# Box/host-generated files foldyard writes beside foldyard.toml, and agents' quick",
+            "# worktrees; never commit.",
             *GITIGNORE_ENTRIES,
             GITIGNORE_END,
         ]

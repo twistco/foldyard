@@ -13,7 +13,8 @@ it, so the label is a to-do list rather than a mood: without the last field, lab
 forever (and readers learn to ignore them) or are dropped quietly with nothing having changed.
 
 Everything that SAYS experimental derives from here: the ``experimental`` row of ``fy doctor``
-(what the adopted config turns on — :func:`doctor_row`) and the ``*(experimental)*`` tags in
+(what the adopted config turns on — :func:`doctor_row`), the Experimental panel of ``fy --help``
+(each entry's ``verbs``) and the ``*(experimental)*`` tags in
 docs/configuration.md (``tests/test_experimental.py`` holds docs and register together, both
 ways). A changelog fragment introducing one carries ``experimental: true`` in its frontmatter
 (``.changes/README.md``). Graduating one is deleting its entry and its doc tag, plus a
@@ -39,6 +40,8 @@ class Feature:
     unproven: str  # what isn't known yet — shown by `fy doctor`
     graduates_when: str  # what would end it — for maintainers; reviewed when it's met
     doc_mark: str  # the exact text in docs/configuration.md that carries its tag
+    # Top-level `fy` verbs that exist for this feature: `fy --help` lists them under Experimental.
+    verbs: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
@@ -94,6 +97,7 @@ REGISTER: tuple[Feature, ...] = (
             "for a month with nothing filed against it in that time still open"
         ),
         doc_mark="- **`monitor`** *(experimental)*",
+        verbs=("monitor",),
     ),
     Feature(
         key="machine.attribution",
@@ -122,7 +126,7 @@ REGISTER: tuple[Feature, ...] = (
         unproven=(
             "every compose call and a project's own box image run in the VM, and its own e2e "
             "module passes on vz, Linux and WSL2 hosts, but the other host-tier modules have run "
-            "with it on under vz only, it hasn't run on the podman backend or under gVisor, and "
+            "with it on under vz only, it hasn't run under gVisor, and "
             "no maintainer uses it day to day yet. Registry logins on your computer don't reach "
             "the VM, and a box that writes the VM user's ~/.bashrc can read a build's gate token "
             "before the runner starts (docs/compose-in-vm-scope.md)"

@@ -45,7 +45,15 @@ def test_heading_ids_are_githubs(heading, github_id):
         # Alt text that wraps and names TOML tables, as the diagrams' alt texts do.
         ("![one [[inject]] row\nbecomes a switch](https://x/a.svg)", "https://x/a.svg"),
         ("see [`[machine] firewall`](../c.md)", "../c.md"),
+        # `<…>`: how mdformat writes a target holding parentheses — read whole, not cut at `)`.
+        ("[`V`](<https://x/init(url:readonly:)>)", "<https://x/init(url:readonly:)>"),
+        ("[a](<./b c.md>)", "<./b c.md>"),
     ],
 )
 def test_the_link_pattern_reads_the_manuals_links(markdown, target):
     assert [m.group(2) for m in hooks._LINK.finditer(markdown)] == [target]
+
+
+def test_a_target_that_only_starts_like_a_bracketed_one_is_not_a_link():
+    # `[a](<x>y)` is no link in CommonMark; read as a bare `<x>y`, `fix` would unwrap `x>`.
+    assert list(hooks._LINK.finditer("[a](<x>y)")) == []

@@ -501,7 +501,7 @@ def cli_add(
         )
         print(
             "  A VM or box from before the to-box shares none: `fy machine stop && fy up`, then "
-            "`fy box down && fy box up`."
+            "`fy box recreate`."
         )
     elif file:
         print(

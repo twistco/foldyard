@@ -1,0 +1,6 @@
+# mdformat (`just format` / `just lint`): Markdown wrapped like the code, at 100 columns. The files,
+# and `--compact-tables` (the gfm plugin reads it from the command line only), are the justfile's
+# `_md_files` / `_mdformat`: `exclude` here would need Python 3.13+, and the project runs 3.11.
+wrap = 100
+number = true # keep ordered lists numbered 1. 2. 3., not 1. 1. 1.
+end_of_line = "lf"

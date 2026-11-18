@@ -141,14 +141,43 @@ lint:
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     uv run --project "{{_dir}}" ruff check "{{_dir}}"
     uv run --project "{{_dir}}" ruff format --check "{{_dir}}"
+    cd "{{_dir}}"
+    {{_md_files}} | xargs -0 uv run --project "{{_dir}}" {{_mdformat}} --check
 
-# Auto-format + apply safe lint fixes (ruff).
+# Lint before every commit made ON YOUR COMPUTER too: point this clone's .git/config at the tracked
+# hooks in .githooks/. Boxes have it already, in their own git config (`[box] git_hooks`); this
+# shared setting is the opt-in for your computer, where the hook is code from the box-writable
+# checkout (see .githooks/pre-commit). Refused in a box: written from there, it would turn the
+# hook on for your computer. Undo: `git config --unset core.hooksPath`.
+hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "${IN_DEVBOX:-}" = 1 ]; then
+        echo "✗ run \`just hooks\` on your computer: boxes lint on commit already (foldyard.toml's [box] git_hooks)," >&2
+        echo "  and this setting is the shared .git/config's — from here it would turn the hook on for your computer" >&2
+        exit 1
+    fi
+    git -C "{{_dir}}" config core.hooksPath .githooks
+    echo "✓ commits on this computer run \`just lint\` now (skip once: git commit --no-verify)"
+
+# Auto-format + apply safe lint fixes (ruff), and wrap the Markdown (mdformat).
 format:
     #!/usr/bin/env bash
     set -euo pipefail
     export UV_PROJECT_ENVIRONMENT="${XDG_CACHE_HOME:-$HOME/.cache}/foldyard/dev-venv-$(echo "{{_dir}}" | cksum | cut -d\  -f1)"
     uv run --project "{{_dir}}" ruff format "{{_dir}}"
     uv run --project "{{_dir}}" ruff check "{{_dir}}" --fix
+    cd "{{_dir}}"
+    {{_md_files}} | xargs -0 uv run --project "{{_dir}}" {{_mdformat}}
+
+# The Markdown formatter, a dev dependency (locked in uv.lock with ruff). Settings: .mdformat.toml;
+# --compact-tables here, since the gfm plugin reads it from the command line only.
+_mdformat := "mdformat --compact-tables"
+# What it formats: the tracked Markdown, NUL-separated, but not the Marp talk sources (their slide
+# separators and directives aren't paragraphs) nor CHANGELOG.md (written by `just release` from
+# the .changes/ fragments, which are formatted). Files deleted but not yet committed are skipped:
+# `just release` checks with the folded fragments gone.
+_md_files := 'git ls-files -z -- "*.md" ":!:docs/talks/*.md" ":!:CHANGELOG.md" | while IFS= read -r -d "" f; do [ ! -e "$f" ] || printf "%s\0" "$f"; done'
 
 # Type-check with both pyright (Microsoft) and ty (Astral). The `e2e` group is installed so the
 # opt-in proxy/box e2e tests typecheck too (they import cryptography/requests — e2e-only deps; a

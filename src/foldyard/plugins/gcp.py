@@ -39,7 +39,7 @@ from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-from .. import config
+from .. import config, term
 from . import CapabilityProbe, DoctorContext, PanelData, Plugin, Switch, TuiPanel
 
 # The host port the SA-token minter listens on comes from ``config.gcp_minter_port()`` —
@@ -282,7 +282,7 @@ def _gcp_panel_data() -> PanelData:
         kind = "user" if e.get("user") else "SA"
         rows.append(
             (
-                e.get("ts", "")[11:19],
+                term.stamp(e.get("ts")),
                 escape((e.get("sa") or "—")[:46]),
                 kind,
                 f"[{colour}]{status}[/{colour}]",

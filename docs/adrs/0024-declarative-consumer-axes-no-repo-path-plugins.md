@@ -13,9 +13,9 @@
 ## Context
 
 [ADR-0019](./0019-consumer-repo-plugins-trust-model.md) decided to let a consumer point
-`[plugins].load` at a Python file in their own repo, guarded by a host-side, hash-acknowledged
-trust store — the direnv model. Two things happened between that decision and the extraction that
-argue against building it, and a third removed the reason it was wanted.
+`[plugins].load` at a Python file in their own repo, guarded by a host-side, hash-acknowledged trust
+store — the direnv model. Two things happened between that decision and the extraction that argue
+against building it, and a third removed the reason it was wanted.
 
 **1. It re-opens the class the codebase just spent five rounds closing.** The audit behind
 [ADR-0023](./0023-no-host-executed-code-from-the-repo-mount.md) did not gate host-executed
@@ -50,8 +50,8 @@ trust store, no `fy plugins trust`, no new doctor tier — because data is not c
 pattern the config surface already converged on: `[[overlay]]`, `[[require]]`, `[[secret]]` and
 `[[inject]]` are all consumer-declared data evaluated by package-side code.
 
-That deletes `llm.py` outright and reduces `auth0_sim.py` to two residues, each of which gets a
-home rather than an exception:
+That deletes `llm.py` outright and reduces `auth0_sim.py` to two residues, each of which gets a home
+rather than an exception:
 
 - **The `auth0`×`storage` conflict warning** becomes a **conflict relation** alongside `Requires`:
   `axis="auth0", when=["sim"], conflicts="storage", at=["staging"], severity="warn", message="…"`.
@@ -61,11 +61,10 @@ home rather than an exception:
   the first `[[…]]` table whose payload is prose, and it extends an evaluator that is already
   property-tested over generated constraint graphs.
 - **The mkcert/nss doctor checks and fixes** are absorbed into a small **core** `[localhost_tls]`
-  check set with a configurable `cert_dir`. These cannot become config: `DoctorFix.cmd` is a
-  command the host executes, and a consumer-declared command is precisely the `minter = "<command>"`
-  hole ADR-0023 closed. Keeping the commands package-side keeps both the checks and the fix
-  buttons. The sim-container bounce is dropped — `stack.up()` already bounces the sim when
-  `auth0=sim`.
+  check set with a configurable `cert_dir`. These cannot become config: `DoctorFix.cmd` is a command
+  the host executes, and a consumer-declared command is precisely the `minter = "<command>"` hole
+  ADR-0023 closed. Keeping the commands package-side keeps both the checks and the fix buttons. The
+  sim-container bounce is dropped — `stack.up()` already bounces the sim when `auth0=sim`.
 
 **Why local TLS is "core", since core needs a boundary.** foldyard hosts a consumer's stack *with
 compose*, and a compose-hosted stack is overwhelmingly a **web** stack: services on localhost ports,
@@ -76,16 +75,16 @@ can reach the engine" does. It is a bounded claim: foldyard **checks for and poi
 TLS toolchain — it does not become a CA and does not touch the trust store itself.
 
 **Entry-point plugins remain the third-party tier** ("installed = trusted" — installing a
-distribution into the tool venv is already an explicit, host-side act), plus one cheap doctor
-guard: warn if a loaded plugin's `__file__` resolves inside the repo mount, since an editable
-install from the mount reopens the hole by the back door.
+distribution into the tool venv is already an explicit, host-side act), plus one cheap doctor guard:
+warn if a loaded plugin's `__file__` resolves inside the repo mount, since an editable install from
+the mount reopens the hole by the back door.
 
 ## Consequences
 
-- **A consumer can no longer ship host-side hook *code* with config alone.** The routes are:
-  declare an axis as data, upstream the behaviour, or publish an entry-point plugin and install it
-  into the tool venv. Combined with ADR-0023, foldyard now has **no** path by which repo contents
-  become host-executed code — a property worth stating as a whole rather than per-field.
+- **A consumer can no longer ship host-side hook *code* with config alone.** The routes are: declare
+  an axis as data, upstream the behaviour, or publish an entry-point plugin and install it into the
+  tool venv. Combined with ADR-0023, foldyard now has **no** path by which repo contents become
+  host-executed code — a property worth stating as a whole rather than per-field.
 - **The package stops carrying one consumer's shape.** `auth0_sim` and `llm` were Tangible-specific
   built-ins living in a general-purpose tool; they leave without landing anywhere else.
 - **Two new surfaces to document and property-test**: the conflict relation and `[localhost_tls]`.
@@ -97,26 +96,26 @@ install from the mount reopens the hole by the back door.
 - **A wish-list item, recorded so it isn't re-derived.** A PyPI-installable replacement for
   `brew install mkcert nss` would ride the tool venv foldyard already owns and work on Linux hosts.
   The *generation* half is easy in pure Python (`trustme`, or `cryptography`); the half that earns
-  mkcert its keep is **trust-store installation** (the macOS keychain via `security
-  add-trusted-cert`, plus NSS via `certutil` for Firefox/Chrome), which is irreducibly
+  mkcert its keep is **trust-store installation** (the macOS keychain via
+  `security add-trusted-cert`, plus NSS via `certutil` for Firefox/Chrome), which is irreducibly
   platform-specific. Do **not** solve it by reusing the egress proxy's mitmproxy CA: that CA is
-  trusted inside the box only, and promoting the key that sits beside a live intercepting proxy
-  into the host's system trust store is a materially worse posture than mkcert's own CA, which
-  signs nothing but localhost leaves.
+  trusted inside the box only, and promoting the key that sits beside a live intercepting proxy into
+  the host's system trust store is a materially worse posture than mkcert's own CA, which signs
+  nothing but localhost leaves.
 
 ## Rejected alternatives
 
-- **Build ADR-0019 as designed** (path loading + hash-acknowledged trust store). Sound as a
-  design — its detailed shape is preserved in ADR-0023's rejected alternatives, including the
+- **Build ADR-0019 as designed** (path loading + hash-acknowledged trust store). Sound as a design —
+  its detailed shape is preserved in ADR-0023's rejected alternatives, including the
   copy-the-acked-bytes-out-of-the-mount correction — but it has no customer. Count the customers
   before building the gate; there were two, and both were data.
 - **Drop the `auth0`×`storage` warning entirely.** Free, and the boundary stays clean, but it loses
   a real guard on a one-command mistake with cloud-write consequences.
-- **Ship auth0-sim as a small consumer distribution installed via an entry point.** Works today,
-  but it must be installed from outside the mount or the hole returns, and it adds an onboarding
-  step plus a reinstall per edit — a lot of ceremony for two hooks.
+- **Ship auth0-sim as a small consumer distribution installed via an entry point.** Works today, but
+  it must be installed from outside the mount or the hole returns, and it adds an onboarding step
+  plus a reinstall per edit — a lot of ceremony for two hooks.
 - **A declarative `[[check]]` table with a closed predicate vocabulary** (`which = "mkcert"`,
   `file = "…"`) plus a printed `how` hint — the `[[secret]]` pattern. Buildable and safe (data with
-  a fixed evaluator, not a command), but it loses the fix buttons and adds a config surface, and
-  the `which`/`file` vocabulary is a mild host-probing primitive that would want naming in its own
-  ADR if ever built.
+  a fixed evaluator, not a command), but it loses the fix buttons and adds a config surface, and the
+  `which`/`file` vocabulary is a mild host-probing primitive that would want naming in its own ADR
+  if ever built.

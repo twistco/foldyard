@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
+from collections.abc import Callable
 from datetime import timedelta
 from typing import cast
 
@@ -162,7 +164,7 @@ def test_box_env_hint_is_box_ups_comparison(monkeypatch):
 def test_box_env_hint_says_the_recreate_not_box_up(monkeypatch):
     # `fy box up` on a running box only warns — the fix for create-time env is a new box.
     hint, _ = _hint_for(monkeypatch, ["X: missing"])
-    assert hint and hint.endswith("apply with: fy box down && fy box up")
+    assert hint and hint.endswith("apply with: fy box recreate")
 
 
 def test_box_env_hint_is_silent_when_the_box_matches_or_cannot_be_read(monkeypatch):
@@ -221,8 +223,8 @@ def test_doctor_includes_engine_and_machine_checks_on_mac(monkeypatch):
     # "lima machine". The podman CLI row is unconditional: podman drives the socket whatever
     # backend produced it (lima needs limactl AND podman).
     monkeypatch.setattr(devmode, "machine_state", lambda: "running")
-    # A non-podman backend also gets its own lifecycle-CLI row, and the machine row is gated on
-    # it — so the box (no limactl) needs that stubbed to reach the machine row at all.
+    # limactl gets its own row, and the machine row is gated on it — so the box (no limactl)
+    # needs that stubbed to reach the machine row at all.
     monkeypatch.setattr(devmode._BACKEND, "available", lambda: True)
     rows = _mac_doctor(monkeypatch, "me@x.io")
     names = [n for _, n, _ in rows]
@@ -293,6 +295,17 @@ def _stub_mac_only(monkeypatch):
             "new_profiles": "",
         },
     )
+
+
+async def _until(pilot, ok: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Pause until ``ok()`` holds, or ``timeout`` passes (the caller's assert then says what's
+    wrong). The TUI's updates land over several event-loop hops: a cursor move posts a message,
+    its handler refreshes the bindings, and the footer recomposes after the next refresh. A
+    background doctor run reports when its worker gets the CPU. One fixed pause covers that on an
+    idle machine, but not on a loaded runner (CI and a full local run, 2026-11-11)."""
+    deadline = time.monotonic() + timeout
+    while not ok() and time.monotonic() < deadline:
+        await pilot.pause(0.05)
 
 
 def _fixed_doctor(deep=False):
@@ -738,7 +751,7 @@ def _two_workspaces_feat_box_up():
     return ws
 
 
-_STALE = "⚠ dev box env out of date (X: missing) — apply with: fy box down && fy box up"
+_STALE = "⚠ dev box env out of date (X: missing) — apply with: fy box recreate"
 
 
 async def test_the_box_env_hint_never_holds_the_ui_thread(monkeypatch):
@@ -788,7 +801,7 @@ async def test_the_box_env_hint_aims_the_recreate_at_the_worktrees_box(monkeypat
         await pilot.pause()
         text = _text(app.query_one("#ws-hint", tui.Static))
     assert "proj-feat" in asked
-    assert "WORKTREE=feat fy box down && WORKTREE=feat fy box up" in text
+    assert "WORKTREE=feat fy box recreate" in text
 
 
 async def test_devbox_toggle_starts_without_confirmation_when_down(monkeypatch):
@@ -872,6 +885,37 @@ async def test_devbox_stop_asks_for_confirmation_then_runs(monkeypatch):
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert downs == ["feat"] and ups == []
+
+
+async def test_devbox_recreate_confirms_then_recreates_only_a_running_box(monkeypatch):
+    # `r` is a recreate: offered where a box runs (feat), not where none does (main), and it
+    # asks first — what runs inside is ended just as by a stop.
+    recreates, ups, downs = [], [], []
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces_feat_box_up)
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _CleanDrift())
+    monkeypatch.setattr(devmode, "box_recreate", lambda name: recreates.append(name) or (0, ""))
+    monkeypatch.setattr(devmode, "box_up", lambda name: ups.append(name) or (0, ""))
+    monkeypatch.setattr(devmode, "box_down", lambda name: downs.append(name) or (0, ""))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 0
+        await pilot.pause()
+        assert lv.check_action("recreate_devbox", ()) is False  # main: no box to recreate
+        lv.index = 1
+        await pilot.pause()
+        assert lv.check_action("recreate_devbox", ()) is True
+        await pilot.press("r")
+        await app.workers.wait_for_complete()  # the live-agent lookup runs on a worker
+        await pilot.pause()
+        assert isinstance(app.screen, tui.ConfirmScreen)
+        assert "Recreate the dev box" in str(app.screen.query_one("#cf-title", tui.Static).render())
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+    assert recreates == ["feat"] and ups == [] and downs == []
 
 
 async def test_devbox_stop_cancel_does_nothing_and_never_hits_the_mode_handler(monkeypatch):
@@ -1072,6 +1116,77 @@ async def test_plugin_panel_is_rendered_navigated_and_focused(monkeypatch):
         assert "the summary" in _text(app.query_one("#demo-summary", tui.Static))
         await pilot.press("down")  # ↓ enters the panel → its table takes focus
         assert _fid(app) == "demo-table"
+
+
+async def test_a_table_panel_redraws_a_row_that_changed_in_place(monkeypatch):
+    # Same row count, new content (a stamp gains its date at midnight): redrawn. Unchanged rows
+    # are left alone, so an idle tick keeps the cursor.
+    rows = [("a", "23:59:00"), ("b", "1")]
+
+    class _Changing(_PanelPlugin):
+        def tui_panels(self):
+            return [
+                plugins.TuiPanel(
+                    id="demo",
+                    title="Demo Panel",
+                    columns=("k", "v"),
+                    refresh=lambda: plugins.PanelData("the summary", list(rows)),
+                )
+            ]
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_Changing()))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        table = app.query_one("#demo-table", tui.DataTable)
+        app.refresh_panels()
+        assert table.get_row_at(0) == ["a", "23:59:00"]
+        table.move_cursor(row=1)
+        app.refresh_panels()
+        assert table.cursor_row == 1  # nothing changed: not redrawn
+        rows[0] = ("a", "2026-11-11 23:59:00")
+        app.refresh_panels()
+        assert table.row_count == 2
+        assert table.get_row_at(0) == ["a", "2026-11-11 23:59:00"]
+
+
+async def test_a_redrawn_table_keeps_the_readers_cursor_and_scroll(monkeypatch):
+    # A capped log (the GCP Tokens panel holds 200) redraws on every new entry with the count the
+    # same: someone reading far down stays there, not sent back to the top each time.
+    rows = [(f"r{i}", str(i)) for i in range(200)]
+
+    class _Long(_PanelPlugin):
+        def tui_panels(self):
+            return [
+                plugins.TuiPanel(
+                    id="demo",
+                    title="Demo Panel",
+                    columns=("k", "v"),
+                    refresh=lambda: plugins.PanelData("the summary", list(rows)),
+                )
+            ]
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_Long()))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        await pilot.press("right")  # onto the panel, so the table is laid out
+        await pilot.pause()
+        table = app.query_one("#demo-table", tui.DataTable)
+        table.move_cursor(row=120)
+        # Scrolled on its own, so the cursor sits mid-view: a cursor scrolled back into view lands
+        # elsewhere, and only the restored scroll matches.
+        table.scroll_to(y=110, animate=False)
+        await pilot.pause()
+        top = table.scroll_y
+        assert top == 110
+        rows.insert(0, ("new", "x"))
+        rows.pop()
+        app.refresh_panels()
+        await pilot.pause()
+        assert table.get_row_at(0) == ["new", "x"]
+        assert table.cursor_row == 120
+        assert table.scroll_y == top
 
 
 class _TreePanelPlugin(plugins.Plugin):
@@ -1367,10 +1482,14 @@ async def _on_network_leaf(pilot, line: int):
     await pilot.pause()
     tree = app.query_one("#network-tree", tui.Tree)
     tree.focus()
-    tree.root.children[0].expand()
-    await pilot.pause()
+    host = tree.root.children[0]
+    host.expand()
+    # Shown once the host's first row has a line of its own (-1 until the tree renders it).
+    await _until(
+        pilot, lambda: app.focused is tree and bool(host.children) and host.children[0].line >= 0
+    )
     tree.cursor_line = line
-    await pilot.pause()
+    await _until(pilot, lambda: tree.cursor_node is not None and tree.cursor_node.line == line)
     return app, tree
 
 
@@ -1489,15 +1608,20 @@ async def test_the_footer_names_what_each_key_does_on_the_row_under_the_cursor(m
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app, tree = await _on_network_leaf(pilot, 1)  # a refused GET with a path to grant
+        await _until(pilot, lambda: _footer(app).get("a") == "allow path…")
         footer = _footer(app)
         assert footer["a"] == "allow path…" and footer["l"] == "copy log row" and "x" not in footer
         for line, a in ((0, "allow host"), (2, "allow host")):  # the host; the CONNECT row
+            # Each reached from the GET, whose footer differs: going from the host straight to
+            # the CONNECT row changes nothing a wait could see, so it read the host's footer.
+            tree.cursor_line = 1
+            await _until(pilot, lambda: _footer(app).get("a") == "allow path…")
             tree.cursor_line = line
-            await pilot.pause()
+            await _until(pilot, lambda a=a: _footer(app).get("a") == a)
             footer = _footer(app)
             assert footer["a"] == a and footer["l"] == "copy log row", line
         tree.cursor_line = 3  # the "… earlier" note: nothing to copy, its host still to allow
-        await pilot.pause()
+        await _until(pilot, lambda: "l" not in _footer(app))
         footer = _footer(app)
         assert footer["a"] == "allow host" and "l" not in footer
 
@@ -1788,10 +1912,17 @@ async def test_doctor_render_survives_ansi_and_markup_in_detail(monkeypatch):
     monkeypatch.setattr(devmode, "doctor", _fixed_doctor)
     async with tui.DevModeTui().run_test() as pilot:
         # the startup deep run drives the (stubbed) doctor — there's no d/D shortcut anymore
-        await pilot.pause(0.1)
+        app = cast(tui.DevModeTui, pilot.app)
+        await _until(
+            pilot,
+            lambda: (
+                any(status == "ok" for status, _, _ in app._doctor_rows)
+                and "denied" in _text(app.query_one("#doctor-out", tui.Static))
+            ),
+        )
         # No MarkupError raised, and the adversarial detail reached the row data and the
         # rendered Static (which the old markup-string render choked on).
-        rows = cast(tui.DevModeTui, pilot.app)._doctor_rows
+        rows = app._doctor_rows
         assert any("[/red]" in detail for _, _, detail in rows)
         assert any(status == "ok" for status, _, _ in rows)
         out = _text(pilot.app.query_one("#doctor-out", tui.Static))
@@ -2051,6 +2182,112 @@ async def test_mode_button_secret_wrong_shape_stays_on_the_modal(monkeypatch, tm
         assert isinstance(app.screen, tui.SecretScreen)
         assert "doesn't look like" in _text(app.screen.query_one("#sec-hint", tui.Static))
         assert not host_env.exists() and sets == []
+
+
+async def test_mode_button_secret_takes_a_key_file_by_path(monkeypatch, tmp_path):
+    # The modal is the TUI's door to the same capture as `fy mode`: a base64 secret's FILE, by its
+    # path, read and encoded on the host — so the key itself never shows in any terminal.
+    import base64
+
+    from foldyard.plugins import Secret
+
+    host_env = tmp_path / "host.env"
+    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"  # gitleaks:allow
+    key = tmp_path / "app.private-key.pem"
+    key.write_text(pem)
+    secret = Secret(
+        var="FY_INJECT_GITHUB",
+        label="GitHub App private key (PEM)",
+        pattern="*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*",
+        b64=True,
+    )
+    monkeypatch.setattr(
+        devmode, "missing_secrets", lambda updates: [secret] if updates == {"github": "on"} else []
+    )
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        await pilot.pause()
+        assert isinstance(app.screen, tui.SecretScreen)
+        assert "path" in _text(app.screen.query_one("#sec-body", tui.Static))
+        app.screen.query_one("#sec-input", tui.Input).value = f"'{key}'"  # as a drag types it
+        await pilot.press("enter")
+        await pilot.pause()
+    assert host_env.read_text() == f"FY_INJECT_GITHUB={base64.b64encode(pem.encode()).decode()}\n"
+    assert sets == [{"github": "on"}]
+
+
+async def test_secret_dialog_takes_a_drop_that_arrived_with_nothing_focused(monkeypatch, tmp_path):
+    # Dragging a file in from another app (Finder) takes the terminal's focus with it: Textual
+    # clears focus on AppBlur, and the drop's paste arrives BEFORE AppFocus restores it, so it
+    # reached the screen, not the field, and was lost (seen live in macOS Terminal: a drag only
+    # landed every few tries). The dialog has one field, so the paste goes there.
+    import base64
+
+    from textual import events
+
+    from foldyard.plugins import Secret
+
+    host_env = tmp_path / "host.env"
+    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"  # gitleaks:allow
+    folder = tmp_path / "with space"
+    folder.mkdir()
+    key = folder / "app.private-key.pem"
+    key.write_text(pem)
+    secret = Secret(
+        var="FY_INJECT_GITHUB",
+        label="GitHub App private key (PEM)",
+        pattern="*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*",
+        b64=True,
+    )
+    monkeypatch.setattr(
+        devmode, "missing_secrets", lambda updates: [secret] if updates == {"github": "on"} else []
+    )
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        await pilot.pause()
+        assert isinstance(app.screen, tui.SecretScreen)
+        app.screen.set_focus(None)  # what AppBlur did when the drag left for Finder
+        dropped = str(key).replace(" ", "\\ ") + " "  # as Terminal.app pasted it
+        app.post_message(events.Paste(dropped))
+        await pilot.pause()
+        field = app.screen.query_one("#sec-input", tui.Input)
+        assert field.value == dropped and app.screen.focused is field  # once, and focused
+        await pilot.press("enter")
+        await pilot.pause()
+    assert host_env.read_text() == f"FY_INJECT_GITHUB={base64.b64encode(pem.encode()).decode()}\n"
+    assert sets == [{"github": "on"}]
+
+
+async def test_secret_dialog_drop_replaces_a_selection_as_the_field_would():
+    # The field's own paste replaces what's selected; a drop that arrived unfocused does the same,
+    # so a selected half-entry isn't left glued to the front of the path.
+    from textual import events
+
+    from foldyard.plugins import Secret
+
+    secret = Secret(var="FY_INJECT_GITHUB", label="GitHub App private key (PEM)", b64=True)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.push_screen(tui.SecretScreen(secret))
+        await pilot.pause()
+        field = app.screen.query_one("#sec-input", tui.Input)
+        field.insert_text_at_cursor("half-typed")
+        field.select_all()
+        app.screen.set_focus(None)
+        app.post_message(events.Paste("/keys/app.pem"))
+        await pilot.pause()
+        assert field.value == "/keys/app.pem"
 
 
 _REAL_SET_MODE = devmode.set_mode  # captured before the autouse stub replaces it per test
@@ -2354,9 +2591,10 @@ async def test_host_log_pane_handles_a_missing_logfile(monkeypatch, tmp_path):
 # ── the Network Log's wall pane (grants + pending `[proxy] recommend` offers) ─────────
 
 
-def _stub_wall(monkeypatch, pending=(), granted=(), enforcing=True):
+def _stub_wall(monkeypatch, pending=(), granted=(), enforcing=True, follows=()):
     monkeypatch.setattr(tui.allowlist, "pending_recommendations", lambda: list(pending))
     monkeypatch.setattr(tui.allowlist, "grants", lambda: list(granted))
+    monkeypatch.setattr(tui.allowlist, "follow_grants", lambda: list(follows))
     monkeypatch.setattr(tui.allowlist, "default_deny", lambda: enforcing)
 
 
@@ -2380,6 +2618,71 @@ async def test_wall_pane_lists_pending_offers_before_grants(monkeypatch):
         assert app._manage_keys == [("rec", "unpkg.com"), ("grant", "pypi.org")]
         summary = _text(app.query_one("#network-manage-summary", tui.Static))
         assert "1 recommended pending" in summary and "1 granted" in summary
+
+
+async def test_wall_pane_marks_a_build_only_grant(monkeypatch):
+    # A grant made at the build gate covers image builds alone; listed like any other, the box's
+    # refusal of that host read as a broken wall (2026-11-16).
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    _stub_wall(
+        monkeypatch,
+        granted=[
+            {"host": "cdn.playwright.dev", "level": "permanent", "expires": None, "scope": "build"},
+            {"host": "pypi.org", "level": "permanent", "expires": None, "scope": "runtime"},
+            {"host": "unpkg.com", "level": "once", "expires": "2026-11-16T13:00:00+00:00",
+             "scope": "build"},
+        ],
+    )  # fmt: skip
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        build, runtime, once = (str(table.get_row_at(i)[2]) for i in range(3))
+        assert build == "for image builds only"
+        assert runtime == ""
+        assert once.startswith("for image builds only · expires ")
+
+
+async def test_relevelling_a_build_only_grant_says_it_widens_to_the_box(monkeypatch):
+    # `a` on a build-scoped grant replaces it with a runtime one (allowlist.grant): the picker
+    # says so, rather than read as a change of level alone. A runtime grant's picker doesn't.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    _stub_wall(
+        monkeypatch,
+        granted=[
+            {"host": "cdn.playwright.dev", "level": "permanent", "expires": None, "scope": "build"},
+            {"host": "pypi.org", "level": "permanent", "expires": None, "scope": "runtime"},
+        ],
+    )  # fmt: skip
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        table.focus()
+        await pilot.pause()
+        await pilot.press("a")  # row 0: the build-only grant
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, tui.AllowHostScreen)
+        widens = _text(screen.query_one("#allow-widens", tui.Static))
+        assert "image builds only" in widens and "lets the box reach it too" in widens
+        await pilot.press("escape")
+        await pilot.pause()
+        table.move_cursor(row=1)
+        await pilot.press("a")  # row 1: a runtime grant — nothing to say
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen)
+        assert not app.screen.query("#allow-widens")
 
 
 async def test_wall_pane_accepts_a_recommendation_via_the_level_picker(monkeypatch):
@@ -2434,6 +2737,181 @@ async def test_wall_pane_x_declines_a_rec_and_revokes_a_grant(monkeypatch):
         await pilot.press("x")  # row 1: the grant → revoke
         await app.workers.wait_for_complete()
         assert declined == ["unpkg.com"] and revoked == ["pypi.org"]
+
+
+async def test_wall_pane_grants_and_removes_a_follow_as_a_follow(monkeypatch):
+    # A follow row's `a` makes a follow grant with its targets, never a path grant on its source,
+    # and `x` takes the follow alone: a path grant on the same key is another decision.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    targets = ["*.blob.core.windows.net/actions-results/"]
+    _stub_wall(
+        monkeypatch,
+        pending=[{"host": source, "why": "CI logs", "redirects_to": targets}],
+        follows=[{"source": "cdn.example.com/dl/", "to": ["objects.example.net"],
+                  "level": "session", "expires": None}],
+    )  # fmt: skip
+    followed: list[tuple] = []
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    monkeypatch.setattr(tui.allowlist, "grant", lambda *a: calls.append(("grant", a[0])))
+    monkeypatch.setattr(tui.allowlist, "revoke", lambda h: calls.append(("revoke", h)))
+    monkeypatch.setattr(tui.allowlist, "revoke_follow", lambda h: calls.append(("unfollow", h)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        assert app._manage_keys == [("follow?", source), ("follow", "cdn.example.com/dl/")]
+        assert "follow → *.blob.core.windows.net/actions-results/" in str(table.get_row_at(0)[2])
+        table.focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AllowHostScreen)
+        assert "Follow redirects from" in _text(app.screen.query_one("#allow-title", tui.Static))
+        await pilot.press("p")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, targets, "permanent")] and calls == []
+        table.move_cursor(row=1)
+        await pilot.press("x")
+        await app.workers.wait_for_complete()
+        assert calls == [("unfollow", "cdn.example.com/dl/")]
+
+
+async def test_wall_pane_grants_only_the_targets_a_recommendation_adds(monkeypatch):
+    # As `fy allow sync` does: a follow recommendation that adds a target is answered for that
+    # target alone, and the one already followed keeps its level (the row says it's held).
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch,
+        pending=[{"host": source, "why": "", "redirects_to": ["a.example.net", "b.example.net"]}],
+    )
+    monkeypatch.setattr(
+        tui.allowlist, "unfollowed", lambda e: (["b.example.net"], ["a.example.net"])
+    )
+    followed: list[tuple] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        note = str(table.get_row_at(0)[2])
+        assert "follow → b.example.net" in note and "already following a.example.net" in note
+        table.focus()
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, ["b.example.net"], "once")]
+
+
+async def test_a_follow_row_with_nothing_left_to_grant_never_becomes_a_path_grant(monkeypatch):
+    # Another process followed the last target after the pane was drawn: the row is still a
+    # follow, so `a` grants nothing — never the picker's path grant on the source.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch, pending=[{"host": source, "why": "", "redirects_to": ["a.example.net"]}]
+    )
+    monkeypatch.setattr(tui.allowlist, "unfollowed", lambda e: ([], ["a.example.net"]))
+    calls: list = []
+    monkeypatch.setattr(tui.allowlist, "grant", lambda *a: calls.append(("grant", a)))
+    monkeypatch.setattr(tui.allowlist, "grant_follow", lambda *a: calls.append(("follow", a)))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        app.query_one("#network-manage", tui.DataTable).focus()
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert not isinstance(app.screen, tui.AllowHostScreen)
+        await app.workers.wait_for_complete()
+        assert calls == []
+
+
+async def test_wall_pane_re_levels_every_target_of_a_follow_source(monkeypatch):
+    # Targets granted at different levels are one row per level, but a source is one decision:
+    # `a` on either row names (and re-levels) all of its targets, never only that row's.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "api.github.com/repos/o/r/actions/"
+    _stub_wall(
+        monkeypatch,
+        follows=[
+            {"source": source, "to": ["a.example.net"], "level": "permanent", "expires": None},
+            {"source": source, "to": ["b.example.net"], "level": "session", "expires": None},
+        ],
+    )
+    followed: list[tuple] = []
+    monkeypatch.setattr(
+        tui.allowlist, "grant_follow", lambda s, t, level: followed.append((s, t, level))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        assert app._manage_keys == [("follow", source), ("follow", source)]
+        table.focus()
+        table.move_cursor(row=1)
+        await pilot.press("a")
+        await pilot.pause()
+        assert "a.example.net, b.example.net" in _text(
+            app.screen.query_one("#allow-title", tui.Static)
+        )
+        await pilot.press("p")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert followed == [(source, ["a.example.net", "b.example.net"], "permanent")]
+
+
+async def test_wall_pane_repaints_when_only_a_rows_kind_changed(monkeypatch):
+    # The same text can belong to two kinds of row: an ordinary recommendation whose `why` reads
+    # like a follow's, then a follow recommendation on the same source. The pane must take the new
+    # kind, or `a` grants a path where a follow was asked for.
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    source = "cdn.example.com/dl/"
+    _stub_wall(monkeypatch, pending=[{"host": source, "why": "follow → objects.example.net"}])
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one(tui.TabbedContent).active = "tab-network"
+        await pilot.pause()
+        app.refresh_panels()
+        assert app._manage_keys == [("rec", source)]
+        _stub_wall(
+            monkeypatch,
+            pending=[{"host": source, "why": "", "redirects_to": ["objects.example.net"]}],
+        )
+        app.refresh_panels()
+        assert app._manage_keys == [("follow?", source)]
 
 
 async def test_x_is_gated_to_the_network_tab(monkeypatch):

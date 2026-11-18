@@ -14,10 +14,6 @@
   dir — the box can't reach). Slots are made with :func:`mountwrite.makedirs`, never
   ``Path.mkdir(parents=True)``: any box can plant a slot as a symlink before its first `fy box up`.
 
-Both exist on the **lima** backend only. On podman-machine a mount-set change is a machine
-RECREATE (`podman machine set` has no volume flag) and no provider enforces read-only outside the
-guest, so nothing about that VM's mounts changes: transcripts stay bound out in the checkout.
-
 Only the two subdirectories are mounted, never the state dir itself (``host.env``, the keys, the
 allow-store): ``fy verify`` exempts exactly these two mountpoints. Stdlib + ``config`` only — the
 plugins call it from ``box_args``, and the in-box ``fy verify`` reads :func:`vm_paths`."""
@@ -52,11 +48,6 @@ ENFORCING_MOUNT_TYPE = {"vz": "virtiofs", "qemu": "9p"}
 # the writable mounts, fresh on the same runners; it caches nothing for ordinary reads. Guest-side
 # only: QEMU's `readonly=on` still refuses every write. vz's virtiofs takes no cache setting.
 TO_BOX_9P_CACHE = "mmap"
-
-
-def enabled() -> bool:
-    """Does this project's VM get the two mounts? The lima backend only (see the module doc)."""
-    return config.machine_backend() == "lima"
 
 
 def to_box_dir() -> Path:
@@ -185,10 +176,8 @@ def remove_slot(worktree: str) -> str | None:
 def vm_paths() -> tuple[str, str]:
     """``(from-box, to-box)`` as VM paths (== host paths), ``""`` for one that isn't mounted.
     In the box: what `fy box up` baked (:data:`ENV_FROM_BOX`, :data:`ENV_TO_BOX`). On your computer:
-    both roots on the lima backend — `verify` exempts them by exact mountpoint and looks for the
+    both roots — `verify` exempts them by exact mountpoint and looks for the
     to-box in the VM's own mount table, so a pair with no to-box costs nothing."""
     if config.in_box():
         return os.environ.get(ENV_FROM_BOX, ""), os.environ.get(ENV_TO_BOX, "")
-    if not enabled():
-        return "", ""
     return str(from_box_dir()), str(to_box_dir())

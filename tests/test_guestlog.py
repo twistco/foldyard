@@ -61,39 +61,22 @@ def test_journal_snippet_caps_journald_and_vacuums_on_change():
     # min(10% of the fs, 4G) and a 90G VM disk sat at the 4G ceiling. 1G keeps a useful
     # `podman logs` window for a chatty worker; the vacuum reclaims the backlog at once rather
     # than waiting for rotation.
-    snippet = guestlog.journal_snippet(sudo="")
+    snippet = guestlog.journal_snippet()
     assert "journald.conf.d/50-foldyard-cap.conf" in snippet
     assert f"SystemMaxUse={guestlog.JOURNAL_MAX_USE}" in snippet
     assert "systemctl restart systemd-journald" in snippet
     assert f"journalctl --vacuum-size={guestlog.JOURNAL_MAX_USE}" in snippet
 
 
-def test_journal_snippet_prefixes_every_root_step_with_the_given_sudo():
-    snippet = guestlog.journal_snippet(sudo="sudo -n")
-    for verb in ("install -d", "tee", "systemctl restart systemd-journald", "journalctl --vacuum"):
-        assert f"sudo -n {verb}" in snippet, verb
-
-
-@pytest.mark.parametrize("sudo", ["", "sudo -n"])
-def test_scripts_are_valid_bash(sudo):
+def test_scripts_are_valid_bash():
     if shutil.which("bash") is None:
         pytest.skip("no bash on this host")
-    for script in (guestlog.user_script(), guestlog.journal_snippet(sudo=sudo)):
+    for script in (guestlog.user_script(), guestlog.journal_snippet()):
         res = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
         assert res.returncode == 0, res.stderr
 
 
-def test_ensure_on_podman_machine_does_both_over_ssh_with_sudo_for_the_journal(guest):
-    # podman machine's CoreOS appliance can't take a boot script, but its user keeps
-    # passwordless sudo — so root-side housekeeping goes over ssh there, non-interactive.
-    guestlog.ensure(FakeBackend("podman"), "tangible")
-    assert len(guest["scripts"]) == 1
-    script = guest["scripts"][0]
-    assert "50-foldyard-loglevel.conf" in script
-    assert "sudo -n tee /etc/systemd/journald.conf.d/50-foldyard-cap.conf" in script
-
-
-def test_ensure_on_lima_leaves_the_journal_cap_to_the_boot_script(guest):
+def test_ensure_leaves_the_journal_cap_to_the_boot_script(guest):
     # Lima's VM user has no sudo (root is boot-time only, machine.py) — the cap is rendered into
     # the root boot script there, and the ssh pass carries only the user-level drop-in.
     guestlog.ensure(FakeBackend("lima"), "homelab")
@@ -104,7 +87,7 @@ def test_ensure_on_lima_leaves_the_journal_cap_to_the_boot_script(guest):
 
 def test_ensure_skips_a_backend_without_ssh(guest):
     guestlog.ensure(
-        FakeBackend("podman", target=None), "x"
+        FakeBackend("lima", target=None), "x"
     )  # a machine whose ssh target can't be read
     assert guest["scripts"] == []
 
@@ -113,7 +96,7 @@ def test_ensure_warns_and_carries_on_when_the_guest_refuses(guest, capsys):
     # Housekeeping, not a posture: a failed log-budget pass must never block `fy up` the way a
     # failed gVisor provisioning does.
     guest["rc"] = 1
-    guestlog.ensure(FakeBackend("podman"), "tangible")
+    guestlog.ensure(FakeBackend("lima"), "tangible")
     err = capsys.readouterr().err
     assert "⚠" in err and "log budget" in err and "ssh: boom" in err
 
@@ -125,6 +108,6 @@ def test_ensure_warns_and_carries_on_when_ssh_stalls(guest, monkeypatch, capsys)
         raise subprocess.TimeoutExpired(cmd="ssh", timeout=600)
 
     monkeypatch.setattr(guestlog, "_ssh", stalled)
-    guestlog.ensure(FakeBackend("podman"), "tangible")
+    guestlog.ensure(FakeBackend("lima"), "tangible")
     err = capsys.readouterr().err
     assert "⚠" in err and "log budget" in err and "timed out" in err

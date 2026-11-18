@@ -1,15 +1,15 @@
 # Testing modes, TTLs, and credential checks — zero secrets
 
-The interesting behaviour of [modes](./modes.md) — TTL expiry, dependent switches lowered along
-with it, token services starting and stopping as the mode changes, credential checks going
-DEGRADED and recovering — normally needs real credentials and real waiting to see. This rig
-removes both: a **fake credential plugin** and a **mode clock** you can fast-forward. Everything
-below runs on any computer with `fy` installed, with no secrets anywhere.
+The interesting behaviour of [modes](./modes.md) — TTL expiry, dependent switches lowered along with
+it, token services starting and stopping as the mode changes, credential checks going DEGRADED and
+recovering — normally needs real credentials and real waiting to see. This rig removes both: a
+**fake credential plugin** and a **mode clock** you can fast-forward. Everything below runs on any
+computer with `fy` installed, with no secrets anywhere.
 
 (A **mode** is a set of switches, each at a level. Terms are in the [glossary](./glossary.md).)
 
-New to modes? Start with the [example project's mode
-walkthrough](https://github.com/twistco/foldyard/blob/main/example/README.md#mode-walkthrough--modes-overlays-requirements-zero-secrets):
+New to modes? Start with the
+[example project's mode walkthrough](https://github.com/twistco/foldyard/blob/main/example/README.md#mode-walkthrough--modes-overlays-requirements-zero-secrets):
 the same rig driving a real stack (a refused combination → the one-command fix → an overlay → a
 visible feature). This page goes a level deeper: TTLs, the expiry cascade, and credential checks
 lapsing and recovering.
@@ -20,20 +20,19 @@ lapsing and recovering.
 `foldyard.local.toml` to keep it off teammates' dashboards. It adds:
 
 - a `fakecred` switch (`off | on | user`):
-  - `on` runs the **fake token service**, a small HTTP server handing out dummy tokens (set up
-    per project like the real ones, so leftover-process cleanup works on it too);
+  - `on` runs the **fake token service**, a small HTTP server handing out dummy tokens (set up per
+    project like the real ones, so leftover-process cleanup works on it too);
   - `user` is an **emergency level**: it has a TTL and switches itself off.
-- a `fakedep` switch (`off | on`): `on` *requires* `fakecred` to be `on` or `user`. The
-  plugin declares this as data (`Switch.requires`), the same way a real plugin or your
-  `[[require]]` table would. So when `fakecred` expires, `fakedep` has to come down with it —
-  that's the expiry cascade.
-- a **credential check** (every 2 s) reading `~/.foldyard/<project>/fakecred-capability`:
-  missing or `ok` means working; anything else means lapsed, and the content is shown as the
-  DEGRADED detail. While lapsed, the fake token service's `/token` returns 403 — the same shape
-  as a real credential that has expired.
+- a `fakedep` switch (`off | on`): `on` *requires* `fakecred` to be `on` or `user`. The plugin
+  declares this as data (`Switch.requires`), the same way a real plugin or your `[[require]]` table
+  would. So when `fakecred` expires, `fakedep` has to come down with it — that's the expiry cascade.
+- a **credential check** (every 2 s) reading `~/.foldyard/<project>/fakecred-capability`: missing or
+  `ok` means working; anything else means lapsed, and the content is shown as the DEGRADED detail.
+  While lapsed, the fake token service's `/token` returns 403 — the same shape as a real credential
+  that has expired.
 
-**`fy clock`** — shifts foldyard's clock for everything that reads it: TTL expiry, countdowns,
-the supervisor's automatic switch-off.
+**`fy clock`** — shifts foldyard's clock for everything that reads it: TTL expiry, countdowns, the
+supervisor's automatic switch-off.
 
 - `fy clock ff 2h` — fast-forward;
 - `fy clock reset` — back to real time;
@@ -75,7 +74,7 @@ Follow the supervisor log with `fy host logs -f` while you go.
 ## What each step tests
 
 | step | what it exercises |
-|---|---|
+| -- | -- |
 | `fy mode fakecred=user … ttl` | emergency levels, TTL recording, refusing combinations that can't work (all switches set together) |
 | `fy host restart` starts the service | the supervisor reacting to the mode, starting a per-project token service |
 | lapse file → DEGRADED | credential checks: plugin → supervisor → `capabilities.json` → mode mirror → `fy mode` / `fy state` |
@@ -91,11 +90,11 @@ separate mechanism.
 
 A lapsed credential does **not** change the mode. The mode is what you *asked for*; whether the
 credential works is *observed*. Lowering the mode on a lapse would lose what you asked for (you'd
-have to notice and set it again after fixing the credential), flip back and forth on brief
-failures, and turn a read-only check into something that writes. So a lapse shows as
-`⚠ DEGRADED` on the level you asked for, with the fix in the message, and recovers in place.
+have to notice and set it again after fixing the credential), flip back and forth on brief failures,
+and turn a read-only check into something that writes. So a lapse shows as `⚠ DEGRADED` on the level
+you asked for, with the fix in the message, and recovers in place.
 
-The only thing that *does* write the mode is TTL expiry of an emergency level — your own
-credentials must never quietly stay on — and the cascade that rides the same write: a dependent
-switch the expiry would leave in a combination that can't work is lowered to its default too.
-So an expiry always ends in a mode that works offline.
+The only thing that *does* write the mode is TTL expiry of an emergency level — your own credentials
+must never quietly stay on — and the cascade that rides the same write: a dependent switch the
+expiry would leave in a combination that can't work is lowered to its default too. So an expiry
+always ends in a mode that works offline.

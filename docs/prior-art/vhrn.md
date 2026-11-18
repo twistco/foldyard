@@ -1,43 +1,43 @@
 # vhrn — a jailed agent harness with a specified egress proxy, read against foldyard
 
-[vhrn](https://github.com/aravind-n/vhrn) ("Virtualized Harness Runtime") runs a coding agent
-inside a container jailed to the current project directory, with default-deny egress through a
-host-owned allowlist. MIT, Rust, single author (Aravind Nidadavolu), first commit 2026-07-17,
-v0.5.1 — reviewed at `0e3926d` (2026-09-21, the day of this review; the project is under daily
-development). [prior-art.md](../prior-art.md) carries the one-row positioning summary.
+[vhrn](https://github.com/aravind-n/vhrn) ("Virtualized Harness Runtime") runs a coding agent inside
+a container jailed to the current project directory, with default-deny egress through a host-owned
+allowlist. MIT, Rust, single author (Aravind Nidadavolu), first commit 2026-07-17, v0.5.1 — reviewed
+at `0e3926d` (2026-09-21, the day of this review; the project is under daily development).
+[prior-art.md](../prior-art.md) carries the one-row positioning summary.
 
 ## The verdict
 
-- **Not a competitor on the unit, but the closest neighbour yet on the *operator surface*.**
-  vhrn jails one agent run in one project directory. There is no stack, no posture ladder, no
-  worktrees, no VM by default. But unlike the per-task sandbox wave, its user is a *developer on
-  their own machine with a daily loop* — the same person foldyard serves — and it has grown the
-  same operator verbs foldyard has: scoped persistent egress grants (`vhrn net allow --project .`),
-  a live status view with provenance, a denial log. Gondolin was the closest *mechanism*
-  neighbour; vhrn is the closest *ergonomics* neighbour.
-- **It independently reinvents the ADR-0022 rule, and states it more sharply than we do.**
-  "Config is host-owned only — vhrn reads nothing from the project directory, so a cloned repo can
-  never reconfigure the jail." They went further than foldyard's adopt-gate: they *deleted* the
-  `[net]` config table outright and moved every persistent domain into a host state store reached
-  only through `vhrn net allow`, with a targeted migration error for stale config. That is
-  foldyard's "egress grants live in the host store at EVERY level" don't-break rule, reached
-  independently, and enforced by removing the channel rather than gating it.
+- **Not a competitor on the unit, but the closest neighbour yet on the *operator surface*.** vhrn
+  jails one agent run in one project directory. There is no stack, no posture ladder, no worktrees,
+  no VM by default. But unlike the per-task sandbox wave, its user is a *developer on their own
+  machine with a daily loop* — the same person foldyard serves — and it has grown the same operator
+  verbs foldyard has: scoped persistent egress grants (`vhrn net allow --project .`), a live status
+  view with provenance, a denial log. Gondolin was the closest *mechanism* neighbour; vhrn is the
+  closest *ergonomics* neighbour.
+- **It independently reinvents the ADR-0022 rule, and states it more sharply than we do.** "Config
+  is host-owned only — vhrn reads nothing from the project directory, so a cloned repo can never
+  reconfigure the jail." They went further than foldyard's adopt-gate: they *deleted* the `[net]`
+  config table outright and moved every persistent domain into a host state store reached only
+  through `vhrn net allow`, with a targeted migration error for stale config. That is foldyard's
+  "egress grants live in the host store at EVERY level" don't-break rule, reached independently, and
+  enforced by removing the channel rather than gating it.
 - **Its proxy contract is the single most valuable artifact in the repo.**
-  `docs/proxy/consumer-contract.md` is a 570-line normative specification of the forward proxy —
-  RFC 9110/9112/3986/1035 references, MUST/SHOULD language, exact error bodies, a fail-closed
+  `docs/proxy/consumer-contract.md` is a 570-line normative specification of the forward proxy — RFC
+  9110/9112/3986/1035 references, MUST/SHOULD language, exact error bodies, a fail-closed
   policy-read rule, and a globally-reachable-unicast boundary defined against dated IANA
   special-purpose registry snapshots. foldyard's proxy has no written contract at all. This is the
   highest-leverage thing to steal, and it is free — it is a document, not code.
-- **Reading it re-confirmed the three open gondolin gaps and found three more** (below): the
-  proxy is foldyard's most privileged component and is itself unsandboxed; the `~/.foldyard/`
-  state-dir key — and therefore the allow-store's location — is derived from a value the mount can
-  write; and there is no DNS-answer pinning, so an allowlisted hostname can be rebound.
+- **Reading it re-confirmed the three open gondolin gaps and found three more** (below): the proxy
+  is foldyard's most privileged component and is itself unsandboxed; the `~/.foldyard/` state-dir
+  key — and therefore the allow-store's location — is derived from a value the mount can write; and
+  there is no DNS-answer pinning, so an allowlisted hostname can be rebound.
 - **Its credential bet is the opposite of ours, deliberately and coherently.** The proxy never
   terminates TLS, so injection is impossible by construction; credentials therefore live *in* the
-  container, in a persistent per-harness store the agent logs into itself. They argue this is
-  better than sharing the host's token, which is true, and it is strictly weaker than never having
-  the credential in reach, which is also true. Worth understanding as the honest alternative to
-  ADR-0007 rather than as a mistake.
+  container, in a persistent per-harness store the agent logs into itself. They argue this is better
+  than sharing the host's token, which is true, and it is strictly weaker than never having the
+  credential in reach, which is also true. Worth understanding as the honest alternative to ADR-0007
+  rather than as a mistake.
 
 ## What vhrn is
 
@@ -67,19 +67,19 @@ overwritten.
 Three enforcement points, none of which requires the guest to cooperate:
 
 1. **In-container nftables, installed before the privilege drop.** The entrypoint runs as root,
-   installs `table inet vhrn` with `policy drop` (permitting only `lo`, established/related, and
-   TCP to the proxy IP:port), then `exec setpriv --reuid dev` — and `dev` has no sudo and no
+   installs `table inet vhrn` with `policy drop` (permitting only `lo`, established/related, and TCP
+   to the proxy IP:port), then `exec setpriv --reuid dev` — and `dev` has no sudo and no
    capabilities. The rules are enforced from outside the agent's reach *while sharing the
    container*. Direct DNS is dropped with everything else.
 2. **The proxy sidecar**, a statically linked Rust binary in a `scratch` image, running as
-   `65532:65532`, read-only root filesystem, every capability dropped, no shell. It receives
-   exactly three mounts — read-only policy, a writable denial log, and a read-only broker token —
-   and the contract states it "MUST NOT require the project, agent configuration, credentials,
+   `65532:65532`, read-only root filesystem, every capability dropped, no shell. It receives exactly
+   three mounts — read-only policy, a writable denial log, and a read-only broker token — and the
+   contract states it "MUST NOT require the project, agent configuration, credentials,
    container-engine socket, or any other host path". The agent container never receives any of them.
 3. **A host-side broker** for the one thing the proxy cannot do from inside a container: reach a
-   host-loopback model server. The proxy holds a per-run token the agent never sees, asks the
-   broker to dial an exact `host:port`, and the broker *rechecks policy before dialing*, capped at
-   128 connections per run.
+   host-loopback model server. The proxy holds a per-run token the agent never sees, asks the broker
+   to dial an exact `host:port`, and the broker *rechecks policy before dialing*, capped at 128
+   connections per run.
 
 Policy is five additive layers evaluated in order — immutable base, selected harness, persistent
 global, exact canonical project, run-only `--allow` — re-read and revalidated **for every new
@@ -90,32 +90,32 @@ empty-`enforce`, and the process stays alive so a host repair can take effect.
 The parts with no foldyard counterpart at all:
 
 - **A globally-reachable-unicast boundary**, defined against the IANA IPv4/IPv6 Special-Purpose
-  registries (most-specific entry; `Destination`, `Forwardable` and `Globally Reachable` must all
-  be `True`), applied in *every* mode including `open`. A public policy entry of `127.0.0.1`
-  therefore cannot grant loopback; private, link-local, multicast, documentation and benchmark
-  ranges are unreachable regardless of allowlist. The registry snapshot is fixed at build review
-  time and the proxy "MUST NOT fetch policy or registries at runtime" — updating it is a reviewed
-  security change.
+  registries (most-specific entry; `Destination`, `Forwardable` and `Globally Reachable` must all be
+  `True`), applied in *every* mode including `open`. A public policy entry of `127.0.0.1` therefore
+  cannot grant loopback; private, link-local, multicast, documentation and benchmark ranges are
+  unreachable regardless of allowlist. The registry snapshot is fixed at build review time and the
+  proxy "MUST NOT fetch policy or registries at runtime" — updating it is a reviewed security
+  change.
 - **DNS-answer pinning.** Resolve the already-authorized host *exactly once*, require 1–64
   addresses, reject the entire answer if any address fails the unicast test, retain the validated
   set, and attempt only those numeric addresses — no second resolution in the connector or HTTP
-  client. A CNAME is not separately authorized but all its addresses face the same test. That
-  closes DNS rebinding as a class.
+  client. A CNAME is not separately authorized but all its addresses face the same test. That closes
+  DNS rebinding as a class.
 - **Capability separation for loopback.** Host-loopback egress is a *different* capability from
   public egress, with its own grammar (`localhost:<port>`, an exact `127.0.0.0/8` address, or
   `[::1]:<port>`, port mandatory), its own grant verb, and its own always-enforced mode. The
-  contract says it plainly: "Public allowlists, `report`, and `open` MUST NOT grant or route a
-  local destination."
+  contract says it plainly: "Public allowlists, `report`, and `open` MUST NOT grant or route a local
+  destination."
 
 The price they pay: hostname matching only. The proxy does not terminate TLS, so it cannot see
-inside a CONNECT tunnel, cannot inject credentials, cannot apply path/method policy, and cannot
-stop exfiltration to an allowed domain or domain-fronting behind an allowed CDN. Their threat model
-says so in those words.
+inside a CONNECT tunnel, cannot inject credentials, cannot apply path/method policy, and cannot stop
+exfiltration to an allowed domain or domain-fronting behind an allowed CDN. Their threat model says
+so in those words.
 
 ### Theirs vs foldyard's
 
 | Property | vhrn | foldyard today |
-| --- | --- | --- |
+| -- | -- | -- |
 | Enforcement without guest cooperation | always (in-container nftables installed pre-privilege-drop; no sudo) | only with `[machine] firewall` (opt-in, Lima only; validated in CI since 2026-09-17) — the box's own netns is unfenced |
 | Proxy's own privilege | scratch container, uid 65532, read-only rootfs, no caps, three mounts | `mitmdump` as the operator on the host, full host network, holds every axis's secret — **see gap 5** |
 | Internal-range upstreams | denied in every mode, by IANA registry classification | **not checked at all** — gondolin gap 1, still open |
@@ -150,15 +150,15 @@ construction, not a TTL that must be swept.
 
 Both models answer "is this host allowed?". Only the scoped one answers "**why** is this host
 allowed, and what happens if I remove it here?" — which is the question an operator actually asks
-when auditing a widened wall six weeks later. foldyard's `exposure.py` inventory exists because
-that question matters; the allow-store is the one widening surface that cannot answer it.
+when auditing a widened wall six weeks later. foldyard's `exposure.py` inventory exists because that
+question matters; the allow-store is the one widening surface that cannot answer it.
 
-They also made the harder call: `--allow` and `--open-net` are run-only *and* `net open|guard|
-report` affect active runs only, with idle state reporting "future runs default to enforce". There
-is no way for a loosened posture to survive into a run that didn't ask for it. foldyard's TTL +
-settle cascade reaches the same place by a different route, and the TTL route buys the emergency
-ladder vhrn has no equivalent of — but it is worth noticing that "run-scoped by construction" needs
-no clock, no sweep, and no supervisor.
+They also made the harder call: `--allow` and `--open-net` are run-only *and*
+`net open|guard| report` affect active runs only, with idle state reporting "future runs default to
+enforce". There is no way for a loosened posture to survive into a run that didn't ask for it.
+foldyard's TTL + settle cascade reaches the same place by a different route, and the TTL route buys
+the emergency ladder vhrn has no equivalent of — but it is worth noticing that "run-scoped by
+construction" needs no clock, no sweep, and no supervisor.
 
 ## Credentials — the opposite bet, coherently argued
 
@@ -174,8 +174,8 @@ vhrn cannot inject, so it does the next best thing and is careful about it:
   the host's `[shell_environment_policy]` winning if set.
 - Host config comes in as a **disposable copy**, not a mount, so the container cannot write back to
   the real config. Codex's `config.toml` is mounted a layer *below* at `/etc/codex/config.toml`,
-  read-only, with its `[projects.*]` trust entries stripped on the way in: "trusting a folder on
-  the host does not trust it in the jail."
+  read-only, with its `[projects.*]` trust entries stripped on the way in: "trusting a folder on the
+  host does not trust it in the jail."
 
 Read against ADR-0007/0008, the comparison is clean: foldyard's guest holds a dummy and the real
 token exists only on the host for the duration of one substituted request; vhrn's guest holds a
@@ -209,68 +209,66 @@ New in this review:
    host-loopback or LAN address walks straight through, and so does one whose second resolution
    differs from its first. **Fix shape:** vhrn's four-step rule — resolve once, validate every
    returned address against the unicast boundary, retain the validated set, attempt only those
-   numeric addresses with no second resolution in the connector. This and gap 1 are one change,
-   and gap 1 is not really fixed without it.
+   numeric addresses with no second resolution in the connector. This and gap 1 are one change, and
+   gap 1 is not really fixed without it.
 5. **The proxy is foldyard's most privileged component and the only one that is unsandboxed.**
    `mitmdump` runs on the host as the operator, with the operator's full network reach and an
    environment holding every axis's `host.env` secret (deliberately — that is how injection works;
    the addon scrubs it for *minters*, not for itself). vhrn's equivalent is a no-shell scratch
-   container with every capability dropped and three mounts. This is inherent to ADR-0007 and is
-   not a bug, but it is unstated: the threat model in [security.md](../security.md) should say
-   plainly that compromising the proxy process compromises every credential the posture has
-   enabled, and gap 1 should be read in that light — the unchecked upstream dial is performed by
-   the one process that holds everything.
-6. **The `~/.foldyard/<project>/` key — and so the allow-store's location — is derived from a
-   value the mount can write.** `config.project()` resolves `FOLDYARD_PROJECT` → `[project].name`
-   from the tree's `foldyard.toml` → the repo dir name, and nothing in the package sets
-   `FOLDYARD_PROJECT` host-side. `state_dir()` is built from it, and `allow-store.json` lives
-   there. configpin already learned exactly this lesson and keys adopted snapshots by *checkout
-   path* — "keyed by the CHECKOUT PATH so nothing the config declares" can move it. The same
-   argument applies to the state dir, which holds the allow-store and the posture state. vhrn's
-   rule is the clean statement of it: canonicalize the cwd once, match the project key
-   byte-for-byte, and forbid `~`, `.` and `..` in keys. **Worth verifying before fixing** — the
-   supervisor's `_toml` is `lru_cache`d, so a long-running host process may never re-read an
-   edited name, and the practical effect of a rename may be an empty store (fail-safe, enforcing)
-   rather than adoption of another project's permanent grants. Either way the channel is open by
-   the ADR-0022 argument, and the fix is the one configpin already shipped.
+   container with every capability dropped and three mounts. This is inherent to ADR-0007 and is not
+   a bug, but it is unstated: the threat model in [security.md](../security.md) should say plainly
+   that compromising the proxy process compromises every credential the posture has enabled, and gap
+   1 should be read in that light — the unchecked upstream dial is performed by the one process that
+   holds everything.
+6. **The `~/.foldyard/<project>/` key — and so the allow-store's location — is derived from a value
+   the mount can write.** `config.project()` resolves `FOLDYARD_PROJECT` → `[project].name` from the
+   tree's `foldyard.toml` → the repo dir name, and nothing in the package sets `FOLDYARD_PROJECT`
+   host-side. `state_dir()` is built from it, and `allow-store.json` lives there. configpin already
+   learned exactly this lesson and keys adopted snapshots by *checkout path* — "keyed by the
+   CHECKOUT PATH so nothing the config declares" can move it. The same argument applies to the state
+   dir, which holds the allow-store and the posture state. vhrn's rule is the clean statement of it:
+   canonicalize the cwd once, match the project key byte-for-byte, and forbid `~`, `.` and `..` in
+   keys. **Worth verifying before fixing** — the supervisor's `_toml` is `lru_cache`d, so a
+   long-running host process may never re-read an edited name, and the practical effect of a rename
+   may be an empty store (fail-safe, enforcing) rather than adoption of another project's permanent
+   grants. Either way the channel is open by the ADR-0022 argument, and the fix is the one configpin
+   already shipped.
 
 ## What to steal, in order
 
-1. **Write the proxy's consumer contract.** A normative document specifying observable behaviour
-   and security outcomes of `egress_proxy.py` — accepted request forms, exact refusal responses,
-   the policy re-read rule and its fail-closed behaviour, what decryption does and does not see, what
+1. **Write the proxy's consumer contract.** A normative document specifying observable behaviour and
+   security outcomes of `egress_proxy.py` — accepted request forms, exact refusal responses, the
+   policy re-read rule and its fail-closed behaviour, what decryption does and does not see, what
    injection guarantees, and the address boundary once gaps 1/4 land. vhrn's is the template, down
    to the "where this contract is stricter than the protocol permits, this contract wins" line.
    foldyard's proxy is the component where a subtle behavioural drift is most expensive and least
    visible, and it is currently specified only by its own source.
-2. **The address discipline (gaps 1 + 4 together)**, implemented to vhrn's specification rather
-   than invented: unicast boundary in every mode, resolve-once-and-pin, loopback as a separate
-   narrow capability. Their `shared/testdata/loopback-authorities.tsv` fixture is the shape of the
-   test table to write.
+2. **The address discipline (gaps 1 + 4 together)**, implemented to vhrn's specification rather than
+   invented: unicast boundary in every mode, resolve-once-and-pin, loopback as a separate narrow
+   capability. Their `shared/testdata/loopback-authorities.tsv` fixture is the shape of the test
+   table to write.
 3. **Provenance in the allow-store.** Record which scope granted a host and show it in
    `fy allow`/the TUI, and make removal report what still supplies it. This is a data-model change
    to a small JSON file and it answers the audit question the current store cannot.
 4. **Per-box nftables installed before the privilege drop.** vhrn gets non-cooperative egress
-   enforcement on *every* engine and platform from ~10 lines in an entrypoint, because the rules
-   are installed by root and the agent user has no sudo. foldyard's equivalent rung today is
-   `[machine] firewall` — opt-in and Lima-only (validated in CI). A box-local `table inet` with `policy drop`,
-   permitting the compose network (in-stack traffic must stay direct under `NO_PROXY`) and the
-   proxy, would close the "cooperative capture is bypassable" hole for the box on backends the VM
-   wall doesn't cover. This needs a spike against the compose network and the socket mount before
-   believing it, but it is much cheaper than the wall.
-5. **The revocation-latency note.** vhrn documents that policy visibility through a shared mount
-   has "no guaranteed immediate visibility or bound" and that a pooled plain-HTTP request can pass
-   after revocation. foldyard's `once` grants auto-revert on a supervisor sweep and the proxy
-   re-reads per request; the honest equivalent sentence belongs in
-   [networking.md](../networking.md).
-6. **Their harness rule, checked against ours:** *"If an agent writes its own config file, vhrn
-   does not write it. Inject through a layer the agent only reads instead."* Worth auditing
-   `skills.py` and `transcripts.py` against — foldyard installs bundled skills into a consumer's
-   `.claude/skills/` and syncs transcripts, and the question "does the agent also write here, and
-   do we destroy a decision it recorded?" has not been asked in those words. Their second
-   observation is the same class: Codex keeps all transcripts in one flat tree, so mounting it
-   "would hand a jailed agent every transcript on the machine" — a per-project session store was
-   the fix.
+   enforcement on *every* engine and platform from ~10 lines in an entrypoint, because the rules are
+   installed by root and the agent user has no sudo. foldyard's equivalent rung today is
+   `[machine] firewall` — opt-in and Lima-only (validated in CI). A box-local `table inet` with
+   `policy drop`, permitting the compose network (in-stack traffic must stay direct under
+   `NO_PROXY`) and the proxy, would close the "cooperative capture is bypassable" hole for the box
+   on backends the VM wall doesn't cover. This needs a spike against the compose network and the
+   socket mount before believing it, but it is much cheaper than the wall.
+5. **The revocation-latency note.** vhrn documents that policy visibility through a shared mount has
+   "no guaranteed immediate visibility or bound" and that a pooled plain-HTTP request can pass after
+   revocation. foldyard's `once` grants auto-revert on a supervisor sweep and the proxy re-reads per
+   request; the honest equivalent sentence belongs in [networking.md](../networking.md).
+6. **Their harness rule, checked against ours:** *"If an agent writes its own config file, vhrn does
+   not write it. Inject through a layer the agent only reads instead."* Worth auditing `skills.py`
+   and `transcripts.py` against — foldyard installs bundled skills into a consumer's
+   `.claude/skills/` and syncs transcripts, and the question "does the agent also write here, and do
+   we destroy a decision it recorded?" has not been asked in those words. Their second observation
+   is the same class: Codex keeps all transcripts in one flat tree, so mounting it "would hand a
+   jailed agent every transcript on the machine" — a per-project session store was the fix.
 
 Deliberately **not** stealing: the container-owned credential store (ADR-0007 is strictly stronger),
 hostname-only policy (gives up capture and injection), and the harness-registry/image-per-agent
@@ -305,17 +303,17 @@ adopted, long-lived thing with its own state dir, posture, stack and worktrees. 
   there is no seam to embed. The overlap would be total and the composition incoherent.
 - **As a competitor, partially — watch it.** It does not compete for foldyard's project-environment
   user today. It does compete for the *first hour* of that user's attention: a developer who wants
-  "run Claude Code safely against this repo" is well served by `vhrn claude`, and will meet
-  foldyard only if they later need the stack, the posture ladder, or a second worktree. Single
-  author, two months old, shipping daily, with better-specified egress than foldyard has written
-  down. The realistic risk is not that it grows a compose stack — it is that it defines what
-  developers expect "jailed agent" to mean, on axes (address discipline, grant provenance,
-  proxy containment) where foldyard currently has no answer.
+  "run Claude Code safely against this repo" is well served by `vhrn claude`, and will meet foldyard
+  only if they later need the stack, the posture ladder, or a second worktree. Single author, two
+  months old, shipping daily, with better-specified egress than foldyard has written down. The
+  realistic risk is not that it grows a compose stack — it is that it defines what developers expect
+  "jailed agent" to mean, on axes (address discipline, grant provenance, proxy containment) where
+  foldyard currently has no answer.
 
 ## Sources
 
-- Repo: <https://github.com/aravind-n/vhrn> — reviewed at `0e3926d` (2026-09-21), v0.5.1, MIT,
-  144 commits from 2026-07-17, all by Aravind Nidadavolu.
+- Repo: <https://github.com/aravind-n/vhrn> — reviewed at `0e3926d` (2026-09-21), v0.5.1, MIT, 144
+  commits from 2026-07-17, all by Aravind Nidadavolu.
 - Docs read in full: `README.md`, `docs/sandbox-design.md`, `docs/proxy/consumer-contract.md`,
   `docs/adding-a-harness.md`, `CHANGELOG.md`, and
   `docs/plans/completed/rust-proxy-migration/phase-12-qualification.md`.

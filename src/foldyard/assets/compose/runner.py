@@ -44,9 +44,10 @@ _GUEST = ("PATH", "HOME", "USER", "LOGNAME", "XDG_RUNTIME_DIR")
 _NO_LOGINS = "/nonexistent/foldyard-no-registry-logins.json"
 
 # A file your computer just replaced can read as missing from the VM for a moment: up to about 1 s
-# on Lima's virtiofs, 5 s on libkrun's (ADR-0021's visibility record). So a compose file that isn't
-# there is waited for this long before compose gets to call it missing. Your computer has already
-# refused one that is really gone (`config.missing_compose_files`), so this is rarely paid.
+# on vz's virtiofs, 5 s on libkrun's, which Lima's krunkit uses (ADR-0021's visibility record). So
+# a compose file that isn't there is waited for this long before compose gets to call it missing.
+# Your computer has already refused one that is really gone (`config.missing_compose_files`), so
+# this is rarely paid.
 _SETTLE = 6.0
 
 

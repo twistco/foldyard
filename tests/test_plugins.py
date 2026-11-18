@@ -15,7 +15,7 @@ from typing import cast
 
 import pytest
 
-from foldyard import config, devmode, keyless, plugins
+from foldyard import config, devmode, keyless, plugins, term
 from foldyard.plugins import (
     DoctorContext,
     InjectRule,
@@ -1800,7 +1800,10 @@ def test_network_panel_counts_rotated_backups_too(monkeypatch, tmp_path):
     _net_rows(tmp_path / "egress.jsonl", [_ok("new.example", 6)])
     data = proxy._network_panel_tree()
     assert [g.key for g in data.groups] == ["new.example", "old.example"]
-    assert "2 requests across 2 hosts" in data.summary and "since 2026-10-22 20:00" in data.summary
+    assert (
+        "2 requests across 2 hosts" in data.summary
+        and f"since {term.stamp(_ok('old.example', 0)['ts'])}" in data.summary
+    )
 
 
 def test_network_panel_caps_a_hosts_rows_and_says_how_many_are_earlier(monkeypatch, tmp_path):
@@ -2644,28 +2647,27 @@ def test_claude_keyless_seeds_onboarding_flag(monkeypatch):
         ),
     ],
 )
-def test_a_bare_agent_block_is_the_manual_login_box(
+def test_a_bare_agent_block_offers_no_login_hosts(
     monkeypatch, plugin, enabled, keyless, cred, seed, api_host
 ):
-    # `[claude]` / `[codex]` with NO keyless = "install it, mount its state, I'll log in myself".
-    # Every keyless artifact has to stay out of that box or the login can't happen: a dummy
-    # credential takes precedence over the token you obtain, and a pre-seeded onboarding/auth file
-    # skips or satisfies the very prompt you need. There's also no rung to flip — the axis only
-    # exists under keyless — and no injector, so nothing exempts the API host from a default_deny
-    # wall; it has to be OFFERED instead. Run with the proxy substrate present, since that's what
-    # makes the keyless artifacts ambient: only `keyless` being unset may hold them back.
+    # `[claude]` / `[codex]` with NO keyless used to mean "I'll log in inside the box". There is no
+    # in-box login any more (ADR-0008, amended 2026-11-18): such a table is refused at launch, so
+    # the plugin offers no login or API host for it, and bakes no keyless artifact either. Run with
+    # the proxy substrate present, since that's what makes the keyless artifacts ambient.
     monkeypatch.setattr(config, enabled, lambda: True)
     monkeypatch.setattr(config, keyless, lambda: "")
     p = plugin()
     env = {**_BOX_ENV, "FY_PROXY": "1"}
-    assert p.switches() == []  # no mode switch: there is no host-side decision to make
+    assert p.switches() == []
     assert p.proxy_rules({}) == [] and p.derive_env({}) == {}
-    assert not any(cred in a for a in p.box_args(dict(env)))  # no dummy to shadow a real token
+    assert not any(cred in a for a in p.box_args(dict(env)))
     assert all(s["label"] != seed for s in p.box_bootstrap(dict(env)))
-    assert api_host in [h["host"] for h in p.egress_recommend()]  # reachable behind the wall
-    # …and under keyless the API host drops off the offer: it's the injector host, exempt already.
+    offered = [h["host"] for h in p.egress_recommend()]
+    assert api_host not in offered  # the injector's host: exempt under keyless, never logged into
+    assert not {"console.anthropic.com", "auth.openai.com"} & set(offered)
+    # …and under keyless it's the same: only the installer's hosts are offered.
     monkeypatch.setattr(config, keyless, lambda: "api-key")
-    assert api_host not in [h["host"] for h in p.egress_recommend()]
+    assert [h["host"] for h in p.egress_recommend()] == offered
 
 
 def test_claude_keyless_inert_when_off(monkeypatch):
@@ -3027,7 +3029,7 @@ def test_codex_keyless_api_key_axis_rule_and_dummy(monkeypatch):
     assert p.derive_env({"codex": "on"}) == {"CODEX_INJECT": "on"}
     # The dummy is AMBIENT with the proxy substrate, NOT gated on the rung: `fy mode codex=on` is a
     # host-side flip, and a box-side artifact keyed to the rung could only be built at create time —
-    # which is what made the flip silently require `fy box down && fy box up`.
+    # which is what made the flip silently require `fy box recreate`.
     assert not any("OPENAI_API_KEY" in a for a in p.box_args(dict(_BOX_ENV)))  # no proxy substrate
     assert "OPENAI_API_KEY=sk-dummy" in p.box_args({**_BOX_ENV, "FY_PROXY": "1"})  # rung OFF
     assert "OPENAI_API_KEY=sk-dummy" in p.box_args(
@@ -3273,3 +3275,120 @@ def test_a_bad_attribution_value_never_crashes_the_proxys_spec(monkeypatch, tmp_
     monkeypatch.setenv("MACHINE_ATTRIBUTION", "bogus")
     spec = Registry([proxy.ProxyPlugin()]).desired_daemons({})["egress-proxy"]
     assert spec["live"]["data"]["origin"]["record"] is False
+
+
+# ── no in-box login: what `fy verify` / `fy doctor` say in the box (ADR-0008, amended) ───────
+
+
+def _plant_claude(home):
+    (home / ".credentials.json").write_text('{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x"}}')
+
+
+def _plant_codex(home):
+    (home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-proj-real"}')
+
+
+_STORED_LOGIN = [
+    (claude.ClaudePlugin, "claude_enabled", "CLAUDE_CONFIG_DIR", _plant_claude, "Claude"),
+    (codex.CodexPlugin, "codex_enabled", "CODEX_HOME", _plant_codex, "Codex"),
+]
+_AGENT_CRED_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
+
+
+@pytest.fixture
+def agent_home(monkeypatch, tmp_path):
+    for name in _AGENT_CRED_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        monkeypatch.setenv(name, str(tmp_path))
+    return tmp_path
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_verify_passes_a_box_with_no_stored_login(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    rows = list(plugin().verify_checks(_vctx()))
+    assert rows and _statuses(rows) == ["pass"] * len(rows)
+    assert any(f"no {label} login" in msg for _, msg in rows)
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_verify_fails_a_login_stored_in_the_box(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    plant(agent_home)
+    rows = list(plugin().verify_checks(_vctx()))
+    failed = [msg for status, msg in rows if status == "fail"]
+    assert len(failed) == 1 and str(agent_home) in failed[0] and label in failed[0]
+
+
+@pytest.mark.parametrize(
+    ("plugin", "enabled", "name", "dummy"),
+    [
+        (claude.ClaudePlugin, "claude_enabled", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-dummy"),
+        (codex.CodexPlugin, "codex_enabled", "OPENAI_API_KEY", "sk-dummy"),
+    ],
+)
+def test_verify_fails_a_real_credential_in_the_agents_env(
+    monkeypatch, agent_home, plugin, enabled, name, dummy
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    monkeypatch.setenv(name, dummy)
+    assert "fail" not in _statuses(plugin().verify_checks(_vctx()))
+    monkeypatch.setenv(name, "sk-real-looking")
+    failed = [msg for status, msg in plugin().verify_checks(_vctx()) if status == "fail"]
+    assert len(failed) == 1 and name in failed[0]
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_verify_watches_every_box_but_says_nothing_on_the_host(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    # Like the [[inject]] kinds' credential vars: watched in EVERY box, declared or not — a box
+    # without the table that holds a real login or key is exactly what verify must not pass.
+    plant(agent_home)
+    monkeypatch.setattr(config, enabled, lambda: True)
+    assert list(plugin().verify_checks(_vctx(in_box=False))) == []  # the volume isn't here
+    monkeypatch.setattr(config, enabled, lambda: False)
+    assert any(s == "fail" and label in m for s, m in plugin().verify_checks(_vctx()))
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_box_doctor_names_a_stored_login_and_how_to_remove_it(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    [(status, name, detail)] = list(plugin().box_doctor_checks(_ctx()))
+    assert status == "ok" and name == f"{label.lower()} login"
+    plant(agent_home)
+    [(status, name, detail)] = list(plugin().box_doctor_checks(_ctx()))
+    assert status == "fail" and str(agent_home) in detail
+    assert ("/logout" if label == "Claude" else "codex logout") in detail
+
+
+def test_verify_reads_claudes_default_state_file_when_its_config_dir_is_unset(
+    monkeypatch, agent_home
+):
+    # Without CLAUDE_CONFIG_DIR (a box with no [claude], which verify watches too) Claude keeps
+    # `.claude.json` BESIDE ~/.claude, at $HOME/.claude.json — not inside it.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setenv("HOME", str(agent_home))
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    (agent_home / ".claude.json").write_text('{"primaryApiKey": "sk-ant-api03-real"}')
+    failed = [m for s, m in claude.ClaudePlugin().verify_checks(_vctx()) if s == "fail"]
+    assert len(failed) == 1 and str(agent_home / ".claude.json") in failed[0]
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_box_doctor_speaks_for_an_undeclared_agent_only_when_it_finds_a_login(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    # Verify watches every box; doctor agrees with it on a finding, without a row per absent agent.
+    monkeypatch.setattr(config, enabled, lambda: False)
+    assert list(plugin().box_doctor_checks(_ctx())) == []
+    plant(agent_home)
+    [(status, name, _detail)] = list(plugin().box_doctor_checks(_ctx()))
+    assert status == "fail" and name == f"{label.lower()} login"

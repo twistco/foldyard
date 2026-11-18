@@ -31,6 +31,8 @@ import base64
 import fcntl
 import json
 import os
+import shlex
+import stat
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -220,6 +222,133 @@ def dummy_box_args(taxonomy: dict, kind: str) -> list[str]:
     return ["-e", f"{spec['env']}={spec['dummy']}"] if spec else []
 
 
+# ── no in-box login (ADR-0008, amended 2026-11-18) ───────────────────────────────────────────
+#
+# Keyless is the only supported way an agent is credentialed. A `[claude]`/`[codex]` without
+# `keyless` is refused at launch (:func:`no_keyless_block`), and a login made in the box anyway —
+# the box is root, so nothing can stop one — is found by `fy verify` and `fy doctor` in the files
+# the agents themselves write it to. Read in the box, of the box's own files.
+
+
+def no_keyless_block(table: str) -> str:
+    """The refusal for a declared ``[claude]``/``[codex]`` with no ``keyless``: why, and the one
+    line that fixes it, in the personal file — which credential you pay for is yours, and a
+    ``keyless`` in the shared file prompts every colleague for one they may not have."""
+    kinds = {
+        "claude": (
+            ('"oauth"', "a token from `claude setup-token` on your computer"),
+            ('"api-key"', "an Anthropic API key"),
+        ),
+        "codex": (
+            ('"chatgpt"', "your ChatGPT subscription (`codex login` on your computer once)"),
+            ('"api-key"', "an OpenAI API key"),
+        ),
+    }[table]
+    choices = "".join(f"\n      keyless = {k:<11}# {why}" for k, why in kinds)
+    return (
+        f"✗ [{table}] has no `keyless`: foldyard no longer supports logging in inside the box,\n"
+        "    where the login is a real credential every box of the project can read (ADR-0008).\n"
+        "    Choose how your computer supplies it, in foldyard.local.toml (personal, gitignored):\n"
+        f"      [{table}]{choices}\n"
+        "    (one of them), then retry; you'll be asked to adopt the change."
+    )
+
+
+def claude_stored_login(config_dir: Path, state: Path | None = None) -> list[str]:
+    """Where Claude Code has stored a real login under ``config_dir`` (its ``CLAUDE_CONFIG_DIR``):
+    ``.credentials.json`` holding anything (its OAuth login), or a Console API key kept in
+    ``.claude.json`` (``primaryApiKey``). A keyless box's Claude writes neither: its credential is
+    the dummy in the environment. A ``.credentials.json`` that is empty or holds only empty values
+    (whatever a logout leaves) is no login; one that can't be read counts, as Codex's ``auth.json``
+    does — it exists only to hold a credential. An unreadable ``.claude.json`` is not a finding:
+    it's Claude's state file, rewritten constantly, and a torn read isn't a credential. ``state``
+    is where that state file is when it isn't in ``config_dir``: without ``CLAUDE_CONFIG_DIR``
+    Claude keeps it beside ``~/.claude``, at ``~/.claude.json``."""
+    found: list[str] = []
+    creds = config_dir / ".credentials.json"
+    if creds.exists():
+        try:
+            text = creds.read_text()
+            held = json.loads(text) if text.strip() else {}
+        except (OSError, ValueError):
+            held = True  # can't vouch for it
+        if held is True or not isinstance(held, dict) or any(held.values()):
+            found.append(str(creds))
+    state = state or config_dir / ".claude.json"
+    try:
+        data = json.loads(state.read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get("primaryApiKey"):
+        found.append(f"{state} (primaryApiKey)")
+    return found
+
+
+def codex_stored_login(codex_home: Path) -> list[str]:
+    """``[auth.json]`` when Codex's ``auth.json`` under ``codex_home`` holds anything but foldyard's
+    own dummy: a real ``OPENAI_API_KEY`` (``codex login --api-key``) or real ChatGPT tokens
+    (``codex login``). ChatGPT keyless seeds :func:`dummy_codex_auth_json` there, whose tokens are
+    the known dummies; api-key keyless writes no file. A file that can't be read as JSON counts:
+    it exists only to hold a credential, so verify can't vouch for it."""
+    path = codex_home / "auth.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return [str(path)]
+    if not isinstance(data, dict):
+        return [str(path)]
+    key = data.get("OPENAI_API_KEY")
+    if key and key != CODEX_KEYLESS["api-key"]["dummy"]:
+        return [str(path)]
+    tokens = data.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        return [str(path)]
+    dummies = {
+        "id_token": codex_chatgpt_dummy_token(),
+        "access_token": codex_chatgpt_dummy_token(),
+        "refresh_token": "fy-dummy-refresh-token-never-used",
+    }
+    if any(tokens.get(name) and tokens[name] != dummy for name, dummy in dummies.items()):
+        return [str(path)]
+    return []
+
+
+def stored_login_rows(
+    label: str, found: list[str], leaks: list[str], remove: str
+) -> list[tuple[str, str]]:
+    """`fy verify`'s rows for one agent in the box: a FAIL per stored login (``found``) and per
+    credential env var holding more than the dummy (``leaks``), else one pass. ``remove`` is how
+    to get rid of a stored login, said in the failure."""
+    rows = [("fail", f"{label} login stored in the box: {path} — {remove}") for path in found] + [
+        (
+            "fail",
+            f"{name} holds a real-looking {label} credential — the box should hold only the dummy",
+        )
+        for name in leaks
+    ]
+    return rows or [
+        ("pass", f"no {label} login stored in the box (keyless: it stays on your computer)")
+    ]
+
+
+def stored_login_detail(found: list[str], remove: str) -> str:
+    """`fy doctor`'s detail for a stored login: where, and how to remove it."""
+    return f"real login stored in the box: {', '.join(found)} — {remove}"
+
+
+def credential_env_leaks(taxonomy: dict, environ) -> list[str]:
+    """The names, among ``taxonomy``'s credential env vars, that hold something other than
+    foldyard's dummy for them. Unset or empty is fine: no credential at all."""
+    out: list[str] = []
+    for spec in taxonomy.values():
+        value = environ.get(spec["env"], "")
+        if value and value != spec["dummy"] and spec["env"] not in out:
+            out.append(spec["env"])
+    return out
+
+
 # Prefix → (host.env var, human label). Order matters: the Claude ``sk-ant-…`` prefixes are more
 # specific than the bare OpenAI ``sk-`` and so must be tested first. ``sk-proj-…`` (OpenAI project
 # keys) falls under ``sk-``. This is the "no need to ask which" classifier from the design.
@@ -324,6 +453,94 @@ def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
     return value if (not pattern or fnmatchcase(value, pattern)) else None
 
 
+SECRET_FILE_MAX = 64 * 1024
+"""The largest file a capture prompt reads for a base64 secret. A PEM private key is 2–4 KiB; a cap
+keeps a mistyped path to something huge from being read whole into memory and onto one line."""
+
+
+def secret_entry(value: str, secret) -> tuple[str | None, str]:
+    """What one entry at a capture prompt stores for ``secret``: ``(to_store, note)``.
+
+    A value that :func:`secret_ok` accepts is stored as it is (``note`` empty). For a ``b64`` secret
+    the entry may instead be the FULL PATH of the file to store — the operator's own key file, read
+    and encoded here, so the key never passes through their terminal: printing
+    ``base64 < key.pem`` to copy it leaves it in scrollback and the clipboard, which a hidden prompt
+    exists to avoid. The stored line is the same either way. ``note`` then names the file read.
+
+    ``to_store`` is ``None`` when nothing should be stored, and ``note`` says why — WITHOUT
+    repeating the entry: base64 may start with ``/``, so a mangled paste can look like a path, and
+    what went into a hidden prompt stays hidden. Only a path that named a real file is shown.
+
+    A relative path is never read: the prompt runs in the checkout, which the box can write, so a
+    bare ``key.pem`` would be whatever the box put there. ``~/…`` and absolute paths are the
+    operator's own choice; a terminal's quoting or backslash-escaping of a dragged-in path is
+    undone first."""
+    stored = secret_ok(value, secret.pattern, secret.b64)
+    if stored is not None:
+        return stored, ""
+    shape = "doesn't look like " + secret.label
+    if not secret.b64:
+        return None, f"that {shape}"
+    path = _entry_path(value)
+    if path is None:
+        return None, f"that {shape} (expected the key file's full path, or single-line base64)"
+    raw, problem = _read_secret_file(path)
+    if raw is None:
+        return None, problem
+    encoded = secret_ok(base64.b64encode(raw).decode(), secret.pattern, True)
+    if encoded is None:
+        return None, f"{path} {shape}"
+    return encoded, f"read {path}"
+
+
+def _entry_path(value: str) -> Path | None:
+    """The absolute path a prompt entry names, else ``None``; expands ``~``. The entry as typed,
+    when that names something: a backslash or a quote is an ordinary filename character, and
+    decoding it away could name a DIFFERENT file. Otherwise undoes a terminal's quoting or
+    backslash-escaping of a dragged-in path (one shell word)."""
+    typed = value.strip()
+    try:
+        words = shlex.split(value)
+    except ValueError:  # an unbalanced quote: take the entry as it was typed
+        words = []
+    # Not one shell word: a path pasted as it is (a file manager's "copy path" leaves spaces bare).
+    decoded = words[0] if len(words) == 1 else typed
+    for text in dict.fromkeys((typed, decoded)):
+        try:
+            path = Path(text).expanduser()
+        except RuntimeError:  # `~someone/…` for an account this computer doesn't have
+            continue
+        # os.path.exists, not Path.exists: on Python ≤ 3.13 the latter RAISES for a path under a
+        # directory you can't enter, before the read's own refusal is reached.
+        if path.is_absolute() and (text == decoded or os.path.exists(path)):
+            return path
+    return None
+
+
+def _read_secret_file(path: Path) -> tuple[bytes | None, str]:
+    """``path``'s bytes, or ``None`` and the reason. A path that didn't open isn't named: the entry
+    may not have been a path at all. One that opened was, so it's named — the operator can't see
+    what a hidden prompt received. Non-blocking open + ``fstat`` on the opened descriptor: a FIFO
+    would otherwise wait for a writer, and checking the type before opening would race a swap."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except IsADirectoryError:
+        return None, f"{path} is not a file"
+    except (OSError, ValueError):  # ValueError: an embedded NUL, which no path can hold
+        return None, "no readable file at the path entered"
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a directory opens read-only on some systems
+        os.close(fd)
+        return None, f"{path} is not a file"
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(SECRET_FILE_MAX + 1)
+    except OSError as exc:  # it opened, then the read failed: a flaky mount, a vanished device
+        return None, f"{path} couldn't be read ({exc.strerror or type(exc).__name__})"
+    if len(raw) > SECRET_FILE_MAX:
+        return None, f"{path} is larger than a key file ({SECRET_FILE_MAX // 1024} KiB at most)"
+    return raw, ""
+
+
 def ensure_secret(
     host_env: Path,
     secret,
@@ -351,14 +568,16 @@ def ensure_secret(
             "TTY to be prompted."
         )
         return "skipped"
-    echo(
-        f"▶ {secret.label}: paste it (stored on your computer at 0600, never in the box or the "
-        "repo)."
-    )
+    where = "stored on your computer at 0600, never in the box or the repo"
+    if secret.b64:
+        # The file's path first: foldyard encodes it, so the key never shows on a screen.
+        echo(f"▶ {secret.label}: give its file's full path, or paste it as base64 ({where}).")
+    else:
+        echo(f"▶ {secret.label}: paste it ({where}).")
     if secret.how:
         echo(f"  (get it with: {secret.how})")
     if secret.b64:
-        echo("  (single-line base64 — pipe the value through `base64` if the hint didn't)")
+        echo("  (drag the file onto this window, then press Enter — nothing shows as you do)")
     value = prompt("  value (hidden): ").strip()
     if not value:
         echo(
@@ -366,18 +585,14 @@ def ensure_secret(
             "or `fy box up`.)"
         )
         return "empty"
-    to_store = secret_ok(value, secret.pattern, secret.b64)
+    to_store, note = secret_entry(value, secret)
     if to_store is None:
-        echo(
-            f"✗ that doesn't look like {secret.label}"
-            + (" (expected single-line base64)" if secret.b64 else "")
-            + " — stored nothing, so nothing wrong-shaped reaches the token service."
-        )
+        echo(f"✗ {note} — stored nothing, so nothing wrong-shaped reaches the token service.")
         return "mismatch"
     append_host_env(host_env, secret.var, to_store)
     echo(
-        f"✓ stored {secret.label} in {host_env} (0600). The token service on your computer "
-        "reads it when it mints."
+        f"✓ {note + ', ' if note else ''}stored {secret.label} in {host_env} (0600). The token "
+        "service on your computer reads it when it mints."
     )
     return "stored"
 

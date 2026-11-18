@@ -1,5 +1,4 @@
-"""guestlog.py — the machine VM's log budget, provisioned by ``machine ensure`` on every backend
-with a VM.
+"""guestlog.py — the machine VM's log budget, provisioned by ``machine ensure``.
 
 Containers log to journald (podman's default driver), so the guest journal IS the container
 logs — and Fedora's default cap is min(10% of the filesystem, 4G): measured 2026-09-15 on a
@@ -10,13 +9,11 @@ own access log at ``--log-level=info`` (the TUI/doctor polling ``_ping`` and lis
 Two knobs, two privilege levels:
 
 * the **journald cap** is a root-owned ``/etc`` drop-in. On Lima root is boot-time only
-  (machine.py), so it is rendered into the root boot script there (:func:`journal_snippet`
-  with no sudo) and rides the provisioning id; podman machine's CoreOS appliance takes no
-  boot script but keeps its user's passwordless sudo, so there it goes over the backend's ssh
-  with ``sudo -n``.
+  (machine.py), so it is rendered into the root boot script (:func:`journal_snippet`) and
+  rides the provisioning id.
 * the **API log level** is a user-level ``podman.service`` drop-in — the stock unit runs
-  ``podman $LOGGING system service`` with ``LOGGING=--log-level=info`` — applied over ssh on
-  both backends, restarting the service only when the file changed. The gVisor posture's own
+  ``podman $LOGGING system service`` with ``LOGGING=--log-level=info`` — applied over ssh,
+  restarting the service only when the file changed. The gVisor posture's own
   second service (sandbox.py) passes no ``--log-level`` and so already sits at podman's default.
 
 Best-effort throughout: this is housekeeping, not a posture, so a guest that refuses is a
@@ -40,19 +37,18 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr)
 
 
-def journal_snippet(*, sudo: str) -> str:
-    """The journald cap as idempotent bash: written, journald restarted and the backlog vacuumed
-    ONLY when the drop-in's content differs (a steady-state boot or ``fy up`` touches nothing).
-    ``sudo`` prefixes every root step — ``""`` where the caller already is root."""
-    p = f"{sudo} " if sudo else ""
+def journal_snippet() -> str:
+    """The journald cap as idempotent bash, run as root by the boot script: written, journald
+    restarted and the backlog vacuumed ONLY when the drop-in's content differs (a steady-state
+    boot or ``fy up`` touches nothing)."""
     content = f"[Journal]\\nSystemMaxUse={JOURNAL_MAX_USE}\\n"
     return f"""
 # foldyard: cap the guest journal (= the container logs) at {JOURNAL_MAX_USE}.
-{p}install -d -m 0755 /etc/systemd/journald.conf.d
-if ! printf '{content}' | {p}cmp -s - {_JOURNAL_DROPIN} 2>/dev/null; then
-  printf '{content}' | {p}tee {_JOURNAL_DROPIN} >/dev/null
-  {p}systemctl restart systemd-journald
-  {p}journalctl --vacuum-size={JOURNAL_MAX_USE} >/dev/null 2>&1 || true
+install -d -m 0755 /etc/systemd/journald.conf.d
+if ! printf '{content}' | cmp -s - {_JOURNAL_DROPIN} 2>/dev/null; then
+  printf '{content}' | tee {_JOURNAL_DROPIN} >/dev/null
+  systemctl restart systemd-journald
+  journalctl --vacuum-size={JOURNAL_MAX_USE} >/dev/null 2>&1 || true
   echo "journal: capped at {JOURNAL_MAX_USE}"
 fi
 """
@@ -76,14 +72,12 @@ fi
 
 
 def ensure(backend: SshBackend, name: str) -> None:
-    """Apply the log budget to the running VM ``name`` over the backend's ssh; a backend without
-    a VM (native) has nothing to budget."""
+    """Apply the API log level to the running VM ``name`` over the backend's ssh; nothing when
+    there is no ssh route (no VM yet)."""
     target = backend.ssh_target(name)
     if target is None:
         return
     script = user_script()
-    if backend.name == "podman":
-        script += journal_snippet(sudo="sudo -n")
     try:
         res = _ssh(target, script)
     except subprocess.TimeoutExpired as e:

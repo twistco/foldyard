@@ -440,7 +440,7 @@ def test_start_refuses_an_old_or_missing_tmux(in_box, capsys):
     assert "3.3 or newer" in capsys.readouterr().err
     replies["-V"] = _Proc(127, "", "not found")
     assert agents.start("claude", "", [], attach_after=False) == 1
-    assert "fy box down && fy box up" in capsys.readouterr().err
+    assert "fy box recreate" in capsys.readouterr().err
     assert not any("new-session" in c for c in calls)
 
 
@@ -463,7 +463,7 @@ def test_a_stock_image_without_tmux_is_an_old_box_never_an_offer(no_tmux, capsys
     assert agents.start("claude", "", [], attach_after=False) == 1
     err = capsys.readouterr().err
     assert "packaged box image has it" in err
-    assert "on your computer, `fy box down && fy box up`" in err  # in a box: the host's verb
+    assert "on your computer, `fy box recreate`" in err  # in a box: the host's verb
     assert no_tmux == []
 
 

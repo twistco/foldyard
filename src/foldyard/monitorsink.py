@@ -109,7 +109,7 @@ def _follow(fd: int, comp: str, path: str) -> str:
     if st.st_uid != _TRUSTED_UID or os.access(".", os.W_OK, dir_fd=fd):
         raise Refused(
             f"{path}: '{comp}' is a symlink that something running as you could have made — the "
-            "box writes the checkout as you, so the sink never follows one. Give the real path: "
+            "box writes the checkout as you, so foldyard never follows one. Give the real path: "
             f"{os.path.realpath(path)}"
         )
     return os.readlink(comp, dir_fd=fd)
@@ -166,7 +166,8 @@ def _open(path: str, flags: int, *, writing: bool) -> int:
         except OSError:
             link = False
         if link or e.errno == errno.ELOOP:
-            raise Refused(f"{path} is a symlink — the sink never writes through one") from None
+            how = "writes" if writing else "reads"
+            raise Refused(f"{path} is a symlink — foldyard never {how} through one") from None
         raise Refused(f"{path}: {e.strerror}") from None
     finally:
         os.close(parent)
@@ -230,6 +231,14 @@ def append(path: str, line: bytes) -> None:
             raise
     finally:
         os.close(fd)
+
+
+def open_for_reading(path: str) -> int:
+    """``path`` (absolute) opened read-only by the same walk: a link anywhere on the way that
+    something running as you could have made, or a FIFO or other non-regular file, is
+    :class:`Refused`. For `fy paste`'s file argument, which may name a file in the box-writable
+    checkout. The caller closes the descriptor."""
+    return _open(path, os.O_RDONLY, writing=False)
 
 
 def read(path: str) -> bytes:

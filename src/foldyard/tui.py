@@ -29,7 +29,7 @@ Navigation is zoned (see DevModeTui / ModeGrid / WorkspaceList for the seams):
   • workspace list: ↑/↓ between workspaces (last row = ＋ new worktree, enter opens the
     branch picker), → hands off to the panel. With a workspace highlighted: c opens Code
     (`fy code`), d starts/stops its dev box (stopping confirms first — an agent session may
-    be running inside), s starts/stops the Podman machine (stopping confirms first — it
+    be running inside), s starts/stops the VM (stopping confirms first — it
     takes every workspace's containers down), x removes the worktree (not main — tears
     down its box + stack, archives transcripts, then git-removes it, after a confirm dialog)
   • [ ] switch panel anywhere (when a DataTable owns the arrows) · q quit. The doctor
@@ -48,6 +48,7 @@ from typing import cast
 
 from rich.markup import escape
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -77,6 +78,16 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 def _leaf_row(group: PanelGroup, i: int) -> object:
     """What leaf ``i`` of ``group`` stands for (:attr:`PanelGroup.rows`), or None."""
     return group.rows[i] if i < len(group.rows) else None
+
+
+def _build_only_grant(key: str) -> bool:
+    """Is ``key`` (a host or a path grant) granted now for image builds alone? Then allowing it
+    from the TUI widens it to the box (:func:`allowlist.grant` replaces a build grant), and the
+    level picker says so. Best-effort: an unreadable store reads as no (nothing to warn of)."""
+    try:
+        return any(g["host"] == key and g.get("scope") == "build" for g in allowlist.grants())
+    except Exception:
+        return False
 
 
 def _row_scopes(row: dict | None) -> list[str]:
@@ -240,16 +251,18 @@ class NewWorktreeCard(ListItem):
 
 class WorkspaceList(ListView):
     """The left column. ↑/↓ are native (cursor); → hands off to the active panel.
-    When a real workspace is highlighted, b/c/d/s act on it (open browser / open Code / toggle
-    its dev box / toggle the Podman machine); x removes a worktree (not main). Workspace actions
-    are hidden on the ＋ new-worktree row (which only takes enter), and x is also hidden on
-    main. The stop directions of d and s confirm first (see DevModeTui.toggle_devbox/_machine)."""
+    When a real workspace is highlighted, b/c/d/r/s act on it (open browser / open Code / toggle
+    its dev box / recreate a running one / toggle the VM); x removes a worktree (not
+    main). Workspace actions are hidden on the ＋ new-worktree row (which only takes enter), r
+    where no box is running, and x on main. The stop directions of d and s, and r, confirm first
+    (see DevModeTui.toggle_devbox/recreate_devbox/_machine)."""
 
     BINDINGS = [
         Binding("right", "to_panel", "panel ▶"),
         Binding("b", "open_browser", "open browser"),
         Binding("c", "open_code", "open Code"),
         Binding("d", "toggle_devbox", "start/stop devbox"),
+        Binding("r", "recreate_devbox", "recreate devbox"),
         Binding("s", "toggle_machine", "start/stop machine"),
         Binding("x", "remove_worktree", "remove worktree"),
     ]
@@ -275,6 +288,9 @@ class WorkspaceList(ListView):
             return False
         if action == "remove_worktree" and not self._on_real_worktree():
             return False
+        if action == "recreate_devbox":  # a recreate, so only of a box that is there
+            item = self.highlighted_child
+            return isinstance(item, WorkspaceCard) and bool(item.ws.get("devbox"))
         return True
 
     def action_to_panel(self) -> None:
@@ -294,6 +310,11 @@ class WorkspaceList(ListView):
         item = self.highlighted_child
         if isinstance(item, WorkspaceCard):
             cast("DevModeTui", self.app).toggle_devbox(item.ws)
+
+    def action_recreate_devbox(self) -> None:
+        item = self.highlighted_child
+        if isinstance(item, WorkspaceCard):
+            cast("DevModeTui", self.app).recreate_devbox(item.ws)
 
     def action_toggle_machine(self) -> None:
         cast("DevModeTui", self.app).toggle_machine()
@@ -511,6 +532,9 @@ class DevModeTui(App):
     .panel-summary { margin: 0 1; height: auto; }
     /* Tree-kind plugin panels (the Network Log groups requests by host) fill the pane + scroll. */
     Tree { height: 1fr; }
+    /* Table-kind ones too: left at DataTable's own `height: auto` a long log (GCP Tokens holds
+       200 rows) grows past the screen, where the pane clips it and nothing scrolls. */
+    .panel-table { height: 1fr; }
     /* The Network Log splits: the request log on top, the wall-management pane below (grants +
        pending `[proxy] recommend` offers). The id selector out-specifies the generic Tree rule. */
     #network-tree { height: 3fr; }
@@ -644,7 +668,9 @@ class DevModeTui(App):
                             tree.show_root = False
                             yield tree
                         else:
-                            yield DataTable(id=f"{panel.id}-table", cursor_type="row")
+                            yield DataTable(
+                                id=f"{panel.id}-table", cursor_type="row", classes="panel-table"
+                            )
                         if panel.id == "network":
                             # The egress-wall management pane, below the log: the store's grants
                             # (revoke with x) + the recommendations still awaiting an answer —
@@ -692,6 +718,9 @@ class DevModeTui(App):
         # The wall-management pane (present only when the proxy contributes the Network Log).
         # `_manage_keys` maps its cursor rows back to (kind, host) — see _manage_data.
         self._manage_keys: list[tuple[str, str]] = []
+        # A follow row's targets, by source (``follow?`` a pending recommendation, ``follow`` a
+        # grant): what `a` grants and re-levels — see _manage_data.
+        self._manage_follow: dict[tuple[str, str], list[str]] = {}
         self._manage_sig: tuple = ()
         manage = self.query("#network-manage")
         if manage:
@@ -699,6 +728,8 @@ class DevModeTui(App):
         # Tree-panel guard: panel-id → the PanelTree last rendered, so a tree is touched only when
         # its data changed, and relabelled in place while its groups' order holds.
         self._tree_data: dict[str, PanelTree] = {}
+        # Its table-panel twin: panel-id → the rows last rendered, so an idle tick keeps the cursor.
+        self._table_rows: dict[str, list[tuple[str, ...]]] = {}
         self.refresh_workspaces()
         self._select_launch_workspace()
         self.refresh_mode()
@@ -862,7 +893,7 @@ class DevModeTui(App):
         if devmode.machine_state() == "running":
             self.push_screen(
                 ConfirmScreen(
-                    title="Stop the Podman machine?",
+                    title="Stop the VM?",
                     body=(
                         "The machine hosts [b]every[/b] workspace: stopping it takes all "
                         "stacks, dev boxes, and any agent sessions running inside them down "
@@ -876,7 +907,7 @@ class DevModeTui(App):
             self._do_toggle_machine()
 
     def _do_toggle_machine(self) -> None:
-        self.notify("toggling the Podman machine…")
+        self.notify("toggling the VM…")
 
         def work() -> None:
             rc, out = devmode.machine_toggle()
@@ -900,6 +931,17 @@ class DevModeTui(App):
         if not ws["devbox"]:
             self._start_devbox(ws)
             return
+        self._confirm_devbox(ws, "down")
+
+    def recreate_devbox(self, ws: dict) -> None:
+        """Recreate the highlighted workspace's running box (`fy box recreate`) — after the same
+        confirmation as a stop, since it ends what runs inside it just the same."""
+        self.workers.cancel_group(self, "devbox-confirm")
+        self._confirm_devbox(ws, "recreate")
+
+    def _confirm_devbox(self, ws: dict, verb: str) -> None:
+        """Look up the box's live agent sessions, then ask before `verb` (down/recreate) ends
+        them."""
 
         def work() -> None:
             # Off the UI thread: the lookup is a `podman exec` into the box (up to its timeout).
@@ -917,38 +959,56 @@ class DevModeTui(App):
                 # Checked HERE, on the UI thread, where a newer `d` is handled: a check on the
                 # worker thread could pass just before that press cancelled this worker.
                 if not worker.is_cancelled:
-                    self._confirm_stop_devbox(ws, live)
+                    self._confirm_stop_devbox(ws, live, verb)
 
             self.call_from_thread(show)
 
         self.run_worker(work, thread=True, exclusive=True, group="devbox-confirm")
 
-    def _confirm_stop_devbox(self, ws: dict, live: list) -> None:
-        """The stop-box confirmation, naming the agent sessions still running in it."""
+    def _confirm_stop_devbox(self, ws: dict, live: list, verb: str = "down") -> None:
+        """The stop- (or recreate-) box confirmation, naming the agent sessions still running in
+        it. A confirmed recreate goes the start's way, through the adopt question."""
         named = (
             f"\n\n[b]{len(live)} agent session(s) still running[/b] (`fy agent ls`): "
             + ", ".join(escape(s.name) for s in live)
             if live
             else ""
         )
+        box = f"[dim]{escape(ws['project'])}-devbox[/dim]"
+        killed = (
+            "Anything running inside it — including a live `fy claude` / `fy codex` agent "
+            "session — is killed; the stack's other containers keep running and login/CLI "
+            "volumes are kept."
+        )
+        if verb == "recreate":
+            self.push_screen(
+                ConfirmScreen(
+                    title=f"Recreate the dev box for [b]{escape(ws['name'])}[/b]?",
+                    body=(
+                        f"Removes {box} and creates it again (`fy box recreate`), which picks up "
+                        f"what is fixed at creation: env, mounts, foldyard, the image. {killed}"
+                        f"{named}"
+                    ),
+                    confirm_label="Recreate box",
+                ),
+                lambda ok: self._start_devbox(ws, "recreate") if ok else None,
+            )
+            return
         self.push_screen(
             ConfirmScreen(
                 title=f"Stop the dev box for [b]{escape(ws['name'])}[/b]?",
                 body=(
-                    f"Stops + removes [dim]{escape(ws['project'])}-devbox[/dim]. Anything "
-                    "running inside it — including a live `fy claude` / `fy codex` agent "
-                    "session — is killed; the stack's other containers keep running and "
-                    "login/CLI volumes are kept."
+                    f"Stops + removes {box}. {killed}"
                     f"{named}\n\nStart it again with [b]d[/b] (or `fy box up`)."
                 ),
                 confirm_label="Stop box",
             ),
-            lambda ok: self._run_devbox(ws, up=False) if ok else None,
+            lambda ok: self._run_devbox(ws, "down") if ok else None,
         )
 
-    def _start_devbox(self, ws: dict) -> None:
-        """Bring a box up, resolving the adopt gate FIRST when this checkout has never been
-        adopted (or has drifted since).
+    def _start_devbox(self, ws: dict, verb: str = "up") -> None:
+        """Bring a box up (or, with ``verb="recreate"``, recreate it), resolving the adopt gate
+        FIRST when this checkout has never been adopted (or has drifted since).
 
         `fy box up` inherits `configpin.gate`, which on a terminal asks whether to adopt. The TUI
         has no terminal to answer on, so the gate now refuses instead of hanging — correct, but it
@@ -963,10 +1023,10 @@ class DevModeTui(App):
             drift = configpin.inspect(devmode.worktree_config("" if name == "main" else name))
         except Exception as e:  # never let the gate's own failure block starting a box
             self.notify(f"couldn't check the adopted config ({e})", severity="warning")
-            self._run_devbox(ws, up=True)
+            self._run_devbox(ws, verb)
             return
         if drift.pinned_exists and not drift.changed:
-            self._run_devbox(ws, up=True)
+            self._run_devbox(ws, verb)
             return
         try:
             # What this branch changes about the config the host already runs for main — the only
@@ -992,17 +1052,17 @@ class DevModeTui(App):
                 )
             except configpin.ReviewStale as e:
                 self.notify(f"{e} — asking again", severity="warning")
-                self._start_devbox(ws)
+                self._start_devbox(ws, verb)
                 return
             except Exception as e:
                 self.notify(f"adopt failed: {e}", severity="error")
                 return
             self.notify(f"✓ adopted config for '{ws['name']}'")
-            self._run_devbox(ws, up=True)
+            self._run_devbox(ws, verb)
 
         self.push_screen(AdoptConfigScreen(drift, baseline), _after)
 
-    def _run_devbox(self, ws: dict, up: bool) -> None:
+    def _run_devbox(self, ws: dict, verb: str) -> None:
         name = ws["name"]
         # One in-flight box operation per workspace: marked HERE on the UI thread (both `d`
         # presses land there, so the check-then-add can't race) and cleared in the worker's
@@ -1011,18 +1071,23 @@ class DevModeTui(App):
             self.notify(f"[{name}] a dev-box operation is already running…", severity="warning")
             return
         self._devbox_busy.add(name)
-        self.notify(f"{'starting' if up else 'stopping'} dev box for '{name}'…")
+        doing, done, run = {
+            "up": ("starting", "up", devmode.box_up),
+            "down": ("stopping", "stopped", devmode.box_down),
+            "recreate": ("recreating", "recreated", devmode.box_recreate),
+        }[verb]
+        self.notify(f"{doing} dev box for '{name}'…")
 
         def work() -> None:
             try:
-                rc, out = (devmode.box_up if up else devmode.box_down)(name)
+                rc, out = run(name)
                 tail = out.splitlines()[-1] if out else ""
                 self.call_from_thread(
                     self.notify,
                     (
-                        f"✓ [{name}] dev box {'up' if up else 'stopped'}"
+                        f"✓ [{name}] dev box {done}"
                         if rc == 0
-                        else f"✗ [{name}] box {'up' if up else 'down'} failed: {tail}"
+                        else f"✗ [{name}] box {verb} failed: {tail}"
                     ),
                     severity=("information" if rc == 0 else "error"),
                 )
@@ -1077,7 +1142,7 @@ class DevModeTui(App):
         self._ws_hint_for = name
         if hint and name != "main":  # the recreate, aimed at THIS worktree's box
             wt = f"WORKTREE={name} "
-            hint = hint.replace("fy box down && fy box up", f"{wt}fy box down && {wt}fy box up")
+            hint = hint.replace("fy box recreate", f"{wt}fy box recreate")
         hints.first(Static).update(
             f"[b]{name}[/b]: "
             + (hint or ("devbox env matches the config" if devbox else "no devbox running"))
@@ -1391,11 +1456,26 @@ class DevModeTui(App):
             # Its own name, not `host`: the lambda closes over the VARIABLE, and the tree branch
             # below rebinds `host` — never reached after this return, but one refactor away from
             # the picker granting a different row than it named.
-            _kind, sel_host = sel
+            kind, sel_host = sel
+            if kind in ("follow?", "follow"):
+                # A follow grant: the source's redirects to these targets, never the source
+                # itself — so a row left with none (followed elsewhere since the pane was drawn)
+                # grants nothing, and never falls through to the picker's path grant.
+                targets = self._manage_follow.get(sel)
+                if not targets:
+                    self.notify(f"redirects from {sel_host} are already followed")
+                    self.refresh_panels()
+                    return
+                self.push_screen(
+                    AllowHostScreen(sel_host, follow=targets),
+                    lambda level: self._after_follow(sel_host, targets, level),
+                )
+                return
             if self._typed_only(sel_host):
                 return
             self.push_screen(
-                AllowHostScreen(sel_host), lambda level: self._after_allow(sel_host, level)
+                AllowHostScreen(sel_host, widens=_build_only_grant(sel_host)),
+                lambda level: self._after_allow(sel_host, level),
             )
             return
         tree = self.query_one("#network-tree", Tree)
@@ -1421,7 +1501,10 @@ class DevModeTui(App):
         """The level picker for ``key`` (a host or a path grant), then the grant."""
         if not key or self._typed_only(key):
             return
-        self.push_screen(AllowHostScreen(key), lambda level: self._after_allow(key, level))
+        self.push_screen(
+            AllowHostScreen(key, widens=_build_only_grant(key)),
+            lambda level: self._after_allow(key, level),
+        )
 
     def action_copy_row(self) -> None:
         """Copy what the Network Log's cursor is on, as JSON: a request's log row, or a host's
@@ -1472,6 +1555,22 @@ class DevModeTui(App):
 
         self.run_worker(work, thread=True)
 
+    def _after_follow(self, source: str, targets: list[str], level: str | None) -> None:
+        if not level:
+            return
+        self.notify(f"following redirects from {source} ({level})…")
+
+        def work() -> None:
+            try:
+                allowlist.grant_follow(source, targets, level)
+                ok, msg = True, f"✓ following redirects from {source} ({level})"
+            except Exception as e:  # SystemExit (bad source/target/in-box) or OSError
+                ok, msg = False, f"✗ follow failed: {e}"
+            self.call_from_thread(self.notify, msg, severity=("information" if ok else "error"))
+            self.call_from_thread(self.refresh_panels)
+
+        self.run_worker(work, thread=True)
+
     def _manage_selection(self) -> tuple[str, str] | None:
         """The wall pane's selected ``(kind, host)`` — ``kind`` is ``rec`` (a pending
         recommendation) or ``grant`` — but only while that table has focus, so `a` on the log
@@ -1506,6 +1605,12 @@ class DevModeTui(App):
                 if kind == "rec":
                     allowlist.decline(host)
                     msg = f"✗ {host} declined — not offered again (`fy allow add` re-allows)"
+                elif kind == "follow?":
+                    allowlist.decline_follow(host)
+                    msg = f"✗ redirects from {host} declined — not offered again"
+                elif kind == "follow":
+                    allowlist.revoke_follow(host)
+                    msg = f"✓ redirects from {host} no longer followed"
                 else:
                     allowlist.revoke(host)
                     msg = f"✓ {host} revoked"
@@ -1666,11 +1771,20 @@ class DevModeTui(App):
                 self.query_one(f"#{panel.id}-summary", Static).update(data.summary)
             except NoMatches:
                 continue
-            if table.row_count == len(data.rows):
+            # The rows themselves, not their count: a row can change in place (a stamp gains its
+            # date at midnight, a capped log slides along) with the count the same.
+            if self._table_rows.get(panel.id) == data.rows:
                 continue
+            self._table_rows[panel.id] = list(data.rows)
+            # clear() sends the cursor and the scroll home; a capped log redraws on every new
+            # entry, so put both back where the reader left them (row 0 stays on the newest).
+            at, top = table.cursor_row, table.scroll_y
             table.clear()
             for row in data.rows:
                 table.add_row(*row)
+            if data.rows:
+                table.move_cursor(row=min(at, len(data.rows) - 1), scroll=False)
+            table.call_after_refresh(table.scroll_to, y=top, animate=False)
 
     def _refresh_tree_panel(self, panel: TuiPanel, data: PanelTree) -> None:
         """Render a tree-kind panel's PanelTree as a Textual Tree (groups → their rows). While the
@@ -1743,15 +1857,46 @@ class DevModeTui(App):
             enforcing = allowlist.default_deny()
         except Exception:
             return "", [], []
+        try:
+            follows = allowlist.follow_grants()
+        except Exception:
+            follows = []
         rows: list[tuple[str, str, str]] = []
         keys: list[tuple[str, str]] = []
+        self._manage_follow = {}
         for e in pending:
+            if e.get("redirects_to"):
+                # A follow recommendation: its row names where the source may send the box —
+                # the targets not followed yet, which are all `a` grants (as `fy allow sync`
+                # does: an answer never re-levels a target already held).
+                new, held = allowlist.unfollowed(e)
+                note = f"follow → {', '.join(new)}"
+                if held:
+                    note += f" (already following {', '.join(held)})"
+                rows.append(("rec?", e["host"], note))
+                keys.append(("follow?", e["host"]))
+                self._manage_follow[("follow?", e["host"])] = new
+                continue
             rows.append(("rec?", e["host"], e["why"]))
             keys.append(("rec", e["host"]))
         for g in granted:
-            exp = g["expires"]
-            rows.append((g["level"], g["host"], f"expires {exp[11:19]}" if exp else ""))
+            # A build-scoped grant (the build gate's) never reaches the box: listed bare, the
+            # box's refusal of that host read as a broken wall.
+            notes = ["for image builds only"] if g.get("scope") == "build" else []
+            if g["expires"]:
+                notes.append(f"expires {term.stamp(g['expires'])}")
+            rows.append((g["level"], g["host"], " · ".join(notes)))
             keys.append(("grant", g["host"]))
+        for f in follows:
+            # A row per source and level (each target keeps its own), but `a` re-levels the
+            # source as one decision: every target it follows, named in the dialog.
+            notes = [f"follow → {', '.join(f['to'])}"]
+            if f["expires"]:
+                notes.append(f"expires {term.stamp(f['expires'])}")
+            rows.append((f["level"], f["source"], " · ".join(notes)))
+            keys.append(("follow", f["source"]))
+            held = self._manage_follow.setdefault(("follow", f["source"]), [])
+            held.extend(t for t in f["to"] if t not in held)
         wall = "ENFORCING" if enforcing else "observing only"
         summary = (
             f"[b]allowlist[/b] — {wall} · {len(granted)} granted"
@@ -1782,7 +1927,9 @@ class DevModeTui(App):
         if not pane or not summary_out:
             return
         summary_out.first(Static).update(Text.from_markup(summary))
-        sig = tuple(rows)
+        # The keys too: one row's text can stand for two kinds (a recommendation's `why` reading
+        # like a follow's), and `a`/`x` act on the key, not the text.
+        sig = (tuple(rows), tuple(keys))
         if sig == self._manage_sig:
             return
         self._manage_sig = sig
@@ -2033,16 +2180,29 @@ class AllowHostScreen(ModalScreen):
         ("permanent", "permanent — kept in the host allow-store, survives restarts"),
     )
 
-    def __init__(self, host: str) -> None:
+    def __init__(self, host: str, *, widens: bool = False, follow: list[str] | None = None) -> None:
         super().__init__()
         self.host = host
+        self.widens = widens  # it has a build-only grant, which this replaces (allowlist.grant)
+        self.follow = follow or []  # a follow grant: the targets its redirects may name
 
     def compose(self) -> ComposeResult:
         with Vertical(id="allow-dialog"):
-            yield Static(
-                Text.from_markup(f"Allow [b]{escape(self.host)}[/b] through the allowlist"),
-                id="allow-title",
+            title = (
+                f"Follow redirects from [b]{escape(self.host)}[/b] to "
+                f"{escape(', '.join(self.follow))} — the box reads the exact URL each names"
+                if self.follow
+                else f"Allow [b]{escape(self.host)}[/b] through the allowlist"
             )
+            yield Static(Text.from_markup(title), id="allow-title")
+            if self.widens:
+                yield Static(
+                    Text.from_markup(
+                        "[yellow]granted now for image builds only — this lets the box reach "
+                        "it too[/yellow]"
+                    ),
+                    id="allow-widens",
+                )
             yield ListView(id="allow-list")
             yield Static("o once · s session · p permanent · esc cancel", id="allow-hint")
 
@@ -2221,11 +2381,12 @@ class RemoveWorktreeScreen(ModalScreen):
 
 
 class SecretScreen(ModalScreen):
-    """Paste one host-side secret a posture needs (:class:`foldyard.plugins.Secret`). The `how`
-    hint is SHOWN, never run. Enter validates the paste against the secret's pattern (a
-    wrong-shaped value keeps the dialog open with the reason, so nothing wrong-shaped reaches the
-    minter) and dismisses the value to STORE; an empty enter dismisses "" (skip); esc dismisses
-    None (leave the posture unchanged). The Input is masked — a real secret."""
+    """Paste one host-side secret a posture needs (:class:`foldyard.plugins.Secret`) — or, for a
+    base64 one, its file's path (:func:`foldyard.keyless.secret_entry`). The `how` hint is SHOWN,
+    never run. Enter validates the entry against the secret's pattern (a wrong-shaped value keeps
+    the dialog open with the reason, so nothing wrong-shaped reaches the minter) and dismisses the
+    value to STORE; an empty enter dismisses "" (skip); esc dismisses None (leave the posture
+    unchanged). The Input is masked — a real secret."""
 
     BINDINGS = [Binding("escape", "cancel", "cancel")]
 
@@ -2242,17 +2403,38 @@ class SecretScreen(ModalScreen):
         if sec.how:
             lines.append(f"get it with: [i]{escape(sec.how)}[/i]")
         if sec.b64:
-            lines.append("single-line base64 — pipe the value through `base64` if the hint didn't")
+            lines.append(
+                "give its file's full path (drag the file in, then press Enter — the field stays "
+                "masked) — read and encoded here, so the key never shows on screen — or paste it "
+                "as single-line base64"
+            )
+        placeholder = "its file's path, or its base64 (hidden)" if sec.b64 else "paste it (hidden)"
         with Vertical(id="sec-dialog"):
             yield Static(Text.from_markup(f"This mode needs {escape(sec.label)}"), id="sec-title")
             yield Static(Text.from_markup("\n".join(lines)), id="sec-body")
-            yield Input(placeholder="paste the value (hidden)", password=True, id="sec-input")
+            yield Input(placeholder=placeholder, password=True, id="sec-input")
             yield Static(
                 "enter store · empty enter skip · esc leave the mode unchanged", id="sec-hint"
             )
 
     def on_mount(self) -> None:
         self.query_one("#sec-input", Input).focus()
+
+    def on_paste(self, event: events.Paste) -> None:
+        """A paste that reached the SCREEN, i.e. arrived with nothing focused (the field stops any
+        it gets). Dragging a file in from another app takes the terminal's focus with it: Textual
+        clears focus on AppBlur, and the drop's paste lands before AppFocus restores it — so the
+        drag looked like it did nothing. This dialog has one field: the paste goes there, as
+        Input's own handler would take it (its first line, over any selection)."""
+        field = self.query_one("#sec-input", Input)
+        field.focus()
+        if event.text:
+            line = event.text.splitlines()[0]
+            if field.selection.is_empty:
+                field.insert_text_at_cursor(line)
+            else:
+                field.replace(line, *field.selection)
+        event.stop()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         from . import keyless
@@ -2261,12 +2443,10 @@ class SecretScreen(ModalScreen):
         if not value:
             self.dismiss("")
             return
-        to_store = keyless.secret_ok(value, self._secret.pattern, self._secret.b64)
+        to_store, note = keyless.secret_entry(value, self._secret)
         if to_store is None:
-            why = " (expected single-line base64)" if self._secret.b64 else ""
             self.query_one("#sec-hint", Static).update(
-                f"✗ that doesn't look like {escape(self._secret.label)}{why} — nothing stored; "
-                "try again, or esc"
+                f"✗ {escape(note)} — nothing stored; try again, or esc"
             )
             self.query_one("#sec-input", Input).value = ""
             return
@@ -2277,7 +2457,7 @@ class SecretScreen(ModalScreen):
 
 
 class ConfirmScreen(ModalScreen):
-    """A generic stop-something confirmation (dev box / Podman machine): title + body spell out
+    """A generic stop-something confirmation (dev box / VM): title + body spell out
     the blast radius, focus defaults to Cancel, y (or the confirm button) confirms, esc/n cancels.
     Dismisses True (do it) / False (leave it). `title`/`body` are Rich markup — escape() any
     interpolated names at the call site."""

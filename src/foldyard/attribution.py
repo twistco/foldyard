@@ -180,7 +180,7 @@ def run(log: Callable[[str], None], stopping: Callable[[], bool]) -> None:
     while not stopping():
         msg = ""
         try:
-            if wanted() and machine.BACKEND.name == "lima" and machine.state() == "running":
+            if wanted() and machine.state() == "running":
                 snap.poll()
         except Exception as e:
             msg = f"attribution: snapshotting the engine's containers failed: {e}"

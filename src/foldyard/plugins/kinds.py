@@ -51,13 +51,15 @@ GITHUB_API = "api.github.com"
 # single-line prompt) satisfies the BEGIN marker on its own.
 PEM_PATTERN = "*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*"
 PEM_HINT = (
-    "download the GitHub App's private key (.pem) from the App settings, then "
-    "`base64 < key.pem | tr -d '\\n'`"
+    "generate a private key on the GitHub App's settings page (App settings → Private keys), "
+    "then give the prompt the downloaded .pem file's full path"
 )
 """The default "where do I get this?" line for the PEM capture prompt — the App settings, which
-every consumer has. A consumer whose key lives in a vault overrides it with a `[[secret]]` row for
-the switch's var carrying its own `how`. foldyard PRINTS this, never runs it, so no hint makes a
-vault CLI a foldyard dependency."""
+every consumer has. It teaches the PATH (:func:`foldyard.keyless.secret_entry` reads and encodes
+the file): having the operator print ``base64 < key.pem`` to copy it put the key in their
+scrollback and clipboard, which the hidden prompt exists to avoid. A consumer whose key lives in
+a vault overrides it with a `[[secret]]` row for the switch's var carrying its own `how`. foldyard
+PRINTS this, never runs it, so no hint makes a vault CLI a foldyard dependency."""
 
 _NUMBER = re.compile(r"^[0-9]+$")
 # A GitHub repository name: what `repositories` may hold. Never `owner/repo` — the installation
@@ -318,16 +320,23 @@ class GithubAppKind(_GithubKind):
             True if raw else (False if active else None),
             f"{switch} PEM",
             f"present — ${var}",
-            f"missing — `fy mode {switch}=on` prompts for it, or: {hint}",
+            f"missing — `fy mode {switch}=on` prompts for it (get it with: {hint})",
         )
         if raw:
             from .. import keyless  # lazy: the registry hot path needn't import it
 
+            if os.environ.get(var):  # an export wins over host.env (`_secret_value`): fix THAT
+                fix = f"correct or unset the exported ${var}, which wins over host.env"
+            else:  # the prompt only asks for a var host.env lacks, so the bad line must go first
+                fix = (
+                    f"delete its line in {config.host_env_file()}, "
+                    f"then `fy mode {switch}=on` asks again"
+                )
             yield ctx.result(
                 keyless.secret_ok(raw, PEM_PATTERN, True) is not None,
                 f"{switch} PEM shape",
                 "decodes to a PEM private key",
-                f"${var} isn't base64 of a PEM — re-capture it ({hint})",
+                f"${var} isn't base64 of a PEM — {fix} (get it with: {hint})",
             )
 
 

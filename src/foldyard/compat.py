@@ -58,8 +58,9 @@ _WIDTH = 3
 #: starts a session, while `box exec` is what every git hook dispatches through and `box ps`
 #: answers a question. Whole-group scoping (a bare ``"box"``) put the nudge on a commit hook,
 #: which is precisely the every-invocation nag this set exists to avoid — see :func:`nudge`.
-#: Likewise `host restart` (re)starts the host side, while bare `fy host` is a status check.
-NUDGE_VERBS = frozenset({"up", "box up", "host restart"})
+#: Likewise `host restart` (re)starts the host side, while bare `fy host` is a status check;
+#: `box restart` is `box recreate`'s alias, and the callback sees the name that was typed.
+NUDGE_VERBS = frozenset({"up", "box up", "box recreate", "box restart", "host restart"})
 
 
 def _parse(raw: str | None) -> tuple[int, ...] | None:
@@ -181,7 +182,7 @@ def _fix(in_box: bool) -> str:
     nothing. Advice that reads as success while changing nothing is worse than none.
     """
     if in_box:
-        return "Run `fy box down && fy box up` from the host."
+        return "Run `fy box recreate` from the host."
     return f"Run `{upgrade_hint()}` (the full sequence: `fy docs quickstart`, Upgrading)."
 
 

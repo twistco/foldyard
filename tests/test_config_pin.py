@@ -1083,3 +1083,33 @@ def test_a_first_adoption_with_no_baseline_is_unaffected_by_the_recheck(checkout
     assert status == "pinned"
     assert configpin.inspect(checkout).pinned_exists
     assert not any("main changed" in line for line in lines), lines
+
+
+def test_drop_removes_one_adoption_marker_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(configpin, "_pin_root", lambda: tmp_path / "adopted")
+    pin = tmp_path / "adopted" / "gone-1"
+    (pin / "generations" / "g1").mkdir(parents=True)
+    (pin / configpin.ADOPTED_MARKER).write_text("{}")
+    configpin.drop(pin)
+    assert not pin.exists()
+
+
+def test_drop_unlinks_a_link_and_never_follows_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(configpin, "_pin_root", lambda: tmp_path / "adopted")
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / configpin.ADOPTED_MARKER).write_text("{}")
+    (tmp_path / "adopted").mkdir()
+    link = tmp_path / "adopted" / "gone-1"
+    link.symlink_to(target)
+    configpin.drop(link)
+    assert not link.is_symlink() and (target / configpin.ADOPTED_MARKER).is_file()
+
+
+def test_drop_refuses_anything_outside_the_adoption_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(configpin, "_pin_root", lambda: tmp_path / "adopted")
+    stray = tmp_path / "work" / "alpha"
+    stray.mkdir(parents=True)
+    with pytest.raises(ValueError):
+        configpin.drop(stray)
+    assert stray.is_dir()

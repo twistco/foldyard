@@ -572,7 +572,7 @@ def _archive(
 
 def bound_out_dir(checkout: Path, here: str) -> Path:
     """The LEGACY host-side dir a box binds Claude's ``projects/`` out to, inside the checkout —
-    a box created before the from-box (ADR-0033), or one on the podman backend, which keeps it.
+    a box created before the from-box (ADR-0033).
     Fragile to ``git clean -fdx`` and worktree removal, which is why destructive ops
     :func:`sync_archive` it to the durable store first."""
     return checkout / here / ".devbox-claude/projects"
@@ -585,10 +585,10 @@ def codex_bound_out_dir(checkout: Path, here: str) -> Path:
 
 # ── where a checkout's transcripts are: the from-box slot, then the legacy bind-out ──────────
 #
-# A box on the from-box layout (ADR-0033, the lima backend) binds its agents' trees out to the
+# A box on the from-box layout (ADR-0033) binds its agents' trees out to the
 # checkout's slot under `<state dir>/from-box/` — out of the checkout, so `git clean`, grep and
 # `worktree remove` never see them. For one release the host ALSO reads the legacy bind-out inside
-# the checkout (a box not yet recreated, the podman backend, a session written before the switch);
+# the checkout (a box not yet recreated, a session written before the switch);
 # the next release drops it. Both are box-writable and read by the same no-follow walk: the
 # from-box one anchored at the from-box root, whose parent — the state dir — no box can reach,
 # so even the root's own name is opened without following a link.

@@ -1,38 +1,38 @@
 # Quickstart — from `init` to a working, isolated dev environment
 
-`foldyard init` writes a `foldyard.toml` that doubles as the guide. It starts as a locked-down
-dev box with no stack, safe to build and poke. Everything else — agents, your compose stack,
-the extras — is already in the file as commented blocks you uncomment when you're ready. This
-page follows the same three steps.
+`foldyard init` writes a `foldyard.toml` that doubles as the guide. It starts as a locked-down dev
+box with no stack, safe to build and poke. Everything else — agents, your compose stack, the extras
+— is already in the file as commented blocks you uncomment when you're ready. This page follows the
+same three steps.
 
 New words (box, mode, switch, allowlist, adopted config…) are defined in the
 [glossary](./glossary.md).
 
 ## Before you start
 
-**A clean repo.** Foldyard mounts only your repo into the VM, so the zero-credential guarantee
-holds exactly when the repo holds config, not secrets. Scan your history with
+**A clean repo.** Foldyard mounts only your repo into the VM, so the zero-credential guarantee holds
+exactly when the repo holds config, not secrets. Scan your history with
 [gitleaks](https://github.com/gitleaks/gitleaks) or
-[TruffleHog](https://github.com/trufflesecurity/trufflehog) first, and the working tree too: the
-VM mounts the whole folder, gitignored files like `.env` included
+[TruffleHog](https://github.com/trufflesecurity/trufflehog) first, and the working tree too: the VM
+mounts the whole folder, gitignored files like `.env` included
 ([the commands](./workshop.md#step-4--check-your-repo-has-no-secrets-in-it)). Move anything they
 find out of the repo.
 
 Running a workshop? [workshop.md](./workshop.md) has the setup to send attendees and the plan for
 the day.
 
-**First uv** ([install it](https://docs.astral.sh/uv/getting-started/installation/)). On
-Windows, install WSL2 first and do everything inside its Linux distro. Then let foldyard check
-the rest of this computer:
+**First uv** ([install it](https://docs.astral.sh/uv/getting-started/installation/)). On Windows,
+install WSL2 first and do everything inside its Linux distro. Then let foldyard check the rest of
+this computer:
 
 ```bash
 uvx foldyard@latest prereq      # @latest: uvx otherwise reuses any copy it cached before
 ```
 
-It needs no project and doesn't install foldyard. It checks Lima, podman, a hypervisor, and on
-Linux QEMU, KVM and a `systemd --user` session, plus disk and memory. For anything missing it
-prints the command that installs it with the package manager you have, but it doesn't run it.
-It exits non-zero until everything required is there. The usual installs:
+It needs no project and doesn't install foldyard. It checks Lima, podman, a hypervisor, and on Linux
+QEMU, KVM and a `systemd --user` session, plus disk and memory. For anything missing it prints the
+command that installs it with the package manager you have, but it doesn't run it. It exits non-zero
+until everything required is there. The usual installs:
 
 macOS:
 
@@ -60,19 +60,19 @@ What has been tested on Linux and inside WSL2, and what hasn't, is tracked in
 uv tool install foldyard
 ```
 
-This puts `foldyard` on your PATH, with `fy` as shorthand — `fy <verb>` and `foldyard <verb>`
-are the same thing.
+This puts `foldyard` on your PATH, with `fy` as shorthand — `fy <verb>` and `foldyard <verb>` are
+the same thing.
 
-The install includes mitmproxy, which runs the egress proxy on your computer: the box's only
-way out is that proxy. `uv tool install` doesn't put a dependency's commands on your PATH, so
-the copy inside foldyard's own install is the only `mitmdump` you'll have. (Older instructions
-said `"foldyard[host]"`; that still works, and the extra is now empty.) The box installs
-foldyard without mitmproxy, since it only routes through the proxy — you don't do anything
-for that, `fy box up` handles it.
+The install includes mitmproxy, which runs the egress proxy on your computer: the box's only way out
+is that proxy. `uv tool install` doesn't put a dependency's commands on your PATH, so the copy
+inside foldyard's own install is the only `mitmdump` you'll have. (Older instructions said
+`"foldyard[host]"`; that still works, and the extra is now empty.) The box installs foldyard without
+mitmproxy, since it only routes through the proxy — you don't do anything for that, `fy box up`
+handles it.
 
-**Optional: the big downloads, ahead of time.** `fy prereq --fetch` bakes a base VM once (about
-1 GB of downloads, two minutes on a good connection). After that, each new project's VM is a clone of it, and a first
-`fy box up` takes seconds instead of minutes. See `fy docs base-vm`.
+**Optional: the big downloads, ahead of time.** `fy prereq --fetch` bakes a base VM once (about 1 GB
+of downloads, two minutes on a good connection). After that, each new project's VM is a clone of it,
+and a first `fy box up` takes seconds instead of minutes. See `fy docs base-vm`.
 
 ## Step 1 — a locked-down box you can safely poke
 
@@ -88,15 +88,15 @@ What you now have:
 - **A rootless Lima VM that mounts only this repo** — no home directory, no other checkouts.
 - **A VM firewall.** Traffic from the box can only leave through the proxy on your computer.
   Anything that tries to go around the proxy is refused.
-- **An allowlist, learning for its first hour.** `init` writes `[proxy] enforce = "learn"`. For
-  the first hour after your first `fy box up`, nothing is refused: the proxy lets everything
-  through and records every host it *would* have refused. Then it starts enforcing by itself,
-  so it can't be left open by mistake. Grant what it saw in one reviewed batch with
-  `fy allow learn`. To enforce straight away, run `fy allow enforce on`; to learn again (say,
-  for a new dependency), `fy allow enforce learn --for 30m`.
+- **An allowlist, learning for its first hour.** `init` writes `[proxy] enforce = "learn"`. For the
+  first hour after your first `fy box up`, nothing is refused: the proxy lets everything through and
+  records every host it *would* have refused. Then it starts enforcing by itself, so it can't be
+  left open by mistake. Grant what it saw in one reviewed batch with `fy allow learn`. To enforce
+  straight away, run `fy allow enforce on`; to learn again (say, for a new dependency),
+  `fy allow enforce learn --for 30m`.
 - **Recommended hosts.** The hosts the box needs to build itself are listed under
-  `[proxy] recommend` in the generated config. `fy box up` offers each one to you — one yes
-  each. The repo can suggest a host; only you can grant it.
+  `[proxy] recommend` in the generated config. `fy box up` offers each one to you — one yes each.
+  The repo can suggest a host; only you can grant it.
 - **Zero credentials** — no SSH keys, no tokens, no push access. Committing works; pushing is
   refused.
 
@@ -115,30 +115,30 @@ scripts, `curl` — can reach your computer, your keys or your other repos.
 ## Step 2 — put an agent in the box
 
 Uncomment **one** agent table in `foldyard.toml` — `[claude]` for Claude Code or `[codex]` for
-OpenAI Codex — including its `keyless` line. Then:
+OpenAI Codex — including its `keyless` line: an agent table without one is refused, since the agent
+never logs in inside the box. Then:
 
 ```bash
 fy config diff              # read the change your computer would start running…
 fy config adopt             # …and adopt it (`fy box up`'s own prompt defaults to ignore)
-fy box down && fy box up    # recreate it with the agent; asks once (hidden) for your key
+fy box recreate             # recreate it with the agent; asks once (hidden) for your key
 fy mode claude=on           # switch on the proxy's key swap for the agent
 fy claude                   # Claude Code, running inside the box
 ```
 
 For Codex, it's `fy mode codex=on` and `fy codex`. A plain `fy box up` on a box that's already
-running doesn't add the agent: the install and the dummy credential are set when the box is
-created.
+running doesn't add the agent: the install and the dummy credential are set when the box is created.
 
-**Knowing up front which agent you want?** `foldyard init --with claude` (or `--with codex`)
-writes that table already uncommented, so the first `fy box up` creates the box with it: the
-adopt it asks for anyway covers it, with no second adopt and no recreate, just
-`fy mode claude=on` and `fy claude`. `--with vscode` does the same for
-`[vscode]` (for `fy code`); combine them as `--with claude,vscode`.
+**Knowing up front which agent you want?** `foldyard init --with claude` (or `--with codex`) writes
+that table already uncommented, so the first `fy box up` creates the box with it: the adopt it asks
+for anyway covers it, with no second adopt and no recreate, just `fy mode claude=on` and
+`fy claude`. `--with vscode` does the same for `[vscode]` (for `fy code`); combine them as
+`--with claude,vscode`.
 
-**Keyless** means the real key never enters the box. The box holds a dummy value, and the proxy
-on your computer swaps in the real one as each request goes out. You paste the real key once,
-and it is stored only on your computer. The agent gets full autonomy — including the VM's
-container socket, so it can drive your stack — but only over the repo and the VM.
+**Keyless** means the real key never enters the box. The box holds a dummy value, and the proxy on
+your computer swaps in the real one as each request goes out. You paste the real key once, and it is
+stored only on your computer. The agent gets full autonomy — including the VM's container socket, so
+it can drive your stack — but only over the repo and the VM.
 
 A good first task for the agent: work out the rest of this config with you.
 
@@ -164,45 +164,38 @@ fy open              # open the app in your browser
 fy tui               # the dashboard: mode, network log, doctor, one-click fixes
 ```
 
-Services reach each other by container name; your computer reaches them on the published ports.
-The details for a real stack — variables, worktrees, volumes, podman-compose's quirks — are in
+Services reach each other by container name; your computer reaches them on the published ports. The
+details for a real stack — variables, worktrees, volumes, podman-compose's quirks — are in
 [stack.md](./stack.md).
 
-From here, uncomment the rest as the project needs it: your own box image (`[box] image`),
-monitored tool installs (`[[box.tools]]`), VS Code attach (`[vscode]` + `fy code`), compose
-overlays that change with the mode (`[[overlay]]`). Every key is in
-[configuration.md](./configuration.md).
+From here, uncomment the rest as the project needs it: your own box image (`[box] image`), monitored
+tool installs (`[[box.tools]]`), VS Code attach (`[vscode]` + `fy code`), compose overlays that
+change with the mode (`[[overlay]]`). Every key is in [configuration.md](./configuration.md).
 
-For parallel work, `fy worktree add <name>` gives a branch its own checkout and its own stack,
-with offset ports, sharing the one VM and its caches.
+For parallel work, `fy worktree add <name>` gives a branch its own checkout and its own stack, with
+offset ports, sharing the one VM and its caches.
 
-## Backends: lima · podman
+## The VM
 
-`init` writes the default, `backend = "lima"` with `firewall = true`. Lima gives each project
-its own VM, runs several side by side, and is the only backend that carries the VM firewall.
-The one alternative, set in `[machine]`:
+`init` writes `firewall = true`. Every project gets its own Lima VM, several run side by side, and
+there is always a VM, on Linux too. The podman machine backend was removed
+([ADR-0036](./adrs/0036-lima-only-podman-machine-backend-removed.md)), and the VM-less `native` one
+before it ([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)); a config that still names
+either is refused until it says `lima`.
 
-- `backend = "podman"` — one podman machine, shared by every project, and only one runs at a
-  time. There is no VM firewall, so routing through the proxy is cooperative only. Pick it if
-  podman machine is already your daily driver.
-
-Either way there is always a VM, on Linux too. The old VM-less `native` backend is gone
-([ADR-0027](./adrs/0027-always-a-vm-native-backend-retired.md)); a config that still names it
-gets a warning and the podman backend.
-
-Two more `[machine]` options add layers on top: `runtime = "gvisor"` runs the box under
-gVisor's userspace kernel, and `host_firewall = true` (Linux only) adds a second firewall around
-the VM on your computer, installed once with `fy machine host-firewall`. See
+Two more `[machine]` options add layers on top: `runtime = "gvisor"` runs the box under gVisor's
+userspace kernel, and `host_firewall = true` (Linux only) adds a second firewall around the VM on
+your computer, installed once with `fy machine host-firewall`. See
 [configuration.md](./configuration.md#machine).
 
-Sizing (`cpus`, `memory_mib`, `disk_gib`) applies when the VM is first created. To change it
-later, run `foldyard machine recreate`.
+Sizing (`cpus`, `memory_mib`, `disk_gib`) applies when the VM is first created. To change it later,
+run `foldyard machine recreate`.
 
 ## Upgrading
 
-When a repo starts relying on a newer foldyard, it raises `min_foldyard_version` in the same
-commit. After a `git pull`, an older `fy` then **refuses every verb** — `fy box down` included —
-until you upgrade. Upgrade *before* you pull and nothing refuses:
+When a repo starts relying on a newer foldyard, it raises `min_foldyard_version` in the same commit.
+After a `git pull`, an older `fy` then **refuses every verb** — `fy box down` included — until you
+upgrade. Upgrade *before* you pull and nothing refuses:
 
 ```bash
 uv tool upgrade foldyard      # 1. upgrade the tool — before pulling
@@ -211,52 +204,67 @@ git pull                      # 2. pull the repo (and its foldyard.toml)
 fy doctor                     # 3. expect ✓ foldyard version, ✓ mitmproxy, ○ adopted config
 fy config diff                # 4. read what your computer would start running…
 fy config adopt               #    …and adopt it
-fy box down && fy box up      # 5. recreate the box on the new version
+fy box recreate               # 5. recreate the box on the new version
+fy ls                         # 6. your other projects: whose supervisor runs older code
 ```
 
 Why each step is the way it is:
 
 - **Use `uv tool upgrade`, not `uv tool install --upgrade`.** The second form re-installs plain
-  `foldyard`, which swaps an editable checkout for the PyPI release. `upgrade` keeps the
-  install exactly as you made it.
-- **If `upgrade` says "Nothing to upgrade"** (a pinned install), or `fy doctor` shows
-  `mitmproxy` missing: the doctor row prints the reinstall command for *your* kind of install.
-  Run it exactly as printed. For reference, it is `uv tool install --force foldyard` for a
-  PyPI install, and the same with `--editable <checkout>` for an install from a foldyard
-  checkout.
-- **Installed editable from a foldyard checkout?** `upgrade` rebuilds from whatever that
-  checkout holds, so pull *the foldyard checkout* first — not the repo you work in.
-- **Adopt on purpose, after reading the diff.** `fy box up` shows the same diff and asks, but
-  its default answer is *ignore*. Press Enter and your computer keeps running the *previous*
-  config, asks again next time, and the launch looks like it worked. `fy config diff` shows
-  what would change — including where credentials are injected and which traffic is decrypted
-  — and `fy config adopt` is the one step that applies it (see
+  `foldyard`, which swaps an editable checkout for the PyPI release. `upgrade` keeps the install
+  exactly as you made it.
+- **If `upgrade` says "Nothing to upgrade"** (a pinned install), or `fy doctor` shows `mitmproxy`
+  missing: the doctor row prints the reinstall command for *your* kind of install. Run it exactly as
+  printed. For reference, it is `uv tool install --force foldyard` for a PyPI install, and the same
+  with `--editable <checkout>` for an install from a foldyard checkout.
+- **Installed editable from a foldyard checkout?** `upgrade` rebuilds from whatever that checkout
+  holds, so pull *the foldyard checkout* first — not the repo you work in.
+- **Adopt on purpose, after reading the diff.** `fy box up` shows the same diff and asks, but its
+  default answer is *ignore*. Press Enter and your computer keeps running the *previous* config,
+  asks again next time, and the launch looks like it worked. `fy config diff` shows what would
+  change — including where credentials are injected and which traffic is decrypted — and
+  `fy config adopt` is the one step that applies it (see
   [configuration.md](./configuration.md#the-adopted-config-what-the-host-actually-runs)).
-- **`fy box down` then `fy box up`, not `fy box up` alone.** On a running box, `fy box up` says
-  "already up" and changes nothing. Recreating the box is what installs the new `fy` inside it
-  and restarts the supervisor on the new code. Finish or park agent sessions in the box first:
-  `fy box down` archives their transcripts, but an agent mid-task is interrupted.
+- **`fy box recreate`, not `fy box up`.** On a running box, `fy box up` says "already up" and
+  changes nothing. Recreating the box is what installs the new `fy` inside it and restarts the
+  supervisor on the new code. Finish or park agent sessions in the box first: the recreate archives
+  their transcripts, but an agent mid-task is interrupted.
+- **Your other projects' supervisors keep running the old code** until each is restarted. `fy ls`
+  lists them (*the host supervisor runs different foldyard code than this `fy`*), and
+  `fy host restart` in that checkout, or its next `fy up`, moves it on.
 - **Run `fy code` again** if the release changed anything under `[vscode]`: the VS Code attach
   config is written from the adopted config, so it's out of date until regenerated.
-- **Moving the repo itself onto a newer foldyard?** `fy changelog` prints the releases between
-  the version `foldyard.toml` declares and the one installed, oldest first, from the install's
-  own copy (offline). `fy changelog --action` keeps only what can need a step: each release's
-  summary and its Security, Removed, Deprecated and Changed entries. Once the config is caught
-  up, raise `min_foldyard_version` in the same commit, and the next `fy changelog` starts there.
+- **Moving the repo itself onto a newer foldyard?** `fy changelog` prints the releases between the
+  version `foldyard.toml` declares and the one installed, oldest first, from the install's own copy
+  (offline). `fy changelog --action` keeps only what can need a step: each release's summary and its
+  Security, Removed, Deprecated and Changed entries. Once the config is caught up, raise
+  `min_foldyard_version` in the same commit, and the next `fy changelog` starts there.
 
 ## When something's off
 
 `fy doctor` diagnoses; `fy tui` shows the same checks, with one-click fixes where they're safe.
 `fy verify` is the isolation check — run it whenever you want to re-check the boundary.
 
-Where next: the [docs map](https://github.com/twistco/foldyard/blob/main/docs/README.md) —
-modes and time limits, the egress proxy and its log, the security model — and, for the
-reasoning behind the design, the
-[ADRs](https://github.com/twistco/foldyard/tree/main/docs/adrs).
+`fy ls`, from anywhere on your computer, lists every project you've adopted a config for: its VM
+(running or not, its size and the disk it takes), its host supervisor, the boxes up and the agents
+running in them. Below the table it lists what needs attention, each with the command that fixes it,
+and what's left over: VMs foldyard made that no project uses, folders in `~/.foldyard` no project
+uses, and adoptions of checkouts that are gone (counted; `--verbose` lists each one). It only reads.
+A stopped VM is reported, never started, and nothing is removed for you. `--json` gives the same as
+JSON.
 
-**From inside the box** (or anywhere without this page open): `fy docs` lists these same pages
-and prints them. They're served from the installed package, so they always match the version
-you're running, and they work offline. `fy init` also adds the bundled **`foldyard` skill** to
+`fy prune` forgets the adoptions whose checkout folder is gone, after listing them and asking
+(`--yes` doesn't ask). A checkout on a drive that isn't plugged in reads as gone, and its next
+`fy up` asks you to adopt again. VMs and state folders it only names, with how to remove them: a VM
+holds your databases and volumes, a state folder your `host.env`.
+
+Where next: the [docs map](https://github.com/twistco/foldyard/blob/main/docs/README.md) — modes and
+time limits, the egress proxy and its log, the security model — and, for the reasoning behind the
+design, the [ADRs](https://github.com/twistco/foldyard/tree/main/docs/adrs).
+
+**From inside the box** (or anywhere without this page open): `fy docs` lists these same pages and
+prints them. They're served from the installed package, so they always match the version you're
+running, and they work offline. `fy init` also adds the bundled **`foldyard` skill** to
 `.claude/skills/`. It orients an agent working in the box: what it can't do (push, give itself
-credentials, widen its own allowlist), how to ask you for what it needs, and why a change
-might not have taken effect. `fy skill list` shows the other bundled skills.
+credentials, widen its own allowlist), how to ask you for what it needs, and why a change might not
+have taken effect. `fy skill list` shows the other bundled skills.

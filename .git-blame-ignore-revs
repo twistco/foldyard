@@ -1,0 +1,5 @@
+# Commits that only reformat, which `git blame` should look through. GitHub reads this file by
+# name; locally: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style(docs): reformat the Markdown with mdformat
+a5dca05e96c73accaeaf2ba02c840512de1964fd

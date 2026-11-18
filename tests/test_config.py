@@ -430,55 +430,36 @@ def test_mirror_file_under_dev_vm_dir(fresh_config, tmp_path):
     assert config.mirror_file() == tmp_path / "dv" / ".dev-mode.json"
 
 
-# ── machine_backend (podman default vs opt-in lima) ───────────────────────────────────
+# ── retired_backend (Lima is the only backend; ADR-0036) ──────────────────────────────
 
 
-def test_machine_backend_defaults_to_lima(fresh_config, tmp_path):
-    # Lima is the default: it is the only backend with concurrent per-project VMs AND the in-VM
-    # fail-closed wall, and `fy init` has scaffolded it since it shipped (ADR-0011 amendment).
-    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n')
+@pytest.mark.parametrize("toml", ['[project]\nname = "p"\n', '[machine]\nbackend = "lima"\n'])
+def test_retired_backend_is_empty_when_absent_or_lima(fresh_config, tmp_path, toml):
+    (tmp_path / "foldyard.toml").write_text(toml)
     fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND=None)
-    assert config.machine_backend() == "lima"
-    assert config.machine_backend_explicit() == ""  # nobody CHOSE it — it was inherited
+    assert config.retired_backend() == ""
 
 
-def test_machine_backend_default_does_not_change_in_the_box(fresh_config, tmp_path, monkeypatch):
-    # The box must resolve the SAME backend as the host: it reads the machine's socket, it doesn't
-    # pick a backend of its own, and a divergence here would point the box at another VM's paths.
-    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n')
+@pytest.mark.parametrize("name", ["podman", "native"])
+def test_retired_backend_names_what_the_toml_still_asks_for(fresh_config, tmp_path, name):
+    (tmp_path / "foldyard.toml").write_text(f'[machine]\nbackend = "{name}"\n')
     fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND=None)
-    monkeypatch.setattr(config, "in_box", lambda: True)
-    assert config.machine_backend() == "lima"
+    assert config.retired_backend() == name
 
 
-def test_machine_backend_from_toml(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "podman"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND=None)
-    assert config.machine_backend() == "podman"
-    # Same NAME as the default would give for lima, but chosen — which is what decides whether a
-    # missing CLI is "this host has no VM tooling" (skip) or a misconfiguration (abort).
-    assert config.machine_backend_explicit() == "podman"
-
-
-def test_machine_backend_env_beats_toml_and_is_lowercased(fresh_config, tmp_path):
+def test_retired_backend_env_beats_toml_and_is_lowercased(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\n')
     fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND="Podman")
-    assert config.machine_backend() == "podman"
+    assert config.retired_backend() == "podman"
 
 
-# ── host_alias (the box→Mac address — backend-dependent) ───────────────────────────────
+# ── host_alias (the box→Mac address) ──────────────────────────────────────────────────
 
 
-def test_host_alias_is_containers_internal_on_podman(fresh_config, tmp_path):
-    (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "podman"\n')
-    fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND=None, FY_HOST_ALIAS=None)
-    assert config.host_alias() == "host.containers.internal"
-
-
-def test_host_alias_is_the_lima_host_gateway_on_lima(fresh_config, tmp_path):
+def test_host_alias_is_the_lima_host_gateway(fresh_config, tmp_path):
     # Under lima, host.containers.internal resolves to the VM's own gateway — the alias must be
     # Lima's guest→host address instead, so box egress actually reaches the Mac proxy.
-    (tmp_path / "foldyard.toml").write_text('[machine]\nbackend = "lima"\n')
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n')
     fresh_config(FOLDYARD_REPO=tmp_path, MACHINE_BACKEND=None, FY_HOST_ALIAS=None)
     assert config.host_alias() == config.LIMA_HOST_GATEWAY == "192.168.5.2"
 

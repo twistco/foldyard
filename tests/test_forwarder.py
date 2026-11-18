@@ -292,17 +292,18 @@ def test_the_report_is_read_over_ssh_as_the_vm_user(monkeypatch):
 # ── preflight and doctor ───────────────────────────────────────────────────────────────
 
 
-def test_preflight_needs_lima_and_the_firewall(monkeypatch):
+def test_preflight_needs_the_firewall(monkeypatch):
     monkeypatch.setattr(preflight.config, "machine_attribution", lambda: "record")
     monkeypatch.setattr(preflight.config, "machine_wall", lambda: False)
     monkeypatch.setattr(preflight.config, "machine_host_wall", lambda: False)
     monkeypatch.setattr(preflight.config, "machine_monitor", lambda: "off")
-    issues = "\n".join(preflight._attribution_issues("podman"))
-    assert "needs the lima backend" in issues and "needs the VM firewall" in issues
+    issues = "\n".join(preflight._attribution_issues())
+    assert "needs the VM firewall" in issues
     monkeypatch.setattr(preflight.config, "machine_wall", lambda: True)
-    assert preflight._attribution_issues("lima") == []
+    assert preflight._attribution_issues() == []
+    monkeypatch.setattr(preflight.config, "machine_wall", lambda: False)
     monkeypatch.setattr(preflight.config, "machine_attribution", lambda: "off")
-    assert preflight._attribution_issues("podman") == []
+    assert preflight._attribution_issues() == []
 
 
 def test_the_config_names_a_level_never_anything_else(monkeypatch):

@@ -3,8 +3,10 @@ and nothing else on it.
 
 The case they exist for is a redirect: a granted CDN (``cdn.playwright.dev``) sends a browser
 download to one bucket of a shared host (``storage.googleapis.com/chrome-for-testing-public/``),
-where granting the host would grant every bucket on it, uploads included. Following redirects in
-the proxy instead was rejected: an open redirector on any granted host would then reach anywhere.
+where granting the host would grant every bucket on it, uploads included. Following a granted
+host's redirects instead was rejected: an open redirector on it would then reach anywhere. (A
+follow grant trusts one source PATH's redirects instead, for targets that move:
+``test_proxy_follow.py``.)
 
 What the grant must hold, each pinned below against the REAL addon over a stubbed mitmproxy (the
 wire path — the dial counted on a real socket — is ``test_proxy_wall_e2e.py``):
@@ -13,7 +15,9 @@ wire path — the dial counted on a real socket — is ``test_proxy_wall_e2e.py`
   a raw path that no server could normalise to somewhere else (dot segments, ``//``, encoded
   separators refused);
 - the host is never blind-tunnelled (not on ``passthrough``, not for a build): a path can only be
-  judged decrypted;
+  judged decrypted. A path grant can be BUILD-scoped too (``build_allow``): a host-started build
+  reaches it decrypted — the walled VM's build steps trust the proxy CA — while the box doesn't
+  reach it at all;
 - nothing is dialled for a connection until it has earned it — a ClientHello (so every request in
   it is decrypted and judged) or a cleartext request the grant let through — so a raw TCP tunnel
   to the host is refused its dial, and raw bytes inside a decrypted one are never relayed.
@@ -37,6 +41,7 @@ _dial = t._dial
 _answered = t._answered
 _write_allow = t._write_allow
 _rows = t._rows
+building = t.building  # `walled` while the host runs a build (its secret live)
 
 GCS = "storage.googleapis.com"
 BUCKET = "/chrome-for-testing-public/"
@@ -219,7 +224,7 @@ async def test_a_host_grant_beside_it_still_grants_the_whole_host(walled):
     assert await _judged(inj, flow)
 
 
-async def test_a_malformed_or_build_entry_grants_nothing(walled):
+async def test_a_malformed_or_build_entry_grants_the_box_nothing(walled):
     inj, allow, _log = walled
     allow.write_text(
         '{"default_deny": true, "allow": ["storage.googleapis.com/a/../b/"],'
@@ -229,6 +234,7 @@ async def test_a_malformed_or_build_entry_grants_nothing(walled):
     assert not await _judged(inj, _request(path="/b/x"))
     assert not await _judged(inj, _request())  # a build entry is never read as runtime …
     assert inj._build_patterns == []  # … nor as its host for a build
+    assert inj._build_path_grants == {GCS: (BUCKET,)}  # it is a path grant for builds
 
 
 # ── the tunnel: answered, decrypted, dialled only once earned ───────────────────────────────────
@@ -398,3 +404,266 @@ def test_the_network_log_says_outside_and_where_the_redirect_came_from():
     assert "outside the paths this host is granted for" in line
     line = proxy._net_leaf_body({**row, "via": "cdn.playwright.dev"}, lambda s: s)
     assert "not on the allowlist (redirected from cdn.playwright.dev)" in line
+    line = proxy._net_leaf_body({**row, "build_only": True}, lambda s: s)
+    assert "granted for image builds only" in line and "not on the allowlist" not in line
+
+
+# ── for builds: a build-scoped path grant, judged decrypted ───────────────────────────────────
+
+
+def _write_build_allow(allow, build: list[str], runtime: list[str] | None = None) -> None:
+    import json
+
+    allow.write_text(
+        json.dumps({"default_deny": True, "allow": runtime or [], "build_allow": build}) + "\n"
+    )
+
+
+def _build_connect(inj, host: str = GCS, client_id: str = "build-1") -> _Flow:
+    flow = t._build(_Flow(host, method="CONNECT", path=""))
+    flow.client_conn = types.SimpleNamespace(id=client_id, sni=None)
+    flow.response = None
+    inj.http_connect(flow)
+    return flow
+
+
+def _inside(host: str = GCS, path: str = ZIP, client_id: str = "build-1", **kw) -> _Flow:
+    """A request inside a decrypted connection: no Proxy-Authorization of its own."""
+    flow = _request(host, path, **kw)
+    flow.client_conn = types.SimpleNamespace(id=client_id, sni=None)
+    return flow
+
+
+async def test_a_build_path_grant_lets_the_build_read_under_it_decrypted(building):
+    inj, allow, log = building
+    _write_build_allow(allow, [GRANT])
+    connect = _build_connect(inj)
+    assert _answered(inj, connect)  # nothing dialled before a ClientHello …
+    hello = _ClientHello(GCS, client_id="build-1")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is False  # … decrypted, never tunnelled, though it is a build
+    assert _dial(inj, GCS, client_id="build-1") is None
+
+    read = _inside()
+    assert await _judged(inj, read)
+    read.response = t._Resp(200)
+    await inj.response(read)
+    row = _rows(log)[-1]
+    assert row["build"] is True and row["path"] == ZIP and not row.get("blocked")
+
+    outside = _inside(path="/another-bucket/x")
+    assert not await _judged(inj, outside)
+    assert outside.response is not None and GRANT in outside.response.content.decode()
+    row = _rows(log)[-1]
+    assert row["blocked"] and row["outside"] and row["build"] is True  # the gate reads this
+    assert not await _judged(inj, _inside(method="PUT"))  # a read only, as for the box
+
+
+async def test_a_build_path_grant_is_nothing_to_the_box(building):
+    inj, allow, _log = building
+    _write_build_allow(allow, [GRANT])
+    box = _Flow(GCS, method="CONNECT", path="")
+    box.client_conn = types.SimpleNamespace(id="box-1", sni=None)
+    box.response = None
+    inj.http_connect(box)
+    inj.tls_clienthello(_ClientHello(GCS, client_id="box-1"))
+    assert _dial(inj, GCS, client_id="box-1") is not None
+    assert not await _judged(inj, _inside(client_id="box-1"))
+    # The bare marker is public: it is the box.
+    bare = t._marked(_Flow(GCS, method="CONNECT", path=""))
+    bare.client_conn = types.SimpleNamespace(id="box-2", sni=None)
+    bare.response = None
+    inj.http_connect(bare)
+    assert not await _judged(inj, _inside(client_id="box-2"))
+
+
+async def test_a_box_refusal_of_a_host_granted_for_builds_only_says_so(building):
+    # A grant made at the build gate is the build's alone. The box asking for that host is still
+    # refused, but its row says why: "not on the allowlist" beside a grant the TUI lists read as a
+    # broken wall (a box's runtime Playwright download, 2026-11-16).
+    inj, allow, log = building
+    _write_build_allow(allow, ["cdn.playwright.dev", GRANT])
+    for host, path, narrow in (
+        ("cdn.playwright.dev", "/builds/cft/x.zip", "cdn.playwright.dev/builds/"),
+        (GCS, ZIP, GRANT),
+    ):
+        refused = _inside(host, path, client_id="box-1")
+        assert not await _judged(inj, refused)
+        row = _rows(log)[-1]
+        assert row["blocked"] and row["build_only"] is True and not row.get("build")
+        # …and so does what the box is answered: the grant to widen, narrowest first.
+        assert refused.response is not None
+        body = refused.response.content.decode()
+        assert f"{host} is granted for image builds only" in body
+        assert f"`fy allow add {narrow}`" in body and f"`fy allow add {host}`" in body
+    other = _inside("elsewhere.example.com", "/x", client_id="box-1")
+    assert not await _judged(inj, other)
+    assert "build_only" not in _rows(log)[-1]
+    assert other.response is not None and b"image builds" not in other.response.content
+    # The build's own refusal (a path outside its grant) is not one.
+    _build_connect(inj)
+    assert not await _judged(inj, _inside(path="/another-bucket/x"))
+    assert "build_only" not in _rows(log)[-1]
+
+
+def test_a_build_only_refusal_off_the_default_port_offers_no_path_grant(gh, building):
+    # A path grant has no port (allowlist.path_grant), so off :443/:80 only `host:port` is offered.
+    body = gh.module._build_only_body("cdn.example.com:8443", "/builds/x.zip", "GET").decode()
+    assert "`fy allow add cdn.example.com:8443`" in body and "/builds/" not in body
+    # …and a CONNECT there — refused in http_connect, never decrypted — is answered the same way.
+    inj, allow, _log = building
+    _write_build_allow(allow, ["cdn.example.com:8443"])
+    connect = _Flow("cdn.example.com", method="CONNECT", path="", port=8443)
+    connect.response = None
+    inj.http_connect(connect)
+    assert connect.response is not None
+    assert b"cdn.example.com:8443 is granted for image builds only" in connect.response.content
+
+
+def test_a_suggested_path_grant_is_only_offered_for_a_read(gh):
+    # A path grant lets GET/HEAD through, nothing else: offering one for a POST fixes nothing.
+    for body in (
+        gh.module._build_only_body("cdn.example.com", "/builds/x", "POST"),
+        gh.module._redirect_body("cdn.example.com", "/builds/x", "POST", "a.example.com"),
+    ):
+        text = body.decode()
+        assert "`fy allow add cdn.example.com`" in text and "/builds/" not in text
+
+
+def test_a_suggested_path_grant_is_shell_quoted(gh):
+    # The path is the box's, and a path grant may hold `$ ( ) ; & '` (allowlist._PATH_CHARS): a
+    # pasted `fy allow add host/$(id)/` would run `id` on your computer.
+    for body in (
+        gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET"),
+        gh.module._redirect_body("cdn.example.com", "/$(id)/x", "GET", "a.example.com"),
+        gh.module._redirect_body("cdn.example.com", "/it's/x", "GET", "a.example.com"),
+    ):
+        text = body.decode()
+        assert (
+            "fy allow add cdn.example.com/$(" not in text
+            and "fy allow add cdn.example.com/it'" not in text
+        )
+    assert (
+        "`fy allow add 'cdn.example.com/$(id)/'`"
+        in gh.module._build_only_body("cdn.example.com", "/$(id)/x", "GET").decode()
+    )
+    # …and so is the whole host: valid_host keeps out whitespace and `/`, not `$ ( ) ;`.
+    host = "x$(id).example.com"
+    for body in (
+        gh.module._build_only_body(host, "/a/x", "POST"),
+        gh.module._redirect_body(host, "/a/x", "POST", "a.example.com"),
+    ):
+        assert f"`fy allow add '{host}'`" in body.decode()
+
+
+def test_a_suggested_path_grant_is_one_fy_allow_add_accepts(gh):
+    # The proxy judges paths over a wider set than a grant may hold (allowlist._PATH_CHARS): a
+    # suggestion outside it would only be refused, so the whole host is offered instead.
+    text = gh.module._build_only_body("cdn.example.com", "/a|b/x", "GET").decode()
+    assert "a|b" not in text and "`fy allow add cdn.example.com`" in text
+    assert gh.module._GRANT_PATH_CHARS.pattern == allowlist._PATH_CHARS.pattern
+
+
+async def test_a_suggested_path_grant_lets_the_refused_request_through(gh, walled):
+    # What the advice is for: granted as printed, it answers the request it was printed for. A
+    # top-level file is its own grant (`host/downloads/` covers only what is below it); a deeper
+    # path gets its first directory, as allowlist.path_scopes shapes it for the TUI.
+    import re
+    import shlex
+
+    inj, allow, _log = walled
+    for path, want in (
+        ("/downloads", "cdn.example.com/downloads"),
+        ("/a/b.zip", "cdn.example.com/a/"),
+        ("/dir/", "cdn.example.com/dir/"),
+    ):
+        body = gh.module._build_only_body("cdn.example.com", path, "GET").decode()
+        found = re.search(r"`fy allow add ([^`]+)`", body)
+        assert found is not None, body
+        key = shlex.split(found.group(1))[0]
+        assert key == want
+        _write_allow(allow, [key])
+        assert await _judged(inj, _request("cdn.example.com", path)), path
+
+
+async def test_an_off_port_redirect_target_is_offered_its_port(walled):
+    # A path grant has no port, and a bare host grant means :443 / :80: for `host:8080`, only
+    # `host:8080` lets the request through.
+    inj, allow, _log = walled
+    _write_allow(allow, ["cdn.playwright.dev"])
+    inj.responseheaders(_redirect("cdn.playwright.dev", "http://objects.example.com:8080/b/x"))
+    follow = _request("objects.example.com", "/b/x", port=8080, scheme="http")
+    assert not await _judged(inj, follow)
+    assert follow.response is not None
+    body = follow.response.content.decode()
+    assert "cdn.playwright.dev redirected here" in body
+    assert "`fy allow add objects.example.com:8080`" in body and "/b/" not in body
+
+
+def test_a_builds_whole_host_grant_is_tunnelled_as_before(building):
+    # The whole host for builds wins over a path grant for the box: the build's connection is
+    # tunnelled; only a host that the build reaches by path alone is decrypted.
+    inj, allow, _log = building
+    _write_build_allow(allow, [GCS], runtime=[GRANT])
+    assert _build_connect(inj).response is None
+    hello = _ClientHello(GCS, client_id="build-1")
+    inj.tls_clienthello(hello)
+    assert hello.ignore_connection is True
+    assert inj._tunnel(GCS, build=True) is True and inj._tunnel(GCS, build=False) is False
+
+
+def test_raw_bytes_in_a_builds_path_connection_are_never_relayed(building):
+    inj, allow, log = building
+    _write_build_allow(allow, [GRANT])
+    _build_connect(inj)
+    message = types.SimpleNamespace(content=b"\r\nPUT /other-bucket/x HTTP/1.1\r\n\r\n")
+    inj.tcp_message(
+        types.SimpleNamespace(
+            server_conn=types.SimpleNamespace(address=(GCS, 443)),
+            client_conn=types.SimpleNamespace(id="build-1"),
+            messages=[message],
+            metadata={},
+        )
+    )
+    assert message.content == b""
+    row = _rows(log)[-1]
+    assert row["method"] == "TCP" and row["outside"] and row["build"] is True
+
+
+def test_a_revoked_build_path_grant_refuses_the_next_dial(building):
+    inj, allow, _log = building
+    _write_build_allow(allow, [GRANT])
+    _build_connect(inj)
+    inj.tls_clienthello(_ClientHello(GCS, client_id="build-1"))
+    assert _dial(inj, GCS, client_id="build-1") is None
+    _write_build_allow(allow, [])
+    inj._allow_mtime = -1.0
+    assert _dial(inj, GCS, client_id="build-1") is not None
+    assert not inj._connect_ok(GCS, 443, build=True)  # and `_sweep` closes it
+
+
+async def test_a_builds_refused_request_names_its_path(building):
+    # A refused host is answered and decrypted for a build too, so the row the build gate reads
+    # carries the path it can offer a path grant from — not only the host.
+    inj, _allow, log = building
+    connect = _build_connect(inj)
+    assert _answered(inj, connect)
+    inj.tls_clienthello(_ClientHello(GCS, client_id="build-1"))
+    refused = _inside()
+    assert not await _judged(inj, refused)
+    row = _rows(log)[-1]
+    assert row["blocked"] and row["build"] is True and row["path"] == ZIP and row["host"] == GCS
+
+
+def test_a_build_path_grant_on_an_address_dials_it_for_the_build_alone(building):
+    inj, allow, _log = building
+    _write_build_allow(allow, ["127.0.0.1/repo/"])
+    _build_connect(inj, "127.0.0.1")
+    inj.tls_clienthello(_ClientHello("127.0.0.1", client_id="build-1"))
+    assert _dial(inj, "127.0.0.1", client_id="build-1") is None
+    box = _Flow("127.0.0.1", method="CONNECT", path="")
+    box.client_conn = types.SimpleNamespace(id="box-1", sni=None)
+    box.response = None
+    inj.http_connect(box)
+    inj.tls_clienthello(_ClientHello("127.0.0.1", client_id="box-1"))
+    assert _dial(inj, "127.0.0.1", client_id="box-1") is not None

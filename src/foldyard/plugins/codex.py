@@ -40,12 +40,23 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shlex
+from collections.abc import Iterator
+from pathlib import Path
 
 from .. import boxmounts, config, keyless, selfspawn
 from ..keyless import CODEX_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CODEX_KEYLESS_HOST as _KEYLESS_HOST
-from . import HeldCredential, InjectRule, Plugin, Secret, Switch
+from . import (
+    DoctorContext,
+    HeldCredential,
+    InjectRule,
+    Plugin,
+    Secret,
+    Switch,
+    VerifyContext,
+)
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm-managed Codex so the native installer's ~/.local/bin copy wins on PATH (the
@@ -69,6 +80,20 @@ _INSTALL = (
     "| CODEX_NON_INTERACTIVE=1 sh)\n"
     "fi"
 )
+
+# How to get rid of a login made in the box. Under ChatGPT keyless that also removes foldyard's
+# dummy auth.json, which only a create seeds (a running box's `fy box up` doesn't bootstrap again).
+_REMOVE_LOGIN = (
+    "remove it (`codex logout`; under ChatGPT keyless, then `fy box recreate` on your computer "
+    "to put foldyard's dummy back); keyless injects the credential instead"
+)
+
+
+def _stored_login() -> list[str]:
+    """Whether this box's Codex has stored a real login (see :func:`keyless.codex_stored_login`),
+    under the ``CODEX_HOME`` that `box_args` sets."""
+    home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+    return keyless.codex_stored_login(Path(home))
 
 
 class CodexPlugin(Plugin):
@@ -206,25 +231,38 @@ class CodexPlugin(Plugin):
         """What `_INSTALL` below reaches for, so a walled box can install Codex after one consented
         yes instead of a blocked-host hunt. `chatgpt.com` is listed because the installer SCRIPT
         lives there and is fetched in every keyless mode — under `keyless = "chatgpt"` the same host
-        is also the injector host (exempt without a grant), but under `api-key`/no keyless nothing
-        exempts it. `api.openai.com` is deliberately absent: injector host, exempt structurally.
-        The installer's GitHub fallback (`CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=0`) isn't
-        recommended — `releases.openai.com` is its default source.
-
-        Under a BARE ``[codex]`` (no ``keyless``) the API + login hosts join the offer: that box
-        logs in for real, and with no injector rule nothing exempts them structurally."""
+        is also the injector host (exempt without a grant), but under `api-key` nothing exempts
+        it. `api.openai.com` is deliberately absent: injector host, exempt structurally. The
+        installer's GitHub fallback (`CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=0`) isn't
+        recommended — `releases.openai.com` is its default source. Never the login host: there is
+        no in-box login (ADR-0008, amended 2026-11-18)."""
         if not config.codex_enabled():
             return []
-        hosts = [
+        return [
             {"host": "chatgpt.com", "why": "Codex CLI installer (install.sh)"},
             {"host": "releases.openai.com", "why": "Codex CLI release binaries + updates"},
         ]
-        if not config.codex_keyless():
-            hosts += [
-                {"host": "api.openai.com", "why": "Codex API (manual in-box login)"},
-                {"host": "auth.openai.com", "why": "Codex login (`codex login`)"},
-            ]
-        return hosts
+
+    def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
+        # In the box only (the volume isn't on your computer): no real Codex credential in it —
+        # neither a login Codex stored in auth.json nor a real value where the dummy belongs.
+        # Watched in EVERY box, declared or not (see ClaudePlugin.verify_checks).
+        if not ctx.in_box:
+            return
+        leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
+        yield from keyless.stored_login_rows("Codex", _stored_login(), leaks, _REMOVE_LOGIN)
+
+    def box_doctor_checks(self, ctx: DoctorContext) -> Iterator[tuple[str, str, str]]:
+        # As ClaudePlugin.box_doctor_checks: a declared agent's row, or an undeclared one's finding.
+        found = _stored_login()
+        if not found and not config.codex_enabled():
+            return
+        yield ctx.result(
+            not found,
+            "codex login",
+            "none stored in the box (keyless)",
+            keyless.stored_login_detail(found, _REMOVE_LOGIN),
+        )
 
     def box_bootstrap(self, env: dict) -> list[dict]:
         if not config.codex_enabled():
@@ -233,7 +271,7 @@ class CodexPlugin(Plugin):
         # Both keyless steps below are AMBIENT with the proxy substrate whenever keyless is
         # CONFIGURED (mirroring box_args' dummy) — never gated on the rung. Box-side state that
         # tracked the rung could only be built at CREATE time, so `fy mode codex=on` couldn't take
-        # effect without `fy box down && fy box up`; ambient means the flip is purely host-side
+        # effect without `fy box recreate`; ambient means the flip is purely host-side
         # (does the proxy inject?) and the box is already shaped for it either way.
         keyless_on = bool(env.get("FY_PROXY") and config.codex_keyless())
         # Keyless: the `apps`/codex_apps MCP (chatgpt.com/backend-api/ps/mcp) needs full ChatGPT-

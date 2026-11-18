@@ -1192,7 +1192,7 @@ def test_box_shadow_row_flags_a_late_worktree_the_box_does_not_mask(
     assert (status, name) == ("warn", "box shadowing")  # never fail
     assert f"{wt_root}/b/node_modules" in detail and f"{main}/node_modules" not in detail
     assert "WORKTREE=b fy box exec" in detail
-    assert "WORKTREE=a fy box down && WORKTREE=a fy box up" in detail
+    assert "WORKTREE=a fy box recreate" in detail
     # …and the way that needs no recreate: `fy box up` masks it in the running box
     assert "`WORKTREE=a fy box up` masks them in the running box" in detail
     assert seen[0][2] == "acme-a-devbox"
@@ -1252,7 +1252,7 @@ def test_box_shadow_row_flags_own_dirs_that_are_plain_binds(
     [(status, _, detail)] = list(devmode._box_shadow_check())
     assert status == "warn"
     assert "node_modules" in detail and "not shadowed" in detail
-    assert "fy box down && fy box up" in detail
+    assert "fy box recreate" in detail
 
 
 def test_box_shadow_row_says_nothing_without_a_box_or_declared_dirs(
@@ -1306,7 +1306,7 @@ def test_box_shadow_row_in_the_box_names_an_unregistered_checkout_with_its_real_
     assert "`fy worktree add c`" in detail and "on your computer" in detail
     assert "added after" not in detail
     assert "WORKTREE=c fy box exec" not in detail  # its own box can't start until it's registered
-    assert "fy box down && fy box up" in detail  # …and then this one needs a recreate
+    assert "fy box recreate" in detail  # …and then this one needs a recreate
 
 
 def test_box_shadow_row_in_the_box_keeps_added_after_for_a_registered_worktree(
@@ -1322,7 +1322,7 @@ def test_box_shadow_row_in_the_box_keeps_added_after_for_a_registered_worktree(
     assert "added after acme-devbox was created" in detail
     assert f"{wt_root}/b/node_modules" in detail and "WORKTREE=b fy box exec" in detail
     assert "not registered" not in detail and "fy worktree add" not in detail
-    assert "recreate it on your computer: `fy box down && fy box up`" in detail
+    assert "recreate it on your computer: `fy box recreate`" in detail
 
 
 def test_box_shadow_row_in_the_box_tells_the_two_apart(tmp_path, monkeypatch, register_worktree):
@@ -1364,7 +1364,7 @@ def test_box_shadow_row_with_only_unregistrable_names_says_to_rename(
         tmp_path, monkeypatch, register_worktree, {"a": 1, "b": 2}, mounts, stray=("main",)
     )
     assert "fy worktree add main" not in detail
-    assert "rename" in detail and "fy box down && fy box up" in detail
+    assert "rename" in detail and "fy box recreate" in detail
 
 
 def test_box_shadow_row_in_an_older_box_quotes_an_on_disk_name_in_its_exec_hint(
@@ -2205,7 +2205,7 @@ def test_in_box_missing_proxy_ca_says_the_box_needs_recreating(box_git, monkeypa
     monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
     rows = {n: (st, d) for st, n, d in devmode.doctor(deep=False) if st != "running"}
     status, detail = rows["egress proxy CA"]
-    assert status != "ok" and "fy host restart" in detail and "fy box down && fy box up" in detail
+    assert status != "ok" and "fy host restart" in detail and "fy box recreate" in detail
 
 
 def test_host_side_doctor_has_no_git_shim_rows(box_git, monkeypatch):
@@ -2227,7 +2227,7 @@ def test_another_git_first_on_path_is_a_fail_naming_it_and_the_fix(box_git, tmp_
     rows = box_git.rows()
     status, detail = rows["git shim"]
     assert status == "fail" and str(other) in detail and "not foldyard's shim" in detail
-    assert "PATH" in detail and "fy box down && fy box up" in detail
+    assert "PATH" in detail and "fy box recreate" in detail
     assert "git shim hooks" not in rows  # nothing to judge beside a git that isn't the shim
 
 
@@ -2272,7 +2272,7 @@ def test_a_missing_hooks_dir_is_a_fail(box_git):
     # Named as missing, not as 28 absent entries (and not matched on "missing" alone: the tmp
     # path carries this test's name).
     assert status == "fail" and f"{box_git.hooks} missing" in detail and "lacks" not in detail
-    assert "fy box down && fy box up" in detail
+    assert "fy box recreate" in detail
 
 
 def test_a_missing_hook_entry_is_a_fail_and_named(box_git):
@@ -2655,6 +2655,40 @@ def test_mode_set_interrupted_at_the_prompt_leaves_the_posture_unchanged(
     assert not isolated_state["host_env"].exists()
 
 
+def test_mode_set_refused_at_the_prompt_leaves_the_posture_unchanged(
+    isolated_state, monkeypatch, capsys
+):
+    # A refused entry (the wrong file, not a key) used to store nothing and switch the mode on
+    # anyway, leaving a switch with no key behind it. Like the TUI's dialog, a refusal now applies
+    # nothing, and says how to try again.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: "-----BEGIN RSA PRIVATE KEY-----")
+    with pytest.raises(SystemExit) as refused:
+        devmode.main(["set", "github=on"])
+    assert "`fy mode github=on`" in str(refused.value) and "unchanged" in str(refused.value)
+    assert devmode.read()["mode"]["github"] == "off"
+    assert not isolated_state["host_env"].exists()
+
+
+def test_mode_set_refused_says_to_rerun_with_the_ttl_asked_for(isolated_state, monkeypatch):
+    # The rerun hint is copied as given: without the `ttl=` it would arm for the default hour.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: "-----BEGIN RSA PRIVATE KEY-----")
+    with pytest.raises(SystemExit) as refused:
+        devmode.main(["set", "gcp=user", "github=on", "ttl=15m"])
+    assert "`fy mode gcp=user github=on ttl=15m`" in str(refused.value)
+    assert devmode.read()["mode"]["github"] == "off"
+
+
+def test_mode_set_with_an_empty_entry_still_applies(isolated_state, monkeypatch):
+    # Enter on its own is a choice — arm now, add the key later — as in the TUI. Only a refusal
+    # stops the mode.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: "")
+    assert devmode.main(["set", "github=on"]) == 0
+    assert devmode.read()["mode"]["github"] == "on"
+
+
 def test_mode_set_without_a_tty_warns_and_still_applies(isolated_state, monkeypatch, capsys):
     # Same non-blocking contract as box-up: no TTY ⇒ warn, apply, and let the minter degrade that
     # one host. Arming from a script must not hang on a hidden prompt.
@@ -2939,7 +2973,7 @@ def test_ssh_port_row_warns_on_a_port_off_the_band(ssh_port_row):
     assert "41190" in detail and "41390" in detail and "fy machine stop" in detail
 
 
-@pytest.mark.parametrize("why", ["not followed", "not lima", "no port yet"])
+@pytest.mark.parametrize("why", ["not followed", "no port yet"])
 def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatch, why):
     # Without Podman Desktop nothing pins the port: Lima picks one per start, and any is fine.
     from foldyard import podman_desktop
@@ -2947,8 +2981,6 @@ def test_ssh_port_row_is_silent_where_nothing_is_pinned(ssh_port_row, monkeypatc
     ssh_port_row.port = 41190
     if why == "not followed":
         monkeypatch.setattr(podman_desktop, "following", lambda: False)
-    elif why == "not lima":
-        ssh_port_row.name = "podman"
     else:
         ssh_port_row.port = None
     assert list(devmode._ssh_port_check()) == []
@@ -3082,10 +3114,6 @@ def test_to_box_row_says_why_a_hypervisor_has_none(to_box_row, monkeypatch):
     assert status == "ok" and "krunkit" in detail and "--file" in detail
 
 
-@pytest.mark.parametrize("backend", ["podman", "no vm"])
-def test_to_box_row_silent_on_podman_and_before_the_vm(to_box_row, monkeypatch, backend):
-    be = _ToBoxBackend(exists=backend != "no vm")
-    if backend == "podman":
-        be.name = "podman"
-    monkeypatch.setattr(devmode, "_BACKEND", be)
+def test_to_box_row_silent_before_the_vm(to_box_row, monkeypatch):
+    monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend(exists=False))
     assert list(devmode._to_box_check()) == []

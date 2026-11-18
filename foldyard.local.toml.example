@@ -38,7 +38,7 @@
 #   oauth   — a long-lived OAuth token (sk-ant-oat…) from `claude setup-token` on the host.
 #   api-key — an Anthropic API key (sk-ant-api…) from console.anthropic.com.
 # A TTY `fy box up` prompts once (hidden) and stores it host-side. Then `fy mode claude=on`.
-# Omit `keyless` entirely and you get a plain in-box `claude` login instead.
+# `keyless` is required: a [claude] table without it is refused (there is no in-box login).
 # [claude]
 # keyless = "oauth"
 #
@@ -46,7 +46,7 @@
 #   chatgpt — your ChatGPT subscription: the access token is minted and refreshed host-side
 #             from the host's ~/.codex/auth.json (run `codex login` there once). No key.
 #   api-key — an OpenAI API key (sk-…), captured host-side like Claude's.
-# Then `fy mode codex=on`. Omit `keyless` for a plain in-box `codex login`.
+# Then `fy mode codex=on`. Required here too: a [codex] table without `keyless` is refused.
 # `system_prompt` works here exactly as it does for [claude] — Codex takes it as a developer
 # instruction rather than a system prompt, but the effect (a session that starts oriented in
 # this box) is the same. Keep it in the SHARED file if it's about the project, not about you.

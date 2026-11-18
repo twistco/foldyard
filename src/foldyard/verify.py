@@ -355,7 +355,7 @@ def _predates_box_dirs_hint(leaks: list[str]) -> str:
     if all(_mountpoint(ln).endswith(("/to-box", "/from-box")) for ln in leaks):
         return (
             " — if that is foldyard's to-box/from-box, this box was created before them and "
-            "doesn't know their paths: `fy box down && fy box up`"
+            "doesn't know their paths: `fy box recreate`"
         )
     return ""
 
@@ -387,10 +387,7 @@ def _to_box_rows(
                 "`fy machine stop && fy up` re-records the VM's mount set"
             )
         else:
-            print(
-                f"  ℹ no to-box in this VM ({to_box}) — nothing to check (Lima vz or qemu only; "
-                "the podman backend has none)"
-            )
+            print(f"  ℹ no to-box in this VM ({to_box}) — nothing to check (vz or qemu only)")
         return
     fields = line.split()
     options = fields[3].split(",") if len(fields) > 3 else []
@@ -679,7 +676,7 @@ def _git_reason(stderr: str) -> str:
 
 
 def _walled() -> bool:
-    return config.machine_backend() == "lima" and config.machine_wall()
+    return config.machine_wall()
 
 
 _SSH_URL = re.compile(

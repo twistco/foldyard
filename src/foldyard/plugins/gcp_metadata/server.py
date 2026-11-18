@@ -17,8 +17,9 @@ log-reader SA) each transparently get a token for THEIR identity — the same me
 prod uses (attached SA via the metadata server), with no token on any disk.
 
 Why source-IP resolution lives here and not on the host: a container→host request is
-NAT'd through gvproxy, so the host only sees the gateway IP. On the podman network the
-emulator sees the real container IP, which is what makes per-caller resolution possible.
+NAT'd through the VM's user-mode network, so the host only sees the gateway IP. On the podman
+network the emulator sees the real container IP, which is what makes per-caller resolution
+possible.
 
 Env:
   GCP_MINTER_URL   URL of the host-side minter (e.g. http://host.containers.internal:8079)

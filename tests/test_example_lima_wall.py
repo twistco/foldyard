@@ -30,7 +30,6 @@ def test_files_present():
 
 def test_locked_down_posture_resolves(wall_repo):
     assert config.project() == "fy-wall-example"
-    assert config.machine_backend() == "lima"
     assert config.machine_wall() is True
     # host_alias follows the backend: lima → the Lima host gateway (so the box reaches the Mac).
     assert config.host_alias() == config.LIMA_HOST_GATEWAY

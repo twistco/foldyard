@@ -738,9 +738,8 @@ def engine() -> str:
     ``DOCKER_AUTH_CONFIG``) with no one switch to stop it, where podman has one
     (:mod:`foldyard.registrylogins`).
 
-    NOTE this is a DIFFERENT binary from the machine backend's ``cli``
-    (:func:`machine_backend`): the backend creates the VM, this drives the socket it hands out.
-    Lima needs ``limactl`` *and* this.
+    NOTE this is a DIFFERENT binary from ``limactl``: Lima creates the VM, this drives the socket
+    it hands out. foldyard needs both.
 
     ``FOLDYARD_ENGINE`` and ``[engine].cli`` may only say so. `[engine].cli` is repo config, and
     this value is exec'd host-side by every engine verb (`fy up`, `fy box up`, the reconciler, the
@@ -1023,30 +1022,73 @@ def proxy_recommend() -> list[dict]:
     SHARES its allowlist: the list travels with the branch, the grants stay host-owned.
 
     Entries are ``{ host = "pypi.org", why = "…" }`` tables or bare host strings (``why`` then
-    empty). ``when = "build"`` marks a host only an IMAGE BUILD needs: it isn't offered at launch
-    but by the build gate when a build is refused, and granted for builds only — the runtime wall
-    stays narrower. Every entry carries ``when`` (``"build"`` or ``""``). Malformed entries and
-    invalid hosts are dropped rather than raising — this is read on prompt paths that must not
-    crash — and the widenings report names what a config declares."""
-    from .allowlist import valid_host  # stdlib-only, no cycle: allowlist never imports config-time
+    empty). ``host`` may be a PATH GRANT (``storage.googleapis.com/chrome-for-testing-public/``:
+    reads under that prefix only), kept as the store keys it. ``when = "build"`` marks a host only
+    an IMAGE BUILD needs: it isn't offered at launch but by the build gate when a build is refused,
+    and granted for builds only — the runtime wall stays narrower. Every entry carries ``when``
+    (``"build"`` or ``""``). ``redirects_to = [...]`` makes the entry a FOLLOW grant
+    (:func:`foldyard.allowlist.grant_follow`): ``host`` is then the source (a path grant's shape)
+    and each target a host, ``*.suffix`` glob or either with a path — offered and declined apart
+    from a grant of the same key, and never for a build. Such an entry carries ``redirects_to``
+    (normalised targets); others don't. Malformed entries and invalid keys are dropped rather
+    than raising — this is read on prompt paths that must not crash — and
+    :func:`proxy_recommend_dropped` names them for the widenings report."""
+    return _proxy_recommend_parsed()[0]
+
+
+def proxy_recommend_dropped() -> list[str]:
+    """The ``[proxy] recommend`` entries :func:`proxy_recommend` ignores, each as written (cut
+    short): a key that is neither a host nor a path grant, or an entry of the wrong type. Said
+    by ``fy config widenings`` so an ignored entry is never a mystery."""
+    return _proxy_recommend_parsed()[1]
+
+
+def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
+    # stdlib-only, no cycle: allowlist never imports config-time
+    from .allowlist import follow_source, follow_target, grant_key
 
     raw = _table("proxy").get("recommend")
+    if raw is None:
+        return [], []
     if not isinstance(raw, list):
-        return []
+        return [], [repr(raw)[:80]]  # `recommend = "pypi.org"`: a value, not a list of them
     out: list[dict] = []
+    dropped: list[str] = []
     for entry in raw:
         when = ""
+        follow: list[str] = []
         if isinstance(entry, str):
             host, why = entry, ""
         elif isinstance(entry, dict):
             host, why = str(entry.get("host") or ""), str(entry.get("why") or "")
             when = "build" if entry.get("when") == "build" else ""
+            if "redirects_to" in entry:
+                # A FOLLOW grant: `host` is the source, each target where it may redirect. All or
+                # nothing — half a list would be offered as if it were the one written.
+                targets = entry["redirects_to"]
+                if isinstance(targets, str):
+                    targets = [targets]
+                parsed = (
+                    [follow_target(t) if isinstance(t, str) else None for t in targets]
+                    if isinstance(targets, list)
+                    else [None]
+                )
+                if when or not parsed or None in parsed or follow_source(host) is None:
+                    dropped.append(repr(entry)[:80])  # a build gets no follow: runtime only
+                    continue
+                follow = list(dict.fromkeys(t for t in parsed if t is not None))
         else:
+            dropped.append(repr(entry)[:80])
             continue
-        host = host.strip()
-        if valid_host(host) and host not in {e["host"] for e in out}:
-            out.append({"host": host, "why": why.strip(), "when": when})
-    return out
+        key = grant_key(host)
+        if key is None:
+            dropped.append(repr(host.strip() or entry)[:80])
+        elif (key, bool(follow)) not in {(e["host"], bool(e.get("redirects_to"))) for e in out}:
+            item: dict = {"host": key, "why": why.strip(), "when": when}
+            if follow:
+                item["redirects_to"] = follow
+            out.append(item)
+    return out, dropped
 
 
 def proxy_default_deny_seed() -> str:
@@ -1114,7 +1156,7 @@ def worktree_base() -> str | None:
 
 
 def machine_name() -> str:
-    """The rootless podman machine's name. ``PODMAN_MACHINE`` wins, then
+    """The project's Lima VM's name. ``PODMAN_MACHINE`` wins, then
     ``[machine].name``, then the project name — each held to :func:`_safe_name`."""
     if env := os.environ.get("PODMAN_MACHINE"):
         return _safe_name(env, "PODMAN_MACHINE")
@@ -1123,32 +1165,14 @@ def machine_name() -> str:
     return project()
 
 
-def machine_backend_explicit() -> str:
-    """The backend the consumer actually ASKED for (``MACHINE_BACKEND`` or ``[machine].backend``),
-    or ``""`` when they said nothing and :func:`machine_backend` fell back to the default.
-
-    The distinction matters wherever a missing backend CLI has to be classified: a CLI missing for
-    a backend nobody chose is "this host doesn't do VMs" (skip quietly — a Linux/CI host, or the
-    box managing its own VM), while one missing for a backend somebody NAMED is a misconfiguration
-    that must fail loudly rather than silently fall back to a weaker profile."""
-    return str(
-        os.environ.get("MACHINE_BACKEND") or _identity_value("machine", "backend") or ""
-    ).lower()
-
-
-def machine_backend() -> str:
-    """The engine backend. Explicit env/TOML wins; otherwise **lima**.
-
-    Lima is the default because it is the only backend that delivers the full boundary: per-project
-    VMs that run concurrently (``podman machine`` on macOS allows one at a time — upstream
-    podman#26281), and the in-VM fail-closed egress wall (``[machine] firewall``), which podman
-    machine's CoreOS appliance can't be provisioned with. ``backend = "podman"`` remains supported
-    and is the zero-extra-dependency floor. ``foldyard init`` has scaffolded ``lima`` + ``wall``
-    since it shipped; this default just stops a hand-written config from silently getting less.
-
-    There is no VM-less backend: ``native`` was retired (ADR-0027) — foldyard always has a VM;
-    :func:`machine_backend.get_backend` warns a config still naming it and hands out podman."""
-    return machine_backend_explicit() or "lima"
+def retired_backend() -> str:
+    """The backend ``MACHINE_BACKEND`` or ``[machine].backend`` still names when it isn't
+    ``lima``, else ``""``. Lima is the only backend: ``native`` was retired (ADR-0027) and
+    ``podman`` removed (ADR-0036). A name here is a config from before, so the VM verbs refuse it
+    (:func:`machine_backend.retired_block`) rather than make an empty Lima VM beside the old
+    one's data."""
+    name = str(os.environ.get("MACHINE_BACKEND") or _identity_value("machine", "backend") or "")
+    return "" if name.lower() in ("", "lima") else name.lower()
 
 
 def _env_flag(*names: str) -> bool | None:
@@ -1166,8 +1190,7 @@ def machine_wall() -> bool:
     into the REAL lima machine, so
     the VM user's (and thus every container's) only way out is the host-side egress proxy at
     :data:`LIMA_HOST_GATEWAY` (fail-closed: egress that ignores the proxy env is REJECTED, not
-    silently allowed). Only meaningful for ``backend = "lima"`` (podman-machine's immutable CoreOS
-    appliance can't be provisioned like this) — preflight enforces the pairing.
+    silently allowed).
     ``MACHINE_FIREWALL`` env wins (1/true/on/yes ⇒ on; ``MACHINE_WALL`` is the old spelling)."""
     env = _env_flag("MACHINE_FIREWALL", "MACHINE_WALL")
     if env is not None:
@@ -1283,7 +1306,7 @@ def machine_runtime() -> str:
     posture: ``machine ensure`` provisions it in the VM, and the box's own engine socket defaults
     to it, so the box cannot opt itself or a sibling out. Only the postures foldyard knows how to
     provision are accepted — never a runtime path or command from config (ADR-0023). Changing it
-    means recreating the box (``fy box down && fy box up``) and, on Lima, restarting the VM: its
+    means recreating the box (``fy box recreate``) and, on Lima, restarting the VM: its
     boot provisioning points ``machine.ENGINE_SOCK_IN_VM`` at the filtered socket.
     ``MACHINE_RUNTIME`` env wins."""
     raw = os.environ.get("MACHINE_RUNTIME")
@@ -1379,17 +1402,16 @@ def wall_proxy_url() -> str:
 
 def host_alias() -> str:
     """The address a CONTAINER in the machine uses to reach the host-side foldyard daemons (egress
-    proxy, gcp minter). Backend-dependent: under podman-machine, gvproxy publishes the host as
-    ``host.containers.internal``, and native podman's netavark publishes the host under the same
-    alias. Under LIMA that alias resolves to the VM's own gateway — NOT the host — so emit Lima's
-    guest→host address instead (:data:`LIMA_HOST_GATEWAY`): container → pasta → VM → usernet → host.
+    proxy, gcp minter). Under Lima ``host.containers.internal`` resolves to the VM's own gateway —
+    NOT the host — so this is Lima's guest→host address (:data:`LIMA_HOST_GATEWAY`): container →
+    pasta → VM → usernet → host.
     Emitting the literal IP sidesteps podman's alias machinery entirely (no containers.conf
     provisioning, works for already-created VMs). ``FY_HOST_ALIAS`` env is the escape hatch (e.g.
     a customised Lima network whose host gateway differs)."""
     explicit = os.environ.get("FY_HOST_ALIAS")
     if explicit:
         return explicit
-    return LIMA_HOST_GATEWAY if machine_backend() == "lima" else "host.containers.internal"
+    return LIMA_HOST_GATEWAY
 
 
 def machine_vmtype() -> str:
@@ -1409,7 +1431,7 @@ def machine_vmtype() -> str:
 
 
 def machine_resources() -> dict[str, str]:
-    """``podman machine init`` sizing as strings. Env (``MACHINE_CPUS`` /
+    """The VM's sizing as strings. Env (``MACHINE_CPUS`` /
     ``MACHINE_MEMORY`` MiB / ``MACHINE_DISK`` GiB) wins, then ``[machine]``, then
     modest defaults."""
     m = _table("machine")
@@ -1455,15 +1477,14 @@ def packaged_box_image(tag: str) -> dict:
 
 def box_sock_in_vm() -> str:
     """The rootless podman socket path INSIDE the VM (bind-mounted to the box's
-    /var/run/docker.sock). ``PODMAN_SOCK_IN_VM`` wins, then ``[box].sock_in_vm``, then the
-    active backend's guest-socket default (``/run/docker.sock`` for podman machine; Lima's
-    rootless ``/run/user/<uid>/podman/podman.sock``)."""
+    /var/run/docker.sock). ``PODMAN_SOCK_IN_VM`` wins, then ``[box].sock_in_vm``, then Lima's
+    rootless ``/run/user/<uid>/podman/podman.sock``."""
     explicit = os.environ.get("PODMAN_SOCK_IN_VM") or _box_table().get("sock_in_vm")
     if explicit:
         return explicit
-    from .machine_backend import get_backend  # lazy: machine_backend imports config
+    from .machine_backend import LimaBackend  # lazy: machine_backend imports config
 
-    return get_backend(machine_backend()).guest_socket()
+    return LimaBackend().guest_socket()
 
 
 def box_shadow_volumes() -> list[str]:
@@ -1667,6 +1688,28 @@ def box_bootstrap() -> str:
     return str(raw) if isinstance(raw, str) else ""
 
 
+# A hooks directory as `[box].git_hooks` names it: relative to the checkout and inside it, in plain
+# path characters (it goes into the box's git config and into messages). No `.`/`..` components.
+_GIT_HOOKS_DIR = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.][A-Za-z0-9_.-]*)*")
+
+
+def box_git_hooks() -> str:
+    """The checkout's hooks directory that git in the BOX uses (``core.hooksPath``), set in the
+    box's own git config for this checkout and its worktrees only (``box._git_hooks_script``), so
+    git on your computer runs none of it unless you set it there too. From ``[box].git_hooks``
+    (``""``: git's default, ``.git/hooks``). A path that leaves the checkout is refused."""
+    raw = _box_table().get("git_hooks")
+    if raw is None or raw == "":
+        return ""
+    path = raw.rstrip("/") if isinstance(raw, str) else ""
+    if not _GIT_HOOKS_DIR.fullmatch(path) or {".", ".."} & set(path.split("/")):
+        raise SystemExit(
+            f"✗ [box].git_hooks = {raw!r} isn't a directory inside the checkout. Name it relative "
+            'to the checkout, e.g. git_hooks = ".githooks".'
+        )
+    return path
+
+
 def box_clean_docker_config() -> bool:
     """Point the box's ``DOCKER_CONFIG`` at a foldyard-owned clean config dir
     (``~/.docker-fy``, seeded ``{}`` by the bootstrap) instead of ``~/.docker``. Why: editor
@@ -1732,7 +1775,8 @@ def claude_keyless() -> str:
       - ``"oauth"`` — dummy ``CLAUDE_CODE_OAUTH_TOKEN``; rewrite ``authorization`` with ``Bearer ``
         + the real ``sk-ant-oat…`` token (≈1yr, static — no refresh-minter needed).
 
-    Absent/false/unrecognised ⇒ ``""`` (off — a normal login: real creds in the box's ~/.claude)."""
+    Absent/false/unrecognised ⇒ ``""``, which a declared ``[claude]`` is refused with: there is no
+    in-box login (ADR-0008, amended 2026-11-18; ``preflight.agent_issues``)."""
     raw = _table("claude").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"
@@ -1842,7 +1886,8 @@ def codex_keyless() -> str:
         (refreshed host-side from the host's real ``~/.codex/auth.json`` by the
         :mod:`~foldyard.plugins.codex_chatgpt_token` minter) onto Codex's paths on ``chatgpt.com``.
 
-    Absent/false/unrecognised ⇒ ``""`` (off — normal login)."""
+    Absent/false/unrecognised ⇒ ``""``, which a declared ``[codex]`` is refused with: there is no
+    in-box login (ADR-0008, amended 2026-11-18; ``preflight.agent_issues``)."""
     raw = _table("codex").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"

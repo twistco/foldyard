@@ -521,7 +521,6 @@ def _ssh_origin(
     the (host, port)s a direct connect reaches, `timeouts` those it times out on, `unreachable`
     those an upstream ICMP reply turns away; everything else is refused, the wall's reset."""
     _enter_box(monkeypatch, tmp_path)
-    monkeypatch.setattr(verify.config, "machine_backend", lambda: "lima")
     monkeypatch.setattr(verify.config, "machine_wall", lambda: wall)
     _, results = secure_engine
     results["git_rc"], results["git_stderr"] = 128, _SSH_REFUSED_STDERR
@@ -1550,11 +1549,11 @@ def test_a_box_from_before_the_two_directories_fails_with_the_recreate_hint(
     results["pid1_mounts"] = f"mount3 {_to_box()} virtiofs ro,relatime 0 0\n"
     assert verify.verify() == 1
     out = capsys.readouterr().out
-    assert "VM exposes host paths" in out and "fy box down && fy box up" in out
+    assert "VM exposes host paths" in out and "fy box recreate" in out
     # …while a real leak gets no such hint
     results["pid1_mounts"] = f"mount3 {pathlib.Path.home()} virtiofs rw 0 0\n"
     assert verify.verify() == 1
-    assert "fy box down && fy box up" not in capsys.readouterr().out
+    assert "fy box recreate" not in capsys.readouterr().out
 
 
 def test_a_write_that_lands_and_cant_be_removed_still_names_the_file(with_to_box, capsys):

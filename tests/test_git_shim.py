@@ -869,6 +869,24 @@ def test_a_repo_hooks_tools_see_the_repos_own_hooks_not_ours(rig, where):
     assert out.read_text() == f"{hooks.resolve()}\n"
 
 
+def test_a_repo_hook_runs_with_lefthooks_sync_off(rig):
+    # LEFTHOOK_NO_AUTO_INSTALL (lefthook past 2.2.2): its hook sync stays out of our command's hooks
+    # without the `no_auto_install` key, which would turn it off for the operator's own runs too.
+    rig.box("status", "--porcelain")
+    out = rig.gitdir / "hook-env"
+    hooks = rig.gitdir / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        f'#!/bin/sh\necho "${{LEFTHOOK_NO_AUTO_INSTALL-unset}}" >"{out}"\nexit 0\n'
+    )
+    (hooks / "pre-commit").chmod(0o755)
+    rig.write("fileC", "c\n")
+    rig.box("add", "fileC")
+    r = rig.box("commit", "-qm", "box")
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == "1\n"
+
+
 def test_a_repo_hooks_ref_move_still_goes_through_our_hooks(rig):
     # The other half: a ref-moving git inside a repo hook keeps our override, so its transaction
     # still runs our under-lock check. Observable in the repo's own reference-transaction hook: run

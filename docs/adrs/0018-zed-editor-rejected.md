@@ -6,34 +6,33 @@
 ## Context
 
 The editor plugins needed a second editor beside VS Code, and Zed was the obvious candidate. The
-question was the **remote transport**: how does a Mac-side editor reach a dev box that, by
-design, holds no `~/.ssh` and accepts no inbound credential?
+question was the **remote transport**: how does a Mac-side editor reach a dev box that, by design,
+holds no `~/.ssh` and accepts no inbound credential?
 
 VS Code answers it without SSH: the Remote-Containers extension talks to the **container engine
-API** over the mounted socket (`DOCKER_HOST`), `exec`s into the running box, runs the VS Code
-Server there, and streams over the exec stdio — no sshd, no network port, no inbound credential.
-That is exactly why `fy code` is a Mac-side verb that only needs the socket env, and why VS Code
-rides the same rootless-socket trust boundary as everything else.
+API** over the mounted socket (`DOCKER_HOST`), `exec`s into the running box, runs the VS Code Server
+there, and streams over the exec stdio — no sshd, no network port, no inbound credential. That is
+exactly why `fy code` is a Mac-side verb that only needs the socket env, and why VS Code rides the
+same rootless-socket trust boundary as everything else.
 
 Zed was investigated against its official docs and source. Zed remote development is **SSH-only**:
 the local Zed shells out to the system `ssh` binary, establishes a ControlMaster, and uploads and
-runs a `zed-remote-server` binary in `~/.zed_server` on the remote (`upload_binary_over_ssh:
-true` for restricted-internet remotes — which the box is). There is no container-engine-exec
-transport.
+runs a `zed-remote-server` binary in `~/.zed_server` on the remote (`upload_binary_over_ssh: true`
+for restricted-internet remotes — which the box is). There is no container-engine-exec transport.
 
 ## Decision
 
 **Skip Zed for now.** Supporting it means running sshd inside the box — host keys,
-`authorized_keys`, an inbound auth surface — on a box whose design deliberately keeps *no*
-`~/.ssh` and *no* inbound credential. That inversion of the box's credential posture is not worth
-a second editor while VS Code covers the need over the engine socket.
+`authorized_keys`, an inbound auth surface — on a box whose design deliberately keeps *no* `~/.ssh`
+and *no* inbound credential. That inversion of the box's credential posture is not worth a second
+editor while VS Code covers the need over the engine socket.
 
 The least-bad design was worked out and recorded as shovel-ready, should demand return: `sshd -i`
-(inetd mode, one session on stdin/stdout, no listener, no published port) behind an
-`~/.ssh/config` `ProxyCommand podman exec -i <box> …` — Zed honours ssh_config since it shells
-out to `ssh`. That reuses the same engine-socket trust boundary as VS Code, mounts only the Mac's
-*public* key, and puts nothing on the VM's network. It is strictly better than publishing port
-22, but still adds the sshd surface and stayed unbuilt.
+(inetd mode, one session on stdin/stdout, no listener, no published port) behind an `~/.ssh/config`
+`ProxyCommand podman exec -i <box> …` — Zed honours ssh_config since it shells out to `ssh`. That
+reuses the same engine-socket trust boundary as VS Code, mounts only the Mac's *public* key, and
+puts nothing on the VM's network. It is strictly better than publishing port 22, but still adds the
+sshd surface and stayed unbuilt.
 
 ## Consequences
 

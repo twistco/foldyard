@@ -73,13 +73,6 @@ def test_the_pinned_mount_type_per_vmtype():
     assert boxmounts.mount_type_for("krunkit") == ""
 
 
-def test_enabled_on_lima_only(monkeypatch):
-    monkeypatch.setattr(config, "machine_backend", lambda: "lima")
-    assert boxmounts.enabled()
-    monkeypatch.setattr(config, "machine_backend", lambda: "podman")
-    assert not boxmounts.enabled()
-
-
 def test_nested_sees_through_a_symlinked_worktrees_root(tmp_path):
     # Review on #115: FOLDYARD_WORKTREES_ROOT isn't resolved; a link to a directory holding the
     # state dir overlaps it all the same.
@@ -104,10 +97,7 @@ def test_nested_finds_a_state_dir_inside_a_writable_mount(tmp_path):
 
 
 def test_vm_paths_on_your_computer(state, monkeypatch):
-    monkeypatch.setattr(config, "machine_backend", lambda: "lima")
     assert boxmounts.vm_paths() == (str(state / "from-box"), str(state / "to-box"))
-    monkeypatch.setattr(config, "machine_backend", lambda: "podman")
-    assert boxmounts.vm_paths() == ("", "")
 
 
 def test_vm_paths_in_the_box_are_what_box_up_baked(monkeypatch):

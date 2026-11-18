@@ -43,7 +43,7 @@ from typing import IO, Any
 
 from . import config
 
-# Both backends' guests have it (Fedora on Lima, CoreOS on podman machine) — crossinject's too.
+# Lima's Fedora guest has it — crossinject's too.
 PYTHON = "/usr/bin/python3"
 
 # The runner's module name inside the zip.

@@ -30,7 +30,7 @@ from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
 
-from .. import config, mountwrite
+from .. import config, mountwrite, term
 from . import (
     DoctorContext,
     DoctorFix,
@@ -341,7 +341,7 @@ def _net_leaf(e: dict, escape, who=None) -> str:
 
 
 def _net_leaf_body(e: dict, escape) -> str:
-    ts = escape(e.get("ts", "")[11:19])
+    ts = escape(term.stamp(e.get("ts")))
     if e.get("blocked"):
         # Refused by the proxy — no upstream contacted. Red so it stands out as the row you act on
         # (press the allow key in the TUI to let the host through). What was asked: a request's
@@ -359,6 +359,8 @@ def _net_leaf_body(e: dict, escape) -> str:
             if e.get("push")
             else "outside the paths this host is granted for"
             if e.get("outside")
+            else "granted for image builds only"
+            if e.get("build_only")
             else "not on the allowlist"
         )
         # A granted host's redirect sent the request here (box-reached text: escaped, capped).
@@ -382,6 +384,9 @@ def _net_leaf_body(e: dict, escape) -> str:
         return f"[dim]{ts}[/dim] [yellow]◌ the allowlist would refuse this[/yellow]{ua}"
     if e.get("passthrough"):
         return f"[dim]{ts}[/dim] [dim]· tls tunnel (passthrough, not decrypted)[/dim]"
+    if e.get("tunnel"):
+        # Neither TLS nor HTTP (SSH through a granted address:port): relayed as it is, unread.
+        return f"[dim]{ts}[/dim] [dim]· tcp tunnel (not HTTP, relayed as it is)[/dim]"
     status = e.get("status", 0)
     colour = "green" if status < 400 else "red"
     mark = ("inj" if e.get("injected") else "") + ("+replay" if e.get("replayed") else "")
@@ -399,6 +404,10 @@ def _net_leaf_body(e: dict, escape) -> str:
         # The proxy's own 502 too: the request carried the dummy of a credential that doesn't
         # cover its path, where another credential applies.
         mark = "placeholder out of scope"
+    followed = e.get("followed")
+    if isinstance(followed, str) and followed and not mark:
+        # A follow grant let this read through: the URL a redirect from that host named (ADR-0029).
+        mark = f"followed from {escape(followed[:60])}"
     line = (
         f"[dim]{ts}[/dim] {escape(e.get('method', '')):<6} "
         f"{escape(e.get('path', '')[:80])} [{colour}]{status}[/{colour}]"
@@ -491,7 +500,7 @@ def _network_panel_tree() -> PanelTree:
             rows.append(None)
         groups.append(PanelGroup(key=v.host, label=header, children=children, rows=rows))
 
-    since = f" · since {snap.since[:16].replace('T', ' ')}" if snap.since else ""
+    since = f" · since {term.stamp(snap.since)}" if snap.since else ""
     shown = f" ({len(groups)} shown)" if len(groups) < len(snap.hosts) else ""
     summary = (
         f"{snap.requests} requests across {len(snap.hosts)} hosts{shown} · {snap.injected} with "
@@ -740,7 +749,7 @@ class ProxyPlugin(Plugin):
                     # LOOPBACK only. The proxy authenticates no client, and injects this project's
                     # credentials — on 0.0.0.0 anyone on the operator's network could use it. The
                     # VM doesn't need more: its user-mode network hands the guest's host gateway
-                    # (Lima 192.168.5.2, gvproxy host.containers.internal) to 127.0.0.1.
+                    # (Lima's 192.168.5.2) to 127.0.0.1.
                     "--listen-host",
                     "127.0.0.1",
                     "--listen-port",
@@ -788,9 +797,8 @@ class ProxyPlugin(Plugin):
             return {}
         # Per-worktree port (config.proxy_port) so each worktree's box routes to ITS OWN proxy
         # listener — the supervisor runs one per worktree on the matching offset port. The address
-        # is backend-dependent (config.host_alias): host.containers.internal under podman-machine/
-        # native, Lima's guest→host gateway IP under lima (where that alias points at the VM, not
-        # the host).
+        # is Lima's guest→host gateway IP (config.host_alias; host.containers.internal points at
+        # the VM there, not the host).
         return {"FY_PROXY": f"{config.host_alias()}:{config.proxy_port()}"}
 
     def box_args(self, env: dict) -> list[str]:

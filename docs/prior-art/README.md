@@ -2,8 +2,8 @@
 
 Deep-dives on the tools closest to foldyard, one file each. [../prior-art.md](../prior-art.md) is
 the *landscape* — the whole neighbourhood, tiered, with one row per tool and the positioning
-argument. This directory is the *library*: the handful of tools worth reading in full, read
-against foldyard, each producing findings we can act on.
+argument. This directory is the *library*: the handful of tools worth reading in full, read against
+foldyard, each producing findings we can act on.
 
 A tool earns a file here when reading its source or specs changes what we would build. A tool that
 only needs a row stays in the landscape.
@@ -11,7 +11,7 @@ only needs a row stays in the landscape.
 ## The roster
 
 | Tool | Unit of isolation | Why it's here | Reviewed | Verdict |
-| --- | --- | --- | --- | --- |
+| -- | -- | -- | -- | -- |
 | [gondolin.md](./gondolin.md) | one agent *task* (VM per turn) | closest **mechanism** neighbour — host-side egress mediation + placeholder secrets, independently reinvented; programmable VFS | 2026-07-20 @ `29fa74d` (v0.12.0) | not a competitor; 4 gaps found, 1 idea worth adapting |
 | [vhrn.md](./vhrn.md) | one agent *run* in one project dir | closest **ergonomics** neighbour — same user, same daily loop, same operator verbs; and the best-specified egress proxy in the field | 2026-09-21 @ `0e3926d` (v0.5.1) | not a competitor on the unit; 6 gaps found, contract + address discipline worth stealing |
 
@@ -22,7 +22,7 @@ claim some entry file defends. foldyard's column is kept current (2026-09-24); t
 each review.
 
 | Property | foldyard | gondolin | vhrn |
-| --- | --- | --- | --- |
+| -- | -- | -- | -- |
 | Unit of isolation | the **project** (long-lived) | the **task** (VM per turn) | the **run** (container per invocation) |
 | Boundary | VM, always (ADR-0001, ADR-0027) | micro-VM (QEMU/libkrun) | container; VM only via Apple `container` |
 | Whole compose stack inside | **yes** — the differentiator | no | no |
@@ -57,8 +57,8 @@ is worthless three months later — a set of findings against ours is not.
 4. **Their model vs ours**, as a property-by-property table. Tables force the uncomfortable rows;
    prose lets them be skipped.
 5. **Gaps in foldyard this review found** — the point of the exercise. Ordered by how much they
-   matter, each with a fix shape, and each marked **verified against our source** or inferred.
-   A review that finds nothing should say so explicitly.
+   matter, each with a fix shape, and each marked **verified against our source** or inferred. A
+   review that finds nothing should say so explicitly.
 6. **What to steal, in order** — and what deliberately not to, with the ADR that says why.
 7. **The daylight** — what they don't have. This is the "why isn't this a switch-to-it question?"
    section, and writing it honestly is what keeps the positioning claims in
@@ -68,18 +68,19 @@ is worthless three months later — a set of findings against ours is not.
 
 ## Maintenance
 
-- **Findings are the deliverable.** A gap found here is not fixed here. Carry it into an issue or
-  an ADR; the entry file records what was found and stays a snapshot of that review.
-- **Re-review on a version bump that touches the compared properties**, not on a schedule. Both current
-  entries are fast-moving single-author projects; the roster's `Reviewed` column is the staleness
-  signal, and a claim older than its subject's last release should be treated as unverified.
+- **Findings are the deliverable.** A gap found here is not fixed here. Carry it into an issue or an
+  ADR; the entry file records what was found and stays a snapshot of that review.
+- **Re-review on a version bump that touches the compared properties**, not on a schedule. Both
+  current entries are fast-moving single-author projects; the roster's `Reviewed` column is the
+  staleness signal, and a claim older than its subject's last release should be treated as
+  unverified.
 - **Cross-check before claiming a gap.** Both entries' most useful findings came from grepping
-  foldyard's own source, not from reading theirs. Gondolin's gaps 1–3 were re-verified as still
-  open by the vhrn review two months later — which is the library working.
-- **The landscape and the library must agree.** When an entry changes a verdict, update that
-  tool's row and the positioning bullets in [../prior-art.md](../prior-art.md) in the same commit.
-- **Keep the comparison table above filled.** A new entry that cannot fill a row either found a genuinely
-  new property (add it, and backfill the others) or wasn't read closely enough.
+  foldyard's own source, not from reading theirs. Gondolin's gaps 1–3 were re-verified as still open
+  by the vhrn review two months later — which is the library working.
+- **The landscape and the library must agree.** When an entry changes a verdict, update that tool's
+  row and the positioning bullets in [../prior-art.md](../prior-art.md) in the same commit.
+- **Keep the comparison table above filled.** A new entry that cannot fill a row either found a
+  genuinely new property (add it, and backfill the others) or wasn't read closely enough.
 
 ## Candidates not yet promoted
 
