@@ -698,3 +698,12 @@ def test_the_no_keyless_refusal_names_the_personal_file_and_the_kinds(table, kin
     text = keyless.no_keyless_block(table)
     assert f"[{table}]" in text and "keyless" in text
     assert "foldyard.local.toml" in text and kinds in text and "api-key" in text
+
+
+def test_a_claude_state_file_elsewhere_is_read_where_given(tmp_path):
+    (tmp_path / "home").mkdir()
+    state = tmp_path / "home" / ".claude.json"
+    state.write_text(json.dumps({"primaryApiKey": "sk-ant-api03-real"}))
+    assert keyless.claude_stored_login(tmp_path / "home" / ".claude") == []
+    found = keyless.claude_stored_login(tmp_path / "home" / ".claude", state=state)
+    assert found == [f"{state} (primaryApiKey)"]

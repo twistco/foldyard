@@ -254,14 +254,16 @@ def no_keyless_block(table: str) -> str:
     )
 
 
-def claude_stored_login(config_dir: Path) -> list[str]:
+def claude_stored_login(config_dir: Path, state: Path | None = None) -> list[str]:
     """Where Claude Code has stored a real login under ``config_dir`` (its ``CLAUDE_CONFIG_DIR``):
     ``.credentials.json`` holding anything (its OAuth login), or a Console API key kept in
     ``.claude.json`` (``primaryApiKey``). A keyless box's Claude writes neither: its credential is
     the dummy in the environment. A ``.credentials.json`` that is empty or holds only empty values
     (whatever a logout leaves) is no login; one that can't be read counts, as Codex's ``auth.json``
     does — it exists only to hold a credential. An unreadable ``.claude.json`` is not a finding:
-    it's Claude's state file, rewritten constantly, and a torn read isn't a credential."""
+    it's Claude's state file, rewritten constantly, and a torn read isn't a credential. ``state``
+    is where that state file is when it isn't in ``config_dir``: without ``CLAUDE_CONFIG_DIR``
+    Claude keeps it beside ``~/.claude``, at ``~/.claude.json``."""
     found: list[str] = []
     creds = config_dir / ".credentials.json"
     if creds.exists():
@@ -272,7 +274,7 @@ def claude_stored_login(config_dir: Path) -> list[str]:
             held = True  # can't vouch for it
         if held is True or not isinstance(held, dict) or any(held.values()):
             found.append(str(creds))
-    state = config_dir / ".claude.json"
+    state = state or config_dir / ".claude.json"
     try:
         data = json.loads(state.read_text())
     except (OSError, ValueError):

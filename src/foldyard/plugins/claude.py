@@ -86,9 +86,12 @@ _REMOVE_LOGIN = "remove it (`/logout` in `claude`, or delete the file); keyless 
 
 def _stored_login() -> list[str]:
     """Where this box's Claude has stored a real login (see :func:`keyless.claude_stored_login`),
-    under the config dir `box_args` points it at."""
-    home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return keyless.claude_stored_login(Path(home))
+    under the config dir `box_args` points it at. Without one (a box with no [claude], which verify
+    watches too) Claude's defaults: ``~/.claude``, with its state file BESIDE it, ``~/.claude.json``
+    — the sibling `box_args` sets ``CLAUDE_CONFIG_DIR`` to avoid."""
+    if home := os.environ.get("CLAUDE_CONFIG_DIR"):
+        return keyless.claude_stored_login(Path(home))
+    return keyless.claude_stored_login(Path.home() / ".claude", state=Path.home() / ".claude.json")
 
 
 class ClaudePlugin(Plugin):
@@ -218,9 +221,11 @@ class ClaudePlugin(Plugin):
         yield from keyless.stored_login_rows("Claude", _stored_login(), leaks, _REMOVE_LOGIN)
 
     def box_doctor_checks(self, ctx: DoctorContext) -> Iterator[tuple[str, str, str]]:
-        if not config.claude_enabled():
-            return
+        # A row for a declared agent, and for an undeclared one only when there's a login to name:
+        # verify watches every box, and doctor must agree with it on a finding.
         found = _stored_login()
+        if not found and not config.claude_enabled():
+            return
         yield ctx.result(
             not found,
             "claude login",

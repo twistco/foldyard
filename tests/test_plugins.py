@@ -3367,3 +3367,28 @@ def test_box_doctor_names_a_stored_login_and_how_to_remove_it(
     [(status, name, detail)] = list(plugin().box_doctor_checks(_ctx()))
     assert status == "fail" and str(agent_home) in detail
     assert ("/logout" if label == "Claude" else "codex logout") in detail
+
+
+def test_verify_reads_claudes_default_state_file_when_its_config_dir_is_unset(
+    monkeypatch, agent_home
+):
+    # Without CLAUDE_CONFIG_DIR (a box with no [claude], which verify watches too) Claude keeps
+    # `.claude.json` BESIDE ~/.claude, at $HOME/.claude.json — not inside it.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setenv("HOME", str(agent_home))
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    (agent_home / ".claude.json").write_text('{"primaryApiKey": "sk-ant-api03-real"}')
+    failed = [m for s, m in claude.ClaudePlugin().verify_checks(_vctx()) if s == "fail"]
+    assert len(failed) == 1 and str(agent_home / ".claude.json") in failed[0]
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_box_doctor_speaks_for_an_undeclared_agent_only_when_it_finds_a_login(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    # Verify watches every box; doctor agrees with it on a finding, without a row per absent agent.
+    monkeypatch.setattr(config, enabled, lambda: False)
+    assert list(plugin().box_doctor_checks(_ctx())) == []
+    plant(agent_home)
+    [(status, name, _detail)] = list(plugin().box_doctor_checks(_ctx()))
+    assert status == "fail" and name == f"{label.lower()} login"

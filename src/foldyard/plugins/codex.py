@@ -253,9 +253,10 @@ class CodexPlugin(Plugin):
         yield from keyless.stored_login_rows("Codex", _stored_login(), leaks, _REMOVE_LOGIN)
 
     def box_doctor_checks(self, ctx: DoctorContext) -> Iterator[tuple[str, str, str]]:
-        if not config.codex_enabled():
-            return
+        # As ClaudePlugin.box_doctor_checks: a declared agent's row, or an undeclared one's finding.
         found = _stored_login()
+        if not found and not config.codex_enabled():
+            return
         yield ctx.result(
             not found,
             "codex login",
