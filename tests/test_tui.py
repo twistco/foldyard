@@ -2221,6 +2221,53 @@ async def test_mode_button_secret_takes_a_key_file_by_path(monkeypatch, tmp_path
     assert sets == [{"github": "on"}]
 
 
+async def test_secret_dialog_takes_a_drop_that_arrived_with_nothing_focused(monkeypatch, tmp_path):
+    # Dragging a file in from another app (Finder) takes the terminal's focus with it: Textual
+    # clears focus on AppBlur, and the drop's paste arrives BEFORE AppFocus restores it, so it
+    # reached the screen, not the field, and was lost (seen live in macOS Terminal: a drag only
+    # landed every few tries). The dialog has one field, so the paste goes there.
+    import base64
+
+    from textual import events
+
+    from foldyard.plugins import Secret
+
+    host_env = tmp_path / "host.env"
+    monkeypatch.setattr(config, "host_env_file", lambda: host_env)
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"  # gitleaks:allow
+    folder = tmp_path / "with space"
+    folder.mkdir()
+    key = folder / "app.private-key.pem"
+    key.write_text(pem)
+    secret = Secret(
+        var="FY_INJECT_GITHUB",
+        label="GitHub App private key (PEM)",
+        pattern="*-----BEGIN *PRIVATE KEY-----?*-----END *PRIVATE KEY-----*",
+        b64=True,
+    )
+    monkeypatch.setattr(
+        devmode, "missing_secrets", lambda updates: [secret] if updates == {"github": "on"} else []
+    )
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        await pilot.pause()
+        assert isinstance(app.screen, tui.SecretScreen)
+        app.screen.set_focus(None)  # what AppBlur did when the drag left for Finder
+        dropped = str(key).replace(" ", "\\ ") + " "  # as Terminal.app pasted it
+        app.post_message(events.Paste(dropped))
+        await pilot.pause()
+        field = app.screen.query_one("#sec-input", tui.Input)
+        assert field.value == dropped and app.screen.focused is field  # once, and focused
+        await pilot.press("enter")
+        await pilot.pause()
+    assert host_env.read_text() == f"FY_INJECT_GITHUB={base64.b64encode(pem.encode()).decode()}\n"
+    assert sets == [{"github": "on"}]
+
+
 _REAL_SET_MODE = devmode.set_mode  # captured before the autouse stub replaces it per test
 
 

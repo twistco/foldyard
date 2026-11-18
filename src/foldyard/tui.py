@@ -48,6 +48,7 @@ from typing import cast
 
 from rich.markup import escape
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -2418,6 +2419,18 @@ class SecretScreen(ModalScreen):
 
     def on_mount(self) -> None:
         self.query_one("#sec-input", Input).focus()
+
+    def on_paste(self, event: events.Paste) -> None:
+        """A paste that reached the SCREEN, i.e. arrived with nothing focused (the field stops any
+        it gets). Dragging a file in from another app takes the terminal's focus with it: Textual
+        clears focus on AppBlur, and the drop's paste lands before AppFocus restores it — so the
+        drag looked like it did nothing. This dialog has one field: the paste goes there, as
+        Input's own handler would take it (its first line)."""
+        field = self.query_one("#sec-input", Input)
+        field.focus()
+        if event.text:
+            field.insert_text_at_cursor(event.text.splitlines()[0])
+        event.stop()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         from . import keyless
