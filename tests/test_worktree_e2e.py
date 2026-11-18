@@ -8,8 +8,8 @@ its local state, and leaves main's stack and the branch alone. It removes with `
 check for uncommitted work runs in the box image too, over the VM's mount of this copy, which
 this module has neither of — test_box_e2e drives that check.
 
-Host tier (tests/e2e_host.py). The verbs are host-only (`worktree._host_only`: in-box they would
-edit the shared .git against a box-local worktrees dir). The example stack has no bind mounts, so
+Host tier (tests/e2e_host.py). The verbs are host-only (`worktree._host_only`: they set up the
+worktree's own box, stack and config). The example stack has no bind mounts, so
 the worktree's stack ships its build context over the socket and the VM need not mount the
 worktrees root (`machine.ensure` says so, as a warning). Lima 2.2.0, Fedora 44 guest.
 """

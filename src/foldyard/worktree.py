@@ -36,15 +36,21 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
 
 
-def _host_only(verb: str) -> int | None:
-    """Worktree add/remove are host-only. The box shares the real ``.git`` (bind-mounted) but
-    its worktrees root is a container-local dir the host can't see — so an in-box
-    ``git worktree add/remove/prune`` edits SHARED metadata against paths that exist on only
-    one side, orphaning host-side checkouts (dir present, metadata gone: ``git worktree
-    remove`` then refuses it forever). None when OK to proceed."""
+def _host_only(verb: str, quick: str = "") -> int | None:
+    """Worktree add/remove are host-only: what they make and unmake is your computer's — the
+    worktree registry, the adopted config, a box and a stack of its own — and a box can't make its
+    own box. (A box sees the worktrees root at the same path your computer does; the old reason
+    here, a box-local root, no longer holds.) For ``add``, ``quick`` names the plain worktree a box
+    CAN make itself, inside the checkout (docs/git.md, "Quick worktrees in a box"). None when OK
+    to proceed."""
     if config.in_box():
-        _err(f"✗ run on your computer — in the box, `worktree {verb}` would edit the shared")
-        _err("  .git against a box-local worktrees dir and orphan the checkout on your computer.")
+        _err(f"✗ run on your computer — `fy worktree {verb}` sets up the worktree's own box, stack")
+        _err("  and config there, which a box can't do for itself.")
+        if quick:
+            path = shlex.quote(f".claude/worktrees/{quick}")
+            _err("  For a small change that needs none of that, a plain worktree inside the")
+            _err(f"  checkout works from here:  git worktree add --no-track -b <branch> {path}")
+            _err("  (`fy docs git`, under quick worktrees in a box, says what it lacks).")
         return 1
     return None
 
@@ -450,6 +456,14 @@ def _checkout_in_yard(
         return 0
     if not oid:
         _err(f"✗ couldn't read the commit branch '{branch}' points at")
+    elif rc in (126, 127) and _git_runs_in(engine, env, image):
+        # The engine says "command not found" for a working directory it can't enter too.
+        wt_root = config.worktrees_root(main)
+        _err(f"✗ the VM can't see {wt_dir}, which git just made on your computer:")
+        _err(f"  its share of {wt_root} is out of date. That happens when the folder is")
+        _err("  deleted and made again while the VM runs: the VM keeps the old one until it")
+        _err("  restarts. Restart it (this stops the project's boxes and agent sessions):")
+        _err("    fy machine stop && fy up")
     elif rc in (126, 127):
         _err(f"✗ the checkout couldn't start git in {image}: no git there? [box].image must")
         _err("  provide git — the box needs it too (ADR-0014).")
@@ -463,6 +477,18 @@ def _checkout_in_yard(
     _undo_add(main, wt_dir, branch, oid if made else "")
     _err(f"  Nothing was kept. Once that's fixed, run it again:  {again}")
     return 1
+
+
+def _git_runs_in(engine: str, env: dict, image: str) -> bool:
+    """Whether ``image``'s git starts at all: asked only after a checkout the engine couldn't
+    start (126/127), since crun says "command not found" both for a missing binary and for a
+    working directory the VM can't see. Nothing mounted and no working directory, so its answer
+    is about the image alone."""
+    probe = [
+        *(engine, "run", "--rm", "--cap-drop", "ALL", "--network", "none"),
+        *("--entrypoint", "git", image, "--version"),
+    ]
+    return subprocess.run(probe, env=env, capture_output=True).returncode == 0
 
 
 def _checkout_cmd(engine: str, image: str, main: Path, wt_dir: Path, oid: str) -> list[str]:
@@ -582,19 +608,68 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     ORPHAN: the checkout dir survives but its ``.git/worktrees`` metadata is gone (e.g. pruned
     from a context that couldn't see the checkout), so ``git worktree remove`` refuses it
     forever ("not a working tree") — the caller must delete the dir + prune instead."""
-    out = subprocess.run(
-        ["git", "-C", str(main), "worktree", "list", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if out.returncode != 0:
+    if (listing := _worktree_listing(main)) is None:
         return True  # can't tell — proceed as registered and let `git worktree remove` report
-    trees = {
-        line.removeprefix("worktree ").strip()
-        for line in out.stdout.splitlines()
-        if line.startswith("worktree ")
-    }
-    return str(wt_dir) in trees or str(wt_dir.resolve()) in trees
+    return any(f"\nworktree {p}\n" in listing for p in {str(wt_dir), str(wt_dir.resolve())})
+
+
+def _worktree_listing(main: Path) -> str | None:
+    """``git worktree list --porcelain`` for ``main``, a newline in front, None when git can't
+    say. Git writes each path verbatim (only ``-z``, git 2.36+, delimits them), so a path is
+    matched in this text as ``\nworktree <path>…`` rather than split into lines, which would cut
+    a path holding a newline. The paths come from the shared ``.git``, which a box writes: data to
+    compare and show, never to act on."""
+    out = subprocess.run(
+        ["git", "-C", str(main), "worktree", "list", "--porcelain"], capture_output=True
+    )
+    return None if out.returncode != 0 else "\n" + os.fsdecode(out.stdout)
+
+
+def _nested_worktrees(main: Path, wt_dir: Path) -> list[str] | None:
+    """The worktrees git records INSIDE ``wt_dir`` — an agent's quick worktree under
+    ``.claude/worktrees/``, say (docs/git.md) — or None when git can't list them. Deleting
+    ``wt_dir`` deletes them, uncommitted work and all: ``git worktree remove`` takes a worktree
+    nested in an ignored dir even without ``--force``, and the yard's check reads only ``wt_dir``'s
+    own files. Each is shown up to the first newline past ``wt_dir`` (display only)."""
+    if (listing := _worktree_listing(main)) is None:
+        return None
+    found: set[str] = set()
+    for outer in {str(wt_dir), str(wt_dir.resolve())}:
+        marker = f"\nworktree {outer}{os.sep}"
+        at = listing.find(marker)
+        while at != -1:
+            begin, tail = at + len("\nworktree "), at + len(marker)
+            found.add(listing[begin : listing.find("\n", tail)])
+            at = listing.find(marker, tail)
+    return sorted(found)
+
+
+def _refuse_nested(name: str, nested: list[str] | None, *, late: bool = False) -> bool:
+    """Say why ``remove`` stops, when worktrees sit inside ``name``'s (or git couldn't list
+    them); ``late`` when its box and stack are already down. False when nothing is in the way."""
+    if nested == []:
+        return False
+    if nested is None:
+        _err("✗ git couldn't list the worktrees, so it can't be told whether any sit inside")
+        _err(f"  '{name}', which removing it would delete with any uncommitted work in them.")
+    else:
+        what = "were made inside it meanwhile" if late else "sit inside it"
+        _err(f"✗ not removing worktree '{name}': these git worktrees {what}, and removing it")
+        _err("  would delete them with any uncommitted work in them:")
+        for path in nested:
+            _err(f"    {_shown_path(path)}")
+        _err("  Remove each first (in a box: `git worktree remove <path>`, which refuses one")
+        _err("  with uncommitted work).")
+    if late:
+        _err("  Its box and stack are down and their volumes dropped; the checkout and the")
+        _err("  worktrees inside it are untouched.")
+    _err("  Then run this again, or pass --discard to remove it all anyway.")
+    return True
+
+
+def _shown_path(path: str) -> str:
+    """A path from the shared ``.git``, safe to print: quoted, control characters escaped."""
+    return shlex.quote(path) if path.isprintable() else ascii(path)
 
 
 # ── `remove` reads the worktree in the yard ───────────────────────────────────────────────────
@@ -1070,7 +1145,7 @@ def add(
     worktree add``) it registers instead, once the operator has confirmed its real path — the one
     way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
     ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
-    if (rc := _host_only("add")) is not None:
+    if (rc := _host_only("add", quick=name)) is not None:
         return rc
     if name == "main":
         # "main" is the positional label for the PRIMARY checkout (the repo root) in the workspaces
@@ -1396,6 +1471,9 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         _err("  take it. Re-run with --force to delete the directory instead (any uncommitted")
         _err("  changes in it are lost).")
         return 1
+    nested = _nested_worktrees(main, wt_dir)
+    if not discard and _refuse_nested(name, nested):
+        return 1
     # Asked BEFORE the plan and the teardown: with no yard to ask about uncommitted work, nothing
     # is torn down (an orphan has nothing git could check, and --discard says not to ask).
     again = _remove_command(name, force, assume_yes)
@@ -1417,6 +1495,9 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         print("  4. git worktree remove — the checkout directory is deleted, NOT checked for")
         print("       uncommitted work first, nor any saved (--discard): anything uncommitted")
         print("       in it is lost")
+        for path in nested or ():
+            print(f"       — and in the worktree inside it, {_shown_path(path)}, which git then")
+            print("         lists as prunable until `git worktree prune`")
     elif force:
         print("  4. save any uncommitted work on refs/fy/removed/<name>-<time> (looked for in the")
         print("       VM), then git worktree remove — the checkout directory is deleted")
@@ -1457,6 +1538,11 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         _err(f"✗ refusing to remove worktree '{name}' — its transcripts were NOT archived.")
         _err("  Resolve the issue, or re-run with --force to remove anyway (loses them).")
         return rc
+
+    # Its agents ran until the box went down, and one may have made a worktree inside it since
+    # the first look: look again before anything is deleted.
+    if not discard and _refuse_nested(name, _nested_worktrees(main, wt_dir), late=True):
+        return 1
 
     # 4. Delete the checkout — asking the yard about uncommitted work right before (after the
     #    teardown, so its own box can't add more), parking it under --force — or, for an orphan

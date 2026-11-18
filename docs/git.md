@@ -186,8 +186,9 @@ then saves the result on a ref and deletes the checkout.
 
 For parallel work, make a worktree on your computer with `fy worktree add <name>`: its own checkout
 and branch (`wt/<name>` by default, forked from the trunk), its own box, stack, mode and ports, all
-in the one VM. Don't run `git worktree add` in the box, and `fy worktree add` refuses there: it
-would record paths in the shared `.git` that exist on only one side.
+in the one VM. `fy worktree add` runs only on your computer and refuses in a box. For a small change
+that needs none of that, an agent can make a plain git worktree in its box instead: see
+[quick worktrees in a box](#quick-worktrees-in-a-box).
 
 Your computer runs each checkout's *adopted* `foldyard.toml`, never the working tree
 ([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)), so
@@ -229,7 +230,11 @@ asks first). The row lists those apart, with that fix.
 and its adopted config, and keeps its branch, so a worktree added later under the same name starts
 with nothing adopted. A worktree with uncommitted work needs `--force`; that work is saved first on
 a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command prints how to restore
-it.
+it. A worktree that holds another one, such as an agent's
+[quick worktree](#quick-worktrees-in-a-box) inside it, is refused before anything is taken down:
+deleting it would delete the one inside, uncommitted work and all, which neither git nor that save
+would notice. Remove the inner one first, from a box, with `git worktree remove <path>`; `--discard`
+removes both anyway, and git then lists the inner one as prunable until `git worktree prune`.
 
 Uncommitted work here means files that differ from the worktree's last commit once everything is
 unstaged: changed, deleted or untracked files that aren't gitignored, and changes inside a
@@ -247,6 +252,40 @@ down, and says what to run first. If you can't provide them and you're sure noth
 the worktree matters, `--discard` removes it without checking or saving anything (a worktree with
 submodules still needs `--force` as well, as without `--discard`). If the check or the save fails,
 the worktree is kept.
+
+### Quick worktrees in a box
+
+A small change that needs no stack (a fix, a doc edit, a review branch) doesn't need its own box. An
+agent can make a plain git worktree from its box, under `.claude/worktrees/` in the checkout, which
+is where Claude Code puts its own:
+
+```bash
+git worktree add --no-track -b <branch> .claude/worktrees/<name> [<start>]
+# … edit, commit …
+git worktree remove .claude/worktrees/<name>
+```
+
+`--no-track` matters when `<start>` is a remote branch such as `origin/main`: without it the new
+branch tracks that branch, so a later `git push` can head for `main` instead of a branch of its own.
+`fy worktree add` passes it for the same reason.
+
+Git records a worktree's path in the shared `.git`, so the path must be the same on both sides,
+which holds only inside the checkout. Never make one outside it (`/tmp`, your home in the box): your
+computer can't see that path, so a `git worktree prune` there, or in time git's own garbage
+collection, deletes its record and breaks it in the box. Never make one in the worktrees root
+either: that's where `fy worktree add` puts the worktrees your computer registers, and `fy doctor`
+lists anything else there as unregistered. And don't run `git worktree prune` in a box, which
+deletes the record of any worktree made somewhere the box can't see.
+
+`.claude/worktrees/` must be ignored, or main's `git status` lists each one: `fy init` adds it to
+the `.gitignore` block it manages, and `.git/info/exclude` works too. Your computer sees the branch
+and its commits at once, and `git status` there agrees with the box's.
+
+A quick worktree has none of what `fy worktree add` sets up: no box, stack, mode, ports or adopted
+config of its own, and no volumes over its dependency dirs. So an install in it writes onto your
+computer's disk, with paths only the box can run. Keep it in the box instead, for example
+`UV_PROJECT_ENVIRONMENT=/tmp/<name>-venv uv sync`. When the change needs a stack or its own
+installs, ask for a `fy worktree add` on your computer.
 
 ## What `fy doctor` checks
 
