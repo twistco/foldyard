@@ -325,13 +325,18 @@ class GithubAppKind(_GithubKind):
         if raw:
             from .. import keyless  # lazy: the registry hot path needn't import it
 
+            if os.environ.get(var):  # an export wins over host.env (`_secret_value`): fix THAT
+                fix = f"correct or unset the exported ${var}, which wins over host.env"
+            else:  # the prompt only asks for a var host.env lacks, so the bad line must go first
+                fix = (
+                    f"delete its line in {config.host_env_file()}, "
+                    f"then `fy mode {switch}=on` asks again"
+                )
             yield ctx.result(
                 keyless.secret_ok(raw, PEM_PATTERN, True) is not None,
                 f"{switch} PEM shape",
                 "decodes to a PEM private key",
-                # The prompt only asks for a var host.env lacks, so the bad line must go first.
-                f"${var} isn't base64 of a PEM — delete its line in {config.host_env_file()}, "
-                f"then `fy mode {switch}=on` asks again (get it with: {hint})",
+                f"${var} isn't base64 of a PEM — {fix} (get it with: {hint})",
             )
 
 

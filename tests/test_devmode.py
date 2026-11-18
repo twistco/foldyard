@@ -2670,6 +2670,16 @@ def test_mode_set_refused_at_the_prompt_leaves_the_posture_unchanged(
     assert not isolated_state["host_env"].exists()
 
 
+def test_mode_set_refused_says_to_rerun_with_the_ttl_asked_for(isolated_state, monkeypatch):
+    # The rerun hint is copied as given: without the `ttl=` it would arm for the default hour.
+    monkeypatch.setattr(devmode.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(devmode.getpass, "getpass", lambda _p: "-----BEGIN RSA PRIVATE KEY-----")
+    with pytest.raises(SystemExit) as refused:
+        devmode.main(["set", "gcp=user", "github=on", "ttl=15m"])
+    assert "`fy mode gcp=user github=on ttl=15m`" in str(refused.value)
+    assert devmode.read()["mode"]["github"] == "off"
+
+
 def test_mode_set_with_an_empty_entry_still_applies(isolated_state, monkeypatch):
     # Enter on its own is a choice — arm now, add the key later — as in the TUI. Only a refusal
     # stops the mode.

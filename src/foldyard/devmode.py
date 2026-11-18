@@ -2893,13 +2893,14 @@ def clock_cli(args: list[str]) -> int:
 # ── CLI ────────────────────────────────────────────────────────────────────────────
 
 
-def _capture_secrets_for(updates: dict[str, str]) -> None:
+def _capture_secrets_for(updates: dict[str, str], asked: str) -> None:
     """Ask for what the prospective posture lacks BEFORE it is written: a Ctrl-C at the prompt
     then leaves the posture unchanged, and the proxy's warm-up never runs against an empty
     host.env. A REFUSED entry leaves it unchanged too, as the TUI's dialog does: the operator
     meant to give the key, and a switch armed without one only fails later. An empty entry is a
     choice (arm now, add the key later) and applies. Without a TTY it warns and carries on —
-    same non-blocking contract as box-up."""
+    same non-blocking contract as box-up. ``asked`` is the command's arguments as given, ``ttl=``
+    included, for the rerun hint."""
     from . import keyless
 
     statuses = keyless.capture_secrets(
@@ -2910,7 +2911,6 @@ def _capture_secrets_for(updates: dict[str, str]) -> None:
         echo=lambda m: print(m, file=sys.stderr),
     )
     if "mismatch" in statuses:
-        asked = " ".join(f"{axis}={value}" for axis, value in updates.items())
         raise SystemExit(f"✗ mode unchanged — run `fy mode {asked}` again to give the key.")
 
 
@@ -2949,7 +2949,7 @@ def main(argv: list[str]) -> int:
             _refuse_a_ttl_nothing_carries(updates)
         if not in_box():  # set_mode refuses in-box anyway; don't prompt for a secret first
             validate_updates(updates)  # …nor for a mode set_mode would refuse
-            _capture_secrets_for(updates)
+            _capture_secrets_for(updates, " ".join(argv[1:]))
         set_mode(updates, ttl)
         return show()
     if cmd == "env":

@@ -513,6 +513,44 @@ def test_a_plain_secret_never_reads_a_file(tmp_path):
     assert to_store is None
 
 
+def test_an_unknown_account_after_a_tilde_is_refused_not_raised(tmp_path):
+    # `Path.expanduser` raises RuntimeError for `~someone/…` when there's no such account: that
+    # escaped both prompts instead of reaching their refusal.
+    to_store, note = keyless.secret_entry("~no-such-account-fy/key.pem", _secret())
+    assert to_store is None and "full path" in note and "no-such" not in note
+
+
+def test_a_literal_backslash_in_a_real_path_is_kept(tmp_path):
+    # A backslash is an ordinary filename character: shell-decoding `/…/prod\key.pem` would read
+    # `/…/prodkey.pem` instead — and if THAT exists, store a different key than the one named.
+    key = _key_file(tmp_path, "prod\\key.pem")
+    _key_file(tmp_path, "prodkey.pem", _PEM.replace("abc", "other"))
+    to_store, _note = keyless.secret_entry(str(key), _secret())
+    assert to_store == base64.b64encode(key.read_bytes()).decode()
+
+
+def test_a_read_error_after_the_file_opened_is_refused_not_raised(tmp_path, monkeypatch):
+    # An I/O error mid-read (a flaky mount) must reach the refusal, not escape the prompt.
+    key = _key_file(tmp_path)
+
+    class _Failing:
+        def __init__(self, fd, _mode):
+            self.fd = fd
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            os.close(self.fd)
+
+        def read(self, _n):
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(keyless.os, "fdopen", _Failing)
+    to_store, note = keyless.secret_entry(str(key), _secret())
+    assert to_store is None and str(key) in note and "couldn't be read" in note
+
+
 def test_host_env_value_matches_supervisor_parsing(tmp_path):
     f = tmp_path / "host.env"
     f.write_text("# c\nGH_PEM_B64='quoted'\nOTHER = spaced \nOTHER=rotated\n")

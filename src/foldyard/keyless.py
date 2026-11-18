@@ -367,16 +367,25 @@ def secret_entry(value: str, secret) -> tuple[str | None, str]:
 
 
 def _entry_path(value: str) -> Path | None:
-    """The absolute path a prompt entry names, else ``None``. Undoes a terminal's quoting or
-    backslash-escaping of a dragged-in path (one shell word), else takes the entry as typed;
-    expands ``~``."""
+    """The absolute path a prompt entry names, else ``None``; expands ``~``. The entry as typed,
+    when that names something: a backslash or a quote is an ordinary filename character, and
+    decoding it away could name a DIFFERENT file. Otherwise undoes a terminal's quoting or
+    backslash-escaping of a dragged-in path (one shell word)."""
+    typed = value.strip()
     try:
         words = shlex.split(value)
     except ValueError:  # an unbalanced quote: take the entry as it was typed
         words = []
     # Not one shell word: a path pasted as it is (a file manager's "copy path" leaves spaces bare).
-    path = Path(words[0] if len(words) == 1 else value.strip()).expanduser()
-    return path if path.is_absolute() else None
+    decoded = words[0] if len(words) == 1 else typed
+    for text in dict.fromkeys((typed, decoded)):
+        try:
+            path = Path(text).expanduser()
+        except RuntimeError:  # `~someone/…` for an account this computer doesn't have
+            continue
+        if path.is_absolute() and (text == decoded or path.exists()):
+            return path
+    return None
 
 
 def _read_secret_file(path: Path) -> tuple[bytes | None, str]:
@@ -393,8 +402,11 @@ def _read_secret_file(path: Path) -> tuple[bytes | None, str]:
     if not stat.S_ISREG(os.fstat(fd).st_mode):  # a directory opens read-only on some systems
         os.close(fd)
         return None, f"{path} is not a file"
-    with os.fdopen(fd, "rb") as fh:
-        raw = fh.read(SECRET_FILE_MAX + 1)
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(SECRET_FILE_MAX + 1)
+    except OSError as exc:  # it opened, then the read failed: a flaky mount, a vanished device
+        return None, f"{path} couldn't be read ({exc.strerror or type(exc).__name__})"
     if len(raw) > SECRET_FILE_MAX:
         return None, f"{path} is larger than a key file ({SECRET_FILE_MAX // 1024} KiB at most)"
     return raw, ""

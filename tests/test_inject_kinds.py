@@ -523,6 +523,26 @@ def test_pem_doctor_accepts_a_captured_key_and_flags_a_broken_one(monkeypatch, t
     assert "delete its line" in rows[1][2] and "`fy mode github=on`" in rows[1][2]
 
 
+def test_pem_shape_fix_names_the_export_when_that_is_the_bad_value(monkeypatch, tmp_path):
+    # An export wins over host.env (`_secret_value`), so when IT is the broken one, deleting the
+    # host.env line would throw away a good key and leave the bad one in charge.
+    (tmp_path / "host.env").write_text(f"FY_INJECT_GITHUB={_PEM_B64}\n")
+    monkeypatch.setattr(config, "host_env_file", lambda: tmp_path / "host.env")
+    monkeypatch.setattr(config, "secret_specs", lambda: [])
+    monkeypatch.setenv("FY_INJECT_GITHUB", "-----BEGIN RSA PRIV")
+    ctx = DoctorContext(
+        deep=False,
+        run=lambda cmd, timeout=None: pytest.fail(f"doctor must not shell out here: {cmd}"),
+        which=lambda _tool: False,
+        result=devmode._result,
+        probe=lambda _port: False,
+        mode={},
+    )
+    rows = list(_plugin(monkeypatch, [_APP]).doctor_checks(ctx))
+    assert [s for s, *_ in rows] == ["ok", "fail"]
+    assert "exported" in rows[1][2] and "delete its line" not in rows[1][2]
+
+
 def test_pem_doctor_names_the_consumers_hint_where_there_is_one(monkeypatch, tmp_path):
     # The capture prompt gets a `[[secret]]` override from Registry.secrets; doctor reads the kind
     # directly, so it applies the same override — one hint, wherever the operator looks. It's a

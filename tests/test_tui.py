@@ -2268,6 +2268,28 @@ async def test_secret_dialog_takes_a_drop_that_arrived_with_nothing_focused(monk
     assert sets == [{"github": "on"}]
 
 
+async def test_secret_dialog_drop_replaces_a_selection_as_the_field_would():
+    # The field's own paste replaces what's selected; a drop that arrived unfocused does the same,
+    # so a selected half-entry isn't left glued to the front of the path.
+    from textual import events
+
+    from foldyard.plugins import Secret
+
+    secret = Secret(var="FY_INJECT_GITHUB", label="GitHub App private key (PEM)", b64=True)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.push_screen(tui.SecretScreen(secret))
+        await pilot.pause()
+        field = app.screen.query_one("#sec-input", tui.Input)
+        field.insert_text_at_cursor("half-typed")
+        field.select_all()
+        app.screen.set_focus(None)
+        app.post_message(events.Paste("/keys/app.pem"))
+        await pilot.pause()
+        assert field.value == "/keys/app.pem"
+
+
 _REAL_SET_MODE = devmode.set_mode  # captured before the autouse stub replaces it per test
 
 

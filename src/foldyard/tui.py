@@ -2425,11 +2425,15 @@ class SecretScreen(ModalScreen):
         it gets). Dragging a file in from another app takes the terminal's focus with it: Textual
         clears focus on AppBlur, and the drop's paste lands before AppFocus restores it — so the
         drag looked like it did nothing. This dialog has one field: the paste goes there, as
-        Input's own handler would take it (its first line)."""
+        Input's own handler would take it (its first line, over any selection)."""
         field = self.query_one("#sec-input", Input)
         field.focus()
         if event.text:
-            field.insert_text_at_cursor(event.text.splitlines()[0])
+            line = event.text.splitlines()[0]
+            if field.selection.is_empty:
+                field.insert_text_at_cursor(line)
+            else:
+                field.replace(line, *field.selection)
         event.stop()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
