@@ -529,6 +529,20 @@ def test_a_literal_backslash_in_a_real_path_is_kept(tmp_path):
     assert to_store == base64.b64encode(key.read_bytes()).decode()
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses a mode-000 directory anyway")
+def test_a_path_under_a_directory_you_cannot_enter_is_refused_not_raised(tmp_path):
+    # Python ≤ 3.13's `Path.exists()` raises PermissionError there rather than answering False,
+    # and the as-typed check runs before the read's own refusal could.
+    locked = tmp_path / "restricted"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        to_store, note = keyless.secret_entry(f"{locked}/app\\ key.pem", _secret())
+    finally:
+        locked.chmod(0o700)
+    assert to_store is None and "restricted" not in note  # never echoed: it didn't open
+
+
 def test_a_read_error_after_the_file_opened_is_refused_not_raised(tmp_path, monkeypatch):
     # An I/O error mid-read (a flaky mount) must reach the refusal, not escape the prompt.
     key = _key_file(tmp_path)

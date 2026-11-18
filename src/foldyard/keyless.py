@@ -383,7 +383,9 @@ def _entry_path(value: str) -> Path | None:
             path = Path(text).expanduser()
         except RuntimeError:  # `~someone/…` for an account this computer doesn't have
             continue
-        if path.is_absolute() and (text == decoded or path.exists()):
+        # os.path.exists, not Path.exists: on Python ≤ 3.13 the latter RAISES for a path under a
+        # directory you can't enter, before the read's own refusal is reached.
+        if path.is_absolute() and (text == decoded or os.path.exists(path)):
             return path
     return None
 
