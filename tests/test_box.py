@@ -1336,6 +1336,7 @@ def test_stage_foldyard_builds_wheel(tmp_path, monkeypatch):
     # uv build succeeds (mocked to drop a .whl) → returns the staged wheel; failure → None.
     src = tmp_path / "src"
     src.mkdir()
+    (tmp_path / "co").mkdir()  # the checkout exists; only what's under it is staged
     dest = tmp_path / "co" / "dev-stack" / ".devbox-foldyard"
 
     def fake_build(cmd, **kw):

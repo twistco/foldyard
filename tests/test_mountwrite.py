@@ -8,10 +8,12 @@ gate's edit of ``foldyard.toml`` — must land in the checkout or not at all."""
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
-from foldyard import config, devmode, githeal, mountwrite
+from foldyard import box, config, devmode, githeal, mountwrite
 from foldyard.plugins import proxy
 
 
@@ -93,6 +95,49 @@ def test_the_ca_is_never_staged_through_a_planted_symlink(checkout, victim, tmp_
     assert sorted(p.name for p in victim.parent.iterdir()) == ["authorized_keys"]
 
 
+def _fake_uv_build(seen: list[Path]):
+    """`uv build --out-dir X`, mocked: records X and drops a wheel there."""
+
+    def run(cmd, **kw):
+        out = Path(cmd[cmd.index("--out-dir") + 1])
+        seen.append(out)
+        (out / "foldyard-1.0-py3-none-any.whl").write_bytes(b"WHEEL")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    return run
+
+
+def test_the_wheel_is_built_outside_the_mount_and_copied_in(checkout, tmp_path, monkeypatch):
+    seen: list[Path] = []
+    monkeypatch.setattr(box.subprocess, "run", _fake_uv_build(seen))
+    dest = checkout / "dev" / ".devbox-foldyard"
+    dest.mkdir(parents=True)
+    (dest / "foldyard-0.9-py3-none-any.whl").write_bytes(b"STALE")
+    wheel = box.stage_foldyard_for_box(str(checkout), "dev", tmp_path)
+    assert wheel is not None and wheel == dest / "foldyard-1.0-py3-none-any.whl"
+    assert wheel.read_bytes() == b"WHEEL"
+    assert not seen[0].is_relative_to(checkout)  # uv never writes into the mount itself
+    assert sorted(p.name for p in dest.iterdir()) == [".gitignore", wheel.name]  # stale one gone
+    assert (dest / ".gitignore").read_text() == "*\n"
+
+
+@pytest.mark.parametrize("planted", ["dev", "dev/.devbox-foldyard"])
+def test_the_wheel_is_never_staged_through_a_planted_symlink(
+    checkout, victim, tmp_path, monkeypatch, planted
+):
+    # A box that links the staging dir (or the dir above it) at a host dir would have had the
+    # host delete every *.whl there, then build a wheel into it.
+    (victim.parent / "precious.whl").write_bytes(b"OPERATOR'S")
+    monkeypatch.setattr(box.subprocess, "run", _fake_uv_build([]))
+    link = checkout / planted
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(victim.parent)
+    with pytest.raises(SystemExit, match="symlink"):
+        box.stage_foldyard_for_box(str(checkout), "dev", tmp_path)
+    assert sorted(p.name for p in victim.parent.iterdir()) == ["authorized_keys", "precious.whl"]
+    assert (victim.parent / "precious.whl").read_bytes() == b"OPERATOR'S"
+
+
 @pytest.mark.parametrize("value", ["/Users/someone", "../elsewhere", "infra/../../x", "~/x"])
 def test_dev_vm_dir_must_stay_inside_the_checkout(fresh_config, checkout, value):
     (checkout / "foldyard.toml").write_text(f'[project]\nname = "p"\ndev_vm_dir = "{value}"\n')
@@ -143,3 +188,40 @@ def test_makedirs_refuses_a_root_that_is_a_symlink(tmp_path, victim):
 def test_makedirs_refuses_a_path_leaving_the_root(checkout, rel):
     with pytest.raises(ValueError):
         mountwrite.makedirs(checkout, rel)
+
+
+# ── listdir / unlink: clearing out what the host staged before ────────────────────────────
+
+
+def test_listdir_and_unlink_work_below_the_root(checkout):
+    mountwrite.write(checkout, "a/b/old.whl", b"x")
+    mountwrite.write(checkout, "a/b/keep.txt", b"x")
+    assert sorted(mountwrite.listdir(checkout, "a/b")) == ["keep.txt", "old.whl"]
+    mountwrite.unlink(checkout, "a/b/old.whl")
+    assert sorted(mountwrite.listdir(checkout, "a/b")) == ["keep.txt"]
+
+
+@pytest.mark.parametrize("planted", ["a", "a/b"])
+def test_listdir_and_unlink_refuse_a_planted_dir(checkout, victim, planted):
+    (checkout / planted).parent.mkdir(parents=True, exist_ok=True)
+    (checkout / planted).symlink_to(victim.parent)
+    with pytest.raises(OSError):
+        mountwrite.listdir(checkout, "a/b")
+    with pytest.raises(OSError):
+        mountwrite.unlink(checkout, "a/b/authorized_keys")
+    assert victim.read_text() == "ssh-ed25519 AAAA operator\n"
+
+
+def test_unlink_removes_a_planted_link_not_its_target(checkout, victim):
+    (checkout / "old.whl").symlink_to(victim)
+    mountwrite.unlink(checkout, "old.whl")
+    assert not (checkout / "old.whl").exists() and victim.exists()
+
+
+@pytest.mark.parametrize("rel", ["/etc/x", "../x", "a/../../x", ""])
+def test_listdir_and_unlink_refuse_a_path_leaving_the_root(checkout, rel):
+    with pytest.raises(ValueError):
+        mountwrite.unlink(checkout, rel)
+    if rel:  # "" is the root itself, which listdir may read
+        with pytest.raises(ValueError):
+            mountwrite.listdir(checkout, rel)

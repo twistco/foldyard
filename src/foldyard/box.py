@@ -58,6 +58,7 @@ from . import (
     hostgit,
     keyless,
     machine,
+    mountwrite,
     sandbox,
     stack,
 )
@@ -1519,38 +1520,65 @@ def stage_foldyard_for_box(checkout: str, here: str, src: Path) -> Path | None:
     the checkout (which IS mounted) and hand the box that wheel path — the proxy-CA staging trick.
     The wheel pins the box to the exact host (WIP) version. Returns the staged wheel, or ``None``
     if the build fails — there is no fallback: the caller flags ``fy_stage_failed`` and the
-    bootstrap's foldyard install FAILS CLOSED rather than drifting off an unpinned version."""
-    dest = Path(checkout) / here / ".devbox-foldyard"
-    dest.mkdir(parents=True, exist_ok=True)
-    for old in dest.glob("*.whl"):  # one wheel only — a stale one would make the install ambiguous
-        old.unlink()
-    r = subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(dest), str(src)],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        # The TAIL, whole lines: uv reports resolution failures as a `×/├─▶/╰─▶` pyramid whose
-        # LAST line is the root cause ("network was disabled", "tunnel error: unsuccessful") —
-        # a char-count truncation kept the symptom and cut exactly the line that explains it.
-        _err("  ✗ foldyard wheel build failed — the box's `fy` install will fail closed:")
-        for line in r.stderr.strip().splitlines()[-12:]:
-            _err(f"      {line}")
-        proxies = [
-            k
-            for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY")
-            if os.environ.get(k)
-        ]
-        if proxies:
-            # The one real failure seen so far: a debugging shell exporting the egress proxy,
-            # which under default_deny refuses pypi.org — so `uv build` can't fetch hatchling.
-            _err(
-                f"      (this shell exports {', '.join(proxies)} — the build fetches its build "
-                "backend from PyPI through it; `unset` them or allow pypi.org)"
-            )
-        return None
-    wheels = sorted(dest.glob("*.whl"))
-    return wheels[-1] if wheels else None
+    bootstrap's foldyard install FAILS CLOSED rather than drifting off an unpinned version.
+
+    The checkout is box-writable, so ``uv`` builds into a private temp dir and only the finished
+    wheel is copied in, through :mod:`mountwrite`: a ``.devbox-foldyard`` the box planted as a
+    symlink would otherwise have the host delete every ``*.whl`` where it points, then build
+    there."""
+    with tempfile.TemporaryDirectory(prefix="fy-wheel-") as out:
+        r = subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", out, str(src)],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            _report_wheel_build_failure(r.stderr)
+            return None
+        wheels = sorted(Path(out).glob("*.whl"))
+        if not wheels:
+            return None
+        return _stage_wheel(Path(checkout), Path(here) / ".devbox-foldyard", wheels[-1])
+
+
+def _stage_wheel(checkout: Path, rel: Path, wheel: Path) -> Path:
+    """Copy ``wheel`` to ``checkout/rel`` as the ONLY wheel there (a stale one would make the
+    box's install ambiguous), beside uv's own ``*`` ignore file, following no symlink below
+    ``checkout``. A planted one refuses, as the proxy CA's staging does."""
+    try:
+        mountwrite.write(checkout, rel / ".gitignore", b"*\n")
+        for name in mountwrite.listdir(checkout, rel):
+            if name.endswith(".whl") and name != wheel.name:
+                mountwrite.unlink(checkout, rel / name)
+        mountwrite.write(checkout, rel / wheel.name, wheel.read_bytes())
+    except (OSError, ValueError) as e:
+        raise SystemExit(
+            f"✗ couldn't stage the foldyard wheel at {checkout / rel}: {e}\n"
+            "  A directory on that path is a symlink or not a directory — the box can write the\n"
+            "  checkout, so foldyard won't write through one. Remove it and retry."
+        ) from None
+    return checkout / rel / wheel.name
+
+
+def _report_wheel_build_failure(stderr: str) -> None:
+    # The TAIL, whole lines: uv reports resolution failures as a `×/├─▶/╰─▶` pyramid whose
+    # LAST line is the root cause ("network was disabled", "tunnel error: unsuccessful") —
+    # a char-count truncation kept the symptom and cut exactly the line that explains it.
+    _err("  ✗ foldyard wheel build failed — the box's `fy` install will fail closed:")
+    for line in stderr.strip().splitlines()[-12:]:
+        _err(f"      {line}")
+    proxies = [
+        k
+        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY")
+        if os.environ.get(k)
+    ]
+    if proxies:
+        # The one real failure seen so far: a debugging shell exporting the egress proxy,
+        # which under default_deny refuses pypi.org — so `uv build` can't fetch hatchling.
+        _err(
+            f"      (this shell exports {', '.join(proxies)} — the build fetches its build "
+            "backend from PyPI through it; `unset` them or allow pypi.org)"
+        )
 
 
 def _foldyard_install_subst(checkout: str, here: str) -> dict[str, str]:
