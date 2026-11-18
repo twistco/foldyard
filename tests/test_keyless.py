@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
 
 import pytest
@@ -389,6 +390,185 @@ def test_ensure_secret_empty_paste_stores_nothing(tmp_path):
         f, _secret(), interactive=True, prompt=lambda _p: "   ", echo=lambda _m: None
     )
     assert status == "empty" and not f.exists()
+
+
+# ── a base64 secret's FILE, by path: foldyard encodes it, so the key never reaches a terminal ──
+
+
+def _key_file(tmp_path, name: str = "my-app.private-key.pem", body: str = _PEM):
+    path = tmp_path / name
+    path.write_text(body)
+    return path
+
+
+def test_ensure_secret_reads_a_key_file_by_path_and_stores_its_base64(tmp_path):
+    # The old hint had the operator run `base64 < key.pem | tr -d '\n'` and copy the output:
+    # the key in their scrollback and clipboard, which the hidden prompt exists to avoid. Given
+    # the path instead, foldyard encodes the file itself and stores the very same line.
+    key = _key_file(tmp_path)
+    f = tmp_path / "host.env"
+    out, echo = _recorder()
+    status = keyless.ensure_secret(
+        f, _secret(), interactive=True, prompt=lambda _p: str(key), echo=echo
+    )
+    assert status == "stored"
+    assert f.read_text() == f"GH_PEM_B64={base64.b64encode(key.read_bytes()).decode()}\n"
+    assert any(str(key) in line for line in out)  # says which file it read
+    assert any("path" in line for line in out if "value (hidden)" not in line)  # offered up front
+    # The prompt is hidden, so a drag shows nothing: say so, or it looks like the drag failed.
+    assert any("press Enter" in line and "nothing shows" in line for line in out)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "'{p}'",  # a terminal that quotes a dragged-in path
+        '"{p}"',
+        "{e}",  # one that backslash-escapes its spaces
+        "  {p}  ",  # a file manager's "copy path", spaces left bare
+    ],
+)
+def test_a_path_is_read_however_it_was_spelled(tmp_path, entry):
+    folder = tmp_path / "with space"
+    folder.mkdir()
+    key = _key_file(folder)
+    escaped = str(key).replace(" ", "\\ ")
+    to_store, _note = keyless.secret_entry(entry.format(p=key, e=escaped), _secret())
+    assert to_store == base64.b64encode(key.read_bytes()).decode()
+
+
+def test_a_home_relative_path_is_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    key = _key_file(tmp_path)
+    to_store, _note = keyless.secret_entry(f"~/{key.name}", _secret())
+    assert to_store == base64.b64encode(key.read_bytes()).decode()
+
+
+def test_a_relative_path_is_never_read(tmp_path, monkeypatch):
+    # The prompt runs in the checkout, which the box can write: a bare `key.pem` there would be
+    # whatever the box put there. Only a full path (or ~/…) is the operator's own choice.
+    monkeypatch.chdir(tmp_path)
+    key = _key_file(tmp_path)
+    to_store, note = keyless.secret_entry(key.name, _secret())
+    assert to_store is None and "full path" in note
+
+
+def test_a_file_that_is_not_the_secret_is_refused_and_nothing_stored(tmp_path):
+    other = _key_file(tmp_path, "id_ed25519.pub", "ssh-ed25519 AAAA… me@host\n")
+    f = tmp_path / "host.env"
+    out, echo = _recorder()
+    status = keyless.ensure_secret(
+        f, _secret(), interactive=True, prompt=lambda _p: str(other), echo=echo
+    )
+    assert status == "mismatch" and not f.exists()
+    assert any(str(other) in line and "doesn't look like" in line for line in out)
+
+
+@pytest.mark.parametrize("entry", ["/9j/4AAQSkZJRgABAQ+mangled", "/no/such/key.pem"])
+def test_an_entry_that_names_no_file_is_never_echoed(tmp_path, entry):
+    # Base64 can start with `/`, so a mangled key paste can look like a path. Whatever was typed
+    # into the hidden prompt stays hidden: the refusal names no part of it.
+    f = tmp_path / "host.env"
+    out, echo = _recorder()
+    status = keyless.ensure_secret(
+        f, _secret(), interactive=True, prompt=lambda _p: entry, echo=echo
+    )
+    assert status == "mismatch" and not f.exists()
+    assert not any(entry in line or "4AAQ" in line or "no/such" in line for line in out)
+
+
+def test_a_directory_is_refused(tmp_path):
+    to_store, note = keyless.secret_entry(str(tmp_path), _secret())
+    assert to_store is None and "not a file" in note
+    assert str(tmp_path) in note  # it opened, so the entry was a real path: safe to name
+
+
+def test_a_fifo_is_refused_without_blocking(tmp_path):
+    # Opening a FIFO for reading waits for a writer; the prompt must answer at once instead.
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    start = time.monotonic()
+    to_store, note = keyless.secret_entry(str(fifo), _secret())
+    assert to_store is None and "not a file" in note and str(fifo) in note
+    assert time.monotonic() - start < 1.0
+
+
+def test_a_file_far_larger_than_a_key_is_refused_unread(tmp_path):
+    big = tmp_path / "big.pem"
+    big.write_bytes(b"x" * (keyless.SECRET_FILE_MAX + 1))
+    to_store, note = keyless.secret_entry(str(big), _secret())
+    assert to_store is None and "larger than" in note and str(big) in note
+
+
+def test_a_pasted_base64_value_still_works_and_needs_no_file(tmp_path):
+    assert keyless.secret_entry(_PEM_B64, _secret()) == (_PEM_B64, "")
+
+
+def test_a_plain_secret_never_reads_a_file(tmp_path):
+    # Only a base64 secret is a file's contents; a plain token named by a path stays a value, so
+    # this matches its pattern or is refused — the file is never opened.
+    key = _key_file(tmp_path)
+    plain = _secret(pattern="*-----BEGIN *", b64=False)
+    to_store, _note = keyless.secret_entry(str(key), plain)
+    assert to_store is None
+
+
+def test_an_unknown_account_after_a_tilde_is_refused_not_raised(tmp_path):
+    # `Path.expanduser` raises RuntimeError for `~someone/…` when there's no such account: that
+    # escaped both prompts instead of reaching their refusal.
+    to_store, note = keyless.secret_entry("~no-such-account-fy/key.pem", _secret())
+    assert to_store is None and "full path" in note and "no-such" not in note
+
+
+def test_a_literal_backslash_in_a_real_path_is_kept(tmp_path):
+    # A backslash is an ordinary filename character: shell-decoding `/…/prod\key.pem` would read
+    # `/…/prodkey.pem` instead — and if THAT exists, store a different key than the one named.
+    key = _key_file(tmp_path, "prod\\key.pem")
+    _key_file(tmp_path, "prodkey.pem", _PEM.replace("abc", "other"))
+    to_store, _note = keyless.secret_entry(str(key), _secret())
+    assert to_store == base64.b64encode(key.read_bytes()).decode()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses a mode-000 directory anyway")
+def test_a_path_under_a_directory_you_cannot_enter_is_refused_not_raised(tmp_path):
+    # Python ≤ 3.13's `Path.exists()` raises PermissionError there rather than answering False,
+    # and the as-typed check runs before the read's own refusal could.
+    locked = tmp_path / "restricted"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        to_store, note = keyless.secret_entry(f"{locked}/app\\ key.pem", _secret())
+    finally:
+        locked.chmod(0o700)
+    assert to_store is None and "restricted" not in note  # never echoed: it didn't open
+
+
+def test_an_entry_with_a_nul_byte_is_refused_not_raised(tmp_path):
+    # os.open raises ValueError, not OSError, for an embedded NUL: it escaped the prompt.
+    to_store, note = keyless.secret_entry(f"{tmp_path}/key\x00.pem", _secret())
+    assert to_store is None and "key" not in note
+
+
+def test_a_read_error_after_the_file_opened_is_refused_not_raised(tmp_path, monkeypatch):
+    # An I/O error mid-read (a flaky mount) must reach the refusal, not escape the prompt.
+    key = _key_file(tmp_path)
+
+    class _Failing:
+        def __init__(self, fd, _mode):
+            self.fd = fd
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            os.close(self.fd)
+
+        def read(self, _n):
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(keyless.os, "fdopen", _Failing)
+    to_store, note = keyless.secret_entry(str(key), _secret())
+    assert to_store is None and str(key) in note and "couldn't be read" in note
 
 
 def test_host_env_value_matches_supervisor_parsing(tmp_path):

@@ -194,6 +194,9 @@ def test_github_app_declares_its_pem_as_a_base64_secret_only_when_on(monkeypatch
     assert secret.pattern == kinds.PEM_PATTERN
     assert "private key" in secret.label and "github" in secret.label
     assert "App settings" in secret.how  # printed at the prompt, never run
+    # It teaches the path, never `base64 < key.pem`: printing the encoded key to copy it leaves it
+    # in the terminal's scrollback and the clipboard, which the hidden prompt exists to avoid.
+    assert "path" in secret.how and "base64" not in secret.how
 
 
 def test_a_secret_row_can_retarget_the_pem_hint(monkeypatch):
@@ -516,6 +519,28 @@ def test_pem_doctor_accepts_a_captured_key_and_flags_a_broken_one(monkeypatch, t
     # A truncated/half-pasted key is caught OFFLINE rather than as an opaque 401 at mint time.
     rows = _doctor(monkeypatch, tmp_path, [_APP], host_env="FY_INJECT_GITHUB=-----BEGIN RSA PRIV\n")
     assert [s for s, *_ in rows] == ["ok", "fail"]
+    # The prompt only asks for a var host.env lacks, so the fix names the line to delete first.
+    assert "delete its line" in rows[1][2] and "`fy mode github=on`" in rows[1][2]
+
+
+def test_pem_shape_fix_names_the_export_when_that_is_the_bad_value(monkeypatch, tmp_path):
+    # An export wins over host.env (`_secret_value`), so when IT is the broken one, deleting the
+    # host.env line would throw away a good key and leave the bad one in charge.
+    (tmp_path / "host.env").write_text(f"FY_INJECT_GITHUB={_PEM_B64}\n")
+    monkeypatch.setattr(config, "host_env_file", lambda: tmp_path / "host.env")
+    monkeypatch.setattr(config, "secret_specs", lambda: [])
+    monkeypatch.setenv("FY_INJECT_GITHUB", "-----BEGIN RSA PRIV")
+    ctx = DoctorContext(
+        deep=False,
+        run=lambda cmd, timeout=None: pytest.fail(f"doctor must not shell out here: {cmd}"),
+        which=lambda _tool: False,
+        result=devmode._result,
+        probe=lambda _port: False,
+        mode={},
+    )
+    rows = list(_plugin(monkeypatch, [_APP]).doctor_checks(ctx))
+    assert [s for s, *_ in rows] == ["ok", "fail"]
+    assert "exported" in rows[1][2] and "delete its line" not in rows[1][2]
 
 
 def test_pem_doctor_names_the_consumers_hint_where_there_is_one(monkeypatch, tmp_path):
