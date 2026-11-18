@@ -19,6 +19,7 @@ exclude_docs: |
   !talks/README.md
   demo/
   ebpf-spike-kit/
+  git-guard-spike-kit/
   archive/lima-network-forcing-kit/
 
 hooks:
