@@ -3282,13 +3282,14 @@ def test_a_declared_claude_is_its_own_rows_alone(fake, monkeypatch, tmp_path, ca
 
 
 def test_a_dropped_claude_keyless_dummy_is_drift(fake, monkeypatch, tmp_path, capsys):
-    # The dummy would shadow the real token a now-bare [claude] box logs in for.
+    # [claude] removed from the config: the box still carries the dummy it was created with.
     _routed(fake, monkeypatch, tmp_path)
     monkeypatch.setattr(config, "claude_enabled", lambda: True)
     monkeypatch.setattr(config, "claude_keyless", lambda: "oauth")
     monkeypatch.setattr(box, "_capture_keyless", lambda: None)
     _create_then_run(fake)
-    monkeypatch.setattr(config, "claude_keyless", lambda: None)
+    monkeypatch.setattr(config, "claude_enabled", lambda: False)
+    monkeypatch.setattr(config, "claude_keyless", lambda: "")
     capsys.readouterr()
     assert box.main("up") == 0
     assert "CLAUDE_CODE_OAUTH_TOKEN: no longer set" in _drift_line(capsys.readouterr().out)
@@ -3460,6 +3461,10 @@ def keyless_posture(monkeypatch):
 
         monkeypatch.setattr(config, "claude_keyless", lambda: claude_keyless)
         monkeypatch.setattr(config, "codex_keyless", lambda: codex_keyless)
+        # An agent with no keyless is an undeclared one: a declared table without it is refused
+        # (ADR-0008, amended 2026-11-18), which isn't what these tests are about.
+        monkeypatch.setattr(config, "claude_enabled", lambda: bool(claude_keyless))
+        monkeypatch.setattr(config, "codex_enabled", lambda: bool(codex_keyless))
         reg = Registry(
             [claude.ClaudePlugin(), codex.CodexPlugin()], config=make_config(GENERIC_TOML)
         )
@@ -3486,13 +3491,16 @@ def test_up_is_quiet_once_the_axis_is_armed(fake, capsys, keyless_posture):
     assert "[claude].keyless" not in capsys.readouterr().err
 
 
-def test_up_does_not_warn_for_a_bare_agent_table(fake, capsys, keyless_posture):
-    # No keyless ⇒ ClaudePlugin.switches() returns NOTHING, so there is no rung to arm: that box logs
-    # in inside the container. Telling this user to run `fy mode claude=on` would name an axis
-    # that does not exist.
-    keyless_posture({}, claude_keyless="")
-    assert box.main("up") == 0
-    assert "keyless" not in capsys.readouterr().err
+def test_up_refuses_a_bare_agent_table_without_naming_an_axis(
+    fake, capsys, monkeypatch, keyless_posture
+):
+    # No keyless ⇒ no `claude` axis exists, so the refusal must not tell this user to run
+    # `fy mode claude=on`: it names the line to add instead.
+    keyless_posture({})
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    assert box.main("up") == 1
+    err = capsys.readouterr().err
+    assert "[claude] has no `keyless`" in err and "fy mode" not in err
 
 
 def test_up_warns_per_agent_not_once_for_both(fake, capsys, keyless_posture):

@@ -1775,7 +1775,8 @@ def claude_keyless() -> str:
       - ``"oauth"`` — dummy ``CLAUDE_CODE_OAUTH_TOKEN``; rewrite ``authorization`` with ``Bearer ``
         + the real ``sk-ant-oat…`` token (≈1yr, static — no refresh-minter needed).
 
-    Absent/false/unrecognised ⇒ ``""`` (off — a normal login: real creds in the box's ~/.claude)."""
+    Absent/false/unrecognised ⇒ ``""``, which a declared ``[claude]`` is refused with: there is no
+    in-box login (ADR-0008, amended 2026-11-18; ``preflight.agent_issues``)."""
     raw = _table("claude").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"
@@ -1885,7 +1886,8 @@ def codex_keyless() -> str:
         (refreshed host-side from the host's real ``~/.codex/auth.json`` by the
         :mod:`~foldyard.plugins.codex_chatgpt_token` minter) onto Codex's paths on ``chatgpt.com``.
 
-    Absent/false/unrecognised ⇒ ``""`` (off — normal login)."""
+    Absent/false/unrecognised ⇒ ``""``, which a declared ``[codex]`` is refused with: there is no
+    in-box login (ADR-0008, amended 2026-11-18; ``preflight.agent_issues``)."""
     raw = _table("codex").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"

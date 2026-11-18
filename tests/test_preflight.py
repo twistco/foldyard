@@ -385,9 +385,17 @@ def test_an_agent_table_with_keyless_or_absent_is_fine(monkeypatch, table, kind)
     assert preflight.agent_issues() == []
 
 
-def test_a_keyless_typo_is_left_to_its_own_refusal(monkeypatch):
-    # `keyless = "oath"` normalises to "" and `issues()` already names the typo; saying "has no
-    # keyless" on top would send the reader looking for a line they did write.
-    _wire(monkeypatch, tables={"claude": {"keyless": "oath"}})
+@pytest.mark.parametrize("raw", [1, 0, ""])
+def test_a_keyless_value_that_normalises_to_nothing_is_refused(monkeypatch, raw):
+    # `keyless = 1` used to slip past both checks: `1 == True` passed the typo check, and it
+    # normalises to "" (off). Whatever the raw value, an empty normalised one is a box someone
+    # would log into. (String typos also stop earlier, in `issues()`, which runs first.)
+    _wire(monkeypatch, tables={"claude": {"keyless": raw}})
     monkeypatch.setattr(preflight.config, "claude_enabled", lambda: True)
-    assert preflight.agent_issues() == []
+    assert len(preflight.agent_issues()) == 1
+
+
+@pytest.mark.parametrize("raw", [1, 0, 2.0])
+def test_a_number_for_keyless_is_an_unrecognised_value(monkeypatch, raw):
+    _wire(monkeypatch, tables={"claude": {"keyless": raw}})
+    assert any("[claude].keyless" in p and "isn't recognised" in p for p in preflight.issues())

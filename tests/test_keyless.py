@@ -612,9 +612,20 @@ def test_no_claude_login_in_an_empty_or_keyless_config_dir(tmp_path):
     assert keyless.claude_stored_login(tmp_path) == []
 
 
-def test_a_claude_login_in_the_box_is_found(tmp_path):
-    (tmp_path / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"x": 1}}))
+@pytest.mark.parametrize(
+    "content", [json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-real"}}), "{torn"]
+)
+def test_a_claude_login_in_the_box_is_found(tmp_path, content):
+    # A file that can't be read counts, as Codex's does: it exists only to hold a credential.
+    (tmp_path / ".credentials.json").write_text(content)
     assert keyless.claude_stored_login(tmp_path) == [str(tmp_path / ".credentials.json")]
+
+
+@pytest.mark.parametrize("content", ["{}", json.dumps({"claudeAiOauth": None}), ""])
+def test_an_emptied_claude_credentials_file_is_not_a_login(tmp_path, content):
+    # Whatever `/logout` leaves behind, a file holding nothing is no credential.
+    (tmp_path / ".credentials.json").write_text(content)
+    assert keyless.claude_stored_login(tmp_path) == []
 
 
 def test_a_claude_console_key_in_its_config_is_found(tmp_path):

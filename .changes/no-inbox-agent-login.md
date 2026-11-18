@@ -18,5 +18,6 @@ bump: minor
   allowlist. **What to do:** each developer adds one line to their `foldyard.local.toml` under the
   agent's table: `keyless = "oauth"` (`claude setup-token` on your computer) or `"api-key"` for
   Claude, `keyless = "chatgpt"` (`codex login` on your computer once) or `"api-key"` for Codex.
-  Remove any login already in a box (`/logout` in `claude`, `codex logout`); `fy verify` says where
-  one is.
+  Remove any login already in a box (`/logout` in `claude`; `codex logout`, then under ChatGPT
+  keyless `fy box recreate` on your computer to put foldyard's dummy `auth.json` back); `fy verify`
+  says where one is.

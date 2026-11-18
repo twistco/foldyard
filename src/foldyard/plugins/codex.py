@@ -231,9 +231,9 @@ class CodexPlugin(Plugin):
         """What `_INSTALL` below reaches for, so a walled box can install Codex after one consented
         yes instead of a blocked-host hunt. `chatgpt.com` is listed because the installer SCRIPT
         lives there and is fetched in every keyless mode — under `keyless = "chatgpt"` the same host
-        is also the injector host (exempt without a grant), but under `api-key`/no keyless nothing
-        exempts it. `api.openai.com` is deliberately absent: injector host, exempt structurally.
-        The installer's GitHub fallback (`CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=0`) isn't
+        is also the injector host (exempt without a grant), but under `api-key` nothing exempts
+        it. `api.openai.com` is deliberately absent: injector host, exempt structurally. The
+        installer's GitHub fallback (`CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=0`) isn't
         recommended — `releases.openai.com` is its default source. Never the login host: there is
         no in-box login (ADR-0008, amended 2026-11-18)."""
         if not config.codex_enabled():
@@ -246,7 +246,8 @@ class CodexPlugin(Plugin):
     def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
         # In the box only (the volume isn't on your computer): no real Codex credential in it —
         # neither a login Codex stored in auth.json nor a real value where the dummy belongs.
-        if not ctx.in_box or not config.codex_enabled():
+        # Watched in EVERY box, declared or not (see ClaudePlugin.verify_checks).
+        if not ctx.in_box:
             return
         leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
         yield from keyless.stored_login_rows("Codex", _stored_login(), leaks, _REMOVE_LOGIN)

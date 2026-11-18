@@ -209,8 +209,10 @@ class ClaudePlugin(Plugin):
 
     def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
         # In the box only (the volume isn't on your computer): no real Claude credential in it —
-        # neither a login Claude stored nor a real value where the dummy belongs.
-        if not ctx.in_box or not config.claude_enabled():
+        # neither a login Claude stored nor a real value where the dummy belongs. Watched in EVERY
+        # box, declared or not, like the [[inject]] kinds' credential vars: a box without [claude]
+        # holding a real key is exactly what verify must not pass.
+        if not ctx.in_box:
             return
         leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
         yield from keyless.stored_login_rows("Claude", _stored_login(), leaks, _REMOVE_LOGIN)

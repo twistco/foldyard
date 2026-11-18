@@ -290,9 +290,10 @@ notification the first time it happens. Discovery can also point a workspace at 
 `chatgpt.com` (the account decides; a personal one stays there); keyless injects only on
 `chatgpt.com`, so Codex can't reach such a backend through the proxy.
 
-One caveat: declaring the agent or changing its `keyless` changes the dummy in the box's
-environment, which takes a `fy box up` to apply. The dashboard tells you when the running box is out
-of date. Switching the mode itself never needs a box restart.
+One caveat: declaring the agent or changing its `keyless` changes what the box is created with (the
+agent's install, its volumes and its dummy), so a running box takes a `fy box recreate` to apply it
+once you've adopted the change; `fy box up` and the dashboard tell you when the running box is out
+of date. Switching the mode itself never needs a box restart or a recreate.
 
 ## Per-worktree modes
 

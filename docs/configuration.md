@@ -1091,6 +1091,9 @@ You are root in this project's locked-down foldyard dev box. …
 [claude.settings]         # → claude --settings '{"showThinkingSummaries": "…"}'
 showThinkingSummaries = true
 
+[codex]
+keyless = "chatgpt"
+
 [codex.config]            # → codex -c 'model_reasoning_summary="auto"' -c tui.raw_output_mode=false
 model_reasoning_summary = "auto"
 tui = { raw_output_mode = false }

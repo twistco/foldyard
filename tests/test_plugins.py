@@ -3281,7 +3281,7 @@ def test_a_bad_attribution_value_never_crashes_the_proxys_spec(monkeypatch, tmp_
 
 
 def _plant_claude(home):
-    (home / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+    (home / ".credentials.json").write_text('{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x"}}')
 
 
 def _plant_codex(home):
@@ -3343,15 +3343,17 @@ def test_verify_fails_a_real_credential_in_the_agents_env(
     assert len(failed) == 1 and name in failed[0]
 
 
-@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "_label"), _STORED_LOGIN)
-def test_verify_says_nothing_on_the_host_or_without_the_table(
-    monkeypatch, agent_home, plugin, enabled, _var, plant, _label
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_verify_watches_every_box_but_says_nothing_on_the_host(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
 ):
+    # Like the [[inject]] kinds' credential vars: watched in EVERY box, declared or not — a box
+    # without the table that holds a real login or key is exactly what verify must not pass.
     plant(agent_home)
     monkeypatch.setattr(config, enabled, lambda: True)
     assert list(plugin().verify_checks(_vctx(in_box=False))) == []  # the volume isn't here
     monkeypatch.setattr(config, enabled, lambda: False)
-    assert list(plugin().verify_checks(_vctx())) == []
+    assert any(s == "fail" and label in m for s, m in plugin().verify_checks(_vctx()))
 
 
 @pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
