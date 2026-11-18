@@ -1589,7 +1589,10 @@ def test_a_worktree_made_inside_during_the_teardown_is_not_deleted(fake_main, mo
     assert worktree.remove("feat", force=True, assume_yes=True) == 1
     assert not any("worktree" in c and "remove" in c for c in fake_main["calls"])
     assert (wt / ".claude" / "worktrees" / "quick").is_dir()
-    assert "run this again" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "run this again" in err
+    # By now the stack's and the box's volumes are gone: say what's left, not "nothing".
+    assert "volumes dropped" in err and "nothing was deleted" not in err
 
 
 @pytest.mark.parametrize("name", ["fe\nat", "feat "])

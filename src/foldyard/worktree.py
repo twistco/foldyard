@@ -661,7 +661,8 @@ def _refuse_nested(name: str, nested: list[str] | None, *, late: bool = False) -
         _err("  Remove each first (in a box: `git worktree remove <path>`, which refuses one")
         _err("  with uncommitted work).")
     if late:
-        _err("  Its box and stack are down; nothing was deleted.")
+        _err("  Its box and stack are down and their volumes dropped; the checkout and the")
+        _err("  worktrees inside it are untouched.")
     _err("  Then run this again, or pass --discard to remove it all anyway.")
     return True
 
