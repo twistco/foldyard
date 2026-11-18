@@ -5,6 +5,7 @@ name: foldyard
 # are split out into foldyard-e2e.yml, which only runs on main / on demand.
 on:
   push:
+  pull_request: # a fork's push runs in the fork, so its PR needs this to report the required check
 
 concurrency:
   group: foldyard-${{ github.ref }}
