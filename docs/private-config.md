@@ -15,7 +15,7 @@ them into new worktrees, and the few git commands that delete what's ignored.
 ## What foldyard puts in a checkout
 
 | file | written by | in this setup |
-| --- | --- | --- |
+| -- | -- | -- |
 | `foldyard.toml` | `fy init` | yours, untracked |
 | `foldyard.local.toml.example` | `fy init` | deleted: it's a template for a team |
 | `.gitignore` (a fenced block) | `fy init` | the block moves to `.git/info/exclude` |
@@ -24,15 +24,15 @@ them into new worktrees, and the few git commands that delete what's ignored.
 | `.fy/worktree-init.sh` | you, below | untracked |
 
 `.git/info/exclude` is git's own ignore list for one clone. It works like `.gitignore`, but it is
-never committed or pushed. It lives in the repository's shared git directory, so one list covers
-the main checkout and every worktree.
+never committed or pushed. It lives in the repository's shared git directory, so one list covers the
+main checkout and every worktree.
 
 ## Setting it up, in order
 
-The order matters in two places. The files are hidden **before** anything else can see them, so
-an agent's `git add -A` never stages them. And everything goes into `foldyard.toml` **before** you
-first adopt it and create the box, so you review the whole file once and the box is created with
-the agent already configured.
+The order matters in two places. The files are hidden **before** anything else can see them, so an
+agent's `git add -A` never stages them. And everything goes into `foldyard.toml` **before** you
+first adopt it and create the box, so you review the whole file once and the box is created with the
+agent already configured.
 
 Start from a clean tree (`git status` shows nothing), at the top of your clone:
 
@@ -42,9 +42,9 @@ Start from a clean tree (`git status` shows nothing), at the top of your clone:
    fy init --with claude
    ```
 
-   Size the VM here if the project needs more than the default 4 CPUs, 8 GiB of memory and
-   60 GiB of disk: add `--cpus`, `--memory` (MiB) and `--disk` (GiB). A heavy build (a C++
-   dependency built with Bazel, say) wants twice that.
+   Size the VM here if the project needs more than the default 4 CPUs, 8 GiB of memory and 60 GiB of
+   disk: add `--cpus`, `--memory` (MiB) and `--disk` (GiB). A heavy build (a C++ dependency built
+   with Bazel, say) wants twice that.
 
 2. **Move the ignore block into the exclude list, and undo `fy init`'s other edits.**
 
@@ -57,9 +57,9 @@ Start from a clean tree (`git status` shows nothing), at the top of your clone:
    git status --short   # must print nothing
    ```
 
-   The block is copied from what `fy init` wrote, rather than listed here, so it stays whatever
-   your installed foldyard generates. If `git status` still shows something, add it to the same
-   file before going on.
+   The block is copied from what `fy init` wrote, rather than listed here, so it stays whatever your
+   installed foldyard generates. If `git status` still shows something, add it to the same file
+   before going on.
 
 3. **Write the worktree script** (see [Worktrees](#worktrees) for what it's for):
 
@@ -81,6 +81,7 @@ Start from a clean tree (`git status` shows nothing), at the top of your clone:
    ```
 
 4. **Edit `foldyard.toml`.** Two additions beyond whatever your project needs:
+
    - under `[project]`, `worktree_init = ".fy/worktree-init.sh"`;
    - at the end of `[claude]`'s `system_prompt`, before its closing `"""`, the paragraph in
      [Telling the agent](#telling-the-agent). (If you use Codex too, add it to `[codex]`'s.)
@@ -93,8 +94,8 @@ Start from a clean tree (`git status` shows nothing), at the top of your clone:
    fy box up
    ```
 
-   `fy box up` would also offer the file for adoption on its own. Doing it as separate steps
-   keeps the review apart from a command that goes on to build a VM.
+   `fy box up` would also offer the file for adoption on its own. Doing it as separate steps keeps
+   the review apart from a command that goes on to build a VM.
 
 ## Already set up the usual way?
 
@@ -112,21 +113,20 @@ the box you have carries on. The prompt reaches the next `fy claude`, and `workt
 its own `WORKTREE=<name> fy config diff` and `adopt`.
 
 **If some of it is committed**, on a branch of yours or in `.gitignore`, take it out of the history
-before anything is pushed; a commit that removes it would still carry it into a pull request.
-Copy `foldyard.toml` and `.claude/skills/foldyard/` aside first: git deletes a file from the working
-tree when a rebase or checkout drops the commit that tracked it. Then drop or amend those commits,
-put the files back, and continue as for the uncommitted case. If they have already reached
-upstream, the clone's setup is no longer private, and this page can't make it so.
+before anything is pushed; a commit that removes it would still carry it into a pull request. Copy
+`foldyard.toml` and `.claude/skills/foldyard/` aside first: git deletes a file from the working tree
+when a rebase or checkout drops the commit that tracked it. Then drop or amend those commits, put
+the files back, and continue as for the uncommitted case. If they have already reached upstream, the
+clone's setup is no longer private, and this page can't make it so.
 
 ## Worktrees
 
 `git worktree add` doesn't bring untracked files along, so a new worktree would start with no
 `foldyard.toml`, and its box with an empty config. The script from step 3 fixes that:
-`fy worktree add <name>` runs `[project].worktree_init` in a container right after the checkout,
-and then offers the worktree's config for adoption. When main's file matches what you adopted
-there, the copy is byte-for-byte main's adopted config and is adopted without a prompt: it grants
-nothing main hasn't been granted. (If main has an edit you haven't adopted, you get the usual
-review instead.)
+`fy worktree add <name>` runs `[project].worktree_init` in a container right after the checkout, and
+then offers the worktree's config for adoption. When main's file matches what you adopted there, the
+copy is byte-for-byte main's adopted config and is adopted without a prompt: it grants nothing main
+hasn't been granted. (If main has an edit you haven't adopted, you get the usual review instead.)
 
 Changing the config later, after an edit in the main checkout:
 
@@ -137,14 +137,14 @@ WORKTREE=<name> fy config diff             # then the worktree's own review
 WORKTREE=<name> fy config adopt
 ```
 
-An edit under `[box]` (packages, tools, shadow volumes, caches) also needs each box recreated
-after the adopt, since the box installs them only when it's created: `fy box down && fy box up`,
-and `WORKTREE=<name>` in front of both for a worktree's box.
+An edit under `[box]` (packages, tools, shadow volumes, caches) also needs each box recreated after
+the adopt, since the box installs them only when it's created: `fy box down && fy box up`, and
+`WORKTREE=<name>` in front of both for a worktree's box.
 
 `fy worktree remove <name>` doesn't count the private files as uncommitted work, so it removes the
-worktree without asking about them. That loses nothing, since they are copies of main's. It
-keeps the worktree's branch (`wt/<name>` unless you named one); delete it with `git branch -d`
-when you're done with it.
+worktree without asking about them. That loses nothing, since they are copies of main's. It keeps
+the worktree's branch (`wt/<name>` unless you named one); delete it with `git branch -d` when you're
+done with it.
 
 ## Telling the agent
 
@@ -174,28 +174,27 @@ paragraph: it checks whether git tracks `foldyard.toml` before treating it as th
 Git treats ignored files as expendable. The ones to know:
 
 - **`git clean -x` or `-X`** deletes them, and **`git stash --all`** stashes them away.
-- **A branch that tracks a `foldyard.toml`** (if upstream ever adopts foldyard, say): switching
-  to it overwrites yours **without a warning**, and switching back deletes it.
+- **A branch that tracks a `foldyard.toml`** (if upstream ever adopts foldyard, say): switching to
+  it overwrites yours **without a warning**, and switching back deletes it.
 
 Your computer's adopted copy is unaffected by either: the files in `~/.foldyard/` aren't in the
-checkout, and the host keeps running what you adopted. That copy is also how you get the file
-back:
+checkout, and the host keeps running what you adopted. That copy is also how you get the file back:
 
 ```bash
 FOLDYARD_REPO="$PWD" fy config revert   # rewrites foldyard.toml from the adopted copy
 fy skill install foldyard               # the skill, if it went too
 ```
 
-`FOLDYARD_REPO` is needed because, with the file gone, `fy` no longer recognises the directory as
-a project. `.fy/worktree-init.sh` has no copy anywhere; recreate it from step 3.
+`FOLDYARD_REPO` is needed because, with the file gone, `fy` no longer recognises the directory as a
+project. `.fy/worktree-init.sh` has no copy anywhere; recreate it from step 3.
 
 ## Limits
 
 - **Per clone.** `.git/info/exclude` isn't pushed, so a fresh clone needs these steps again (the
-  adopted copy is per checkout path too). Keep your `foldyard.toml` somewhere of your own if
-  you'll want it again.
+  adopted copy is per checkout path too). Keep your `foldyard.toml` somewhere of your own if you'll
+  want it again.
 - **No team template.** The `foldyard.local.toml` overlay is for splitting shared config from
   personal config. Here all of it is personal, so put everything in `foldyard.toml`.
-- **The box can still edit the file.** It's in the checkout, so it's as writable from the box as
-  in any project. That's fine for the same reason as everywhere else: your computer runs only
-  what you adopt, and `fy config status` reports any difference.
+- **The box can still edit the file.** It's in the checkout, so it's as writable from the box as in
+  any project. That's fine for the same reason as everywhere else: your computer runs only what you
+  adopt, and `fy config status` reports any difference.
