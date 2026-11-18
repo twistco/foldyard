@@ -2647,28 +2647,27 @@ def test_claude_keyless_seeds_onboarding_flag(monkeypatch):
         ),
     ],
 )
-def test_a_bare_agent_block_is_the_manual_login_box(
+def test_a_bare_agent_block_offers_no_login_hosts(
     monkeypatch, plugin, enabled, keyless, cred, seed, api_host
 ):
-    # `[claude]` / `[codex]` with NO keyless = "install it, mount its state, I'll log in myself".
-    # Every keyless artifact has to stay out of that box or the login can't happen: a dummy
-    # credential takes precedence over the token you obtain, and a pre-seeded onboarding/auth file
-    # skips or satisfies the very prompt you need. There's also no rung to flip — the axis only
-    # exists under keyless — and no injector, so nothing exempts the API host from a default_deny
-    # wall; it has to be OFFERED instead. Run with the proxy substrate present, since that's what
-    # makes the keyless artifacts ambient: only `keyless` being unset may hold them back.
+    # `[claude]` / `[codex]` with NO keyless used to mean "I'll log in inside the box". There is no
+    # in-box login any more (ADR-0008, amended 2026-11-18): such a table is refused at launch, so
+    # the plugin offers no login or API host for it, and bakes no keyless artifact either. Run with
+    # the proxy substrate present, since that's what makes the keyless artifacts ambient.
     monkeypatch.setattr(config, enabled, lambda: True)
     monkeypatch.setattr(config, keyless, lambda: "")
     p = plugin()
     env = {**_BOX_ENV, "FY_PROXY": "1"}
-    assert p.switches() == []  # no mode switch: there is no host-side decision to make
+    assert p.switches() == []
     assert p.proxy_rules({}) == [] and p.derive_env({}) == {}
-    assert not any(cred in a for a in p.box_args(dict(env)))  # no dummy to shadow a real token
+    assert not any(cred in a for a in p.box_args(dict(env)))
     assert all(s["label"] != seed for s in p.box_bootstrap(dict(env)))
-    assert api_host in [h["host"] for h in p.egress_recommend()]  # reachable behind the wall
-    # …and under keyless the API host drops off the offer: it's the injector host, exempt already.
+    offered = [h["host"] for h in p.egress_recommend()]
+    assert api_host not in offered  # the injector's host: exempt under keyless, never logged into
+    assert not {"console.anthropic.com", "auth.openai.com"} & set(offered)
+    # …and under keyless it's the same: only the installer's hosts are offered.
     monkeypatch.setattr(config, keyless, lambda: "api-key")
-    assert api_host not in [h["host"] for h in p.egress_recommend()]
+    assert [h["host"] for h in p.egress_recommend()] == offered
 
 
 def test_claude_keyless_inert_when_off(monkeypatch):
@@ -3276,3 +3275,93 @@ def test_a_bad_attribution_value_never_crashes_the_proxys_spec(monkeypatch, tmp_
     monkeypatch.setenv("MACHINE_ATTRIBUTION", "bogus")
     spec = Registry([proxy.ProxyPlugin()]).desired_daemons({})["egress-proxy"]
     assert spec["live"]["data"]["origin"]["record"] is False
+
+
+# ── no in-box login: what `fy verify` / `fy doctor` say in the box (ADR-0008, amended) ───────
+
+
+def _plant_claude(home):
+    (home / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+
+
+def _plant_codex(home):
+    (home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-proj-real"}')
+
+
+_STORED_LOGIN = [
+    (claude.ClaudePlugin, "claude_enabled", "CLAUDE_CONFIG_DIR", _plant_claude, "Claude"),
+    (codex.CodexPlugin, "codex_enabled", "CODEX_HOME", _plant_codex, "Codex"),
+]
+_AGENT_CRED_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
+
+
+@pytest.fixture
+def agent_home(monkeypatch, tmp_path):
+    for name in _AGENT_CRED_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        monkeypatch.setenv(name, str(tmp_path))
+    return tmp_path
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_verify_passes_a_box_with_no_stored_login(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    rows = list(plugin().verify_checks(_vctx()))
+    assert rows and _statuses(rows) == ["pass"] * len(rows)
+    assert any(f"no {label} login" in msg for _, msg in rows)
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_verify_fails_a_login_stored_in_the_box(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    plant(agent_home)
+    rows = list(plugin().verify_checks(_vctx()))
+    failed = [msg for status, msg in rows if status == "fail"]
+    assert len(failed) == 1 and str(agent_home) in failed[0] and label in failed[0]
+
+
+@pytest.mark.parametrize(
+    ("plugin", "enabled", "name", "dummy"),
+    [
+        (claude.ClaudePlugin, "claude_enabled", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-dummy"),
+        (codex.CodexPlugin, "codex_enabled", "OPENAI_API_KEY", "sk-dummy"),
+    ],
+)
+def test_verify_fails_a_real_credential_in_the_agents_env(
+    monkeypatch, agent_home, plugin, enabled, name, dummy
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    monkeypatch.setenv(name, dummy)
+    assert "fail" not in _statuses(plugin().verify_checks(_vctx()))
+    monkeypatch.setenv(name, "sk-real-looking")
+    failed = [msg for status, msg in plugin().verify_checks(_vctx()) if status == "fail"]
+    assert len(failed) == 1 and name in failed[0]
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "_label"), _STORED_LOGIN)
+def test_verify_says_nothing_on_the_host_or_without_the_table(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, _label
+):
+    plant(agent_home)
+    monkeypatch.setattr(config, enabled, lambda: True)
+    assert list(plugin().verify_checks(_vctx(in_box=False))) == []  # the volume isn't here
+    monkeypatch.setattr(config, enabled, lambda: False)
+    assert list(plugin().verify_checks(_vctx())) == []
+
+
+@pytest.mark.parametrize(("plugin", "enabled", "_var", "plant", "label"), _STORED_LOGIN)
+def test_box_doctor_names_a_stored_login_and_how_to_remove_it(
+    monkeypatch, agent_home, plugin, enabled, _var, plant, label
+):
+    monkeypatch.setattr(config, enabled, lambda: True)
+    [(status, name, detail)] = list(plugin().box_doctor_checks(_ctx()))
+    assert status == "ok" and name == f"{label.lower()} login"
+    plant(agent_home)
+    [(status, name, detail)] = list(plugin().box_doctor_checks(_ctx()))
+    assert status == "fail" and str(agent_home) in detail
+    assert ("/logout" if label == "Claude" else "codex logout") in detail

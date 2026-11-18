@@ -99,7 +99,7 @@ they pass through. The box never holds the real value.
 
 **Keyless** (`[claude] keyless`, `[codex] keyless`) — how an AI agent runs in the box without its
 key: the box has a dummy, and the proxy swaps in the real key for the provider's API host. You paste
-the real key once, on your computer.
+the real key once, on your computer. The only way foldyard runs an agent: there is no in-box login.
 
 **Metadata emulator** — a small server on the stack's network that answers Google Cloud's "metadata
 server" requests, so code in the box or a service gets a short-lived token for its own service

@@ -69,6 +69,9 @@ def _wire(
     monkeypatch.setattr(preflight.config, "proxy_enabled", lambda: proxy_enabled)
     monkeypatch.setattr(preflight.config, "claude_keyless", lambda: claude_keyless)
     monkeypatch.setattr(preflight.config, "codex_keyless", lambda: codex_keyless)
+    # Undeclared unless a test says so: the ambient (repo) config declares both agents.
+    monkeypatch.setattr(preflight.config, "claude_enabled", lambda: False)
+    monkeypatch.setattr(preflight.config, "codex_enabled", lambda: False)
     monkeypatch.setattr(preflight.config, "_table", lambda name: tables.get(name, {}))
     monkeypatch.setattr(preflight.config, "in_box", lambda: in_box)
     monkeypatch.setattr(preflight.devmode, "read", lambda: {"mode": {"github": github}})
@@ -359,3 +362,32 @@ def test_a_retired_github_table_refuses_the_launch_and_prints_its_replacement(mo
 def test_no_github_table_no_refusal(monkeypatch):
     _wire(monkeypatch, github_table=None)
     assert preflight.issues() == []
+
+
+# ── an agent table without keyless: no in-box login (ADR-0008, amended 2026-11-18) ───────────
+
+
+@pytest.mark.parametrize("table", ["claude", "codex"])
+def test_an_agent_table_without_keyless_is_refused(monkeypatch, table):
+    _wire(monkeypatch)
+    monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: True)
+    [block] = preflight.agent_issues()
+    assert f"[{table}] has no `keyless`" in block and "foldyard.local.toml" in block
+
+
+@pytest.mark.parametrize(("table", "kind"), [("claude", "oauth"), ("codex", "chatgpt")])
+def test_an_agent_table_with_keyless_or_absent_is_fine(monkeypatch, table, kind):
+    _wire(monkeypatch, **{f"{table}_keyless": kind})
+    monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: True)
+    assert preflight.agent_issues() == []
+    monkeypatch.setattr(preflight.config, f"{table}_keyless", lambda: "")
+    monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: False)  # undeclared/disabled
+    assert preflight.agent_issues() == []
+
+
+def test_a_keyless_typo_is_left_to_its_own_refusal(monkeypatch):
+    # `keyless = "oath"` normalises to "" and `issues()` already names the typo; saying "has no
+    # keyless" on top would send the reader looking for a line they did write.
+    _wire(monkeypatch, tables={"claude": {"keyless": "oath"}})
+    monkeypatch.setattr(preflight.config, "claude_enabled", lambda: True)
+    assert preflight.agent_issues() == []

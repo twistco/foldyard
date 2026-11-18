@@ -222,6 +222,123 @@ def dummy_box_args(taxonomy: dict, kind: str) -> list[str]:
     return ["-e", f"{spec['env']}={spec['dummy']}"] if spec else []
 
 
+# ── no in-box login (ADR-0008, amended 2026-11-18) ───────────────────────────────────────────
+#
+# Keyless is the only supported way an agent is credentialed. A `[claude]`/`[codex]` without
+# `keyless` is refused at launch (:func:`no_keyless_block`), and a login made in the box anyway —
+# the box is root, so nothing can stop one — is found by `fy verify` and `fy doctor` in the files
+# the agents themselves write it to. Read in the box, of the box's own files.
+
+
+def no_keyless_block(table: str) -> str:
+    """The refusal for a declared ``[claude]``/``[codex]`` with no ``keyless``: why, and the one
+    line that fixes it, in the personal file — which credential you pay for is yours, and a
+    ``keyless`` in the shared file prompts every colleague for one they may not have."""
+    kinds = {
+        "claude": (
+            ('"oauth"', "a token from `claude setup-token` on your computer"),
+            ('"api-key"', "an Anthropic API key"),
+        ),
+        "codex": (
+            ('"chatgpt"', "your ChatGPT subscription (`codex login` on your computer once)"),
+            ('"api-key"', "an OpenAI API key"),
+        ),
+    }[table]
+    choices = "".join(f"\n      keyless = {k:<11}# {why}" for k, why in kinds)
+    return (
+        f"✗ [{table}] has no `keyless`: foldyard no longer supports logging in inside the box,\n"
+        "    where the login is a real credential every box of the project can read (ADR-0008).\n"
+        "    Choose how your computer supplies it, in foldyard.local.toml (personal, gitignored):\n"
+        f"      [{table}]{choices}\n"
+        "    (one of them), then retry; you'll be asked to adopt the change."
+    )
+
+
+def claude_stored_login(config_dir: Path) -> list[str]:
+    """Where Claude Code has stored a real login under ``config_dir`` (its ``CLAUDE_CONFIG_DIR``):
+    ``.credentials.json`` (its OAuth login), or a Console API key kept in ``.claude.json``
+    (``primaryApiKey``). A keyless box's Claude writes neither: its credential is the dummy in the
+    environment. An unreadable ``.claude.json`` is not a finding — it's Claude's state file,
+    rewritten constantly, and a torn read isn't a credential."""
+    found: list[str] = []
+    creds = config_dir / ".credentials.json"
+    if creds.exists():
+        found.append(str(creds))
+    state = config_dir / ".claude.json"
+    try:
+        data = json.loads(state.read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get("primaryApiKey"):
+        found.append(f"{state} (primaryApiKey)")
+    return found
+
+
+def codex_stored_login(codex_home: Path) -> list[str]:
+    """``[auth.json]`` when Codex's ``auth.json`` under ``codex_home`` holds anything but foldyard's
+    own dummy: a real ``OPENAI_API_KEY`` (``codex login --api-key``) or real ChatGPT tokens
+    (``codex login``). ChatGPT keyless seeds :func:`dummy_codex_auth_json` there, whose tokens are
+    the known dummies; api-key keyless writes no file. A file that can't be read as JSON counts:
+    it exists only to hold a credential, so verify can't vouch for it."""
+    path = codex_home / "auth.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return [str(path)]
+    if not isinstance(data, dict):
+        return [str(path)]
+    key = data.get("OPENAI_API_KEY")
+    if key and key != CODEX_KEYLESS["api-key"]["dummy"]:
+        return [str(path)]
+    tokens = data.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        return [str(path)]
+    dummies = {
+        "id_token": codex_chatgpt_dummy_token(),
+        "access_token": codex_chatgpt_dummy_token(),
+        "refresh_token": "fy-dummy-refresh-token-never-used",
+    }
+    if any(tokens.get(name) and tokens[name] != dummy for name, dummy in dummies.items()):
+        return [str(path)]
+    return []
+
+
+def stored_login_rows(
+    label: str, found: list[str], leaks: list[str], remove: str
+) -> list[tuple[str, str]]:
+    """`fy verify`'s rows for one agent in the box: a FAIL per stored login (``found``) and per
+    credential env var holding more than the dummy (``leaks``), else one pass. ``remove`` is how
+    to get rid of a stored login, said in the failure."""
+    rows = [("fail", f"{label} login stored in the box: {path} — {remove}") for path in found] + [
+        (
+            "fail",
+            f"{name} holds a real-looking {label} credential — the box should hold only the dummy",
+        )
+        for name in leaks
+    ]
+    return rows or [
+        ("pass", f"no {label} login stored in the box (keyless: it stays on your computer)")
+    ]
+
+
+def stored_login_detail(found: list[str], remove: str) -> str:
+    """`fy doctor`'s detail for a stored login: where, and how to remove it."""
+    return f"real login stored in the box: {', '.join(found)} — {remove}"
+
+
+def credential_env_leaks(taxonomy: dict, environ) -> list[str]:
+    """The names, among ``taxonomy``'s credential env vars, that hold something other than
+    foldyard's dummy for them. Unset or empty is fine: no credential at all."""
+    out: list[str] = []
+    for spec in taxonomy.values():
+        value = environ.get(spec["env"], "")
+        if value and value != spec["dummy"] and spec["env"] not in out:
+            out.append(spec["env"])
+    return out
+
+
 # Prefix → (host.env var, human label). Order matters: the Claude ``sk-ant-…`` prefixes are more
 # specific than the bare OpenAI ``sk-`` and so must be tested first. ``sk-proj-…`` (OpenAI project
 # keys) falls under ``sk-``. This is the "no need to ask which" classifier from the design.

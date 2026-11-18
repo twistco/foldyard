@@ -106,7 +106,7 @@ recommend = [
 
 # ── Agents — uncomment ONE, then `fy box up` (step 2) ────────────────────────────────────
 # Claude Code (`fy claude`). Declaring [claude] installs it on box-up + mounts its persisted
-# login/transcripts. Keyless: the real token is injected at the host proxy, NEVER in the box
+# config/transcripts. Keyless: the real token is injected at the host proxy, NEVER in the box
 # (`fy box up` prompts once, hidden; stored only on the host). Then `fy mode claude=on`.
 # system_prompt is appended via --append-system-prompt, so a fresh `fy claude` starts
 # oriented instead of re-deriving the box and getting it wrong. The one below WORKS as
@@ -148,7 +148,7 @@ showThinkingSummaries = true
 #
 # OpenAI Codex CLI (`fy codex`). Declaring [codex] installs it on box-up + mounts ~/.codex.
 # Native installer (a static binary — no node needed). Keyless like Claude: the proxy
-# injects host-side. Leave `keyless` out and you get a plain in-box `codex login` instead.
+# injects host-side. Both agents need `keyless`: `fy box up` refuses a table without it.
 [codex]
 # keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)
 keyless = "chatgpt"  # your ChatGPT subscription: the minter refreshes ~/.codex/auth.json

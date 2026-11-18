@@ -44,7 +44,7 @@ in:
 - `[[inject]]` — one `off | on` switch per entry. The entry's `kind` says how its credential is
   made: a static token, a GitHub App installation token (`github-app`), or your own `gh` token
   (`gh-cli`, always an emergency switch) — [configuration](./configuration.md#inject);
-- `claude` and `codex` — only when you configure keyless auth (below).
+- `claude` and `codex` — when you declare the agent's table, with its `keyless` key (below).
 
 Everything else — cloud identity, auth simulators, LLM routing — comes from plugins your project
 opts into. No plugin in the config, no switch on the dashboard. So `fy mode` shows *your* project.
@@ -224,8 +224,8 @@ services starting and stopping — on a real machine with zero credentials. See
 
 ## Keyless agents
 
-If you run a coding agent in the box with `keyless` configured (`[claude]` or `[codex]`), you get an
-on/off switch for it:
+A coding agent in the box (`[claude]` or `[codex]`) always runs keyless, and you get an on/off
+switch for it:
 
 ```bash
 fy mode claude=on
@@ -236,6 +236,13 @@ prompt: paste your key or token. foldyard recognises its kind from the prefix an
 `host.env`. The box gets only a **dummy** credential — enough to make the client send an auth header
 — and the proxy replaces that header with the real value in flight. The real value is never typed in
 the box, never in the repo, never in scrollback.
+
+There is no in-box login to fall back on. A `[claude]` or `[codex]` table without `keyless` is
+refused (by `fy box up` and `fy box recreate` on your computer, by `fy claude` and `fy codex` in the
+box); set it in your `foldyard.local.toml`
+([configuration](./configuration.md#claude--codex--vscode)). A login made in the box anyway
+(`/login` in `claude`, `codex login`) leaves a real credential in the box's volume, so `fy verify`
+fails on it and `fy doctor` in the box names the file to remove.
 
 | keyless mode | dummy in the box | header the client sends | proxy rewrites on | real value lives in |
 | -- | -- | -- | -- | -- |
@@ -283,9 +290,9 @@ notification the first time it happens. Discovery can also point a workspace at 
 `chatgpt.com` (the account decides; a personal one stays there); keyless injects only on
 `chatgpt.com`, so Codex can't reach such a backend through the proxy.
 
-One caveat: adding, removing or changing `keyless` in the config adds or removes the dummy in the
-box's environment, which takes a `fy box up` to apply. The dashboard tells you when the running box
-is out of date. Switching the mode itself never needs a box restart.
+One caveat: declaring the agent or changing its `keyless` changes the dummy in the box's
+environment, which takes a `fy box up` to apply. The dashboard tells you when the running box is out
+of date. Switching the mode itself never needs a box restart.
 
 ## Per-worktree modes
 

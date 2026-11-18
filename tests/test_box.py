@@ -1887,6 +1887,29 @@ def test_codex_refuses_outside_box_and_execs_inside(monkeypatch):
     assert captured["argv"][-1] == "resume"  # caller args passed through
 
 
+@pytest.mark.parametrize(("agent", "kind"), [("claude", "oauth"), ("codex", "chatgpt")])
+def test_an_agent_without_keyless_is_refused_in_the_box(monkeypatch, capsys, agent, kind):
+    # No in-box login (ADR-0008, amended 2026-11-18): `fy claude`/`fy codex` refuse a table with
+    # no `keyless` before anything starts, naming the line that fixes it.
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setattr(box.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "")
+    monkeypatch.setattr(box.os, "execvpe", lambda *a: pytest.fail("launched"))
+    assert getattr(box, agent)([]) == 1
+    err = capsys.readouterr().err
+    assert f"[{agent}] has no `keyless`" in err and "foldyard.local.toml" in err and kind in err
+
+
+def test_box_up_refuses_an_agent_without_keyless_before_anything_starts(monkeypatch, capsys):
+    from foldyard import preflight
+
+    monkeypatch.setattr(preflight, "check_or_abort", lambda *a, **k: None)
+    monkeypatch.setattr(preflight, "agent_issues", lambda: ["✗ [claude] has no `keyless`: …"])
+    monkeypatch.setattr(box, "_ctx", lambda *a, **k: pytest.fail("reached the machine"))
+    assert box.main("up") == 1
+    assert "[claude] has no `keyless`" in capsys.readouterr().err
+
+
 # ── the launch gate: a keyless agent whose credential mode is off ─────────────────────
 
 
@@ -2043,12 +2066,9 @@ def test_launch_off_at_a_terminal_ctrl_c_cancels(gate, monkeypatch):
 
 
 @pytest.mark.parametrize("agent", ["claude", "codex"])
-def test_launch_gate_says_nothing_without_keyless_or_a_mirror(gate, agent, monkeypatch, capsys):
-    # A bare [agent] logs in for real (no mode to wait for); no mirror = the box knows nothing.
-    monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "")
-    _launch(agent)
-    assert gate.execed and capsys.readouterr().err == ""
-    gate.execed = None
+def test_launch_gate_says_nothing_without_a_mirror(gate, agent, monkeypatch, capsys):
+    # No mirror = the box knows nothing about the mode, so nothing to wait for. (A table with no
+    # keyless is refused outright: test_an_agent_without_keyless_is_refused_in_the_box.)
     monkeypatch.setattr(box.config, f"{agent}_keyless", lambda: "oauth")
     box.config.mirror_file().unlink()
     _launch(agent)

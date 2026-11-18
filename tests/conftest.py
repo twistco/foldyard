@@ -228,6 +228,21 @@ def isolated_home(tmp_path_factory, monkeypatch, request):
     monkeypatch.setenv("HOME", str(home))
 
 
+# The credentials the agents read from their environment. The suite drives `fy verify` in the
+# box, which fails on a real-looking one: a value from the operator's shell, or one a test let the
+# supervisor load from a host.env, must never reach another test.
+_AGENT_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def no_agent_credentials(monkeypatch):
+    """Each test starts without the agents' credential env, and ends without it too: setenv records
+    the value to restore (or "absent"), so whatever a test leaves there is undone."""
+    for name in _AGENT_CREDENTIAL_ENV:
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
 @pytest.fixture(autouse=True)
 def isolated_allow_store(tmp_path, monkeypatch, request):
     """Point the egress allow-store + the effective file the proxy reads at per-test paths, so no

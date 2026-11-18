@@ -36,6 +36,23 @@ def _proxy_required(mode: dict) -> bool:
     return bool(registry().proxy_rules(mode))
 
 
+def agent_issues() -> list[str]:
+    """A declared ``[claude]``/``[codex]`` with no ``keyless``, as a refusal block each: there is no
+    in-box login (ADR-0008, amended 2026-11-18). Asked by the box's own launch verbs, not
+    :func:`issues`, so `fy up` still brings a stack up. A ``keyless`` value that isn't recognised
+    normalises to ``""`` too; :func:`issues` names that typo, so it isn't said twice here."""
+    from . import keyless
+
+    out = []
+    for table, enabled, kind in (
+        ("claude", config.claude_enabled(), config.claude_keyless()),
+        ("codex", config.codex_enabled(), config.codex_keyless()),
+    ):
+        if enabled and not kind and config._table(table).get("keyless") in (None, False):
+            out.append(keyless.no_keyless_block(table))
+    return out
+
+
 def issues() -> list[str]:
     """Every blocking prerequisite problem for `up`/`box up`, each a ready-to-print block with a fix
     hint. Empty ⇒ good to go. Reads config + host PATH + posture; no side effects."""

@@ -1,7 +1,9 @@
 # ADR-0008 — Keyless agent auth: dummy credential in the box, rewrite in flight
 
 - **Status:** Accepted (design 2026-06-28; Claude api-key/OAuth + Codex api-key shipped late
-  2026-06; Codex ChatGPT-subscription follow-up) — implemented
+  2026-06; Codex ChatGPT-subscription follow-up) — implemented. **Amended 2026-11-18:** in-box login
+  removed: keyless is the only way an agent runs in the box (see
+  [the amendment](#amendment-2026-11-18-no-in-box-login)).
 - **Sources:** docs/history/agent-editor-plugins-plan.md Item 4b, src/foldyard/keyless.py,
   src/foldyard/plugins/claude.py, src/foldyard/plugins/codex.py
 
@@ -51,9 +53,10 @@ configuration of existing machinery.
   shared `egress-proxy` daemon, absent entirely unless `keyless` is configured. `off` (the
   zero-secret default) means the box holds only the dummy and cannot reach the provider.
   `derive_env` sets a `CLAUDE_INJECT`/`CODEX_INJECT` marker only when the axis is on — the dummy
-  bake and Claude's onboarding-flag seeding key on it, so a *non*-keyless `[claude]` box (real
-  in-box login, user's choice) gets no dummy. Both rules ride the proxy's multi-injector rule set
-  (ADR-0007), so claude + codex + github can all be on at once.
+  bake and Claude's onboarding-flag seeding key on it, so a *non*-keyless `[claude]` box gets no
+  dummy. (Such a box logged in for real inside the box, the user's choice until the 2026-11-18
+  amendment below refused it.) Both rules ride the proxy's multi-injector rule set (ADR-0007), so
+  claude + codex + github can all be on at once.
 - **Capture is host-side and prompt-once:** on a TTY `fy box up` with keyless configured and no
   matching host.env entry, `keyless.ensure_cred` prompts (hidden input), classifies the paste by
   prefix (`sk-ant-api…` → Claude key, `sk-ant-oat…` → Claude OAuth, `sk-…` → OpenAI key, so it never
@@ -81,3 +84,44 @@ configuration of existing machinery.
   a ChatGPT session, so the dummy-env trick doesn't apply; hence the dummy-`auth.json` shape.
 - **A host-side refresh minter for Claude OAuth** — unnecessary: the ~1-year token makes static
   injection correct, and skipping the refresh flow keeps the Claude path config-only.
+
+## Amendment (2026-11-18): no in-box login
+
+**Context.** A `[claude]` or `[codex]` table without `keyless` meant "log in inside the box"
+(`claude`'s own login, `codex login --api-key`). That was the starting point from before the egress
+proxy could inject credentials, and it outlived the reason for it. The login leaves a long-lived
+credential in a volume (`~/.claude/.credentials.json`, `~/.codex/auth.json`) that every box of the
+project mounts: readable by anything running in the box, and usable from anywhere once copied out.
+The rejected alternatives below already reject mounting real credentials into the box; an in-box
+login is the same outcome, reached by another route.
+
+**Decision.** Keyless is the only supported way to run Claude Code or Codex in the box.
+
+1. **A `[claude]`/`[codex]` table without `keyless` is refused** at `fy box up` and
+   `fy box recreate` on your computer, and by `fy claude` / `fy codex` in the box, with a message
+   naming the fix: set `keyless` under that table in `foldyard.local.toml` (personal: which
+   subscription you pay for is personal, and a shared one prompts every colleague). Claude:
+   `"oauth"` (`claude setup-token` on your computer) or `"api-key"`. Codex: `"chatgpt"`
+   (`codex login` on your computer once) or `"api-key"`.
+2. **`fy verify` in the box FAILs on a real login stored there:** Claude's `.credentials.json` under
+   `$CLAUDE_CONFIG_DIR` or a `primaryApiKey` in its `.claude.json`; a Codex `auth.json` under
+   `$CODEX_HOME` holding anything but foldyard's dummy (a real `OPENAI_API_KEY` or real ChatGPT
+   tokens); and `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` or `OPENAI_API_KEY` holding anything
+   but foldyard's dummy. `fy doctor` in the box names the file and how to remove it (`/logout` in
+   `claude` or delete the file; `codex logout`, then under ChatGPT keyless `fy box recreate` on your
+   computer to seed the dummy again). A stored login does not block launching: verify fails and
+   doctor reports, so nobody is locked out mid-migration.
+3. **The agents' `egress_recommend` no longer offers the login and API hosts** (`api.anthropic.com`,
+   `console.anthropic.com`, `api.openai.com`, `auth.openai.com`). Under keyless the API host is an
+   injector host, allowed anyway; the login hosts are never needed.
+4. **"Not supported" is not "impossible".** The box is root, and nothing stops someone running
+   `codex login` in it. Unsupported means: not offered, refused at launch when configured that way,
+   and detected by verify and doctor.
+
+**Consequences.**
+
+- Breaking for a consumer whose committed `[claude]`/`[codex]` has no `keyless`: each developer adds
+  one line to their `foldyard.local.toml`.
+- An existing box holding a login fails `fy verify` until the login is removed.
+- Features that need a fuller session than the injected credential carries stay unavailable in the
+  box: Codex's apps MCP, for one, is already switched off under keyless.

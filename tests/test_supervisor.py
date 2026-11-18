@@ -1018,7 +1018,11 @@ def test_reconcile_launches_the_proxy_once_host_env_gains_its_required_token(mon
     # CLAUDE_CODE_OAUTH_TOKEN"), which left the always-routing box with no network.
     host_env = tmp_path / "host.env"
     monkeypatch.setattr(supervisor.config, "host_env_file", lambda: host_env)
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)  # only ever lives in host.env
+    # Only ever lives in host.env. setenv first so monkeypatch records "absent" and removes the
+    # token the supervisor loads into os.environ below — a bare delenv of an absent var records
+    # nothing, and the token leaked into every later test on the worker.
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
     monkeypatch.setattr(
         supervisor, "_host_env_ambient", None
     )  # fresh ambient snapshot for the test

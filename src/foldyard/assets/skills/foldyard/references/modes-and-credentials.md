@@ -26,6 +26,9 @@ The real token is made **on the host** and added to your request in flight by th
 box holds a dummy value at most. So:
 
 - reading the env var gives you a placeholder — that's expected, not a misconfiguration;
+- never log an agent CLI in inside the box (`/login` in `claude`, `codex login`) to get past a 401:
+  that stores a real credential in the box, which `fy verify` fails on. The agents run keyless only;
+  the fix is a switch on the host;
 - the access only exists while the switch is on, and only against the host it's scoped to;
 - a fully compromised box can *use* the access during that window but can never *hold* it;
 - with a switch off, the proxy answers a request carrying its placeholder itself, with a 401 naming

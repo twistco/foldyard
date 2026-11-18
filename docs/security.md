@@ -266,10 +266,14 @@ only the VM-boundary checks run. What it checks:
 - **Dummy checks** (from the credential plugins): each `[[inject]]` row's `box_env` dummies must
   still hold their dummy value, in *any* mode, and the variables a known client reads a token from
   (`GH_TOKEN`, `GITHUB_TOKEN`) must be unset or a declared dummy in every box; the real credential
-  stays on your computer. A push over the API is possible exactly when an injected token's own scope
-  allows it (a GitHub App with `contents: write`, say) — `fy config widenings` shows where each
-  credential is delivered and what a GitHub App's was last read to grant. Active **emergency levels
-  print a banner**, so an escalation is never invisible.
+  stays on your computer. The coding agents get the same check: `ANTHROPIC_API_KEY`,
+  `CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY` hold foldyard's dummy or nothing, and no login is
+  stored in the box (Claude's `.credentials.json` or a `primaryApiKey` in its `.claude.json`, a
+  Codex `auth.json` holding anything but foldyard's dummy), since an agent only ever runs keyless. A
+  push over the API is possible exactly when an injected token's own scope allows it (a GitHub App
+  with `contents: write`, say) — `fy config widenings` shows where each credential is delivered and
+  what a GitHub App's was last read to grant. Active **emergency levels print a banner**, so an
+  escalation is never invisible.
 - **Firewall probes** (Lima with `[machine] firewall = true`): direct connections from the box that
   ignore the proxy — to a public IP on port 443 *and* on 53, the DNS-tunnel case — must be refused.
   A reachable proxy is checked first, so a box that is simply offline doesn't pass.
@@ -360,6 +364,11 @@ Each row names *what* failed. What it usually means, and what to do:
 - **`… possible real credential in the box`** (e.g. `GH_TOKEN` is more than its dummy) — the box's
   environment carries a real credential. `fy mode` shows the mode, `fy state` desired against
   observed; a box created under older config is recreated with `fy box down` and `fy box up`.
+- **A Claude or Codex login stored in the box** — someone ran `/login` in `claude` or `codex login`
+  in the box, or it was made before foldyard required `keyless`. The row names the file, and
+  `fy doctor` in the box says how to remove it: `/logout` in `claude` (or delete the file), or
+  `codex logout` (under ChatGPT keyless, then `fy box recreate` on your computer to put the dummy
+  back). The agents still launch meanwhile; only verify fails.
 - **`box is NOT under gVisor`** — the box was created before `[machine] runtime = "gvisor"` was
   adopted, or through the wrong socket. `fy box down` and `fy box up` recreate it.
 - **VM firewall rows:**

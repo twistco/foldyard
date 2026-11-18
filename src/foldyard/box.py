@@ -1681,6 +1681,9 @@ def claude(args: list[str] | None = None) -> int:
     if not shutil.which("claude"):
         _err("✗ claude not on PATH — add a [claude] table to foldyard.toml, then `fy box up`.")
         return 1
+    if not config.claude_keyless():  # no in-box login (ADR-0008, amended 2026-11-18)
+        _err(keyless.no_keyless_block("claude"))
+        return 1
     if not _await_credential("claude", "Claude", config.claude_keyless()):
         return 130
     _seed_claude_config(config.repo_root())
@@ -1865,6 +1868,9 @@ def codex(args: list[str] | None = None) -> int:
         return 1
     if not shutil.which("codex"):
         _err("✗ codex not on PATH — add a [codex] table to foldyard.toml, then `fy box up`.")
+        return 1
+    if not config.codex_keyless():  # no in-box login (ADR-0008, amended 2026-11-18)
+        _err(keyless.no_keyless_block("codex"))
         return 1
     if not _await_credential("codex", "Codex", config.codex_keyless()):
         return 130
@@ -2704,6 +2710,12 @@ def main(cmd: str = "shell", args: list[str] | None = None) -> int:
         from . import preflight
 
         preflight.check_or_abort(f"fy box {cmd}")
+        # An agent table with no `keyless` would be a box someone logs into: refused (ADR-0008,
+        # amended 2026-11-18), after the gate so it reads the adopted config.
+        if agents := preflight.agent_issues():
+            for block in agents:
+                _err(block)
+            return 1
         # After the gate (it reads the adopted config), before _ctx() can start the VM: a
         # `[box].env` that sets a name foldyard owns is refused before anything is started,
         # removed or built.
