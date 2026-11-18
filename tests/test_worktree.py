@@ -61,6 +61,7 @@ def fake_main(tmp_path, monkeypatch):
         "resolves": {"main"},
         "origin_head": None,
         "registered": set(),
+        "list_rc": 0,  # what `worktree list` exits with
     }
     teardown: list[str] = []  # records the box+stack teardown remove() drives
 
@@ -100,7 +101,9 @@ def fake_main(tmp_path, monkeypatch):
             state["registered"].add(str(wt_dir))
             return _Proc(0)
         if g and "worktree" in cmd and "list" in cmd:  # registration probe (orphan detection)
-            return _Proc(0, "".join(f"worktree {p}\n" for p in sorted(state["registered"])))
+            # Porcelain, as git writes it: each path verbatim, newlines and all.
+            listing = "".join(f"worktree {p}\nHEAD {BRANCH_OID}\n\n" for p in state["registered"])
+            return _Proc(state["list_rc"], "" if state["list_rc"] else listing)
         if g and "show-ref" in cmd:
             return _Proc(0 if cmd[-1] in state["refs"] else 1)
         if g and "symbolic-ref" in cmd:  # origin/HEAD default-branch pointer
@@ -1554,6 +1557,52 @@ def test_a_nested_path_is_shown_without_its_control_characters(fake_main, capsys
     assert worktree.remove("feat", assume_yes=True) == 1
     err = capsys.readouterr().err
     assert "\x1b" not in err and "\x07" not in err
+
+
+def test_remove_refuses_when_git_cannot_list_worktrees(fake_main, capsys):
+    # Can't tell whether one is inside, so nothing is torn down.
+    _make_wt(fake_main)
+    fake_main["state"]["list_rc"] = 128
+    assert worktree.remove("feat", force=True, assume_yes=True) == 1
+    assert fake_main["teardown"] == []
+    assert "--discard" in capsys.readouterr().err
+
+
+def test_remove_discard_goes_on_when_git_cannot_list_worktrees(fake_main):
+    _make_wt(fake_main)
+    fake_main["state"]["list_rc"] = 128
+    assert worktree.remove("feat", discard=True, assume_yes=True) == 0
+
+
+def test_a_worktree_made_inside_during_the_teardown_is_not_deleted(fake_main, monkeypatch, capsys):
+    # Its agents run until `box down`: one can make a worktree after the first look.
+    wt = _make_wt(fake_main)
+    from foldyard import box
+
+    def down(cmd, *a, **k):
+        fake_main["teardown"].append(f"box:{cmd}")
+        if cmd == "down":
+            _nest(fake_main, wt)
+        return 0
+
+    monkeypatch.setattr(box, "main", down)
+    assert worktree.remove("feat", force=True, assume_yes=True) == 1
+    assert not any("worktree" in c and "remove" in c for c in fake_main["calls"])
+    assert (wt / ".claude" / "worktrees" / "quick").is_dir()
+    assert "run this again" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["fe\nat", "feat "])
+def test_an_outer_path_git_lists_verbatim_is_still_matched(fake_main, name):
+    # Git doesn't escape a path in `worktree list --porcelain` (`-z` needs git 2.36): a newline
+    # in it, or trailing whitespace, must neither make the worktree an orphan nor hide what's
+    # inside it.
+    wt = _make_wt(fake_main, name)
+    assert worktree._registered_worktree(fake_main["main"], wt)
+    inner = _nest(fake_main, wt)
+    assert worktree._nested_worktrees(fake_main["main"], wt) == [str(inner)]
+    assert worktree.remove(name, force=True, assume_yes=True) == 1
+    assert fake_main["teardown"] == []
 
 
 def test_the_git_calls_that_can_run_repo_code_switch_hooks_off(fake_main):

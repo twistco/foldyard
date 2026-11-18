@@ -608,35 +608,62 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     ORPHAN: the checkout dir survives but its ``.git/worktrees`` metadata is gone (e.g. pruned
     from a context that couldn't see the checkout), so ``git worktree remove`` refuses it
     forever ("not a working tree") — the caller must delete the dir + prune instead."""
-    if (trees := _worktree_paths(main)) is None:
+    if (listing := _worktree_listing(main)) is None:
         return True  # can't tell — proceed as registered and let `git worktree remove` report
-    return str(wt_dir) in trees or str(wt_dir.resolve()) in trees
+    return any(f"\nworktree {p}\n" in listing for p in {str(wt_dir), str(wt_dir.resolve())})
 
 
-def _worktree_paths(main: Path) -> set[str] | None:
-    """Every worktree path git records for ``main`` (``worktree list``), None when it can't say.
-    The paths come from the shared ``.git``, which a box writes: data to compare and show only."""
+def _worktree_listing(main: Path) -> str | None:
+    """``git worktree list --porcelain`` for ``main``, a newline in front, None when git can't
+    say. Git writes each path verbatim (only ``-z``, git 2.36+, delimits them), so a path is
+    matched in this text as ``\nworktree <path>…`` rather than split into lines, which would cut
+    a path holding a newline. The paths come from the shared ``.git``, which a box writes: data to
+    compare and show, never to act on."""
     out = subprocess.run(
-        ["git", "-C", str(main), "worktree", "list", "--porcelain"],
-        capture_output=True,
-        text=True,
+        ["git", "-C", str(main), "worktree", "list", "--porcelain"], capture_output=True
     )
-    if out.returncode != 0:
-        return None
-    return {
-        line.removeprefix("worktree ").strip()
-        for line in out.stdout.splitlines()
-        if line.startswith("worktree ")
-    }
+    return None if out.returncode != 0 else "\n" + os.fsdecode(out.stdout)
 
 
-def _nested_worktrees(main: Path, wt_dir: Path) -> list[str]:
+def _nested_worktrees(main: Path, wt_dir: Path) -> list[str] | None:
     """The worktrees git records INSIDE ``wt_dir`` — an agent's quick worktree under
-    ``.claude/worktrees/``, say (docs/git.md). Deleting ``wt_dir`` deletes them, uncommitted work
-    and all: ``git worktree remove`` takes a worktree nested in an ignored dir even without
-    ``--force``, and the yard's check reads only ``wt_dir``'s own files."""
-    inside = [str(wt_dir) + os.sep, str(wt_dir.resolve()) + os.sep]
-    return sorted(p for p in _worktree_paths(main) or () if p.startswith(tuple(inside)))
+    ``.claude/worktrees/``, say (docs/git.md) — or None when git can't list them. Deleting
+    ``wt_dir`` deletes them, uncommitted work and all: ``git worktree remove`` takes a worktree
+    nested in an ignored dir even without ``--force``, and the yard's check reads only ``wt_dir``'s
+    own files. Each is shown up to the first newline past ``wt_dir`` (display only)."""
+    if (listing := _worktree_listing(main)) is None:
+        return None
+    found: set[str] = set()
+    for outer in {str(wt_dir), str(wt_dir.resolve())}:
+        marker = f"\nworktree {outer}{os.sep}"
+        at = listing.find(marker)
+        while at != -1:
+            begin, tail = at + len("\nworktree "), at + len(marker)
+            found.add(listing[begin : listing.find("\n", tail)])
+            at = listing.find(marker, tail)
+    return sorted(found)
+
+
+def _refuse_nested(name: str, nested: list[str] | None, *, late: bool = False) -> bool:
+    """Say why ``remove`` stops, when worktrees sit inside ``name``'s (or git couldn't list
+    them); ``late`` when its box and stack are already down. False when nothing is in the way."""
+    if nested == []:
+        return False
+    if nested is None:
+        _err("✗ git couldn't list the worktrees, so it can't be told whether any sit inside")
+        _err(f"  '{name}', which removing it would delete with any uncommitted work in them.")
+    else:
+        what = "were made inside it meanwhile" if late else "sit inside it"
+        _err(f"✗ not removing worktree '{name}': these git worktrees {what}, and removing it")
+        _err("  would delete them with any uncommitted work in them:")
+        for path in nested:
+            _err(f"    {_shown_path(path)}")
+        _err("  Remove each first (in a box: `git worktree remove <path>`, which refuses one")
+        _err("  with uncommitted work).")
+    if late:
+        _err("  Its box and stack are down; nothing was deleted.")
+    _err("  Then run this again, or pass --discard to remove it all anyway.")
+    return True
 
 
 def _shown_path(path: str) -> str:
@@ -1444,15 +1471,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         _err("  changes in it are lost).")
         return 1
     nested = _nested_worktrees(main, wt_dir)
-    if nested and not discard:
-        _err(f"✗ worktree '{name}' holds other git worktrees, and removing it would delete them")
-        _err("  with any uncommitted work in them:")
-        for path in nested:
-            _err(f"    {_shown_path(path)}")
-        _err(
-            "  Remove each first (in its box: `git worktree remove <path>`, which refuses one with"
-        )
-        _err("  uncommitted work), then run this again. --discard removes them all anyway.")
+    if not discard and _refuse_nested(name, nested):
         return 1
     # Asked BEFORE the plan and the teardown: with no yard to ask about uncommitted work, nothing
     # is torn down (an orphan has nothing git could check, and --discard says not to ask).
@@ -1475,8 +1494,9 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         print("  4. git worktree remove — the checkout directory is deleted, NOT checked for")
         print("       uncommitted work first, nor any saved (--discard): anything uncommitted")
         print("       in it is lost")
-        for path in nested:
-            print(f"       — and in the worktree inside it, {_shown_path(path)}")
+        for path in nested or ():
+            print(f"       — and in the worktree inside it, {_shown_path(path)}, which git then")
+            print("         lists as prunable until `git worktree prune`")
     elif force:
         print("  4. save any uncommitted work on refs/fy/removed/<name>-<time> (looked for in the")
         print("       VM), then git worktree remove — the checkout directory is deleted")
@@ -1517,6 +1537,11 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         _err(f"✗ refusing to remove worktree '{name}' — its transcripts were NOT archived.")
         _err("  Resolve the issue, or re-run with --force to remove anyway (loses them).")
         return rc
+
+    # Its agents ran until the box went down, and one may have made a worktree inside it since
+    # the first look: look again before anything is deleted.
+    if not discard and _refuse_nested(name, _nested_worktrees(main, wt_dir), late=True):
+        return 1
 
     # 4. Delete the checkout — asking the yard about uncommitted work right before (after the
     #    teardown, so its own box can't add more), parking it under --force — or, for an orphan
