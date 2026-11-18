@@ -234,7 +234,7 @@ it. A worktree that holds another one, such as an agent's
 [quick worktree](#quick-worktrees-in-a-box) inside it, is refused before anything is taken down:
 deleting it would delete the one inside, uncommitted work and all, which neither git nor that save
 would notice. Remove the inner one first, from a box, with `git worktree remove <path>`; `--discard`
-removes both anyway.
+removes both anyway, and git then lists the inner one as prunable until `git worktree prune`.
 
 Uncommitted work here means files that differ from the worktree's last commit once everything is
 unstaged: changed, deleted or untracked files that aren't gitignored, and changes inside a
