@@ -80,8 +80,9 @@ Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and
   can retire the compose path guard.
 - [fleet-scope.md](./fleet-scope.md) — the agent control plane: what `fy agent` is as a first
   version, and the next phase (a hosted control plane, interaction, sizing).
-- [git-guard-scope.md](./git-guard-scope.md) — keeping the box out of what your git runs: the parts
-  of `.git/` made read-only from the VM, and `fy share` for another repository (proposed).
+- [git-guard-scope.md](./git-guard-scope.md) — keeping the box out of what your git runs: a
+  read-only guard, spiked and set aside, what's left of it, and `fy share` for another repository
+  (proposed).
 - [lima-backend-scope.md](./lima-backend-scope.md) — the VM-backend contract (lima and podman) and
   the tricky parts of the Lima backend.
 - [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — how the box reaches the
