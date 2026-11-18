@@ -22,6 +22,10 @@ What it then does is ``yard["mode"]``:
 ``yard["then"]``, when set, is called after a check has run, in either mode: what the container
 (running the box's filters over a box-writable mount) wrote to the shared ``.git`` meanwhile.
 
+A third, ``<image> --version`` with ``--entrypoint git``, is the question asked after a checkout
+the engine couldn't start: is there a git in the image at all? It is recorded in
+``yard["probes"]`` and answered 0 when ``yard["git"]`` (the default), else 127.
+
 ``yard["image"]`` is what ``box.image_exists`` answers. Every other ``subprocess.run`` goes
 through to whatever ran before (the real one, or a test's own fake installed earlier).
 """
@@ -59,6 +63,8 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
         "then": None,
         "runs": [],
         "checks": [],
+        "probes": [],
+        "git": True,
         "seen": {},
     }
     monkeypatch.setattr(config, "box_image", lambda: {"tag": IMAGE})
@@ -73,6 +79,9 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
             return before(cmd, *a, **kw)
         entrypoint = cmd[cmd.index("--entrypoint") + 1]
         argv = cmd[cmd.index(IMAGE) + 1 :]
+        if entrypoint == "git" and argv == ["--version"]:  # is there a git in the image at all?
+            yard["probes"].append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0 if yard["git"] else 127)
         workdir = Path(cmd[cmd.index("-w") + 1])
         if entrypoint == "sh" and argv[:1] == ["-c"]:
             yard["checks"].append(list(cmd))

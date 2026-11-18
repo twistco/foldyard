@@ -1397,17 +1397,27 @@ def test_remove_retries_volume_cleanup_when_checkout_and_state_gone(fake_main, m
 
 
 def test_add_refuses_in_box(fake_main, monkeypatch, capsys):
-    # The box shares the real .git but sees a container-local worktrees root — an in-box
-    # `git worktree add` would register shared metadata for a path the Mac side can't manage.
+    # What `add` sets up — the registry, the adoption, a box of its own — is your computer's to
+    # make. The refusal points at what a box CAN do: a plain worktree inside the checkout.
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert worktree.add("feat") == 1
     assert not fake_main["calls"]  # bailed before shelling git
-    assert "run on your computer" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "run on your computer" in err
+    assert "git worktree add --no-track -b <branch> .claude/worktrees/feat" in err
+    assert "fy docs git" in err
+
+
+def test_remove_in_box_points_nowhere_else(fake_main, monkeypatch, capsys):
+    _make_wt(fake_main)
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert worktree.remove("feat", force=True) == 1
+    assert ".claude/worktrees" not in capsys.readouterr().err
 
 
 def test_remove_refuses_in_box(fake_main, monkeypatch, capsys):
-    # Same guard for remove: an in-box removal prunes SHARED worktree metadata against a
-    # box-local dir, orphaning the Mac-side checkout (the observed failure this guards).
+    # Same guard for remove: it tears down the worktree's box and stack, and drops its
+    # registration and adopted config — all your computer's.
     _make_wt(fake_main)
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert worktree.remove("feat", force=True) == 1

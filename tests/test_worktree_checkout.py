@@ -226,9 +226,40 @@ def test_no_yard_refuses_before_git_writes_anything(real_add, capsys):
 
 def test_an_image_without_git_is_named(real_add, capsys):
     real_add["yard"]["rc"] = 127
+    real_add["yard"]["git"] = False
     assert _add("new") == 1
     err = capsys.readouterr().err
     assert "no git" in err and "[box].image" in err
+
+
+@pytest.mark.parametrize("rc", [126, 127])
+def test_a_worktree_the_vm_cannot_see_is_not_called_a_missing_git(real_add, capsys, rc):
+    # The engine reports a working directory it can't enter (crun: `chdir to …: No such file or
+    # directory`) with the same 127 as a missing binary. Seen live: the worktrees root deleted and
+    # made again while the VM ran, so the VM's share still served the old, deleted folder.
+    real_add["yard"]["rc"] = rc
+    assert _add("new") == 1
+    err = capsys.readouterr().err
+    assert "no git" not in err
+    assert str(real_add["wt_root"] / "feat") in err and "fy machine stop && fy up" in err
+    assert "Nothing was kept" in err
+    assert not (real_add["wt_root"] / "feat").exists()
+
+
+def test_the_git_question_runs_with_nothing_mounted(real_add):
+    real_add["yard"]["rc"] = 127
+    _add("new")
+    [probe] = real_add["yard"]["probes"]
+    image = probe.index(yard_stub.IMAGE)
+    assert probe[image:] == [yard_stub.IMAGE, "--version"]
+    assert probe[probe.index("--entrypoint") + 1] == "git"
+    assert "-v" not in probe and "-w" not in probe  # what it rules out is the working directory
+    assert probe[probe.index("--network") + 1] == "none"
+
+
+def test_a_checkout_that_succeeds_asks_nothing_more(real_add):
+    assert _add("new") == 0
+    assert real_add["yard"]["probes"] == []
 
 
 def test_lfs_files_are_said_to_be_pointers(real_add, capsys):

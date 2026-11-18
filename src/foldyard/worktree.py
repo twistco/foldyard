@@ -36,15 +36,21 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
 
 
-def _host_only(verb: str) -> int | None:
-    """Worktree add/remove are host-only. The box shares the real ``.git`` (bind-mounted) but
-    its worktrees root is a container-local dir the host can't see — so an in-box
-    ``git worktree add/remove/prune`` edits SHARED metadata against paths that exist on only
-    one side, orphaning host-side checkouts (dir present, metadata gone: ``git worktree
-    remove`` then refuses it forever). None when OK to proceed."""
+def _host_only(verb: str, quick: str = "") -> int | None:
+    """Worktree add/remove are host-only: what they make and unmake is your computer's — the
+    worktree registry, the adopted config, a box and a stack of its own — and a box can't make its
+    own box. (A box sees the worktrees root at the same path your computer does; the old reason
+    here, a box-local root, no longer holds.) For ``add``, ``quick`` names the plain worktree a box
+    CAN make itself, inside the checkout (docs/git.md, "Quick worktrees in a box"). None when OK
+    to proceed."""
     if config.in_box():
-        _err(f"✗ run on your computer — in the box, `worktree {verb}` would edit the shared")
-        _err("  .git against a box-local worktrees dir and orphan the checkout on your computer.")
+        _err(f"✗ run on your computer — `fy worktree {verb}` sets up the worktree's own box, stack")
+        _err("  and config there, which a box can't do for itself.")
+        if quick:
+            path = shlex.quote(f".claude/worktrees/{quick}")
+            _err("  For a small change that needs none of that, a plain worktree inside the")
+            _err(f"  checkout works from here:  git worktree add --no-track -b <branch> {path}")
+            _err("  (`fy docs git`, under quick worktrees in a box, says what it lacks).")
         return 1
     return None
 
@@ -450,6 +456,14 @@ def _checkout_in_yard(
         return 0
     if not oid:
         _err(f"✗ couldn't read the commit branch '{branch}' points at")
+    elif rc in (126, 127) and _git_runs_in(engine, env, image):
+        # The engine says "command not found" for a working directory it can't enter too.
+        wt_root = config.worktrees_root(main)
+        _err(f"✗ the VM can't see {wt_dir}, which git just made on your computer:")
+        _err(f"  its share of {wt_root} is out of date. That happens when the folder is")
+        _err("  deleted and made again while the VM runs: the VM keeps the old one until it")
+        _err("  restarts. Restart it (this stops the project's boxes and agent sessions):")
+        _err("    fy machine stop && fy up")
     elif rc in (126, 127):
         _err(f"✗ the checkout couldn't start git in {image}: no git there? [box].image must")
         _err("  provide git — the box needs it too (ADR-0014).")
@@ -463,6 +477,18 @@ def _checkout_in_yard(
     _undo_add(main, wt_dir, branch, oid if made else "")
     _err(f"  Nothing was kept. Once that's fixed, run it again:  {again}")
     return 1
+
+
+def _git_runs_in(engine: str, env: dict, image: str) -> bool:
+    """Whether ``image``'s git starts at all: asked only after a checkout the engine couldn't
+    start (126/127), since crun says "command not found" both for a missing binary and for a
+    working directory the VM can't see. Nothing mounted and no working directory, so its answer
+    is about the image alone."""
+    probe = [
+        *(engine, "run", "--rm", "--cap-drop", "ALL", "--network", "none"),
+        *("--entrypoint", "git", image, "--version"),
+    ]
+    return subprocess.run(probe, env=env, capture_output=True).returncode == 0
 
 
 def _checkout_cmd(engine: str, image: str, main: Path, wt_dir: Path, oid: str) -> list[str]:
@@ -1070,7 +1096,7 @@ def add(
     worktree add``) it registers instead, once the operator has confirmed its real path — the one
     way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
     ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
-    if (rc := _host_only("add")) is not None:
+    if (rc := _host_only("add", quick=name)) is not None:
         return rc
     if name == "main":
         # "main" is the positional label for the PRIMARY checkout (the repo root) in the workspaces
