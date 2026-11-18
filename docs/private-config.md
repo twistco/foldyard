@@ -96,6 +96,28 @@ Start from a clean tree (`git status` shows nothing), at the top of your clone:
    `fy box up` would also offer the file for adoption on its own. Doing it as separate steps
    keeps the review apart from a command that goes on to build a VM.
 
+## Already set up the usual way?
+
+If you ran `fy init` in this clone before and have been using it, the setup above still applies;
+only the start differs. Your computer keeps running the config you adopted throughout, since the
+adopted copy is keyed by the checkout's path, not by anything git tracks, so the box never goes
+without it.
+
+**If none of it is committed** (`git status` lists `foldyard.toml` and the rest as untracked, and
+`.gitignore` as modified), skip step 1 and do steps 2–4 as written: step 2 copies the ignore block
+from your modified `.gitignore` before `git restore` puts it back. In step 5, `fy config diff` now
+shows only the two additions from step 4, and `fy box up` isn't needed: neither is under `[box]`, so
+the box you have carries on. The prompt reaches the next `fy claude`, and `worktree_init` the next
+`fy worktree add`. A worktree you already have gets the files with `fy worktree init <name>`, then
+its own `WORKTREE=<name> fy config diff` and `adopt`.
+
+**If some of it is committed**, on a branch of yours or in `.gitignore`, take it out of the history
+before anything is pushed; a commit that removes it would still carry it into a pull request.
+Copy `foldyard.toml` and `.claude/skills/foldyard/` aside first: git deletes a file from the working
+tree when a rebase or checkout drops the commit that tracked it. Then drop or amend those commits,
+put the files back, and continue as for the uncommitted case. If they have already reached
+upstream, the clone's setup is no longer private, and this page can't make it so.
+
 ## Worktrees
 
 `git worktree add` doesn't bring untracked files along, so a new worktree would start with no
