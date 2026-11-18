@@ -593,3 +593,117 @@ def test_pattern_is_a_glob_so_no_pattern_can_hang_the_prompt():
     start = time.monotonic()
     assert keyless.secret_ok(victim, evil, False) is None
     assert time.monotonic() - start < 1.0  # as a regex this never returns
+
+
+# ── a login stored in the box (ADR-0008, amended 2026-11-18: no in-box login) ───────────────
+#
+# Keyless is the only supported way an agent is credentialed: the box holds a dummy, the proxy
+# injects the real credential on your computer. A login made in the box anyway (`claude`'s own
+# login, `codex login`) leaves a real credential in a volume every box of the project mounts, so
+# `fy verify` and `fy doctor` look for one. These read the files the agents themselves write.
+
+
+def test_no_claude_login_in_an_empty_or_keyless_config_dir(tmp_path):
+    assert keyless.claude_stored_login(tmp_path / "absent") == []
+    assert keyless.claude_stored_login(tmp_path) == []
+    # What a keyless box's Claude writes on its own: onboarding and trust state, no credential.
+    (tmp_path / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True}))
+    (tmp_path / "settings.json").write_text("{}")
+    assert keyless.claude_stored_login(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "content", [json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-real"}}), "{torn"]
+)
+def test_a_claude_login_in_the_box_is_found(tmp_path, content):
+    # A file that can't be read counts, as Codex's does: it exists only to hold a credential.
+    (tmp_path / ".credentials.json").write_text(content)
+    assert keyless.claude_stored_login(tmp_path) == [str(tmp_path / ".credentials.json")]
+
+
+@pytest.mark.parametrize("content", ["{}", json.dumps({"claudeAiOauth": None}), ""])
+def test_an_emptied_claude_credentials_file_is_not_a_login(tmp_path, content):
+    # Whatever `/logout` leaves behind, a file holding nothing is no credential.
+    (tmp_path / ".credentials.json").write_text(content)
+    assert keyless.claude_stored_login(tmp_path) == []
+
+
+def test_a_claude_console_key_in_its_config_is_found(tmp_path):
+    (tmp_path / ".claude.json").write_text(json.dumps({"primaryApiKey": "sk-ant-api03-real"}))
+    found = keyless.claude_stored_login(tmp_path)
+    assert found == [f"{tmp_path / '.claude.json'} (primaryApiKey)"]
+
+
+def test_an_unreadable_claude_config_is_not_a_login(tmp_path):
+    # `.claude.json` is Claude's state file, rewritten constantly; a torn read is not a credential.
+    (tmp_path / ".claude.json").write_text("{not json")
+    assert keyless.claude_stored_login(tmp_path) == []
+
+
+def _dummy_chatgpt_auth() -> str:
+    return keyless.dummy_codex_auth_json("acct-123")
+
+
+def test_no_codex_login_without_auth_json_or_with_foldyards_dummy(tmp_path):
+    assert keyless.codex_stored_login(tmp_path / "absent") == []
+    assert keyless.codex_stored_login(tmp_path) == []
+    (tmp_path / "auth.json").write_text(_dummy_chatgpt_auth())  # ChatGPT keyless seeds this
+    assert keyless.codex_stored_login(tmp_path) == []
+    (tmp_path / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-dummy"}))
+    assert keyless.codex_stored_login(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {"OPENAI_API_KEY": "sk-proj-real"},  # `codex login --api-key`
+        {  # `codex login` with a ChatGPT account
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {"access_token": "eyJreal", "refresh_token": "rt_real", "account_id": "a"},
+        },
+        {  # the dummy's access token kept, a real refresh token beside it
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "access_token": keyless.codex_chatgpt_dummy_token(),
+                "refresh_token": "rt_real",
+            },
+        },
+    ],
+)
+def test_a_codex_login_in_the_box_is_found(tmp_path, auth):
+    (tmp_path / "auth.json").write_text(json.dumps(auth))
+    assert keyless.codex_stored_login(tmp_path) == [str(tmp_path / "auth.json")]
+
+
+def test_an_unreadable_codex_auth_json_counts_as_a_login(tmp_path):
+    # Unlike Claude's state file, auth.json exists only to hold a credential: if it can't be read
+    # as foldyard's dummy, verify can't vouch for it.
+    (tmp_path / "auth.json").write_text("{torn")
+    assert keyless.codex_stored_login(tmp_path) == [str(tmp_path / "auth.json")]
+
+
+def test_credential_env_holding_anything_but_the_dummy_is_named():
+    env = {"ANTHROPIC_API_KEY": "sk-ant-dummy", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-real"}
+    assert keyless.credential_env_leaks(keyless.CLAUDE_KEYLESS, env) == ["CLAUDE_CODE_OAUTH_TOKEN"]
+    assert keyless.credential_env_leaks(keyless.CLAUDE_KEYLESS, {}) == []
+    assert keyless.credential_env_leaks(keyless.CODEX_KEYLESS, {"OPENAI_API_KEY": "sk-dummy"}) == []
+    assert keyless.credential_env_leaks(keyless.CODEX_KEYLESS, {"OPENAI_API_KEY": "sk-x"}) == [
+        "OPENAI_API_KEY"
+    ]
+
+
+@pytest.mark.parametrize(("table", "kinds"), [("claude", "oauth"), ("codex", "chatgpt")])
+def test_the_no_keyless_refusal_names_the_personal_file_and_the_kinds(table, kinds):
+    text = keyless.no_keyless_block(table)
+    assert f"[{table}]" in text and "keyless" in text
+    assert "foldyard.local.toml" in text and kinds in text and "api-key" in text
+
+
+def test_a_claude_state_file_elsewhere_is_read_where_given(tmp_path):
+    (tmp_path / "home").mkdir()
+    state = tmp_path / "home" / ".claude.json"
+    state.write_text(json.dumps({"primaryApiKey": "sk-ant-api03-real"}))
+    assert keyless.claude_stored_login(tmp_path / "home" / ".claude") == []
+    found = keyless.claude_stored_login(tmp_path / "home" / ".claude", state=state)
+    assert found == [f"{state} (primaryApiKey)"]

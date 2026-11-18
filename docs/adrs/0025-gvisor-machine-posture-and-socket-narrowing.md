@@ -95,15 +95,16 @@ it may call. This is deliberate, with one qualification. foldyard runs one VM pe
 never enter the VM, and the VM mounts only the repo and worktrees (verified — §5). So a sibling that
 mounts the VM's `/` reads this project's own VM (its repo, worktrees and stack); there is no *other*
 project in the VM to leak to. What the VM **does** hold is whatever the box itself was handed: a
-non-keyless `[claude]`/`[codex]` box logs in for real, and that token lives in the
-`devbox_claude_home` / `devbox_codex_home` named volumes on the VM's disk — the box's own mounts. A
-root sibling that bind-mounts the volume store reads them, so "no credentials in the VM" is only
-true of the host-held ones; but the box already reads those volumes, so the sibling holds no
-principal the box did not, and the host boundary is unchanged. The mount/endpoint allowlist (the
-broader "narrowing shape" from isolation-layers Finding 1) would close that reach too; it is defence
-in depth against a shared-VM topology foldyard does not use, and is left as optional future
-hardening rather than a blocker for this ADR. (The keyless rungs keep even the agent token host-side
-— the proxy injects it in flight.)
+non-keyless `[claude]`/`[codex]` box logs in for real (refused since
+[ADR-0008's 2026-11-18 amendment](./0008-keyless-agent-auth.md#amendment-2026-11-18-no-in-box-login)),
+and that token lives in the `devbox_claude_home` / `devbox_codex_home` named volumes on the VM's
+disk — the box's own mounts. A root sibling that bind-mounts the volume store reads them, so "no
+credentials in the VM" is only true of the host-held ones; but the box already reads those volumes,
+so the sibling holds no principal the box did not, and the host boundary is unchanged. The
+mount/endpoint allowlist (the broader "narrowing shape" from isolation-layers Finding 1) would close
+that reach too; it is defence in depth against a shared-VM topology foldyard does not use, and is
+left as optional future hardening rather than a blocker for this ADR. (The keyless rungs keep even
+the agent token host-side — the proxy injects it in flight.)
 
 **5. `verify` gains a kernel row and reclassifies the mount audit under the posture.** In-box,
 `fy verify` checks the kernel the box actually runs on reports gVisor. The VM mount audit

@@ -36,6 +36,25 @@ def _proxy_required(mode: dict) -> bool:
     return bool(registry().proxy_rules(mode))
 
 
+def agent_issues() -> list[str]:
+    """A declared ``[claude]``/``[codex]`` with no ``keyless``, as a refusal block each: there is no
+    in-box login (ADR-0008, amended 2026-11-18). Asked by the box's own launch verbs, not
+    :func:`issues`, so `fy up` still brings a stack up. A ``keyless`` value that isn't recognised
+    normalises to ``""`` too, and is refused here all the same: a string typo has already stopped
+    the launch in :func:`issues` (which `check_or_abort` runs first), and anything else — a number,
+    say — is still a box someone would log into."""
+    from . import keyless
+
+    out = []
+    for table, enabled, kind in (
+        ("claude", config.claude_enabled(), config.claude_keyless()),
+        ("codex", config.codex_enabled(), config.codex_keyless()),
+    ):
+        if enabled and not kind:
+            out.append(keyless.no_keyless_block(table))
+    return out
+
+
 def issues() -> list[str]:
     """Every blocking prerequisite problem for `up`/`box up`, each a ready-to-print block with a fix
     hint. Empty ⇒ good to go. Reads config + host PATH + posture; no side effects."""
@@ -65,7 +84,8 @@ def issues() -> list[str]:
         ("codex", config.codex_keyless(), "api-key | chatgpt | true"),
     ):
         raw = config._table(table).get("keyless")
-        if raw not in (None, False, True) and normalised == "":
+        # By identity: `1 == True`, so a membership test let `keyless = 1` through as "fine".
+        if not (raw is None or raw is False or raw is True) and normalised == "":
             out.append(
                 f"✗ [{table}].keyless = {raw!r} isn't recognised — keyless would be OFF.\n"
                 f"    Use one of: {allowed} (or remove the line)."

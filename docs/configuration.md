@@ -24,6 +24,7 @@ colleague. A missing or malformed file contributes nothing.
 
 **Presence-gated tables.** Declaring the table, even empty, is the opt-in: `[proxy]`, `[claude]`,
 `[codex]`, `[vscode]` and every `[plugins.<name>]`. Delete the table to turn the feature off.
+`[claude]` and `[codex]` also need their `keyless` key ([below](#claude--codex--vscode)).
 
 **Edits don't reach your computer until you adopt them.** The box and the stack read the files live;
 what runs on your computer (the proxy, the token services, credential injection) reads an adopted
@@ -1077,7 +1078,8 @@ warmup = [{ dir = "web", run = "pnpm install --frozen-lockfile" }]
 
 ## `[claude]` / `[codex]` / `[vscode]`
 
-All three are **presence-gated**: declare the table (even empty) to opt in.
+All three are **presence-gated**: declare the table to opt in. `[vscode]` may be empty; `[claude]`
+and `[codex]` need `keyless`, since an agent in the box only ever holds a dummy credential.
 
 ```toml
 [claude]
@@ -1089,6 +1091,9 @@ You are root in this project's locked-down foldyard dev box. …
 [claude.settings]         # → claude --settings '{"showThinkingSummaries": "…"}'
 showThinkingSummaries = true
 
+[codex]
+keyless = "chatgpt"
+
 [codex.config]            # → codex -c 'model_reasoning_summary="auto"' -c tui.raw_output_mode=false
 model_reasoning_summary = "auto"
 tui = { raw_output_mode = false }
@@ -1096,12 +1101,16 @@ tui = { raw_output_mode = false }
 
 - **`[claude]`** — installs Claude Code at box-up and mounts its config/transcript volumes.
 
-  - **`keyless`** — keep the real credential out of the box: the box holds a dummy, and the proxy
-    swaps in the real one from `host.env`. `"oauth"` injects a `claude setup-token` token as the
-    bearer; `"api-key"` (or `true`) injects `x-api-key` on `api.anthropic.com`. Default: off — a
-    normal login, real credentials in the box's `~/.claude`, kept across recreation and `fy nuke`.
-    Without `keyless` there's no switch, and the login and API hosts join the `recommend` offer
-    instead.
+  - **`keyless`** — required. It keeps the real credential out of the box: the box holds a dummy,
+    and the proxy swaps in the real one from `host.env`. `"oauth"` injects a `claude setup-token`
+    token as the bearer; `"api-key"` (or `true`) injects `x-api-key` on `api.anthropic.com`. A
+    `[claude]` table without it is refused, by `fy box up` and `fy box recreate` on your computer
+    and by `fy claude` in the box, each naming the fix. On a team, set it in your
+    `foldyard.local.toml`: which subscription you pay for is personal, and a shared `keyless` asks
+    every colleague for a credential they may not have. There is no in-box login: a real one stored
+    in the box (`.credentials.json` under `$CLAUDE_CONFIG_DIR`, or a `primaryApiKey` in its
+    `.claude.json`) fails `fy verify`, and `fy doctor` in the box names the file. Remove it with
+    `/logout` in `claude`, or delete the file.
   - **`system_prompt`** — text `fy claude` passes via `--append-system-prompt`. `init` seeds a
     generic one. Default: `""`.
   - **`[claude.settings]`** — a settings table `fy claude` passes as JSON to `--settings`; Claude
@@ -1118,12 +1127,13 @@ tui = { raw_output_mode = false }
 - **`[codex]`** — installs the OpenAI Codex CLI at box-up (native installer, no node) and mounts its
   `~/.codex`.
 
-  - **`keyless`** — `"api-key"` (or `true`) injects the real `OPENAI_API_KEY` as a bearer on
-    `api.openai.com`; `"chatgpt"` uses your ChatGPT subscription: the box holds a dummy `auth.json`
-    and the proxy injects a current access token, refreshed on your computer from your real one.
-    Default: off (normal login). In the box that means `codex login --api-key`: the ChatGPT browser
-    login redirects to a loopback port in the box your browser can't reach, which `"chatgpt"`
-    solves.
+  - **`keyless`** — required, and refused without it, as for `[claude]` (`fy codex` in the box).
+    `"chatgpt"` uses your ChatGPT subscription (run `codex login` on your computer once): the box
+    holds a dummy `auth.json` and the proxy injects a current access token, refreshed on your
+    computer from your real one. `"api-key"` (or `true`) injects the real `OPENAI_API_KEY` as a
+    bearer on `api.openai.com`. A real login stored in the box (an `auth.json` under `$CODEX_HOME`
+    holding anything but foldyard's dummy) fails `fy verify`; `codex logout` in the box removes it,
+    and under `"chatgpt"` a `fy box recreate` on your computer puts the dummy back.
   - **`system_prompt`** — same job as `[claude]`'s; `fy codex` passes it as
     `-c developer_instructions="…"`, which adds to (doesn't replace) Codex's own prompt. Default:
     `""`.

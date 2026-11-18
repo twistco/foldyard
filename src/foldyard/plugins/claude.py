@@ -35,11 +35,22 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
 
 from .. import boxmounts, config, keyless
 from ..keyless import CLAUDE_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import CLAUDE_KEYLESS_HOST as _KEYLESS_HOST
-from . import HeldCredential, InjectRule, Plugin, Secret, Switch
+from . import (
+    DoctorContext,
+    HeldCredential,
+    InjectRule,
+    Plugin,
+    Secret,
+    Switch,
+    VerifyContext,
+)
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # Remove a stale npm/global Claude so the native installer's ~/.local/bin copy wins on PATH (an
@@ -68,6 +79,19 @@ _ONBOARD_PY = (
     "d['hasCompletedOnboarding']=True;"
     "open(p,'w').write(json.dumps(d,indent=2))"
 )
+
+# How to get rid of a login made in the box: Claude's own logout, or the file it stored.
+_REMOVE_LOGIN = "remove it (`/logout` in `claude`, or delete the file); keyless injects it instead"
+
+
+def _stored_login() -> list[str]:
+    """Where this box's Claude has stored a real login (see :func:`keyless.claude_stored_login`),
+    under the config dir `box_args` points it at. Without one (a box with no [claude], which verify
+    watches too) Claude's defaults: ``~/.claude``, with its state file BESIDE it, ``~/.claude.json``
+    — the sibling `box_args` sets ``CLAUDE_CONFIG_DIR`` to avoid."""
+    if home := os.environ.get("CLAUDE_CONFIG_DIR"):
+        return keyless.claude_stored_login(Path(home))
+    return keyless.claude_stored_login(Path.home() / ".claude", state=Path.home() / ".claude.json")
 
 
 class ClaudePlugin(Plugin):
@@ -176,22 +200,38 @@ class ClaudePlugin(Plugin):
 
     def egress_recommend(self) -> list[dict]:
         """What a walled box needs to get Claude Code working, after one consented yes instead of a
-        blocked-host hunt. Always the installer's hosts; under a BARE ``[claude]`` (no ``keyless``)
-        also the ones a manual in-box login and its API traffic use, because nothing exempts them
-        there — the structural exemption belongs to an INJECTOR host, and a bare block has no
-        injector. So `api.anthropic.com` is offered exactly when it isn't already free."""
+        blocked-host hunt: the installer's hosts. Never the API or login hosts — there is no
+        in-box login (ADR-0008, amended 2026-11-18), and `api.anthropic.com` is the keyless
+        injector's host, exempt from the wall structurally."""
         if not config.claude_enabled():
             return []
-        hosts = [
+        return [
             {"host": "claude.ai", "why": "Claude Code installer (install.sh)"},
             {"host": "downloads.claude.ai", "why": "Claude Code release binaries + updates"},
         ]
-        if not config.claude_keyless():
-            hosts += [
-                {"host": "api.anthropic.com", "why": "Claude Code API (manual in-box login)"},
-                {"host": "console.anthropic.com", "why": "Claude Code login (Console account)"},
-            ]
-        return hosts
+
+    def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
+        # In the box only (the volume isn't on your computer): no real Claude credential in it —
+        # neither a login Claude stored nor a real value where the dummy belongs. Watched in EVERY
+        # box, declared or not, like the [[inject]] kinds' credential vars: a box without [claude]
+        # holding a real key is exactly what verify must not pass.
+        if not ctx.in_box:
+            return
+        leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
+        yield from keyless.stored_login_rows("Claude", _stored_login(), leaks, _REMOVE_LOGIN)
+
+    def box_doctor_checks(self, ctx: DoctorContext) -> Iterator[tuple[str, str, str]]:
+        # A row for a declared agent, and for an undeclared one only when there's a login to name:
+        # verify watches every box, and doctor must agree with it on a finding.
+        found = _stored_login()
+        if not found and not config.claude_enabled():
+            return
+        yield ctx.result(
+            not found,
+            "claude login",
+            "none stored in the box (keyless)",
+            keyless.stored_login_detail(found, _REMOVE_LOGIN),
+        )
 
     def box_bootstrap(self, env: dict) -> list[dict]:
         if not config.claude_enabled():

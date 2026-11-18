@@ -314,9 +314,9 @@ def test_plugins_recommend_their_own_install_hosts(env):
     assert hosts[0] == "a.example.com"  # the repo's own list is offered first
     assert {"claude.ai", "downloads.claude.ai"} <= set(hosts)
     assert all(e["why"] for e in entries if e["host"] != "a.example.com")  # each carries its why
-    # This `[claude]` is BARE, so it's the manual-login box: no injector exists to exempt the API
-    # host structurally, and a wall that blocks it leaves you logged in and unable to work.
-    assert "api.anthropic.com" in hosts
+    # Never the API or login host, bare table or not: there is no in-box login (ADR-0008, amended
+    # 2026-11-18), and under keyless the API host is the injector's, exempt structurally.
+    assert "api.anthropic.com" not in hosts and "console.anthropic.com" not in hosts
     assert "claude.ai" in [e["host"] for e in allowlist.pending_recommendations()]
     assert allowlist.effective()["allow"] == []  # …still granted by nothing but an answer
 
