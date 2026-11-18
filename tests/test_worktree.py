@@ -1511,6 +1511,51 @@ def test_remove_refuses_when_the_yard_cannot_answer(fake_main, capsys):
     assert "--discard" in capsys.readouterr().err
 
 
+def _nest(fake_main, wt, rel=".claude/worktrees/quick"):
+    """A worktree an agent made inside ``wt`` from its box (docs/git.md, quick worktrees)."""
+    inner = wt / rel
+    inner.mkdir(parents=True)
+    (inner / ".git").write_text("")
+    fake_main["state"]["registered"].add(str(inner))
+    return inner
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_remove_refuses_a_worktree_holding_another(fake_main, capsys, force):
+    # `git worktree remove` deletes a worktree nested in an ignored dir, uncommitted edits and
+    # all, without --force (checked against git 2.5x), and the yard's check reads only the outer
+    # one. So nothing is torn down while one is inside, and --force (which saves only the outer
+    # one's work) doesn't change that.
+    inner = _nest(fake_main, _make_wt(fake_main))
+    assert worktree.remove("feat", force=force, assume_yes=True) == 1
+    assert fake_main["teardown"] == []
+    assert fake_main["yard"]["checks"] == []
+    assert not any("worktree" in c and "remove" in c for c in fake_main["calls"])
+    err = capsys.readouterr().err
+    assert str(inner) in err and "git worktree remove" in err and "--discard" in err
+
+
+def test_remove_discard_takes_a_nested_worktree_too(fake_main, capsys):
+    _nest(fake_main, _make_wt(fake_main))
+    assert worktree.remove("feat", discard=True, assume_yes=True) == 0
+    assert fake_main["teardown"]  # torn down as asked
+    assert ".claude/worktrees/quick" in capsys.readouterr().out  # named in the plan
+
+
+def test_a_sibling_sharing_the_prefix_is_not_nested(fake_main):
+    _make_wt(fake_main)
+    _make_wt(fake_main, "feat-2")
+    assert worktree.remove("feat", assume_yes=True) == 0
+
+
+def test_a_nested_path_is_shown_without_its_control_characters(fake_main, capsys):
+    # The path comes from the shared .git, which a box writes.
+    _nest(fake_main, _make_wt(fake_main), "q\x1b]52;c;evil\x07")
+    assert worktree.remove("feat", assume_yes=True) == 1
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "\x07" not in err
+
+
 def test_the_git_calls_that_can_run_repo_code_switch_hooks_off(fake_main):
     # `worktree add` records the worktree (post-checkout, reference-transaction); `remove` deletes
     # it (and parks work on a ref: reference-transaction); `prune` for symmetry. Each through the

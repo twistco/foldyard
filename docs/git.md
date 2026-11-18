@@ -230,7 +230,11 @@ asks first). The row lists those apart, with that fix.
 and its adopted config, and keeps its branch, so a worktree added later under the same name starts
 with nothing adopted. A worktree with uncommitted work needs `--force`; that work is saved first on
 a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command prints how to restore
-it.
+it. A worktree that holds another one, such as an agent's
+[quick worktree](#quick-worktrees-in-a-box) inside it, is refused before anything is taken down:
+deleting it would delete the one inside, uncommitted work and all, which neither git nor that save
+would notice. Remove the inner one first, from a box, with `git worktree remove <path>`; `--discard`
+removes both anyway.
 
 Uncommitted work here means files that differ from the worktree's last commit once everything is
 unstaged: changed, deleted or untracked files that aren't gitignored, and changes inside a
