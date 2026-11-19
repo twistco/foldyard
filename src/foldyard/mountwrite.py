@@ -81,6 +81,47 @@ def makedirs(root: Path, rel: str | Path, mode: int = 0o700) -> None:
         os.close(dfd)
 
 
+def _open_dir(root: Path, parts: tuple[str, ...]) -> int:
+    """An fd on the EXISTING directory ``root/<parts>``, each component opened under its parent's
+    fd with ``O_NOFOLLOW``: a planted link anywhere below ``root`` raises ``ELOOP``/``ENOTDIR``."""
+    dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            sub = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+            os.close(dfd)
+            dfd = sub
+    except BaseException:
+        os.close(dfd)
+        raise
+    return dfd
+
+
+def listdir(root: Path, rel: str | Path) -> list[str]:
+    """The names in the directory ``root/rel``, following no symlink below ``root`` (an empty
+    ``rel`` is ``root`` itself). Raises ``ValueError`` for a path leaving ``root``."""
+    parts = Path(rel).parts
+    if Path(rel).is_absolute() or ".." in parts:
+        raise ValueError(f"{rel!r} is not a path inside {root}")
+    dfd = _open_dir(root, parts)
+    try:
+        return os.listdir(dfd)
+    finally:
+        os.close(dfd)
+
+
+def unlink(root: Path, rel: str | Path) -> None:
+    """Remove the file ``root/rel``, following no symlink below ``root``: a planted link as the
+    LAST component is removed itself (``unlink`` never follows it), one on the way refuses."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise ValueError(f"{rel!r} is not a path inside {root}")
+    dfd = _open_dir(root, parts[:-1])
+    try:
+        os.unlink(parts[-1], dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
 def write_file(path: Path, data: bytes, within: Path | None = None) -> None:
     """:func:`write` for a full ``path``: walked from ``within`` when it lies under it (so every
     directory in between is checked), else from its own parent."""
