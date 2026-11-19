@@ -42,18 +42,19 @@ def _proxy_required(mode: dict) -> bool:
 
 
 def agent_issues() -> list[str]:
-    """A declared ``[claude]``/``[codex]`` with no ``keyless``, as a refusal block each: there is no
-    in-box login (ADR-0008, amended 2026-11-18). Asked by the box's own launch verbs, not
-    :func:`issues`, so `fy up` still brings a stack up. A ``keyless`` value that isn't recognised
-    normalises to ``""`` too, and is refused here all the same: a string typo has already stopped
-    the launch in :func:`issues` (which `check_or_abort` runs first), and anything else — a number,
-    say — is still a box someone would log into."""
+    """A declared ``[claude]``/``[codex]``/``[copilot]`` with no ``keyless``, as a refusal block
+    each: there is no in-box login (ADR-0008, amended 2026-11-18). Asked by the box's own launch
+    verbs, not :func:`issues`, so `fy up` still brings a stack up. A ``keyless`` value that isn't
+    recognised normalises to ``""`` too, and is refused here all the same: a string typo has already
+    stopped the launch in :func:`issues` (which `check_or_abort` runs first), and anything else — a
+    number, say — is still a box someone would log into."""
     from . import keyless
 
     out = []
     for table, enabled, kind in (
         ("claude", config.claude_enabled(), config.claude_keyless()),
         ("codex", config.codex_enabled(), config.codex_keyless()),
+        ("copilot", config.copilot_enabled(), config.copilot_keyless()),
     ):
         if enabled and not kind:
             out.append(keyless.no_keyless_block(table))

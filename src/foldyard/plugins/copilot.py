@@ -1,16 +1,10 @@
 """The ``copilot`` plugin — GitHub Copilot CLI in the dev box, gated on a ``[copilot]`` table.
 
 Mirrors the ``codex`` plugin: when ``[copilot]`` is declared, install the Copilot CLI on box-up (a
-monitored ``box_bootstrap`` step) and mount its persisted ``~/.copilot`` — login, settings,
-``session-state`` — so the session survives box recreation / ``fy nuke``. The launcher is
-``fy copilot`` (in ``box.py``).
-
-A BARE ``[copilot]`` (no ``keyless``) is the MANUAL-LOGIN box: no dummy token, no mode axis, and the
-Copilot API + auth hosts join ``egress_recommend`` (no injector exists to exempt them). You run
-``fy copilot``, log in once, and the token persists in the mounted volume across recreation. The
-browser flow's loopback callback (``127.0.0.1``) is a loopback INSIDE the box, which your computer's
-browser can't reach, so a headless box wants the device-code flow the CLI falls back to, or
-``copilot login --with-token`` for a PAT.
+monitored ``box_bootstrap`` step) and mount its persisted ``~/.copilot`` — settings, permissions and
+``session-state`` — so the session survives box recreation / ``fy nuke``. A ``keyless`` key is
+required (ADR-0008, amended 2026-11-18): there is no in-box login. The launcher is ``fy copilot``
+(in ``box.py``).
 
 KEYLESS auth (``[copilot].keyless = "api-key"``) — no real token in the box; the egress proxy
 injects it in flight (composes in the shared proxy's multi-injector rule set with claude / codex /
@@ -37,12 +31,22 @@ Stdlib only.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from dataclasses import replace
 
 from .. import boxmounts, config, keyless
 from ..keyless import COPILOT_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import COPILOT_KEYLESS_HOSTS as _KEYLESS_HOSTS
-from . import HeldCredential, InjectRule, Plugin, Secret, Switch
+from . import (
+    DoctorContext,
+    HeldCredential,
+    InjectRule,
+    Plugin,
+    Secret,
+    Switch,
+    VerifyContext,
+)
 from .inject import _spec_to_rule  # reuse the static-token minter wiring (same package, no cycle)
 
 # The upstream installer: a static release tarball fetched from github.com (redirecting to
@@ -60,6 +64,13 @@ _INSTALL = (
     "(set -o pipefail && cd /tmp && curl -fsSL --retry 3 "
     "https://raw.githubusercontent.com/github/copilot-cli/refs/heads/main/install.sh "
     '| PREFIX="$HOME/.local" PATH="$HOME/.local/bin:$PATH" bash)'
+)
+
+# What to do with a real token that reached the box. There is no foldyard-owned login file to
+# inspect: the CLI's `config.json` is CLI-managed and a keyless session legitimately names its user
+# there, so a login row in it is not a finding. What can leak is the credential env var itself.
+_REMOVE_LOGIN = (
+    "unset it in the box; keyless injects the real token from your computer, never stored here"
 )
 
 
@@ -162,17 +173,18 @@ class CopilotPlugin(Plugin):
         box_home = env.get("FY_BOX_HOME") or "/home/vscode"
         copilot_home = f"{box_home}/.copilot"
         # Unlike Claude (whose `.claude.json` sits outside its mounted dir), Copilot keeps ALL of
-        # its state under COPILOT_HOME — the login token (or the plaintext fallback when no system
-        # credential store is available), settings, permissions, the session index and
+        # its state under COPILOT_HOME — settings, permissions, the session index and
         # `session-state/`. One volume therefore persists everything; we set the var explicitly so
         # it never depends on HOME resolving to the same dir (root here has HOME=/home/vscode).
-        # A keyless box gets its OWN volume: the manual-login volume holds a real token, which a
-        # keyless box (running with a dummy and a proxy injector) must never be able to read. This
-        # is a create-time choice, like the box's auth posture itself.
-        volume = (
-            "devbox_copilot_keyless_home" if config.copilot_keyless() else "devbox_copilot_home"
-        )
-        args = ["-e", f"COPILOT_HOME={copilot_home}", "-v", f"{volume}:{copilot_home}"]
+        # Keyless is the only supported posture (ADR-0008, amended 2026-11-18), so the box mounts
+        # the DEDICATED keyless volume: no real token is ever stored in the box. An older
+        # manual-login volume, if one exists, is deliberately not mounted here.
+        args = [
+            "-e",
+            f"COPILOT_HOME={copilot_home}",
+            "-v",
+            f"devbox_copilot_keyless_home:{copilot_home}",
+        ]
         transcripts = env.get("FY_COPILOT_TRANSCRIPTS") or ""
         if transcripts:  # never through a link the box planted in its from-box slot (ADR-0033)
             boxmounts.ensure_bind_source(transcripts)
@@ -181,21 +193,22 @@ class CopilotPlugin(Plugin):
         # rewrites in flight. AMBIENT with the proxy substrate (FY_PROXY) whenever keyless is
         # CONFIGURED — never gated on the rung, which is a host-side decision (does the proxy
         # inject?), while box env is create-time; gating them together made `fy mode copilot=on`
-        # land with nothing changed in the box. A BARE [copilot] box gets no dummy, because
-        # `copilot_keyless()` is empty there — that box logs in for real.
+        # land with nothing changed in the box. A declared [copilot] without `keyless` is refused
+        # at launch, so there is no manual-login case to leave a real token in this volume.
         if env.get("FY_PROXY") and config.copilot_keyless():
             args += keyless.dummy_box_args(_KEYLESS, config.copilot_keyless())
         return args
 
     def egress_recommend(self) -> list[dict]:
-        """What `_INSTALL` and a bare (manual-login) box reach for, so a walled box can install and
-        sign in after one consented yes instead of a blocked-host hunt. Under ``keyless`` the API
-        hosts are exempt structurally (the proxy has a rule for each), so only the installer's hosts
-        are offered. Telemetry (``telemetry.*.githubcopilot.com``) is deliberately absent: the CLI
+        """What `_INSTALL` reaches for, so a walled box can install the CLI after one consented yes
+        instead of a blocked-host hunt: only the installer's hosts. Never the API or auth hosts —
+        there is no in-box login (ADR-0008, amended 2026-11-18), and every host in
+        :data:`~foldyard.keyless.COPILOT_KEYLESS_HOSTS` is the injector's, exempt from the wall
+        structurally. Telemetry (``telemetry.*.githubcopilot.com``) is deliberately absent: the CLI
         degrades without it, and a dev box gains nothing from shipping usage data."""
         if not config.copilot_enabled():
             return []
-        hosts = [
+        return [
             {"host": "github.com", "why": "Copilot CLI installer + release page"},
             {
                 "host": "raw.githubusercontent.com",
@@ -204,12 +217,29 @@ class CopilotPlugin(Plugin):
             {"host": "release-assets.githubusercontent.com", "why": "Copilot CLI release tarball"},
             {"host": "objects.githubusercontent.com", "why": "Copilot CLI release downloads"},
         ]
-        if not config.copilot_keyless():
-            hosts += [
-                {"host": h, "why": "GitHub Copilot API (manual in-box login)"}
-                for h in _KEYLESS_HOSTS
-            ]
-        return hosts
+
+    def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
+        # In the box only (the volume isn't on your computer): no real Copilot token in it. The
+        # CLI-managed config.json is deliberately NOT inspected — a keyless session legitimately
+        # names its user there, so a `loggedInUsers` row is not a finding. What can leak is the
+        # credential env var itself. Watched in EVERY box, declared or not, like the other agents.
+        if not ctx.in_box:
+            return
+        leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
+        yield from keyless.stored_login_rows("Copilot", [], leaks, _REMOVE_LOGIN)
+
+    def box_doctor_checks(self, ctx: DoctorContext) -> Iterator[tuple[str, str, str]]:
+        # As claude's/codex's: a row for a declared agent, and for an undeclared one only when
+        # there's a finding. Copilot's finding is an env var, not a file the CLI writes.
+        leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
+        if not leaks and not config.copilot_enabled():
+            return
+        yield ctx.result(
+            not leaks,
+            "copilot credential",
+            "none in the box (keyless)",
+            "; ".join(f"{name} holds a real token — {_REMOVE_LOGIN}" for name in leaks),
+        )
 
     def box_bootstrap(self, env: dict) -> list[dict]:
         if not config.copilot_enabled():

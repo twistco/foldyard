@@ -11,6 +11,7 @@ bump: minor
   one project's box cannot write into another project's history, or into the sessions a plain
   `copilot --resume` on the host lists for every project. Only UUID-named directories are copied;
   the CLI's `session-store.db` and lock dirs are housekeeping, not sessions. The run ends with the
-  recipe that reads them back: `COPILOT_HOME=~/.foldyard/<project>/transcripts/copilot copilot
-  --resume`. `DEVBOX_COPILOT_TRANSCRIPTS` points the sweep at a different source, and
+  recipe that reads them back:
+  `COPILOT_HOME=~/.foldyard/<project>/transcripts/copilot copilot --resume`.
+  `DEVBOX_COPILOT_TRANSCRIPTS` points the sweep at a different source, and
   `[copilot] transcript_sync_seconds` keeps the periodic sweep on.

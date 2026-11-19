@@ -2812,13 +2812,13 @@ def test_copilot_plugin_inert_without_table(monkeypatch):
 
 def test_copilot_plugin_mounts_and_installs_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "copilot_enabled", lambda: True)
-    monkeypatch.setattr(config, "copilot_keyless", lambda: "")
+    monkeypatch.setattr(config, "copilot_keyless", lambda: "api-key")
     env = {**_BOX_ENV, "FY_COPILOT_TRANSCRIPTS": str(tmp_path / "tx")}
     p = copilot.CopilotPlugin()
     args = p.box_args(env)
     assert "COPILOT_HOME=/home/vscode/.copilot" in args  # state home, set explicitly
-    assert "devbox_copilot_home:/home/vscode/.copilot" in args  # the volume
-    # Only session-state is bound out, inside the home — the login/settings stay in the volume.
+    assert "devbox_copilot_keyless_home:/home/vscode/.copilot" in args  # the volume
+    # Only session-state is bound out, inside the home — the settings stay in the volume.
     assert f"{tmp_path / 'tx'}:/home/vscode/.copilot/session-state" in args
     assert (tmp_path / "tx").is_dir()  # box_args created the host-side bind source
     (boot,) = p.box_bootstrap(env)
@@ -2849,15 +2849,15 @@ def test_copilot_bootstrap_is_image_agnostic(monkeypatch):
 
 
 def test_copilot_keyless_inert_when_off(monkeypatch):
-    # A BARE [copilot] is the manual-login box: no axis, no rule, no dummy, and the API/auth hosts
-    # are OFFERED (nothing exempts them).
+    # No keyless ⇒ no axis, no rule, no dummy (and such a table is refused at launch). The API/auth
+    # hosts are never offered: there is no in-box login to support (ADR-0008, amended 2026-11-18).
     monkeypatch.setattr(config, "copilot_enabled", lambda: True)
     monkeypatch.setattr(config, "copilot_keyless", lambda: "")
     p = copilot.CopilotPlugin()
     assert p.switches() == []
     assert p.proxy_rules({"copilot": "on"}) == [] and p.derive_env({"copilot": "on"}) == {}
     assert not any("COPILOT_GITHUB_TOKEN" in a for a in p.box_args({**_BOX_ENV, "FY_PROXY": "1"}))
-    assert "api.github.com" in [h["host"] for h in p.egress_recommend()]
+    assert "api.github.com" not in [h["host"] for h in p.egress_recommend()]
 
 
 def test_copilot_keyless_one_rule_per_host_any_scheme(monkeypatch):
@@ -2942,6 +2942,39 @@ def test_copilot_keyless_cannot_share_api_github_com_with_a_github_injector(monk
     msg = issues[0][1]
     assert "copilot=on" in msg and "github=on" in msg and "api.github.com" in msg
     assert reg.mode_issues({"copilot": "on", "github": "off"}) == []
+
+
+def test_copilot_verify_ignores_the_cli_config_but_flags_a_real_token(monkeypatch, tmp_path):
+    # The CLI-managed config.json is not a login to flag: a keyless session legitimately names its
+    # user there. A real COPILOT_GITHUB_TOKEN in the box is the finding.
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    home = tmp_path / ".copilot"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"loggedInUsers": [{"login": "someone"}]}))
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    p = copilot.CopilotPlugin()
+    assert _statuses(p.verify_checks(_vctx())) == ["pass"]
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "github_pat_real")
+    failed = [msg for status, msg in p.verify_checks(_vctx()) if status == "fail"]
+    assert len(failed) == 1 and "COPILOT_GITHUB_TOKEN" in failed[0]
+    assert _statuses(p.verify_checks(_vctx(in_box=False))) == []  # not on the host
+
+
+def test_copilot_verify_watches_a_box_with_no_copilot_table(monkeypatch):
+    # As the other agents: a real credential in a box that declares no [copilot] is still a finding.
+    monkeypatch.setattr(config, "copilot_enabled", lambda: False)
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "gho_real")
+    assert any(s == "fail" for s, _ in copilot.CopilotPlugin().verify_checks(_vctx()))
+
+
+def test_copilot_doctor_names_the_leaked_env_var_and_the_fix(monkeypatch):
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    [(status, name, detail)] = list(copilot.CopilotPlugin().box_doctor_checks(_ctx()))
+    assert status == "ok" and name == "copilot credential" and "keyless" in detail
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_real")
+    [(status, name, detail)] = list(copilot.CopilotPlugin().box_doctor_checks(_ctx()))
+    assert status == "fail" and name == "copilot credential"
+    assert "COPILOT_GITHUB_TOKEN" in detail and "unset" in detail
 
 
 def test_held_credentials_reach_the_proxy_as_live_data(monkeypatch):
@@ -3440,7 +3473,12 @@ _STORED_LOGIN = [
     (claude.ClaudePlugin, "claude_enabled", "CLAUDE_CONFIG_DIR", _plant_claude, "Claude"),
     (codex.CodexPlugin, "codex_enabled", "CODEX_HOME", _plant_codex, "Codex"),
 ]
-_AGENT_CRED_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
+_AGENT_CRED_ENV = (
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "COPILOT_GITHUB_TOKEN",
+)
 
 
 @pytest.fixture

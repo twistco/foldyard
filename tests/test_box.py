@@ -1964,6 +1964,8 @@ def test_box_up_refuses_an_agent_without_keyless_before_anything_starts(monkeypa
     monkeypatch.setattr(box, "_ctx", lambda *a, **k: pytest.fail("reached the machine"))
     assert box.main("up") == 1
     assert "[claude] has no `keyless`" in capsys.readouterr().err
+
+
 # ── fy copilot: --allow-all, env, and the instruction file instead of an argv prompt ────
 
 

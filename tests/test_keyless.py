@@ -704,9 +704,20 @@ def test_credential_env_holding_anything_but_the_dummy_is_named():
     assert keyless.credential_env_leaks(keyless.CODEX_KEYLESS, {"OPENAI_API_KEY": "sk-x"}) == [
         "OPENAI_API_KEY"
     ]
+    assert (
+        keyless.credential_env_leaks(
+            keyless.COPILOT_KEYLESS, {"COPILOT_GITHUB_TOKEN": "gho_foldyarddummy"}
+        )
+        == []
+    )
+    assert keyless.credential_env_leaks(
+        keyless.COPILOT_KEYLESS, {"COPILOT_GITHUB_TOKEN": "github_pat_real"}
+    ) == ["COPILOT_GITHUB_TOKEN"]
 
 
-@pytest.mark.parametrize(("table", "kinds"), [("claude", "oauth"), ("codex", "chatgpt")])
+@pytest.mark.parametrize(
+    ("table", "kinds"), [("claude", "oauth"), ("codex", "chatgpt"), ("copilot", "api-key")]
+)
 def test_the_no_keyless_refusal_names_the_personal_file_and_the_kinds(table, kinds):
     text = keyless.no_keyless_block(table)
     assert f"[{table}]" in text and "keyless" in text

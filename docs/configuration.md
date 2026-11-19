@@ -23,8 +23,8 @@ colleague. A missing or malformed file contributes nothing.
 `foldyard.local.toml` itself (at any depth, so worktree copies are ignored too).
 
 **Presence-gated tables.** Declaring the table, even empty, is the opt-in: `[proxy]`, `[claude]`,
-`[codex]`, `[copilot]`, `[vscode]` and every `[plugins.<name>]`. Delete the table to turn the feature
-off. `[claude]`, `[codex]` and `[copilot]` also need their `keyless` key
+`[codex]`, `[copilot]`, `[vscode]` and every `[plugins.<name>]`. Delete the table to turn the
+feature off. `[claude]`, `[codex]` and `[copilot]` also need their `keyless` key
 ([below](#claude--codex--copilot--vscode)).
 
 **Edits don't reach your computer until you adopt them.** The box and the stack read the files live;
@@ -1188,18 +1188,19 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
     `features.daemon_auto_start = true` in `[codex.config]` turns it back on.
 
 - **`[copilot]`** — installs the GitHub Copilot CLI at box-up (its installer's static release
-  tarball) and mounts its `$COPILOT_HOME` (login, settings, `session-state`).
+  tarball) and mounts its `$COPILOT_HOME` (settings, `session-state`).
 
   - **`keyless`** — `"api-key"` (or `true`) keeps the real token out of the box: the box holds a
     dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with `Bearer ` + your token
     from `host.env`. Copilot validates the token on `api.github.com` before its first call and then
     talks to a **plan-specific** API host (individual/business/enterprise), so the injection covers
-    every host that can carry it, not one. Default: off (normal login). A PAT must be one Copilot
-    accepts: a fine-grained PAT, a `gh auth token` OAuth token (`gho_`) or a `ghu_` token. Classic
-    `ghp_` PATs are refused by Copilot itself, so foldyard refuses to store one too. A keyless
-    `[copilot]` also needs `api.github.com` to itself: the two GitHub `[[inject]]` rows deliver a
-    credential to that same host, and one host takes one injection rule — turn those rows off while
-    a Copilot rung is on (`fy mode` reports the conflict and the fix).
+    every host that can carry it, not one. Required: a `[copilot]` without it is refused, by
+    `fy box up` and `fy box recreate` on your computer and by `fy copilot` in the box. A PAT must be
+    one Copilot accepts: a fine-grained PAT, a `gh auth token` OAuth token (`gho_`) or a `ghu_`
+    token. Classic `ghp_` PATs are refused by Copilot itself, so foldyard refuses to store one too.
+    A keyless `[copilot]` also needs `api.github.com` to itself: the two GitHub `[[inject]]` rows
+    deliver a credential to that same host, and one host takes one injection rule — turn those rows
+    off while a Copilot rung is on (`fy mode` reports the conflict and the fix).
   - **`system_prompt`** — same key and job as `[claude]`'s, but a different delivery: the Copilot
     CLI has no `--append-system-prompt` and no ad-hoc config override, so `fy copilot` writes it to
     `$COPILOT_HOME/instructions/foldyard.instructions.md`, one of the personal instruction sources

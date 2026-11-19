@@ -114,9 +114,9 @@ scripts, `curl` — can reach your computer, your keys or your other repos.
 
 ## Step 2 — put an agent in the box
 
-Uncomment **one** agent table in `foldyard.toml` — `[claude]` for Claude Code, `[codex]` for
-OpenAI Codex or `[copilot]` for the GitHub Copilot CLI — including its `keyless` line: an agent
-table without one is refused, since the agent never logs in inside the box. Then:
+Uncomment **one** agent table in `foldyard.toml` — `[claude]` for Claude Code, `[codex]` for OpenAI
+Codex or `[copilot]` for the GitHub Copilot CLI — including its `keyless` line: an agent table
+without one is refused, since the agent never logs in inside the box. Then:
 
 ```bash
 fy config diff              # read the change your computer would start running…

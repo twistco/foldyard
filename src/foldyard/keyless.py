@@ -259,16 +259,16 @@ def dummy_box_args(taxonomy: dict, kind: str) -> list[str]:
 
 # ── no in-box login (ADR-0008, amended 2026-11-18) ───────────────────────────────────────────
 #
-# Keyless is the only supported way an agent is credentialed. A `[claude]`/`[codex]` without
-# `keyless` is refused at launch (:func:`no_keyless_block`), and a login made in the box anyway —
-# the box is root, so nothing can stop one — is found by `fy verify` and `fy doctor` in the files
-# the agents themselves write it to. Read in the box, of the box's own files.
+# Keyless is the only supported way an agent is credentialed. A `[claude]`/`[codex]`/`[copilot]`
+# without `keyless` is refused at launch (:func:`no_keyless_block`), and a login made in the box
+# anyway — the box is root, so nothing can stop one — is found by `fy verify` and `fy doctor` in
+# the files the agents themselves write it to. Read in the box, of the box's own files.
 
 
 def no_keyless_block(table: str) -> str:
-    """The refusal for a declared ``[claude]``/``[codex]`` with no ``keyless``: why, and the one
-    line that fixes it, in the personal file — which credential you pay for is yours, and a
-    ``keyless`` in the shared file prompts every colleague for one they may not have."""
+    """The refusal for a declared ``[claude]``/``[codex]``/``[copilot]`` with no ``keyless``: why,
+    and the one line that fixes it, in the personal file — which credential you pay for is yours,
+    and a ``keyless`` in the shared file prompts every colleague for one they may not have."""
     kinds = {
         "claude": (
             ('"oauth"', "a token from `claude setup-token` on your computer"),
@@ -277,6 +277,9 @@ def no_keyless_block(table: str) -> str:
         "codex": (
             ('"chatgpt"', "your ChatGPT subscription (`codex login` on your computer once)"),
             ('"api-key"', "an OpenAI API key"),
+        ),
+        "copilot": (
+            ('"api-key"', "a GitHub token Copilot accepts (`gh auth token`, fine-grained PAT)"),
         ),
     }[table]
     choices = "".join(f"\n      keyless = {k:<11}# {why}" for k, why in kinds)

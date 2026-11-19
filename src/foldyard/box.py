@@ -2011,6 +2011,9 @@ def copilot(args: list[str] | None = None) -> int:
     if not shutil.which("copilot"):
         _err("✗ copilot not on PATH — add a [copilot] table to foldyard.toml, then `fy box up`.")
         return 1
+    if not config.copilot_keyless():  # no in-box login (ADR-0008, amended 2026-11-18)
+        _err(keyless.no_keyless_block("copilot"))
+        return 1
     if not _await_credential("copilot", "Copilot", config.copilot_keyless()):
         return 130
     _seed_copilot_instructions(config.copilot_system_prompt())

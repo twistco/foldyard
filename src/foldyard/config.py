@@ -2028,8 +2028,8 @@ def codex_config() -> dict:
 
 def copilot_enabled() -> bool:
     """True when the consumer declares a ``[copilot]`` table — installs the GitHub Copilot CLI on
-    box-up and mounts its persisted ``~/.copilot`` (login, settings, sessions) volume. Absent ⇒ no
-    Copilot in the box."""
+    box-up and mounts its persisted ``~/.copilot`` (settings, sessions) volume. Absent ⇒ no Copilot
+    in the box. The table also needs ``keyless``: there is no in-box login."""
     return isinstance(_toml().get("copilot"), dict)
 
 
@@ -2044,7 +2044,8 @@ def copilot_keyless() -> str:
         (``github_pat_…``), an OAuth token (``gho_``) or a user token (``ghu_``); classic ``ghp_``
         PATs are not accepted by Copilot and are refused at the capture prompt.
 
-    Absent/false/unrecognised ⇒ ``""`` (off — normal `copilot login`, persisted in the volume)."""
+    Absent/false/unrecognised ⇒ ``""``, which a declared ``[copilot]`` is refused with: there is no
+    in-box login (ADR-0008, amended 2026-11-18; ``preflight.agent_issues``)."""
     raw = _table("copilot").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"

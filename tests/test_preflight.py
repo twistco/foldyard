@@ -389,7 +389,7 @@ def test_no_github_table_no_refusal(monkeypatch):
 # ── an agent table without keyless: no in-box login (ADR-0008, amended 2026-11-18) ───────────
 
 
-@pytest.mark.parametrize("table", ["claude", "codex"])
+@pytest.mark.parametrize("table", ["claude", "codex", "copilot"])
 def test_an_agent_table_without_keyless_is_refused(monkeypatch, table):
     _wire(monkeypatch)
     monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: True)
@@ -397,7 +397,9 @@ def test_an_agent_table_without_keyless_is_refused(monkeypatch, table):
     assert f"[{table}] has no `keyless`" in block and "foldyard.local.toml" in block
 
 
-@pytest.mark.parametrize(("table", "kind"), [("claude", "oauth"), ("codex", "chatgpt")])
+@pytest.mark.parametrize(
+    ("table", "kind"), [("claude", "oauth"), ("codex", "chatgpt"), ("copilot", "api-key")]
+)
 def test_an_agent_table_with_keyless_or_absent_is_fine(monkeypatch, table, kind):
     _wire(monkeypatch, **{f"{table}_keyless": kind})
     monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: True)
