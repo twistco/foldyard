@@ -62,6 +62,15 @@ _WIDTH = 3
 #: `box restart` is `box recreate`'s alias, and the callback sees the name that was typed.
 NUDGE_VERBS = frozenset({"up", "box up", "box recreate", "box restart", "host restart"})
 
+#: Verbs the FLOOR lets through: `fy config …`, which compare, copy and report the config files
+#: rather than act on what they declare — and are the only way to put an adopted config right. On
+#: the host the floor is read from the ADOPTED config, so an adopted floor this fy can't meet once
+#: refused `fy config adopt` too, and checking an older branch out changed nothing: every verb was
+#: locked out until ~/.foldyard was edited by hand (2026-11-19). Adoption now refuses such a floor
+#: (``configpin.adopt``); this is what stays open if one is adopted anyway (an older fy, a restored
+#: backup).
+FLOOR_EXEMPT_VERBS = frozenset({"config"})
+
 
 def _parse(raw: str | None) -> tuple[int, ...] | None:
     """A version as a comparable tuple, or ``None`` when it cannot be ordered.
@@ -120,6 +129,13 @@ def reasons_between(
 def _bullets(entries: list[tuple[str, str]], indent: str = "    ") -> str:
     width = max((len(v) for v, _ in entries), default=0)
     return "\n".join(f"{indent}{v:<{width}}  {reason}" for v, reason in entries)
+
+
+def floor_unmet(installed: str, minimum: str) -> bool:
+    """Is ``installed`` PROVABLY below the floor ``minimum``? An installed version that can't be
+    ordered (a source checkout) isn't, as in :func:`version_gate`; nor is a floor that can't."""
+    have, floor = _parse(installed), _parse(minimum)
+    return have is not None and floor is not None and have < floor
 
 
 def version_gate(
@@ -229,12 +245,12 @@ def gate_or_abort(verb: str | None = None) -> None:
 
     ``verb`` is the command path being run; the nudge speaks only for :data:`NUDGE_VERBS`, the
     floor for all of them (a stale ``fy`` misreads the config that drives every verb, so the
-    refusal cannot be scoped to a few).
+    refusal cannot be scoped to a few) but :data:`FLOOR_EXEMPT_VERBS`, the way out.
 
     Best-effort by construction — a missing/unreadable ``foldyard.toml`` yields no declaration
     and therefore no opinion, which is what ``fy init`` in an empty directory needs.
     """
-    _apply(verb, floor=True)
+    _apply(verb, floor=verb not in FLOOR_EXEMPT_VERBS)
 
 
 def nudge(verb: str | None) -> None:

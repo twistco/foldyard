@@ -194,8 +194,8 @@ run `foldyard machine recreate`.
 ## Upgrading
 
 When a repo starts relying on a newer foldyard, it raises `min_foldyard_version` in the same commit.
-After a `git pull`, an older `fy` then **refuses every verb** — `fy box down` included — until you
-upgrade. Upgrade *before* you pull and nothing refuses:
+After a `git pull`, an older `fy` then **refuses every verb** but `fy config` — `fy box down`
+included — until you upgrade. Upgrade *before* you pull and nothing refuses:
 
 ```bash
 uv tool upgrade foldyard      # 1. upgrade the tool — before pulling

@@ -1100,8 +1100,8 @@ def _adopt_config(name: str) -> bool:
             if base is not None and base.identical:
                 try:
                     configpin.adopt(cfg, reviewed=drift.tree_digest(), baseline=base.digest)
-                except configpin.ReviewStale:
-                    pass  # it changed after it was compared: review what is there now, below
+                except (configpin.ReviewStale, configpin.NeedsNewerFoldyard):
+                    pass  # changed since it was compared, or too new: the review below says which
                 else:
                     print(f"✓ config adopted — identical to main's ({base.digest}).", flush=True)
                     return True
