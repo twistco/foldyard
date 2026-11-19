@@ -48,6 +48,7 @@ GITIGNORE_ENTRIES = (
     ".devbox-ca/",
     ".devbox-claude/",
     ".devbox-codex/",
+    ".devbox-cq/",
     ".devbox-foldyard/",
     ".dev-mode.json",
     # The per-developer overlay itself. It holds each person's keyless credential CHOICE (never a
@@ -220,6 +221,8 @@ _CLAUDE = [
     '# # keyless = "api-key"  # x-api-key on api.anthropic.com ← from console.anthropic.com',
     "# # (on your own, keyless is fine here; on a team, put it in foldyard.local.toml — which",
     "# #  subscription you pay for is personal, and a shared one prompts every colleague)",
+    "# # cq = true            # cq.exchange shared knowledge: MCP, skill, hooks, /cq:reflect;",
+    "# #                      # your key stays on your computer → `fy mode cq=on`",
     *_AGENT_PROMPT,
 ]
 
@@ -227,6 +230,7 @@ _CODEX = [
     "# [codex]",
     '# keyless = "api-key"    # Authorization: Bearer ← OPENAI_API_KEY (captured to host.env)',
     '# # keyless = "chatgpt"  # ChatGPT subscription: a token service refreshes ~/.codex/auth.json',
+    "# # cq = true            # cq.exchange shared knowledge, as for [claude] above",
     '# system_prompt = """…"""   # same key + same job as [claude]\'s above (paste that one);',
     "#                          # Codex takes it as a developer instruction, not a system prompt",
 ]
@@ -256,7 +260,7 @@ def _codex(active: bool) -> list[str]:
     if not active:
         return _CODEX
     return [
-        *_activate(_CODEX[:3]),
+        *_activate(_CODEX[:4]),
         "# [claude]'s prompt, told it's Codex: Codex takes it as a developer instruction, not a",
         "# system prompt.",
         *_activate(_codex_prompt()),
