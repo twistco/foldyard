@@ -725,9 +725,10 @@ def _describe_checkout(item: dict[str, Any], wt: str) -> None:
     """A registered card's app port (from its adopted config) and branch (``git rev-parse``)."""
     try:
         with config.using(worktree_config(wt)):
+            from . import stack  # lazy: devmode is on the hot path
+
             key = config.app_port_key()
-            base = config.port_bases().get(key) if key else None
-            item["app_port"] = base + config.worktree_offset(wt) if base is not None else None
+            item["app_port"] = stack.worktree_port(key, wt) if key else None
     except Exception:
         # A worktree can temporarily contain an invalid/older foldyard.toml while switching
         # branches. Keep the card usable; the missing port makes the browser action explain
@@ -1353,6 +1354,45 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     )
 
 
+def _port_pool_check() -> Iterable[tuple[str, str, str]]:
+    """Doctor row for ``[ports]`` pools (:func:`config.port_pools`), only where one is declared:
+    FAIL on a pool foldyard can't use (``fy worktree add`` refuses then), WARN naming each
+    registered worktree still publishing on its band — registered before the pool — with the verb
+    that gives it a pool port, else how much of each pool is taken."""
+    from . import stack  # lazy: devmode is on the hot path
+
+    if problems := config.port_pool_problems():
+        yield _result(False, "ports pool", "", "; ".join(problems))
+        return
+    pools = config.port_pools()
+    if not pools:
+        return
+    try:
+        recorded = stack.recorded_pool_ports()
+        names = worktree_registry.names(main_repo())
+    except OSError as e:  # pragma: no cover — unreadable state dir
+        yield _result(None, "ports pool", "", f"couldn't read the worktree registry: {e}")
+        return
+    on_band = {name: [key for key in pools if key not in recorded.get(name, {})] for name in names}
+    stray = [name for name, keys in on_band.items() if keys]
+    band = [
+        f"{name} ({key} {stack.worktree_port(key, name)})"
+        for name in stray
+        for key in on_band[name]
+    ]
+    fixes = "; ".join(f"`fy worktree add {n}`" for n in stray)
+    holders = stack.pool_holders()
+    taken = ", ".join(
+        f"{key}: {len(holders.get(key, {}))} of {len(pool)} taken" for key, pool in pools.items()
+    )
+    yield _result(
+        True if not band else None,
+        "ports pool",
+        taken,
+        f"still on their band, from before the pool: {', '.join(band)} — {fixes}",
+    )
+
+
 def _rebase_leftover_check():
     """Doctor row: a ``git pull --rebase`` (or ``rebase --autostash``) that stopped before it
     began, leaving its state dir holding only the autostash (:func:`githeal.leftover_autostash`).
@@ -1504,6 +1544,7 @@ def doctor(deep: bool = False):
     )
     yield _config_pin_check()
     yield _worktree_registry_check()
+    yield from _port_pool_check()
     yield from _rebase_leftover_check()
     yield _widenings_check()
     yield _experimental_check()

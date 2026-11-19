@@ -24,7 +24,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 
 SLOTS = range(1, 90)  # a worktree's offsets: 0 is main's, and past 89 is the next daemon's span
@@ -91,6 +91,11 @@ def unregister(main: Path, name: str) -> None:
     entries = _load(main)
     if entries.pop(name, None) is not None:
         _save(main, entries)
+
+
+def names(main: Path) -> list[str]:
+    """Every registered worktree's name — even one whose checkout is gone."""
+    return sorted(_load(main))
 
 
 def is_recorded(main: Path, name: str) -> bool:
@@ -197,6 +202,104 @@ def offsets(main: Path, pinned: Mapping[str, int], hashed: Callable[[str], int])
                 json.dump(got, fh, indent=2, sort_keys=True)
                 fh.write("\n")
     return {**got, **{n: v for n, v in pinned.items() if n in names}}
+
+
+# ── pooled ports: a [ports] key whose worktrees take a port from a fixed list ─────────────────
+#
+# Recorded per worktree in a third file beside the registry (an older supervisor reads the registry
+# as name → path, and the offsets file as name → int). Written only by `fy worktree add`; a record
+# whose worktree is no longer registered is ignored, and dropped at the next claim.
+
+
+def pick_ports(
+    pools: Mapping[str, range],
+    taken: Mapping[str, Collection[int]],
+    mine: Mapping[str, int],
+) -> dict[str, int] | None:
+    """A port from each of ``pools`` that isn't ``taken``: the worktree's own (``mine``) while it is
+    still in the pool and free, else the lowest free one. ``None`` when any pool is full — all the
+    keys or none, so a worktree never publishes some ports from a pool and the rest from nowhere.
+    Pure."""
+    got: dict[str, int] = {}
+    for key, pool in pools.items():
+        held = taken.get(key, ())
+        own = mine.get(key)
+        if own is not None and own in pool and own not in held:
+            got[key] = own
+            continue
+        free = next((p for p in pool if p not in held), None)
+        if free is None:
+            return None
+        got[key] = free
+    return got
+
+
+def ports_file(main: Path) -> Path:
+    store = store_file(main)
+    return store.with_name(f"{store.stem}.ports.json")
+
+
+def _read_ports(text: str) -> dict[str, dict[str, int]]:
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        name: {
+            k: v
+            for k, v in ports.items()
+            if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+        }
+        for name, ports in data.items()
+        if isinstance(name, str) and isinstance(ports, dict)
+    }
+
+
+def recorded_ports(main: Path) -> dict[str, dict[str, int]]:
+    """Each registered worktree's pooled ports, as ``fy worktree add`` recorded them. A worktree
+    with none publishes on its band (it was registered before the pool)."""
+    try:
+        recorded = _read_ports(ports_file(main).read_text())
+    except OSError:
+        return {}
+    names = set(_load(main))
+    return {name: ports for name, ports in recorded.items() if name in names and ports}
+
+
+def claim_ports(
+    main: Path,
+    name: str,
+    pools: Mapping[str, range],
+    band: Mapping[str, Collection[int]],
+) -> dict[str, int] | None:
+    """Record a port from each of ``pools`` for registered worktree ``name`` (:func:`pick_ports`)
+    and return them, or ``None``, recording nothing, when a pool is full. ``band`` holds the ports
+    other worktrees publish on without a record — registered before the pool, so on their band,
+    which may lie inside it. flock-guarded: two ``fy worktree add`` can't take one port."""
+    path = ports_file(main)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    names = set(_load(main))
+    with open(path, "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.seek(0)
+        recorded = {n: p for n, p in _read_ports(fh.read()).items() if n in names}
+        taken = {key: set(band.get(key, ())) for key in pools}
+        for other, ports in recorded.items():
+            if other != name:
+                for key, port in ports.items():
+                    if key in taken:
+                        taken[key].add(port)
+        got = pick_ports(pools, taken, recorded.get(name, {}))
+        if got is None:
+            return None
+        recorded[name] = {**recorded.get(name, {}), **got}
+        fh.seek(0)
+        fh.truncate()
+        json.dump(recorded, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    return got
 
 
 def unregistered(main: Path, wt_root: Path) -> list[str]:

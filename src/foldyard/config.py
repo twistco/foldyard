@@ -917,14 +917,82 @@ def port_bases() -> dict[str, int]:
     """Host-published port bases, keyed by the env-var name the compose file reads
     (e.g. ``APP_PORT``). A worktree adds a per-name offset to each. Empty when there's
     no ``[ports]`` table — then worktrees publish no offset ports (define ``[ports]``
-    in ``foldyard.toml`` to enable second-stack-beside-main)."""
+    in ``foldyard.toml`` to enable second-stack-beside-main). A key may be a table,
+    ``{ base = 3000, worktrees = "3001-3005" }``: its base is ``base`` (see :func:`port_pools`)."""
     out: dict[str, int] = {}
     for key, value in _table("ports").items():
+        if isinstance(value, dict):
+            value = value.get("base")
+        if value is None or isinstance(value, bool):
+            continue
         try:
             out[key] = int(value)
         except (TypeError, ValueError):
             continue
     return out
+
+
+_POOL_RANGE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+_BAND = 89  # a worktree's offsets: 1..89 (worktree_registry.SLOTS)
+
+
+def _declared_pools() -> tuple[dict[str, range], list[str]]:
+    """Every ``[ports]`` key's ``worktrees`` pool as written, and what's wrong with each that isn't
+    a range of ports."""
+    pools: dict[str, range] = {}
+    problems: list[str] = []
+    for key, value in _table("ports").items():
+        if not isinstance(value, dict) or "worktrees" not in value:
+            continue
+        raw = value["worktrees"]
+        m = _POOL_RANGE.match(raw) if isinstance(raw, str) else None
+        lo, hi = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if not m or not 1 <= lo <= hi <= 65535:
+            problems.append(
+                f'[ports] {key}: worktrees = {raw!r} isn\'t a range of ports like "3001-3005"'
+            )
+            continue
+        pools[key] = range(lo, hi + 1)
+    return pools, problems
+
+
+def _pool_clashes(pools: dict[str, range]) -> list[str]:
+    """A pool that overlaps another key's ports (its base, and the band its worktrees publish on),
+    or another pool: a port there could be handed out twice. Its OWN band is fine — a worktree from
+    before the pool still on it holds its port (:func:`foldyard.stack.claim_ports`)."""
+    problems = []
+    bases = port_bases()
+    for key, pool in pools.items():
+        for other, base in bases.items():
+            if other == key:
+                continue
+            span = range(base, base + _BAND + 1)
+            if pool.start < span.stop and span.start < pool.stop:
+                problems.append(
+                    f"[ports] {key}: its worktrees pool {pool.start}-{pool.stop - 1} overlaps "
+                    f"{other}'s ports ({span.start}-{span.stop - 1})"
+                )
+        for other, theirs in pools.items():
+            if other > key and pool.start < theirs.stop and theirs.start < pool.stop:
+                problems.append(f"[ports] {key}: its worktrees pool overlaps {other}'s")
+    return problems
+
+
+def port_pools() -> dict[str, range]:
+    """The ``[ports]`` keys whose worktrees take a port from a fixed pool instead of base +
+    offset — ``APP_PORT = { base = 3000, worktrees = "3001-3005" }`` — for a port something outside
+    allows only a few of (an OAuth tenant's callback URLs). ``fy worktree add`` gives each new
+    worktree the lowest free one and refuses when none is. Empty while any pool has a problem
+    (:func:`port_pool_problems`): a half-read pool could hand a port out twice."""
+    pools, problems = _declared_pools()
+    return {} if problems or _pool_clashes(pools) else pools
+
+
+def port_pool_problems() -> list[str]:
+    """What's wrong with the ``[ports]`` pools — reported by ``fy worktree add`` (which refuses)
+    and ``fy doctor``. Empty when every pool can be used."""
+    pools, problems = _declared_pools()
+    return problems + _pool_clashes(pools)
 
 
 # ── egress proxy ────────────────────────────────────────────────────────────────────────

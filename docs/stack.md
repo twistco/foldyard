@@ -112,7 +112,7 @@ guest has and an Ubuntu runner may not. Name the registry in full, or add
 
 | Variable | Value |
 | -- | -- |
-| each `[ports]` key | the base port, plus the worktree's offset |
+| each `[ports]` key | the base port, plus the worktree's offset, or its port from the key's pool ([configuration.md](./configuration.md#a-port-from-a-pool)) |
 | `PODMAN_PROJECT`, `COMPOSE_PROJECT_NAME` | the compose project: `[project] prefix`, plus `-<worktree>` in a worktree |
 | `WORKTREE` | the worktree's name; empty in the main checkout |
 | `FOLDYARD_CHECKOUT` | the checkout this stack belongs to (the worktree's, or main) |
@@ -156,7 +156,9 @@ compose command with every `-f`.
   database is separate from main's.
 - **Offset ports.** The offset is a hash of the name, from 1 to 89. Two names can land on the same
   offset; pin one (1 to 89) in the main checkout's `foldyard.local.toml` under `[worktree-offsets]`
-  and adopt it ([configuration.md](./configuration.md#ports)), or set `WT_OFFSET`.
+  and adopt it ([configuration.md](./configuration.md#ports)), or set `WT_OFFSET`. A port that must
+  come from a short list (a callback allowlist) can have a
+  [pool](./configuration.md#a-port-from-a-pool) instead.
 - **Its own compose files.** The `-f` paths, and the relative paths inside those files (build
   contexts, bind mounts), resolve against the worktree. A compose edit in a worktree changes that
   worktree's stack at its next `fy up`, and leaves main's alone until the change is merged.

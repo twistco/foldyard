@@ -281,8 +281,10 @@ def _published_port_ranges() -> list[str]:
     """Every host port a `[ports]` base can publish on, as VS Code port-range keys
     (``"3000-3089"``). A range rather than this instance's own offset because any instance can
     forward any worktree's port — the main one picked up a worktree's ``APP_PORT+1`` from
-    ``worktree add`` output. A pinned offset above the default span is not covered."""
-    return [f"{base}-{base + _MAX_WORKTREE_OFFSET}" for base in config.port_bases().values()]
+    ``worktree add`` output. A pinned offset above the default span is not covered. A ``[ports]``
+    pool is listed too: its worktrees publish there, which may be outside the band."""
+    bands = [f"{base}-{base + _MAX_WORKTREE_OFFSET}" for base in config.port_bases().values()]
+    return bands + [f"{pool.start}-{pool.stop - 1}" for pool in config.port_pools().values()]
 
 
 def _pin_ports(settings: dict) -> dict:

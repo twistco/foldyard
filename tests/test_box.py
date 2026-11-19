@@ -1053,6 +1053,22 @@ def test_up_bakes_every_worktrees_offset_into_the_box(fake, monkeypatch, registe
     )
 
 
+def test_up_bakes_every_worktrees_pooled_ports_into_the_box(fake, monkeypatch, register_worktree):
+    # In-box `fy up` for a sibling must publish on the port the host gave it, not guess its band.
+    monkeypatch.setattr(box.config, "port_pools", lambda: {"APP_PORT": range(3001, 3006)})
+    monkeypatch.setattr(box.stack, "worktree_ports", lambda: {"feat": {"APP_PORT": 3001}})
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    [baked] = [t.partition("=")[2] for t in run if t.startswith("FY_WORKTREE_PORTS=")]
+    assert json.loads(baked) == {"feat": {"APP_PORT": 3001}}
+
+
+def test_up_bakes_no_pooled_ports_without_a_pool(fake):
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    assert not [t for t in run if t.startswith("FY_WORKTREE_PORTS=")]
+
+
 # The [claude]/[codex] drift rows above fire on the same "recreate" advice, so the foldyard
 # rows below bake their keys to keep those quiet and leave only the row under test speaking.
 _QUIET = {"CLAUDE_CONFIG_DIR": "/home/vscode/.claude", "CODEX_HOME": "/home/vscode/.codex"}

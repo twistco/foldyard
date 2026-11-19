@@ -901,6 +901,13 @@ def _create_env(
         "-e",
         f"FY_HOST_HOME={Path.home()}",
     ]
+    if config.port_pools():
+        # …and their ports from a [ports] pool (stack.worktree_ports), which no offset gives. Only
+        # with a pool: a box without it keeps every worktree on its band (stack._baked_ports).
+        env_args += [
+            "-e",
+            f"FY_WORKTREE_PORTS={json.dumps(stack.worktree_ports(), sort_keys=True)}",
+        ]
     for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
         env_args += ["-e", key]
     if gvisor:
@@ -956,6 +963,10 @@ _DRIFT_IGNORED = frozenset(
         # Every worktree's offset: it changes whenever a worktree is added, no reason to recreate
         # this box. Its own offset moving is `_warn_stale_proxy_port`'s too.
         "FY_WORKTREE_OFFSETS",
+        # …and their pooled ports, which change the same way. Only a box that doesn't know a
+        # worktree at all has to be recreated, and the in-box `fy` refuses that one by name
+        # (stack._pooled).
+        "FY_WORKTREE_PORTS",
         # The runtime: `_warn_stale_runtime`'s.
         sandbox.BAKED_ENV,
         # ADR-0033's two VM paths: facts about the VM's mounts, not config — and a box from before
