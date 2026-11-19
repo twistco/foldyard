@@ -10,6 +10,7 @@ and refuses when none is free. Worktrees registered before the pool keep their b
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from hypothesis import given
@@ -490,3 +491,126 @@ def test_a_reader_never_sees_a_half_written_record(repo, monkeypatch):
     with pytest.raises(OSError):
         reg.claim_ports(repo, "b", pools, {})
     assert reg.ports_file(repo).read_text() == before
+
+
+# ── the project's pools are the main checkout's (0.12.1) ──────────────────────────────────────
+
+
+@pytest.fixture
+def main_and_old_branch(tmp_path, fresh_config, monkeypatch):
+    """A real repo whose main has the pool, and a worktree on a branch cut before it: its own
+    foldyard.toml declares APP_PORT plain. Both checkouts' configs are 'adopted' (the conftest seam
+    reads each tree)."""
+    import subprocess
+
+    main, wt = tmp_path / "repo", tmp_path / "repo-worktrees" / "old"
+    main.mkdir()
+
+    # Without git's location variables: one inherited (a hook exports GIT_DIR) beats `cwd`, and
+    # these calls would then act on that repository.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    }
+
+    def git(*a, cwd=main):
+        subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    plain = '[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\nPG_PORT = 5533\n'
+    (main / "foldyard.toml").write_text(plain)
+    git("add", "foldyard.toml")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "before the pool")
+    git("worktree", "add", "-q", "-b", "old", str(wt))
+    (main / "foldyard.toml").write_text(
+        plain.replace("APP_PORT = 3000", 'APP_PORT = { base = 3000, worktrees = "3001-3003" }')
+    )
+    monkeypatch.setattr(stack, "main_repo", lambda: main.resolve())
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 41)
+    for var in ("WT_OFFSET", "FY_WORKTREE_OFFSETS", "FY_WORKTREE_PORTS", "IN_DEVBOX", "WORKTREE"):
+        monkeypatch.delenv(var, raising=False)
+    reg.register(main.resolve(), "old", wt.resolve())
+    fresh_config(FOLDYARD_REPO=main)
+    return main, wt
+
+
+def test_a_branch_from_before_the_pool_still_gets_its_pooled_port(
+    main_and_old_branch, fresh_config
+):
+    # Live on Tangible (2026-11-19): `WORKTREE=pool-test fy up` from main published 3001, and
+    # `fy up` inside the worktree — whose branch's foldyard.toml had no pool yet — 3041.
+    _main, wt = main_and_old_branch
+    assert stack.claim_ports("old") == {"APP_PORT": 3001}
+    assert stack._published_ports("old")["APP_PORT"] == "3001"  # from main
+    fresh_config(FOLDYARD_REPO=wt)  # from inside the worktree
+    assert config.port_pools() == {"APP_PORT": range(3001, 3004)}
+    assert stack._published_ports("old") == {"APP_PORT": "3001", "PG_PORT": "5574"}
+
+
+def test_a_bound_worktree_config_reads_the_projects_pools(main_and_old_branch):
+    # The TUI card and the supervisor resolve each worktree under its own bound config.
+    _main, wt = main_and_old_branch
+    stack.claim_ports("old")
+    with config.using(config.resolve(worktree="old", repo=wt)):
+        assert stack.worktree_port("APP_PORT", "old") == 3001
+
+
+def test_in_a_box_the_pools_are_main_checkouts_tree(main_and_old_branch, fresh_config, monkeypatch):
+    _main, wt = main_and_old_branch
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("FY_WORKTREE_PORTS", json.dumps({"old": {"APP_PORT": 3002}}))
+    fresh_config(FOLDYARD_REPO=wt)
+    assert stack._published_ports("old")["APP_PORT"] == "3002"
+
+
+def test_outside_git_the_checkouts_own_pools_are_read(fresh_config, tmp_path):
+    _toml(fresh_config, tmp_path, 'APP_PORT = { base = 3000, worktrees = "3001-3005" }')
+    assert config.port_pools() == {"APP_PORT": range(3001, 3006)}
+
+
+def test_an_inherited_git_dir_never_picks_the_main_checkout(
+    main_and_old_branch, monkeypatch, tmp_path
+):
+    # GIT_DIR beats `git -C`: inherited, it named another repo's main, and so its [ports].
+    import subprocess
+
+    _main, wt = main_and_old_branch
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "init", "-q", str(other)],
+        check=True,
+        capture_output=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+    )
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    stack.main_checkout_of.cache_clear()
+    assert stack.main_checkout_of(wt) == _main.resolve()
+
+
+def test_two_keys_on_one_host_port_are_refused_by_name(main_and_old_branch, fresh_config, capsys):
+    # The pool is main's, every other key's base the branch's own: a branch whose PG_PORT base puts
+    # it on the worktree's pooled port would publish both there.
+    _main, wt = main_and_old_branch
+    stack.claim_ports("old")  # APP_PORT 3001
+    (wt / "foldyard.toml").write_text(
+        '[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\nPG_PORT = 2960\n'
+    )
+    fresh_config(FOLDYARD_REPO=wt)  # offset 41: PG_PORT 3001 too
+    assert stack._published_ports("old") == {"APP_PORT": "3001", "PG_PORT": "3001"}  # ps, down…
+    assert stack._shares_a_pooled_port("old") is True  # what `fy up` asks
+    err = capsys.readouterr().err
+    assert "3001" in err and "APP_PORT" in err and "PG_PORT" in err
+
+
+def test_two_keys_on_one_base_are_left_alone_where_no_pool_is_involved(repo, fresh_config):
+    # One key may only build a URL from the other's port; nothing foldyard should start refusing.
+    (repo / "foldyard.toml").write_text(
+        '[project]\nname = "t"\n[ports]\nAPI_PORT = 3000\nPUBLIC_PORT = 3000\n'
+        'APP_PORT = { base = 4000, worktrees = "4001-4003" }\n'
+    )
+    config.clear_caches()
+    _add(repo, "feat")
+    stack.claim_ports("feat")
+    assert stack._shares_a_pooled_port("") is False  # main
+    assert stack._shares_a_pooled_port("feat") is False  # API/PUBLIC share 3050, no pool involved

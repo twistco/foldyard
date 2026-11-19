@@ -611,6 +611,10 @@ PG_PORT = 5544                                        # every other key keeps th
   computer, and keeps it until `fy worktree remove`. When every port is taken it refuses before
   making anything, and names which worktree holds each. Only `fy worktree add` worktrees count: a
   [quick worktree](./git.md#quick-worktrees-in-a-box) has no stack and takes none.
+- **The pool is the project's: the main checkout's `[ports]` defines it**, wherever `fy` runs. A
+  worktree on a branch cut before the pool still gets its pooled port, run from inside it or with
+  `WORKTREE=<name>` from main. Every other key keeps the checkout's own base; should one of them
+  land on the worktree's pooled port, `fy up` refuses and names both.
 - **Only that key leaves the offset.** The worktree's other ports, its proxy and token-service ports
   keep it, so nothing else moves.
 - **A worktree registered before the pool** keeps publishing on its offset port. `fy doctor`'s
