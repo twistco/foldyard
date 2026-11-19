@@ -597,7 +597,20 @@ def test_two_keys_on_one_host_port_are_refused_by_name(main_and_old_branch, fres
         '[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\nPG_PORT = 2960\n'
     )
     fresh_config(FOLDYARD_REPO=wt)  # offset 41: PG_PORT 3001 too
-    with pytest.raises(SystemExit):
-        stack._published_ports("old")
+    assert stack._published_ports("old") == {"APP_PORT": "3001", "PG_PORT": "3001"}  # ps, down…
+    assert stack._shares_a_pooled_port("old") is True  # what `fy up` asks
     err = capsys.readouterr().err
     assert "3001" in err and "APP_PORT" in err and "PG_PORT" in err
+
+
+def test_two_keys_on_one_base_are_left_alone_where_no_pool_is_involved(repo, fresh_config):
+    # One key may only build a URL from the other's port; nothing foldyard should start refusing.
+    (repo / "foldyard.toml").write_text(
+        '[project]\nname = "t"\n[ports]\nAPI_PORT = 3000\nPUBLIC_PORT = 3000\n'
+        'APP_PORT = { base = 4000, worktrees = "4001-4003" }\n'
+    )
+    config.clear_caches()
+    _add(repo, "feat")
+    stack.claim_ports("feat")
+    assert stack._shares_a_pooled_port("") is False  # main
+    assert stack._shares_a_pooled_port("feat") is False  # API/PUBLIC share 3050, no pool involved

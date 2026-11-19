@@ -230,26 +230,40 @@ def _published_ports(name: str) -> dict[str, str]:
     """Every ``[ports]`` key's host port for worktree ``name`` (``""`` = main), as compose env.
     Stops, saying why, where the box doesn't know a pooled port (:class:`PortsUnknown`)."""
     try:
-        ports = {key: str(worktree_port(key, name)) for key in config.port_bases()}
+        return {key: str(worktree_port(key, name)) for key in config.port_bases()}
     except PortsUnknown as e:
         _err(f"✗ {e}")
         _err("  Run it from its own box, or recreate this one so it knows them:")
         _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
         raise SystemExit(1)
-    # A pool is the main checkout's, every other key's base the checkout's own (a branch that adds
-    # a service adds its key), so a branch whose bases differ from main's can put a key on the
-    # worktree's pooled port. Say so here rather than let compose fail on the second bind.
+
+
+def _shares_a_pooled_port(name: str) -> bool:
+    """Refuse (True, saying why) when worktree ``name`` would publish another ``[ports]`` key on
+    its pooled port. A pool is the main checkout's, every other key's base the checkout's own (a
+    branch that adds a service adds its key), so a branch whose bases differ from main's can land a
+    key there. Asked by `fy up` only, the verb that binds them, and only for a worktree with a pool:
+    two keys sharing a base on main (one that only builds a URL) are the consumer's business, and
+    a teardown never needs the config fixed first."""
+    pools = config.port_pools()
+    if not name or not pools:
+        return False
     holders: dict[str, list[str]] = {}
-    for key, port in ports.items():
+    for key, port in _published_ports(name).items():
         holders.setdefault(port, []).append(key)
-    shared = {port: keys for port, keys in holders.items() if len(keys) > 1}
+    shared = {
+        port: keys
+        for port, keys in holders.items()
+        if len(keys) > 1 and any(key in pools for key in keys)
+    }
+    for port, keys in shared.items():
+        _err(f"✗ {' and '.join(keys)} would both publish on host port {port}.")
     if shared:
-        for port, keys in shared.items():
-            _err(f"✗ {' and '.join(keys)} would both publish on host port {port}.")
-        _err("  Its [ports] bases differ from the main checkout's: merge main into its branch, or")
-        _err("  move a base in this branch's foldyard.toml.")
-        raise SystemExit(1)
-    return ports
+        _err(
+            "  This branch's [ports] bases differ from the main checkout's: merge main into it, or"
+        )
+        _err("  move a base in its foldyard.toml.")
+    return bool(shared)
 
 
 def _pooled(name: str) -> dict[str, int]:
@@ -1368,6 +1382,8 @@ def up() -> int:
     # `fy up` is how both come up (the note below then points at `fy box up`).
     if (rc := stack_declared("up", "fy box up")) is not None:
         return rc
+    if _shares_a_pooled_port(ctx.worktree):
+        return 1
     _ensure_dirs(Path(ctx.env["FOLDYARD_CHECKOUT"]))
     # Stage any VM-visible stack assets a plugin's posture needs (e.g. the gcp metadata emulator's
     # server.py — shipped in the package, off the repo mount) into the checkout BEFORE compose up.
