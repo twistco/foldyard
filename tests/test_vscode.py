@@ -1218,6 +1218,18 @@ def test_published_ports_are_never_auto_forwarded(monkeypatch):
     assert "remote.autoForwardPorts" not in clean["settings"]
 
 
+def test_a_ports_pool_outside_the_band_is_never_auto_forwarded_either(monkeypatch):
+    monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)
+    monkeypatch.setattr(config, "proxy_port", lambda: 8088)
+    monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000})
+    monkeypatch.setattr(config, "port_pools", lambda: {"APP_PORT": range(5001, 5004)})
+
+    attrs = vscode._attached_config("/repo", [], {})["settings"]["remote.portsAttributes"]
+
+    assert attrs["5001-5003"]["onAutoForward"] == "ignore"
+    assert attrs["3000-3089"]["onAutoForward"] == "ignore"  # worktrees from before the pool
+
+
 def test_published_port_pin_is_absent_without_a_ports_table(monkeypatch):
     """A consumer with no ``[ports]`` publishes nothing, so there is nothing to guard."""
     monkeypatch.setattr(config, "gcp_minter_port", lambda: 8188)

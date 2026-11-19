@@ -186,6 +186,150 @@ def _offset(name: str) -> int:
     return known[name] if name in known else _hashed_offset(name)
 
 
+# ── pooled ports (`[ports] KEY = { base = …, worktrees = "a-b" }`, config.port_pools) ──────────
+
+
+def worktree_port(key: str, name: str) -> int | None:
+    """The host port ``[ports]`` key ``key`` publishes on for worktree ``name`` (``""`` = main):
+    the base for main; for a worktree, the port ``fy worktree add`` gave it from the key's pool,
+    else base + its offset (no pool, or a worktree registered before it). ``None`` when ``[ports]``
+    has no such key."""
+    base = config.port_bases().get(key)
+    if base is None or not name:
+        return base
+    pool = config.port_pools().get(key)
+    if pool is not None:
+        port = _pooled(name).get(key)
+        if port in pool:
+            return port
+    return base + _offset(name)
+
+
+class PortsUnknown(Exception):
+    """In a box: a worktree added after the box was made, whose pooled port it can't know."""
+
+
+def _published_ports(name: str) -> dict[str, str]:
+    """Every ``[ports]`` key's host port for worktree ``name`` (``""`` = main), as compose env.
+    Stops, saying why, where the box doesn't know a pooled port (:class:`PortsUnknown`)."""
+    try:
+        return {key: str(worktree_port(key, name)) for key in config.port_bases()}
+    except PortsUnknown as e:
+        _err(f"✗ {e}")
+        _err("  Run it from its own box, or recreate this one so it knows them:")
+        _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
+        raise SystemExit(1)
+
+
+def _pooled(name: str) -> dict[str, int]:
+    """The pooled ports recorded for worktree ``name``: the host's record, or in a box what the
+    host baked at create (:func:`worktree_ports`, baked with or without a pool). A box made by a
+    foldyard without pools has nothing baked, and its worktrees keep their band. A box that doesn't
+    know ``name`` at all — a worktree added since — raises :class:`PortsUnknown`: its band port is
+    outside the pool, the failure the pool exists for."""
+    if not config.in_box():
+        return recorded_pool_ports().get(name, {})
+    baked = _baked_ports()
+    if baked is None:
+        return {}
+    if name not in baked:
+        raise PortsUnknown(
+            f"this box doesn't know '{name}''s ports: it was added after the box was made."
+        )
+    return baked[name]
+
+
+def recorded_pool_ports() -> dict[str, dict[str, int]]:
+    """The host's record of every registered worktree's pooled ports."""
+    from . import worktree_registry  # lazy: stack is on every verb's path
+
+    return worktree_registry.recorded_ports(main_repo())
+
+
+def _baked_ports() -> dict[str, dict[str, int]] | None:
+    """In a box: every worktree's pooled ports as the host had them at create
+    (``FY_WORKTREE_PORTS``), or ``None`` when nothing was baked."""
+    raw = os.environ.get("FY_WORKTREE_PORTS")
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        name: {k: v for k, v in ports.items() if isinstance(v, int) and not isinstance(v, bool)}
+        for name, ports in data.items()
+        if isinstance(ports, dict)
+    }
+
+
+def worktree_ports() -> dict[str, dict[str, int]]:
+    """Every registered worktree's port for each pooled key — from the pool, or its band — for
+    the box to bake (``FY_WORKTREE_PORTS``): it can't read the host's record. In a box, what the
+    host baked into it."""
+    if config.in_box():
+        return _baked_ports() or {}
+    from . import worktree_registry
+
+    pools = config.port_pools()
+    return {
+        name: {key: port for key in pools if (port := worktree_port(key, name)) is not None}
+        for name in worktree_registry.names(main_repo())
+    }
+
+
+def _held_without_record(exclude: str) -> dict[str, dict[int, str]]:
+    """Per pooled key, the ports in its pool already published without a pool record: main's base,
+    and the band port of every other registered worktree that has none (registered before the
+    pool) — port → who holds it."""
+    from . import worktree_registry
+
+    pools = config.port_pools()
+    if not pools:
+        return {}
+    recorded = recorded_pool_ports()
+    # The host's record of each worktree's offset, never `_offset`: WT_OFFSET is one invocation's
+    # override, and read for every worktree it would make each of them hold that one port.
+    offsets = worktree_offsets()
+    held: dict[str, dict[int, str]] = {}
+    for key, pool in pools.items():
+        base = config.port_bases()[key]
+        mine = {base: "main"} if base in pool else {}
+        for name in worktree_registry.names(main_repo()):
+            # No record, or one a changed pool left behind: either way it publishes on its band.
+            if name != exclude and recorded.get(name, {}).get(key) not in pool:
+                if (port := base + offsets.get(name, _hashed_offset(name))) in pool:
+                    mine[port] = name
+        held[key] = mine
+    return held
+
+
+def claim_ports(name: str) -> dict[str, int] | None:
+    """Give registered worktree ``name`` a port from each pool, recorded by the host
+    (:func:`foldyard.worktree_registry.claim_ports`): ``{}`` when there are no pools, ``None`` when
+    one is full (see :func:`pool_holders`). Host-only — ``fy worktree add`` calls it."""
+    from . import worktree_registry
+
+    pools = config.port_pools()
+    if not pools:
+        return {}
+    band = {key: set(ports) for key, ports in _held_without_record(name).items()}
+    return worktree_registry.claim_ports(main_repo(), name, pools, band)
+
+
+def pool_holders(exclude: str = "") -> dict[str, dict[int, str]]:
+    """Per pooled key, who holds each port of its pool — for the refusal when one is full."""
+    pools = config.port_pools()
+    holders = _held_without_record(exclude)
+    for name, ports in recorded_pool_ports().items():
+        for key, port in ports.items():
+            if name != exclude and key in pools and port in pools[key]:
+                holders.setdefault(key, {})[port] = name
+    return {key: dict(sorted(ports.items())) for key, ports in holders.items()}
+
+
 def _docker_host(
     main: Path, wt_root: Path, no_machine: bool, read_only: bool = False
 ) -> str | None:
@@ -282,18 +426,17 @@ def _context(
             raise SystemExit(1)
         exported["FOLDYARD_CHECKOUT"] = str(checkout)
         exported["PODMAN_PROJECT"] = f"{prefix}-{worktree.replace('/', '-')}"
-        off = _offset(worktree)
     else:
         exported["FOLDYARD_CHECKOUT"] = str(main)
         exported["PODMAN_PROJECT"] = prefix
-        off = 0
-    # Export the [ports] bases for BOTH the main checkout (offset 0) and worktrees (per-worktree
-    # offset). On main these equal the configured bases — the same values the compose files' own
-    # `${SIM_PORT:-4400}` fallbacks assume — so nothing changes behaviourally, but SIM_PORT/APP_PORT
-    # are now actually SET in the compose env. That silences compose-go's "variable is not set,
-    # defaulting to a blank string" warning, which it emits for a referenced-but-unset var even when
-    # the reference carries a `:-default`. No [ports] table means an empty dict, i.e. no exports.
-    ports = {k: str(base + off) for k, base in config.port_bases().items()}
+    # Export the [ports] for BOTH the main checkout (the bases) and worktrees (per-worktree offset,
+    # or a pooled port — worktree_port). On main these equal the configured bases — the same
+    # values the compose files' own `${SIM_PORT:-4400}` fallbacks assume — so nothing changes
+    # behaviourally, but SIM_PORT/APP_PORT are now actually SET in the compose env. That silences
+    # compose-go's "variable is not set, defaulting to a blank string" warning, which it emits for
+    # a referenced-but-unset var even when the reference carries a `:-default`. No [ports] table
+    # means an empty dict, i.e. no exports.
+    ports = _published_ports(worktree)
     exported["COMPOSE_PROJECT_NAME"] = exported["PODMAN_PROJECT"]
 
     dh = _docker_host(main, wt_root, no_machine, read_only)

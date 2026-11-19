@@ -595,6 +595,33 @@ worktree:
 my-feature = 2
 ```
 
+### A port from a pool
+
+When something outside allows only a few ports for one key, give that key a pool. A typical case is
+an OAuth tenant that redirects only to `localhost:3000`–`3005`. The key's worktrees then take their
+port from the pool, not from their offset:
+
+```toml
+[ports]
+WEB_PORT = { base = 3000, worktrees = "3001-3005" }   # main on 3000, worktrees from the pool
+PG_PORT = 5544                                        # every other key keeps the offset
+```
+
+- **`fy worktree add`** gives the new worktree the lowest free port of the pool, recorded on your
+  computer, and keeps it until `fy worktree remove`. When every port is taken it refuses before
+  making anything, and names which worktree holds each. Only `fy worktree add` worktrees count: a
+  [quick worktree](./git.md#quick-worktrees-in-a-box) has no stack and takes none.
+- **Only that key leaves the offset.** The worktree's other ports, its proxy and token-service ports
+  keep it, so nothing else moves.
+- **A worktree registered before the pool** keeps publishing on its offset port. `fy doctor`'s
+  `ports pool` row names it. `fy worktree add <name>` again gives it a pool port; recreate its box
+  and run `fy up` for it to publish there.
+- **A box** is given its worktrees' pool ports when it's made. Asked about a worktree added since,
+  it refuses rather than guess: `fy box recreate`, or run it from that worktree's own box.
+- **The pool may sit in the key's own offset range** (`3001-3005` above), but not in another key's
+  ports (its base to base + 89) or another pool. `fy worktree add` refuses, and `fy doctor` fails,
+  until it doesn't.
+
 ## `[proxy]`
 
 **Presence-gated.** Declaring `[proxy]`, even empty, routes the box's internet traffic through the

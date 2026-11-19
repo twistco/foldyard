@@ -1190,6 +1190,8 @@ def add(
     if wt_dir.exists() or wt_dir.is_symlink():
         rc = _register_existing(main, name, wt_dir, assume_yes)
         return _box_up(name) if box_up and rc == 0 else rc
+    if _no_pooled_port(name):
+        return 1
     wt_root.mkdir(parents=True, exist_ok=True)
     # The checkout doesn't exist yet, so an adoption at its path is an earlier checkout's (removed
     # by hand, or by a `remove` that predates dropping it). Dropped BEFORE git makes the checkout
@@ -1242,6 +1244,7 @@ def add(
     if (rc := _checkout_in_yard(main, wt_dir, branch, yard, again, made="-b" in argv)) != 0:
         return rc
     worktree_registry.register(main, name, wt_dir)
+    _claim_ports(name)
 
     _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
 
@@ -1288,6 +1291,58 @@ def _say_unmasked(main: Path, name: str, *, fresh: bool) -> None:
     print("  `fy box recreate` (prefixed WORKTREE=<its name> for a worktree's box).")
 
 
+def _no_pooled_port(name: str) -> bool:
+    """Refuse (True) when ``name`` can't have a port from a ``[ports]`` pool: the pool is
+    misconfigured, or every port of it is held — said BEFORE anything is made. A worktree that
+    already holds one keeps it (``fy worktree add`` again on a registered worktree)."""
+    if problems := config.port_pool_problems():
+        for problem in problems:
+            _err(f"✗ {problem}")
+        _err("  Fix [ports] in foldyard.toml and adopt it (`fy config adopt`) before adding one.")
+        return True
+    pools = config.port_pools()
+    holders = stack.pool_holders(exclude=name)
+    full = [key for key, pool in pools.items() if set(pool) <= set(holders.get(key, {}))]
+    for key in full:
+        pool = pools[key]
+        held = ", ".join(f"{port} ({who})" for port, who in holders[key].items())
+        _err(
+            f"✗ no free {key} for '{name}': its [ports] pool {pool.start}-{pool.stop - 1} is taken"
+        )
+        _err(f"    {held}")
+    if full:
+        _err("  Free one with `fy worktree remove <name>` (it works on a worktree whose folder is")
+        _err("  gone too), then add this one again.")
+    return bool(full)
+
+
+def _claim_ports(name: str, *, moving: bool = False) -> bool:
+    """Give registered worktree ``name`` its ports from the ``[ports]`` pools and say which.
+    ``moving``: it was registered before (``fy worktree add`` again), so a port that changes is
+    one its box and stack still publish the old way until recreated. False when a pool is full."""
+    before = {key: stack.worktree_port(key, name) for key in config.port_pools()}
+    got = stack.claim_ports(name)
+    if got is None:
+        if moving:
+            _no_pooled_port(name)
+            return False
+        # Free when checked, taken since: another `fy worktree add` won the last port.
+        _err(f"⚠ the [ports] pool filled up while '{name}' was being added: it publishes on its")
+        _err("  band instead. Free a port (`fy worktree remove <name>`), then `fy worktree add")
+        _err(f"  {name}` again.")
+        return True
+    moved = {key: port for key, port in got.items() if before.get(key) != port}
+    if not moving:
+        for key, port in got.items():
+            print(f"  {key} {port} (from its [ports] pool)")
+    elif moved:
+        for key, port in moved.items():
+            print(f"▶ {key} {before[key]} → {port} (its [ports] pool).")
+        print("  Its box and stack still publish the old port until they're made again:")
+        print(f"    WORKTREE={name} fy box recreate && WORKTREE={name} fy up")
+    return True
+
+
 def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) -> int:
     """``add`` on a checkout that already exists: record it, after the operator has seen what it
     really is. Only a real directory that git tracks as a worktree of ``main`` qualifies — a dir
@@ -1301,7 +1356,11 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
         return 1
     if worktree_registry.checkouts(main).get(name) == Path(os.path.realpath(wt_dir)):
         print(f"✓ worktree '{name}' is already registered ({wt_dir})")
-        return 0
+        if _no_pooled_port(name):
+            return 1
+        return 0 if _claim_ports(name, moving=True) else 1
+    if _no_pooled_port(name):
+        return 1
     print(f"'{name}' already exists: {os.path.realpath(wt_dir)} (branch {_branch_of(wt_dir)}).")
     print("  Registering it lets your computer act on it: run its daemons, heal its git index,")
     print("  and reconcile it once its foldyard.toml is adopted.")
@@ -1318,6 +1377,7 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
     except ValueError as e:
         _err(f"✗ {e}")
         return 1
+    _claim_ports(name)
     print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
     _say_unmasked(main, name, fresh=False)
     return 0

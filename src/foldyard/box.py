@@ -200,6 +200,42 @@ def _warn_stale_proxy_port(engine: str, box: str, env: dict) -> None:
         )
 
 
+def _warn_stale_pooled_ports(engine: str, box: str, env: dict) -> None:
+    """A running box publishes each worktree it knows on the pooled port baked at create
+    (``FY_WORKTREE_PORTS``), else on its band. `fy worktree add <name>` again moves a worktree onto
+    the pool, and this box's `WORKTREE=<name> fy up` would still publish the old port. Name each
+    worktree whose port moved since. One added since isn't stale: the box refuses it by name
+    (``stack.PortsUnknown``). Best-effort: silent if anything can't be read."""
+    try:
+        raw = _baked_env(engine, box, env, "FY_WORKTREE_PORTS")
+        if raw is None:
+            return
+        baked = json.loads(raw)
+        if not isinstance(baked, dict):
+            return
+        pools, bases = config.port_pools(), config.port_bases()
+        offsets = stack.worktree_offsets()
+        moved = []
+        for name, ports in sorted(stack.worktree_ports().items()):
+            known = baked.get(name)
+            if not isinstance(known, dict):
+                continue
+            for key, now in ports.items():
+                was = known.get(key)
+                if not (isinstance(was, int) and was in pools.get(key, ())):
+                    was = bases[key] + offsets.get(name, stack._hashed_offset(name))
+                if was != now:
+                    moved.append(f"{name} ({key} {was} → {now})")
+    except Exception:  # a nag must never crash `fy box up`
+        return
+    if moved:
+        print(
+            f"⚠ dev box {box} was made before these worktrees' ports moved to their [ports] pool: "
+            f"{', '.join(moved)}. A stack it brings up for one would publish the old port; "
+            "recreate it: `fy box recreate`."
+        )
+
+
 def _installed_foldyard(engine: str, box: str, env: dict) -> str | None:
     """The version of the foldyard a running box ACTUALLY has on its PATH, or None when nothing
     answers (no install, a broken one, or one too old to know ``--version``).
@@ -901,6 +937,14 @@ def _create_env(
         "-e",
         f"FY_HOST_HOME={Path.home()}",
     ]
+    # …and their ports from a [ports] pool (stack.worktree_ports), which no offset gives. Baked
+    # with no pool too, each worktree it knows with none: a pool adopted later then gives a
+    # worktree added since a port this box can't know, and it refuses that one (stack._pooled)
+    # rather than read "nothing baked" as a foldyard without pools and guess its offset port.
+    env_args += [
+        "-e",
+        f"FY_WORKTREE_PORTS={json.dumps(stack.worktree_ports(), sort_keys=True)}",
+    ]
     for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
         env_args += ["-e", key]
     if gvisor:
@@ -956,6 +1000,10 @@ _DRIFT_IGNORED = frozenset(
         # Every worktree's offset: it changes whenever a worktree is added, no reason to recreate
         # this box. Its own offset moving is `_warn_stale_proxy_port`'s too.
         "FY_WORKTREE_OFFSETS",
+        # …and their pooled ports, which change the same way: a worktree added since is refused
+        # in the box by name (stack._pooled), and one the box knows that moved onto a pool is
+        # `_warn_stale_pooled_ports`'s.
+        "FY_WORKTREE_PORTS",
         # The runtime: `_warn_stale_runtime`'s.
         sandbox.BAKED_ENV,
         # ADR-0033's two VM paths: facts about the VM's mounts, not config — and a box from before
@@ -2390,6 +2438,7 @@ def _up(
 
     if not replacing and _running(engine, box, env):
         _warn_stale_proxy_port(engine, box, env)  # a pre-band box strands on a dead proxy port
+        _warn_stale_pooled_ports(engine, box, env)  # a worktree it knows moved onto a pool
         _warn_stale_runtime(engine, box, env)  # [machine].runtime is create-time too
         _, run_fingerprint = _box_run_image(engine, img, expected_fingerprint, env)
         if _fingerprint(engine, "container", box, env) != run_fingerprint:

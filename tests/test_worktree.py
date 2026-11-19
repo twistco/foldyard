@@ -1623,3 +1623,62 @@ def test_the_git_calls_that_can_run_repo_code_switch_hooks_off(fake_main):
     _make_wt(fake_main, name="gone", registered=False)
     assert worktree.remove("gone", force=True) == 0
     assert hookless(next(c for c in fake_main["calls"] if c[-2:] == ["worktree", "prune"]))
+
+
+# ── a [ports] pool (tests/test_port_pools.py has the allocation) ─────────────────────────────
+
+
+@pytest.fixture
+def pooled(fake_main, monkeypatch):
+    """main's config pools APP_PORT over 3001-3003; every worktree's band is far from it."""
+    monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000})
+    monkeypatch.setattr(config, "port_pools", lambda: {"APP_PORT": range(3001, 3004)})
+    monkeypatch.setattr(config, "port_pool_problems", lambda: [])
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 50)  # recorded 50, 51, … in turn
+    return fake_main
+
+
+def test_add_gives_the_worktree_the_lowest_free_pooled_port(pooled, capsys):
+    assert worktree.add("feat") == 0
+    assert worktree_registry.recorded_ports(pooled["main"]) == {"feat": {"APP_PORT": 3001}}
+    assert "APP_PORT 3001" in capsys.readouterr().out
+
+
+def test_add_refuses_a_full_pool_before_anything_is_made(pooled, monkeypatch, capsys):
+    for name in ("a", "b", "c"):
+        assert worktree.add(name) == 0
+    pooled["calls"].clear()
+    ensured = []
+    monkeypatch.setattr(machine, "ensure", lambda *a, **k: ensured.append(a))
+    capsys.readouterr()
+    assert worktree.add("d") == 1
+    assert not any("worktree" in c and "add" in c for c in pooled["calls"]) and not ensured
+    assert not (pooled["wt_root"] / "d").exists()
+    err = capsys.readouterr().err
+    assert "3001 (a)" in err and "3003 (c)" in err and "fy worktree remove" in err
+
+
+def test_add_refuses_a_pool_that_is_misconfigured(pooled, monkeypatch, capsys):
+    monkeypatch.setattr(config, "port_pool_problems", lambda: ["APP_PORT: the pool is backwards"])
+    assert worktree.add("feat") == 1
+    assert not any("worktree" in c and "add" in c for c in pooled["calls"])
+    assert "the pool is backwards" in capsys.readouterr().err
+
+
+def test_add_again_gives_a_worktree_from_before_the_pool_a_pooled_port(pooled, capsys):
+    # The upgrade path: a worktree registered before the pool publishes on its band until asked.
+    wt = _make_wt(pooled, "old")
+    worktree_registry.register(pooled["main"], "old", wt)
+    assert worktree.add("old") == 0
+    assert worktree_registry.recorded_ports(pooled["main"]) == {"old": {"APP_PORT": 3001}}
+    out = capsys.readouterr().out
+    assert "APP_PORT 3050 → 3001" in out and "fy box recreate" in out
+
+
+def test_add_again_refuses_a_pool_that_is_misconfigured(pooled, monkeypatch, capsys):
+    wt = _make_wt(pooled, "old")
+    worktree_registry.register(pooled["main"], "old", wt)
+    monkeypatch.setattr(config, "port_pools", lambda: {})
+    monkeypatch.setattr(config, "port_pool_problems", lambda: ["APP_PORT: the pool is backwards"])
+    assert worktree.add("old") == 1
+    assert "the pool is backwards" in capsys.readouterr().err
