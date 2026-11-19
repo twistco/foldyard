@@ -10,6 +10,7 @@ and refuses when none is free. Worktrees registered before the pool keep their b
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from hypothesis import given
@@ -505,8 +506,16 @@ def main_and_old_branch(tmp_path, fresh_config, monkeypatch):
     main, wt = tmp_path / "repo", tmp_path / "repo-worktrees" / "old"
     main.mkdir()
 
+    # Without git's location variables: one inherited (a hook exports GIT_DIR) beats `cwd`, and
+    # these calls would then act on that repository.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    }
+
     def git(*a, cwd=main):
-        subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+        subprocess.run(["git", *a], cwd=cwd, env=env, check=True, capture_output=True)
 
     git("init", "-q", "-b", "main")
     plain = '[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\nPG_PORT = 5533\n'
@@ -558,3 +567,37 @@ def test_in_a_box_the_pools_are_main_checkouts_tree(main_and_old_branch, fresh_c
 def test_outside_git_the_checkouts_own_pools_are_read(fresh_config, tmp_path):
     _toml(fresh_config, tmp_path, 'APP_PORT = { base = 3000, worktrees = "3001-3005" }')
     assert config.port_pools() == {"APP_PORT": range(3001, 3006)}
+
+
+def test_an_inherited_git_dir_never_picks_the_main_checkout(
+    main_and_old_branch, monkeypatch, tmp_path
+):
+    # GIT_DIR beats `git -C`: inherited, it named another repo's main, and so its [ports].
+    import subprocess
+
+    _main, wt = main_and_old_branch
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "init", "-q", str(other)],
+        check=True,
+        capture_output=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+    )
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    stack.main_checkout_of.cache_clear()
+    assert stack.main_checkout_of(wt) == _main.resolve()
+
+
+def test_two_keys_on_one_host_port_are_refused_by_name(main_and_old_branch, fresh_config, capsys):
+    # The pool is main's, every other key's base the branch's own: a branch whose PG_PORT base puts
+    # it on the worktree's pooled port would publish both there.
+    _main, wt = main_and_old_branch
+    stack.claim_ports("old")  # APP_PORT 3001
+    (wt / "foldyard.toml").write_text(
+        '[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\nPG_PORT = 2960\n'
+    )
+    fresh_config(FOLDYARD_REPO=wt)  # offset 41: PG_PORT 3001 too
+    with pytest.raises(SystemExit):
+        stack._published_ports("old")
+    err = capsys.readouterr().err
+    assert "3001" in err and "APP_PORT" in err and "PG_PORT" in err

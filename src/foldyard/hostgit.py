@@ -20,9 +20,10 @@ import os
 import subprocess
 
 KEYS = ("user.name", "user.email")
-# What would point git at a repository despite the cwd: an inherited one (a git hook's, say) lets
-# `includeIf gitdir:` match the checkout.
-_REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+# What would point git at a repository despite the cwd or `-C`: an inherited one (a git hook's,
+# say) lets `includeIf gitdir:` match the checkout, and names another repo's main
+# (stack.main_checkout_of).
+REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 _TIMEOUT_S = 5
 
 
@@ -62,7 +63,7 @@ def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
         got = subprocess.run(
             ["git", "config", "--global", "--includes", *args],
             cwd="/",
-            env={k: v for k, v in os.environ.items() if k not in _REPO_ENV},
+            env={k: v for k, v in os.environ.items() if k not in REPO_ENV},
             capture_output=True,
             timeout=_TIMEOUT_S,
         )

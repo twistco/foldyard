@@ -93,7 +93,12 @@ def main_checkout_of(path: Path) -> Path | None:
     outside git. :func:`main_repo` asks the working directory; this asks a given checkout — the one
     whose config is being read (``config._project_ports``). Memoized like it: the TUI asks every
     second, and which repo a path belongs to doesn't change under a process."""
-    out = _run(["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    from .hostgit import REPO_ENV  # lazy: stack is on every verb's path
+
+    # Without git's location variables, which beat `-C`: an inherited GIT_DIR named another main.
+    env = {k: v for k, v in os.environ.items() if k not in REPO_ENV}
+    cmd = ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"]
+    out = _run(cmd, env=env)
     if out.returncode != 0 or not out.stdout.strip():
         return None
     return Path(os.path.realpath(Path(out.stdout.strip()).parent))
@@ -225,12 +230,26 @@ def _published_ports(name: str) -> dict[str, str]:
     """Every ``[ports]`` key's host port for worktree ``name`` (``""`` = main), as compose env.
     Stops, saying why, where the box doesn't know a pooled port (:class:`PortsUnknown`)."""
     try:
-        return {key: str(worktree_port(key, name)) for key in config.port_bases()}
+        ports = {key: str(worktree_port(key, name)) for key in config.port_bases()}
     except PortsUnknown as e:
         _err(f"✗ {e}")
         _err("  Run it from its own box, or recreate this one so it knows them:")
         _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
         raise SystemExit(1)
+    # A pool is the main checkout's, every other key's base the checkout's own (a branch that adds
+    # a service adds its key), so a branch whose bases differ from main's can put a key on the
+    # worktree's pooled port. Say so here rather than let compose fail on the second bind.
+    holders: dict[str, list[str]] = {}
+    for key, port in ports.items():
+        holders.setdefault(port, []).append(key)
+    shared = {port: keys for port, keys in holders.items() if len(keys) > 1}
+    if shared:
+        for port, keys in shared.items():
+            _err(f"✗ {' and '.join(keys)} would both publish on host port {port}.")
+        _err("  Its [ports] bases differ from the main checkout's: merge main into its branch, or")
+        _err("  move a base in this branch's foldyard.toml.")
+        raise SystemExit(1)
+    return ports
 
 
 def _pooled(name: str) -> dict[str, int]:
