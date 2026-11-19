@@ -6,6 +6,164 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.12.0 — 2026-11-19
+
+### Security
+
+- **The foldyard wheel a box installs is no longer staged through a symlink the box planted.** When
+  your computer runs foldyard from an editable checkout, `fy box up` builds a wheel into
+  `.devbox-foldyard/` in your checkout, which the box can write. A box that swapped that directory
+  for a symlink had your computer delete every `*.whl` where it pointed and build a wheel there. The
+  wheel is now built in a private temporary directory and copied in without following a symlink, and
+  `fy box up` refuses with the path to remove, as it already did for the proxy CA. Published
+  installs never staged a wheel and are unaffected.
+
+### Removed
+
+- **The podman backend (`[machine] backend = "podman"`) is gone: foldyard runs on Lima only
+  (ADR-0036).** Deprecated since 0.7.0. A config that still names it, or `MACHINE_BACKEND=podman`,
+  is refused before anything touches a VM: `fy up`, `fy box up` and `fy machine ensure|recreate`
+  stop and say how to move, `fy doctor` shows it red and `fy ls` shows the VM as `retired`. Your
+  podman machine and its volumes are left as they are, and `fy config diff|adopt` and
+  `fy worktree list` keep working, so a project's own migration can still run. Without one, set
+  `backend = "lima"` (or drop the key), `fy config adopt`, and `fy up` creates a new, empty Lima VM.
+  `backend = "native"` gets the same refusal instead of falling back to podman.
+- **`fy init` no longer writes `backend = "lima"`**, and shows `vmtype` as a comment instead: unset,
+  each computer gets the best hypervisor it has (vz on macOS, qemu on Linux and WSL2). A config that
+  says `backend = "lima"` keeps working.
+
+### Changed
+
+- **Repo hooks in a box run with `LEFTHOOK_NO_AUTO_INSTALL=1`, so a lefthook that supports it skips
+  its hook sync there.** That sync is what used to write lefthook's scripts into foldyard's own
+  hooks directory. Support for the variable is merged upstream (evilmartians/lefthook#1592) but not
+  in a release yet: 2.2.2 and older ignore it and keep foldyard's existing workaround. A lefthook
+  with it leaves your own `lefthook run` syncing as before, which the `no_auto_install` key
+  wouldn't. Boxes pick this up at `fy box recreate`.
+- **The prompt for a GitHub App's private key takes the `.pem` file's path.** Type it, or drag the
+  file onto the terminal (or into `fy tui`'s dialog), and foldyard reads and encodes the key on your
+  computer. The old hint had you run `base64 < key.pem | tr -d '\n'` and paste the output, which
+  left the key in your terminal's scrollback and your clipboard: exactly what the hidden prompt is
+  there to avoid. Pasting base64 still works, and `host.env` holds the same line either way. This
+  applies to any `base64` secret, including a `[[secret]]` row's. A relative path isn't read, since
+  the prompt runs in the checkout the box can write.
+- **`fy mode <switch>=on` no longer switches on when it refuses the key you gave it.** A wrong file
+  or a mangled paste stored nothing but still turned the switch on, with no key behind it. Now the
+  mode is left as it was, as `fy tui`'s dialog already did, and the message says to run the command
+  again. Pressing Enter with nothing still switches on, for adding the key later.
+- **Claude Code and Codex run keyless only: a `[claude]` or `[codex]` table without `keyless` is
+  refused, and a login stored in the box fails `fy verify`.** Without `keyless`, the agent used to
+  log in inside the box (`claude`'s login, `codex login --api-key`), which left a long-lived
+  credential in a volume every box of the project mounts, readable by anything in the box and usable
+  from anywhere once copied. That predates the proxy injecting credentials; keyless has replaced it.
+  `fy box up` and `fy box recreate` on your computer, and `fy claude` / `fy codex` in the box, now
+  refuse such a table and name the fix. In the box, `fy verify` fails on Claude's
+  `.credentials.json` or a `primaryApiKey` in its `.claude.json`, a Codex `auth.json` holding
+  anything but foldyard's dummy, and a real `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` or
+  `OPENAI_API_KEY`; `fy doctor` there names the file and how to remove it. A stored login doesn't
+  stop the agent launching. The agents no longer offer their login and API hosts
+  (`api.anthropic.com`, `console.anthropic.com`, `api.openai.com`, `auth.openai.com`) for the
+  allowlist. **What to do:** each developer adds one line to their `foldyard.local.toml` under the
+  agent's table: `keyless = "oauth"` (`claude setup-token` on your computer) or `"api-key"` for
+  Claude, `keyless = "chatgpt"` (`codex login` on your computer once) or `"api-key"` for Codex.
+  Remove any login already in a box (`/logout` in `claude`; `codex logout`, then under ChatGPT
+  keyless `fy box recreate` on your computer to put foldyard's dummy `auth.json` back); `fy verify`
+  says where one is.
+
+### Added
+
+- **`[box] git_hooks = ".githooks"` runs the checkout's hooks in the box and not on your computer.**
+  foldyard sets `core.hooksPath` in the box's own git config, for this checkout and its worktrees
+  only. Other repos in the box keep their own hooks. Git on your computer never sees the setting,
+  since the box can rewrite those hooks. Before this, getting the same result took a long
+  `[box].bootstrap` line that only worked on newly created boxes. `fy box up` now applies the
+  setting to a box that's already running too, and clearing it takes it off again. See
+  `fy docs git`.
+- **Follow grants: the box can read where a trusted path redirects, without granting the target
+  host.**
+  `fy allow add api.github.com/repos/o/r/actions/ --redirects-to '*.blob.core.windows.net/actions-results/'`
+  lets the box read the exact URL a redirect from under that path names, query included, for a
+  minute: `GET`/`HEAD`, no body, over HTTPS, when one of the targets covers it. Nothing else on the
+  target host is allowed. GitHub's job logs and artifacts are the case that needed it: they redirect
+  to one of about two hundred storage accounts, so a list of path grants went stale, and
+  `*.blob.core.windows.net` would be every storage account, anyone's included. A repo can recommend
+  one with `redirects_to = [...]` in `[proxy] recommend`. It's offered and declined apart from a
+  grant of the same path. Each target keeps the level it was granted at, so when a recommendation
+  adds a target, you're asked about that target alone. `fy allow list`, `fy allow remove`,
+  `fy config widenings`, the Network Log (`followed from <host>`) and the TUI's allowlist pane all
+  show it. The source has to be a path, never a whole host: you're trusting where that path
+  redirects. See `fy docs networking` and ADR-0029's 2026-11-16 amendment.
+- **Agents can make a quick worktree in their box, and the docs say how.** `fy docs git` and the
+  bundled foldyard skill now describe a plain
+  `git worktree add --no-track -b <branch> .claude/worktrees/<name>` from a box for a small change
+  that needs no stack: safe inside the checkout, whose path is the same on both sides, and nowhere
+  else. `--no-track` keeps a branch started from `origin/main` from tracking it. Agents had avoided
+  it because the docs only said not to run `git worktree add` in a box. The in-box refusal of
+  `fy worktree add` now points to it, and `fy init`'s managed `.gitignore` block adds
+  `.claude/worktrees/`. In an existing project, add that line to `.gitignore` (or
+  `.git/info/exclude`) yourself.
+- **A `[ports]` key can give worktrees their port from a pool:**
+  `WEB_PORT = { base = 3000, worktrees = "3001-3005" }`. A worktree's offset moves all of its ports,
+  so a worktree couldn't use a service that accepts only a few, such as an OAuth tenant's callback
+  URLs: it landed on `:3042` and couldn't log in, and changing its offset afterwards moved every
+  port, its proxy and token-service ports included. `fy worktree add` now gives the new worktree the
+  lowest free port of the pool and refuses, naming each holder, when none is free. Only that key
+  leaves the offset. Worktrees registered before the pool keep their offset port (`fy doctor`'s
+  `ports pool` row names them; `fy worktree add <name>` again moves one), and a box refuses a
+  worktree added after it was made rather than guess its port. An older foldyard reads a pooled key
+  as missing, so set `min_foldyard_version` when you add one.
+- **`fy docs private-config`: foldyard on a project that doesn't use it.** Contributing to a project
+  upstream with no `foldyard.toml`, you can keep yours untracked and hidden by `.git/info/exclude`
+  in your own clone, so no commit or pull request carries it. The page gives the setup in order
+  (hide the files, then review and adopt, then create the box), a `worktree_init` script that copies
+  the files into each new worktree, a paragraph for the agent's `system_prompt`, and how to get the
+  file back after git deletes it: your computer's adopted copy survives, and `fy config revert`
+  rewrites it. The bundled `foldyard` skill now checks whether git tracks `foldyard.toml` before
+  treating it as the project's.
+
+### Fixed
+
+- **The TUI's Network Log, GCP Tokens and grant expiries show your local time, with the date on any
+  row that isn't from today.** They showed the log's UTC time of day alone, so a request from
+  yesterday read like one from this afternoon, and every time was off by your UTC offset.
+- **A grant that covers image builds only now says so, wherever you or the box meet it.** A host
+  allowed at the build gate (`fy box build`, the stack build) reaches builds alone, but the TUI's
+  allowlist listed it like any other grant and the box's refusals of it said "not on the allowlist":
+  a box downloading Playwright's browsers at runtime looked refused despite its grant. The TUI's
+  allowlist marks it "for image builds only", the Network Log's refused rows say "granted for image
+  builds only", the box's 403 names the grant that would let it through (a path first, then the
+  whole host), and the TUI's level picker warns that allowing such a host widens it to the box. The
+  wall is unchanged.
+- **A `fy allow add` command the proxy suggests, or a build prints without a terminal, is
+  shell-quoted, and offers a path grant only when one would let the request through.** The path in
+  it is the box's, and a path grant may hold `$ ( ) ;`, so pasting `fy allow add host/$(…)/` from a
+  refusal or a build's output — or a host-side agent running it — would have run that command on
+  your computer. A path grant passes GET and HEAD alone, so a refused POST or an off-port request is
+  now offered only the whole host.
+- **`fy worktree remove` refuses a worktree that holds another one.** A git worktree made inside it
+  (an agent's quick worktree under `.claude/worktrees/`, say) was deleted with it, uncommitted work
+  and all: `git worktree remove` takes a worktree nested in an ignored folder even without
+  `--force`, and foldyard's uncommitted-work check read only the outer one. It now names the
+  worktrees inside and stops before anything is torn down, looks again once the box is down (its
+  agents may have made one meanwhile), and refuses when git can't list the worktrees at all.
+  `--discard` deletes those checkouts too; git then lists them as prunable until
+  `git worktree prune` runs.
+- **`fy worktree add` no longer blames a missing git when the VM can't see the new worktree.** The
+  engine reports a working directory it can't enter with the same "command not found" as a missing
+  binary, so a worktrees folder deleted and made again while the VM ran (the VM keeps serving the
+  old one) read as "no git there? [box].image must provide git". After such a failure foldyard now
+  asks whether the image's git runs at all, and when it does, says the VM's share is out of date and
+  that `fy machine stop && fy up` fixes it.
+- **Adopting a config that asks for a newer foldyard no longer locks every `fy` out.** On your
+  computer `min_foldyard_version` is read from the ADOPTED config, and it stopped every verb,
+  `fy config adopt` included. So adopting a branch's config that asked for an unreleased version, as
+  the launch gate offers to, left no way back: checking the old branch out changed nothing, and only
+  editing `~/.foldyard/adopted` by hand did. Adoption (the launch gate's prompt, `fy config adopt`,
+  the TUI) now refuses a floor the running foldyard doesn't meet and says to upgrade first, and the
+  `fy config` verbs are never behind the floor, so an adopted config can always be put right.
+  Already locked out on an older foldyard? Point `adopted.json`'s `generation` in
+  `~/.foldyard/adopted/<checkout>-<hash>/` back at the previous `gen-…` folder.
+
 ## 0.11.0 — 2026-11-12
 
 New verbs for day-to-day work: `fy box recreate` in one step, `fy ls` for every project on your
