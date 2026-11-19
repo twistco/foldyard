@@ -205,27 +205,37 @@ def worktree_port(key: str, name: str) -> int | None:
     return base + _offset(name)
 
 
+class PortsUnknown(Exception):
+    """In a box: a worktree added after the box was made, whose pooled port it can't know."""
+
+
 def _published_ports(name: str) -> dict[str, str]:
-    """Every ``[ports]`` key's host port for worktree ``name`` (``""`` = main), as compose env."""
-    return {key: str(worktree_port(key, name)) for key in config.port_bases()}
+    """Every ``[ports]`` key's host port for worktree ``name`` (``""`` = main), as compose env.
+    Stops, saying why, where the box doesn't know a pooled port (:class:`PortsUnknown`)."""
+    try:
+        return {key: str(worktree_port(key, name)) for key in config.port_bases()}
+    except PortsUnknown as e:
+        _err(f"✗ {e}")
+        _err("  Run it from its own box, or recreate this one so it knows them:")
+        _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
+        raise SystemExit(1)
 
 
 def _pooled(name: str) -> dict[str, int]:
     """The pooled ports recorded for worktree ``name``: the host's record, or in a box what the
     host baked at create (:func:`worktree_ports`, baked with or without a pool). A box made by a
     foldyard without pools has nothing baked, and its worktrees keep their band. A box that doesn't
-    know ``name`` at all — a worktree added since — refuses: its band port is outside the pool, the
-    failure the pool exists for."""
+    know ``name`` at all — a worktree added since — raises :class:`PortsUnknown`: its band port is
+    outside the pool, the failure the pool exists for."""
     if not config.in_box():
         return recorded_pool_ports().get(name, {})
     baked = _baked_ports()
     if baked is None:
         return {}
     if name not in baked:
-        _err(f"✗ this box doesn't know '{name}''s ports: it was added after the box was made.")
-        _err("  Run it from its own box, or recreate this one so it knows them:")
-        _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
-        raise SystemExit(1)
+        raise PortsUnknown(
+            f"this box doesn't know '{name}''s ports: it was added after the box was made."
+        )
     return baked[name]
 
 
@@ -288,7 +298,8 @@ def _held_without_record(exclude: str) -> dict[str, dict[int, str]]:
         base = config.port_bases()[key]
         mine = {base: "main"} if base in pool else {}
         for name in worktree_registry.names(main_repo()):
-            if name != exclude and key not in recorded.get(name, {}):
+            # No record, or one a changed pool left behind: either way it publishes on its band.
+            if name != exclude and recorded.get(name, {}).get(key) not in pool:
                 if (port := base + offsets.get(name, _hashed_offset(name))) in pool:
                     mine[port] = name
         held[key] = mine

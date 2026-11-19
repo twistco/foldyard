@@ -280,8 +280,10 @@ def test_in_a_box_a_worktree_added_since_is_refused_not_guessed(repo, monkeypatc
     # Its band port would be outside the pool: the very failure the pool exists to prevent.
     monkeypatch.setenv("IN_DEVBOX", "1")
     monkeypatch.setenv("FY_WORKTREE_PORTS", json.dumps({"feat": {"APP_PORT": 3002}}))
-    with pytest.raises(SystemExit):
+    with pytest.raises(stack.PortsUnknown):
         stack.worktree_port("APP_PORT", "later")
+    with pytest.raises(SystemExit):  # the stack verbs say so and stop
+        stack._published_ports("later")
     assert "fy box recreate" in capsys.readouterr().err
 
 
@@ -383,7 +385,7 @@ def test_a_box_made_before_a_pool_refuses_a_worktree_added_since(repo, monkeypat
     config.clear_caches()
     assert stack.worktree_port("APP_PORT", "old") == 3050  # known, no pool then: its offset port
     with pytest.raises(SystemExit):
-        stack.worktree_port("APP_PORT", "feat")
+        stack._published_ports("feat")
     assert "fy box recreate" in capsys.readouterr().err
 
 
@@ -394,3 +396,97 @@ def test_wt_offset_never_speaks_for_the_other_worktrees_held_ports(repo, monkeyp
     _add(repo, "new")
     monkeypatch.setenv("WT_OFFSET", "1")
     assert stack.claim_ports("new") == {"APP_PORT": 3001}
+
+
+# ── review round (CodeRabbit, #202) ──────────────────────────────────────────────────────────
+
+
+def test_a_pool_without_a_base_is_a_problem(fresh_config, tmp_path):
+    _toml(fresh_config, tmp_path, 'APP_PORT = { worktrees = "3001-3005" }')
+    assert config.port_pools() == {}
+    [problem] = config.port_pool_problems()
+    assert "APP_PORT" in problem and "base" in problem
+
+
+def _set_pool(repo, pool):
+    (repo / "foldyard.toml").write_text(
+        f'[project]\nname = "t"\n[ports]\nAPP_PORT = {{ base = 3000, worktrees = "{pool}" }}\n'
+    )
+    config.clear_caches()
+
+
+def test_a_record_left_outside_a_changed_pool_holds_its_offset_port(repo, monkeypatch):
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 2 if name == "old" else 50)
+    _add(repo, "old")
+    _set_pool(repo, "3001-3001")
+    assert stack.claim_ports("old") == {"APP_PORT": 3001}
+    _set_pool(repo, "3002-3003")  # 3001 left the pool: old publishes on its offset port, 3002
+    assert stack.worktree_port("APP_PORT", "old") == 3002
+    _add(repo, "new")
+    assert stack.claim_ports("new") == {"APP_PORT": 3003}
+
+
+def test_doctor_names_a_worktree_whose_record_left_the_pool(doctor_repo):
+    from foldyard import devmode
+
+    _add(doctor_repo, "old")
+    stack.claim_ports("old")  # 3001
+    _set_pool(doctor_repo, "3002-3003")
+    [(status, _, detail)] = devmode._port_pool_check()
+    assert status == "warn" and "`fy worktree add old`" in detail
+
+
+def test_in_a_box_the_card_of_a_worktree_added_since_shows_no_port(repo, monkeypatch):
+    # The refusal belongs to the stack verbs; listing workspaces must not exit on it.
+    from foldyard import devmode
+
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("FY_WORKTREE_PORTS", json.dumps({"feat": {"APP_PORT": 3002}}))
+    (repo / "foldyard.toml").write_text(
+        (repo / "foldyard.toml")
+        .read_text()
+        .replace('name = "t"', 'name = "t"\napp_port = "APP_PORT"')
+    )
+    config.clear_caches()
+    monkeypatch.setattr(devmode, "worktree_config", lambda w: config.resolve(worktree=w, repo=repo))
+    item: dict = {"path": str(repo)}
+    devmode._describe_checkout(item, "later")
+    assert item["app_port"] is None
+
+
+def test_a_claim_keeps_a_record_made_while_it_waited_for_the_lock(repo, monkeypatch):
+    # B registers and claims between A reading the registry and A taking the lock.
+    import fcntl as real_fcntl
+
+    _add(repo, "a")
+    pools = {"APP_PORT": range(3001, 3004)}
+    lock = real_fcntl.flock
+    raced = []
+
+    def flock(fh, op):
+        lock(fh, op)
+        if not raced and op == real_fcntl.LOCK_EX:
+            raced.append(1)
+            _add(repo, "b")
+            reg.ports_file(repo).write_text(json.dumps({"b": {"APP_PORT": 3001}}))
+
+    monkeypatch.setattr(reg.fcntl, "flock", flock)
+    assert reg.claim_ports(repo, "a", pools, {}) == {"APP_PORT": 3002}
+    assert reg.recorded_ports(repo)["b"] == {"APP_PORT": 3001}
+
+
+def test_a_reader_never_sees_a_half_written_record(repo, monkeypatch):
+    _add(repo, "a")
+    _add(repo, "b")
+    pools = {"APP_PORT": range(3001, 3004)}
+    reg.claim_ports(repo, "a", pools, {})
+    before = reg.ports_file(repo).read_text()
+
+    def dump(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(reg.json, "dump", dump)
+    monkeypatch.setattr(reg.json, "dumps", dump)
+    with pytest.raises(OSError):
+        reg.claim_ports(repo, "b", pools, {})
+    assert reg.ports_file(repo).read_text() == before

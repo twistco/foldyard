@@ -277,14 +277,22 @@ def claim_ports(
     """Record a port from each of ``pools`` for registered worktree ``name`` (:func:`pick_ports`)
     and return them, or ``None``, recording nothing, when a pool is full. ``band`` holds the ports
     other worktrees publish on without a record — registered before the pool, so on their band,
-    which may lie inside it. flock-guarded: two ``fy worktree add`` can't take one port."""
+    which may lie inside it. flock-guarded: two ``fy worktree add`` can't take one port.
+
+    The lock is a file of its own, and the record is replaced whole (a temp file and
+    ``os.replace``): :func:`recorded_ports` reads without the lock, and a record truncated in place
+    read as ``{}`` for a moment — every worktree back on its band. Who is registered is read once
+    the lock is held, so a claim finished while this one waited is never dropped as unregistered."""
     path = ports_file(main)
     path.parent.mkdir(parents=True, exist_ok=True)
-    names = set(_load(main))
-    with open(path, "a+", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        fh.seek(0)
-        recorded = {n: p for n, p in _read_ports(fh.read()).items() if n in names}
+    with open(path.with_name(f"{path.name}.lock"), "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        names = set(_load(main))
+        try:
+            text = path.read_text()
+        except OSError:
+            text = ""
+        recorded = {n: p for n, p in _read_ports(text).items() if n in names}
         taken = {key: set(band.get(key, ())) for key in pools}
         for other, ports in recorded.items():
             if other != name:
@@ -295,10 +303,12 @@ def claim_ports(
         if got is None:
             return None
         recorded[name] = {**recorded.get(name, {}), **got}
-        fh.seek(0)
-        fh.truncate()
-        json.dump(recorded, fh, indent=2, sort_keys=True)
-        fh.write("\n")
+        tmp = path.with_name(f"{path.name}.tmp")
+        try:
+            tmp.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
     return got
 
 

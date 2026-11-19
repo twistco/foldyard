@@ -944,6 +944,10 @@ def _declared_pools() -> tuple[dict[str, range], list[str]]:
     for key, value in _table("ports").items():
         if not isinstance(value, dict) or "worktrees" not in value:
             continue
+        base = value.get("base")
+        if not isinstance(base, int) or isinstance(base, bool):
+            problems.append(f"[ports] {key}: a worktrees pool needs an integer base (main's port)")
+            continue
         raw = value["worktrees"]
         m = _POOL_RANGE.match(raw) if isinstance(raw, str) else None
         lo, hi = (int(m.group(1)), int(m.group(2))) if m else (0, 0)

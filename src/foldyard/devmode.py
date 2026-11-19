@@ -1373,7 +1373,10 @@ def _port_pool_check() -> Iterable[tuple[str, str, str]]:
     except OSError as e:  # pragma: no cover — unreadable state dir
         yield _result(None, "ports pool", "", f"couldn't read the worktree registry: {e}")
         return
-    on_band = {name: [key for key in pools if key not in recorded.get(name, {})] for name in names}
+    on_band = {  # no record, or one a changed pool left behind: on its band either way
+        name: [key for key in pools if recorded.get(name, {}).get(key) not in pools[key]]
+        for name in names
+    }
     stray = [name for name, keys in on_band.items() if keys]
     band = [
         f"{name} ({key} {stack.worktree_port(key, name)})"

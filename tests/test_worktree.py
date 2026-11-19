@@ -1673,3 +1673,12 @@ def test_add_again_gives_a_worktree_from_before_the_pool_a_pooled_port(pooled, c
     assert worktree_registry.recorded_ports(pooled["main"]) == {"old": {"APP_PORT": 3001}}
     out = capsys.readouterr().out
     assert "APP_PORT 3050 → 3001" in out and "fy box recreate" in out
+
+
+def test_add_again_refuses_a_pool_that_is_misconfigured(pooled, monkeypatch, capsys):
+    wt = _make_wt(pooled, "old")
+    worktree_registry.register(pooled["main"], "old", wt)
+    monkeypatch.setattr(config, "port_pools", lambda: {})
+    monkeypatch.setattr(config, "port_pool_problems", lambda: ["APP_PORT: the pool is backwards"])
+    assert worktree.add("old") == 1
+    assert "the pool is backwards" in capsys.readouterr().err

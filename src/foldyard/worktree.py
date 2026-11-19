@@ -1356,6 +1356,8 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
         return 1
     if worktree_registry.checkouts(main).get(name) == Path(os.path.realpath(wt_dir)):
         print(f"✓ worktree '{name}' is already registered ({wt_dir})")
+        if _no_pooled_port(name):
+            return 1
         return 0 if _claim_ports(name, moving=True) else 1
     if _no_pooled_port(name):
         return 1

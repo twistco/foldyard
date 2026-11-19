@@ -1063,6 +1063,39 @@ def test_up_bakes_every_worktrees_pooled_ports_into_the_box(fake, monkeypatch, r
     assert json.loads(baked) == {"feat": {"APP_PORT": 3001}}
 
 
+def test_up_nags_when_a_worktree_the_box_knows_moved_to_a_pooled_port(fake, monkeypatch, capsys):
+    # `fy worktree add old` again moved old onto the pool; main's box still has its offset port,
+    # and in-box `WORKTREE=old fy up` would publish that one.
+    monkeypatch.setattr(box.config, "port_pools", lambda: {"APP_PORT": range(3001, 3006)})
+    monkeypatch.setattr(box.config, "port_bases", lambda: {"APP_PORT": 3000})
+    monkeypatch.setattr(box.stack, "worktree_offsets", lambda: {"old": 50, "feat": 51})
+    monkeypatch.setattr(
+        box.stack, "worktree_ports", lambda: {"old": {"APP_PORT": 3001}, "feat": {"APP_PORT": 3002}}
+    )
+    fake["state"].update(
+        running=True,
+        baked_env={"FY_WORKTREE_PORTS": json.dumps({"old": {}, "feat": {"APP_PORT": 3002}})},
+    )
+    assert box.main("up") == 0
+    out = capsys.readouterr().out
+    assert "old (APP_PORT 3050 → 3001)" in out and "fy box recreate" in out
+    assert "feat (" not in out
+
+
+def test_up_is_quiet_when_the_pooled_ports_the_box_knows_still_hold(fake, monkeypatch, capsys):
+    monkeypatch.setattr(box.config, "port_pools", lambda: {"APP_PORT": range(3001, 3006)})
+    monkeypatch.setattr(box.config, "port_bases", lambda: {"APP_PORT": 3000})
+    monkeypatch.setattr(box.stack, "worktree_offsets", lambda: {"old": 50})
+    monkeypatch.setattr(
+        box.stack, "worktree_ports", lambda: {"old": {"APP_PORT": 3050}, "new": {"APP_PORT": 3001}}
+    )
+    fake["state"].update(running=True, baked_env={"FY_WORKTREE_PORTS": json.dumps({"old": {}})})
+    assert box.main("up") == 0
+    assert (
+        "→" not in capsys.readouterr().out
+    )  # old still on its offset port; new: the box refuses it
+
+
 def test_up_bakes_the_worktrees_it_knows_even_without_a_pool(fake, monkeypatch):
     # Present but empty is how the box tells "made before a pool" (refuse a worktree added since)
     # from "made by a foldyard without pools" (nothing baked: every worktree on its offset).
