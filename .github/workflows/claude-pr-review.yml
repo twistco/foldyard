@@ -250,6 +250,43 @@ jobs:
           jq -r "$prog" "$EXECUTION_FILE" || true
 
       # Runs on every review, finding or not: a step that ran only when there was one would say so.
+      # Token and tool usage for the run, in the job summary. The action's log keeps only the cost
+      # (its result line drops each model's token counts); the execution file has them. Numbers and
+      # tool names only, never a call's input or result: the summary is as public as the log.
+      - name: Usage summary
+        if: always() && steps.review.outputs.execution_file != ''
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        run: |
+          # Numbers and tool names only: the summary is as public as the log.
+          msgs='if type == "array" then .[] else . end'
+          {
+            echo "### Token usage"
+            echo
+            jq -r "[$msgs | select(.type == \"result\")] | last // {}
+              | \"\(.num_turns // 0) turns, \((.duration_ms // 0) / 1000 | floor) s, ~\$\(.total_cost_usd // 0 | . * 100 | round / 100) (estimate)\"" "$EXECUTION_FILE"
+            echo
+            echo "| Model | Input | Output | Cache read | Cache write | Cost (USD, est.) |"
+            echo "|---|---:|---:|---:|---:|---:|"
+            jq -r "[$msgs | select(.type == \"result\")] | last // {} | (.modelUsage // {}) | to_entries[]
+              | \"| \(.key | gsub(\"[^A-Za-z0-9_.:-]\"; \"?\") | .[:60]) | \(.value.inputTokens // 0) | \(.value.outputTokens // 0) | \(.value.cacheReadInputTokens // 0) | \(.value.cacheCreationInputTokens // 0) | \(.value.costUSD // 0 | . * 100 | round / 100) |\"" "$EXECUTION_FILE"
+            echo
+            echo "### Tool usage"
+            echo
+            echo "| Tool | Calls | Failed |"
+            echo "|---|---:|---:|"
+            # A message can be emitted once per content block, so a call counts once by its id; a failure
+            # is a tool_result with is_error, matched back to its call.
+            jq -r "[$msgs] as \$m
+              | ([\$m[] | select(.type == \"assistant\") | .message.content[]? | select(.type == \"tool_use\")] | unique_by(.id)) as \$uses
+              | (\$uses | map({key: .id, value: .name}) | from_entries) as \$name
+              | ([\$m[] | select(.type == \"user\") | .message.content[]? | select(.type == \"tool_result\" and .is_error == true) | .tool_use_id] | unique | map(\$name[.] // \"?\")) as \$failed
+              | [\$uses | group_by(.name)[] | .[0].name as \$t
+                 | {tool: \$t, calls: length, failed: ([\$failed[] | select(. == \$t)] | length)}]
+              | sort_by(-.calls)[]
+              | \"| \(.tool | gsub(\"[^A-Za-z0-9_.:-]\"; \"?\") | .[:80]) | \(.calls) | \(.failed) |\"" "$EXECUTION_FILE"
+          } >> "$GITHUB_STEP_SUMMARY" || true
+
       - name: Mint the advisory token
         id: advisory-token
         uses: actions/create-github-app-token@v3
