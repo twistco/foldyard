@@ -245,11 +245,9 @@ def test_a_worktree_with_a_claim_publishes_on_it_and_the_rest_on_its_band(repo):
 
 
 def test_a_worktree_from_before_the_pool_keeps_its_band_and_holds_it(repo, monkeypatch):
-    _add(repo, "old")
-    monkeypatch.setenv("WT_OFFSET", "1")  # its band: 3001, inside the pool
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 1 if name == "old" else 50)
+    _add(repo, "old")  # recorded on offset 1: its band port is 3001, inside the pool
     assert stack.worktree_port("APP_PORT", "old") == 3001
-    monkeypatch.delenv("WT_OFFSET")
-    monkeypatch.setattr(stack, "_offset", lambda name: 1 if name == "old" else 50)
     _add(repo, "new")
     assert stack.claim_ports("new") == {"APP_PORT": 3002}  # 3001 is old's, on its band
 
@@ -366,3 +364,33 @@ def test_doctor_says_nothing_without_a_pool(doctor_repo):
     (doctor_repo / "foldyard.toml").write_text('[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\n')
     config.clear_caches()
     assert list(devmode._port_pool_check()) == []
+
+
+def test_a_box_made_before_a_pool_refuses_a_worktree_added_since(repo, monkeypatch, capsys):
+    # The box is made with no pool (so every worktree it knows has no pooled ports), then a pool is
+    # adopted and a worktree added. Reading "nothing baked" there as "an older foldyard made it"
+    # published the new worktree on its offset port: the failure the pool exists for.
+    (repo / "foldyard.toml").write_text('[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\n')
+    config.clear_caches()
+    _add(repo, "old")
+    baked = json.dumps(stack.worktree_ports())
+    assert json.loads(baked) == {"old": {}}
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("FY_WORKTREE_PORTS", baked)
+    (repo / "foldyard.toml").write_text(
+        '[project]\nname = "t"\n[ports]\nAPP_PORT = { base = 3000, worktrees = "3001-3003" }\n'
+    )
+    config.clear_caches()
+    assert stack.worktree_port("APP_PORT", "old") == 3050  # known, no pool then: its offset port
+    with pytest.raises(SystemExit):
+        stack.worktree_port("APP_PORT", "feat")
+    assert "fy box recreate" in capsys.readouterr().err
+
+
+def test_wt_offset_never_speaks_for_the_other_worktrees_held_ports(repo, monkeypatch):
+    # WT_OFFSET is one invocation's override; read for every worktree it made "old" (recorded on
+    # offset 50, port 3050) look like it held 3001.
+    _add(repo, "old")
+    _add(repo, "new")
+    monkeypatch.setenv("WT_OFFSET", "1")
+    assert stack.claim_ports("new") == {"APP_PORT": 3001}

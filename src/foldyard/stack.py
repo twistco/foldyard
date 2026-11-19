@@ -212,9 +212,10 @@ def _published_ports(name: str) -> dict[str, str]:
 
 def _pooled(name: str) -> dict[str, int]:
     """The pooled ports recorded for worktree ``name``: the host's record, or in a box what the
-    host baked at create (:func:`worktree_ports`). A box made by a foldyard without pools has none
-    baked, and its worktrees keep their band. A box that doesn't know ``name`` at all — a worktree
-    added since — refuses: its band port is outside the pool, the failure the pool exists for."""
+    host baked at create (:func:`worktree_ports`, baked with or without a pool). A box made by a
+    foldyard without pools has nothing baked, and its worktrees keep their band. A box that doesn't
+    know ``name`` at all — a worktree added since — refuses: its band port is outside the pool, the
+    failure the pool exists for."""
     if not config.in_box():
         return recorded_pool_ports().get(name, {})
     baked = _baked_ports()
@@ -275,14 +276,20 @@ def _held_without_record(exclude: str) -> dict[str, dict[int, str]]:
     pool) — port → who holds it."""
     from . import worktree_registry
 
+    pools = config.port_pools()
+    if not pools:
+        return {}
     recorded = recorded_pool_ports()
+    # The host's record of each worktree's offset, never `_offset`: WT_OFFSET is one invocation's
+    # override, and read for every worktree it would make each of them hold that one port.
+    offsets = worktree_offsets()
     held: dict[str, dict[int, str]] = {}
-    for key, pool in config.port_pools().items():
+    for key, pool in pools.items():
         base = config.port_bases()[key]
         mine = {base: "main"} if base in pool else {}
         for name in worktree_registry.names(main_repo()):
             if name != exclude and key not in recorded.get(name, {}):
-                if (port := base + _offset(name)) in pool:
+                if (port := base + offsets.get(name, _hashed_offset(name))) in pool:
                     mine[port] = name
         held[key] = mine
     return held

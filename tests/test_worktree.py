@@ -1634,7 +1634,7 @@ def pooled(fake_main, monkeypatch):
     monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000})
     monkeypatch.setattr(config, "port_pools", lambda: {"APP_PORT": range(3001, 3004)})
     monkeypatch.setattr(config, "port_pool_problems", lambda: [])
-    monkeypatch.setattr(stack, "_offset", lambda name: 50)
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 50)  # recorded 50, 51, … in turn
     return fake_main
 
 

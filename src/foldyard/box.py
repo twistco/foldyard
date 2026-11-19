@@ -901,13 +901,14 @@ def _create_env(
         "-e",
         f"FY_HOST_HOME={Path.home()}",
     ]
-    if config.port_pools():
-        # …and their ports from a [ports] pool (stack.worktree_ports), which no offset gives. Only
-        # with a pool: a box without it keeps every worktree on its band (stack._baked_ports).
-        env_args += [
-            "-e",
-            f"FY_WORKTREE_PORTS={json.dumps(stack.worktree_ports(), sort_keys=True)}",
-        ]
+    # …and their ports from a [ports] pool (stack.worktree_ports), which no offset gives. Baked
+    # with no pool too, each worktree it knows with none: a pool adopted later then gives a
+    # worktree added since a port this box can't know, and it refuses that one (stack._pooled)
+    # rather than read "nothing baked" as a foldyard without pools and guess its offset port.
+    env_args += [
+        "-e",
+        f"FY_WORKTREE_PORTS={json.dumps(stack.worktree_ports(), sort_keys=True)}",
+    ]
     for key in config.port_bases():  # passthrough -e KEY (value flows from env below)
         env_args += ["-e", key]
     if gvisor:

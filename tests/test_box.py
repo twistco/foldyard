@@ -1063,10 +1063,14 @@ def test_up_bakes_every_worktrees_pooled_ports_into_the_box(fake, monkeypatch, r
     assert json.loads(baked) == {"feat": {"APP_PORT": 3001}}
 
 
-def test_up_bakes_no_pooled_ports_without_a_pool(fake):
+def test_up_bakes_the_worktrees_it_knows_even_without_a_pool(fake, monkeypatch):
+    # Present but empty is how the box tells "made before a pool" (refuse a worktree added since)
+    # from "made by a foldyard without pools" (nothing baked: every worktree on its offset).
+    monkeypatch.setattr(box.stack, "worktree_ports", lambda: {"feat": {}})
     assert box.main("up") == 0
     run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
-    assert not [t for t in run if t.startswith("FY_WORKTREE_PORTS=")]
+    [baked] = [t.partition("=")[2] for t in run if t.startswith("FY_WORKTREE_PORTS=")]
+    assert json.loads(baked) == {"feat": {}}
 
 
 # The [claude]/[codex] drift rows above fire on the same "recreate" advice, so the foldyard
@@ -3770,7 +3774,11 @@ def test_up_says_which_dirs_it_could_not_mask(fake, monkeypatch, register_worktr
     assert box.main("up") == 0
     run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
     # No mount names it (its offset in FY_WORKTREE_OFFSETS is an env value, which a colon can't break)
-    assert not [a for a in run if "x:y" in a and not a.startswith("FY_WORKTREE_OFFSETS=")]
+    assert not [
+        a
+        for a in run
+        if "x:y" in a and not a.startswith(("FY_WORKTREE_OFFSETS=", "FY_WORKTREE_PORTS="))
+    ]
     out = capsys.readouterr().out
     assert f"{wt_root}/x:y/data/.venv" in out and "not masked" in out
 
