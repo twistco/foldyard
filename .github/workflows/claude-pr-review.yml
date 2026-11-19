@@ -31,8 +31,12 @@ on:
   pull_request:
     types: [opened, ready_for_review, synchronize]
 
+# The draft state is in the key: the group is applied when a run is queued, before the job's
+# `draft == false` check, so a push to a draft landing seconds before "Ready for review" queued a
+# draft run that cancelled the real review and then skipped itself — and re-running either replays
+# its own payload, so the review never ran (2026-11-19). Ready runs still cancel each other on a push.
 concurrency:
-  group: claude-pr-review-${{ github.event.pull_request.number }}
+  group: claude-pr-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.draft }}
   cancel-in-progress: true
 
 jobs:
