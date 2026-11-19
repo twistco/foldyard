@@ -131,9 +131,11 @@ min_foldyard_version = "0.2.0"
 - **`dev_vm_dir`** — *transitional*: where generated assets and the `.dev-mode.json` mirror land,
   relative to the repo root. Default: `"."`. Env: `FOLDYARD_DEV_VM_DIR`.
 - **`min_foldyard_version`** — a **floor**, not a pin: `fy` refuses to run in this checkout below
-  it. Must be a string. Default: none, but `fy init` stamps the version that scaffolded the file —
-  unless that version can't be compared (`0+unknown` from a bare source tree, or a local build), in
-  which case it writes a commented placeholder instead.
+  it, all but `fy config`, which is how an adopted config is put right. On your computer the floor
+  is the ADOPTED config's, so adopting one whose floor the running `fy` doesn't meet is refused:
+  upgrade first. Must be a string. Default: none, but `fy init` stamps the version that scaffolded
+  the file — unless that version can't be compared (`0+unknown` from a bare source tree, or a local
+  build), in which case it writes a commented placeholder instead.
 - **`recommended_foldyard_version`** — a nudge, never a block, printed only on `fy up`, `fy box up`
   and `fy host restart`. Default: none. `FOLDYARD_NO_VERSION_NUDGE=1` silences it.
 - **`[project.foldyard_version_reasons]`** — a ledger of *why* this repo adopted each version, keyed

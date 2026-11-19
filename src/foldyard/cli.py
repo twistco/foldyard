@@ -1711,9 +1711,15 @@ def config_adopt() -> None:
     Read `fy config diff` first — adopting is the moment of trust, and this file decides which
     hosts get your credentials injected and which egress stays undecrypted.
     """
+    import sys
+
     from . import configpin
 
-    drift = configpin.adopt(_active_config())
+    try:
+        drift = configpin.adopt(_active_config())
+    except configpin.NeedsNewerFoldyard as e:
+        print(f"✗ {e}", file=sys.stderr)
+        raise SystemExit(1)
     print(f"✓ adopted [{drift.label}] ({drift.tree_digest()}) — the supervisor picks it up live.")
 
 

@@ -653,6 +653,26 @@ class ReviewStale(RuntimeError):
     """The tree changed between being shown to the operator and being adopted."""
 
 
+class NeedsNewerFoldyard(RuntimeError):
+    """The tree declares a ``min_foldyard_version`` this fy provably doesn't meet. On the host the
+    floor is read from the ADOPTED config and fronts every verb, so adopting it would refuse every
+    one but `fy config` until an upgrade — and when the floor names a foldyard not yet released,
+    there is no upgrade (2026-11-19)."""
+
+
+def _refuse_unmet_floor(tree: dict[str, bytes | None]) -> None:
+    """Raise :class:`NeedsNewerFoldyard` when ``tree`` declares a floor this fy doesn't meet."""
+    from . import __version__, compat
+
+    minimum = (merged_toml(tree).get("project") or {}).get("min_foldyard_version")
+    if isinstance(minimum, str) and compat.floor_unmet(__version__, minimum):
+        raise NeedsNewerFoldyard(
+            f"this foldyard.toml needs foldyard >= {minimum}, and you have {__version__} — "
+            "nothing adopted: adopting it would stop every fy but `fy config` until you "
+            "upgrade. Upgrade first (`uv tool upgrade foldyard`), then adopt."
+        )
+
+
 def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | None = None) -> Drift:
     """Adopt the working tree: copy it into a NEW generation of the pin, then point the marker at
     it. THE moment of trust in this module — every other path only ever reads what this wrote.
@@ -700,6 +720,7 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
                 f"the config the host runs for main changed since this was measured against it "
                 f"({baseline} → {now}) — nothing adopted; review the new comparison"
             )
+    _refuse_unmet_floor(drift.tree)
     target = pin_dir(cfg)
     gens = target / GENERATIONS
     gens.mkdir(parents=True, exist_ok=True)
@@ -914,7 +935,7 @@ def resolve(
                 reviewed=drift.tree_digest(),
                 baseline=base.digest if base is not None else None,
             )
-        except ReviewStale as e:
+        except (ReviewStale, NeedsNewerFoldyard) as e:
             echo(f"✗ {e}")
             return "unadopted"
         echo("✓ adopted — later edits need `fy config adopt` (`fy up`/`fy host restart` ask).")
@@ -948,7 +969,7 @@ def resolve(
     if answer in ("a", "adopt"):
         try:
             adopt(cfg, reviewed=drift.tree_digest())
-        except ReviewStale as e:
+        except (ReviewStale, NeedsNewerFoldyard) as e:
             echo(f"✗ {e}")
             return "unresolved"
         echo("✓ adopted — the host now runs the working tree's config.")
