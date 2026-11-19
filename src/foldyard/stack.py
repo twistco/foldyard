@@ -87,6 +87,18 @@ def find_main_repo() -> Path | None:
     return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
 
 
+@lru_cache(maxsize=64)
+def main_checkout_of(path: Path) -> Path | None:
+    """The main checkout of the git checkout at ``path`` (itself, for main), by real path; ``None``
+    outside git. :func:`main_repo` asks the working directory; this asks a given checkout — the one
+    whose config is being read (``config._project_ports``). Memoized like it: the TUI asks every
+    second, and which repo a path belongs to doesn't change under a process."""
+    out = _run(["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    return Path(os.path.realpath(Path(out.stdout.strip()).parent))
+
+
 def worktrees_root(main: Path) -> Path:
     return config.worktrees_root(main)
 

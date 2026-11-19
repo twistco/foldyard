@@ -490,3 +490,71 @@ def test_a_reader_never_sees_a_half_written_record(repo, monkeypatch):
     with pytest.raises(OSError):
         reg.claim_ports(repo, "b", pools, {})
     assert reg.ports_file(repo).read_text() == before
+
+
+# ── the project's pools are the main checkout's (0.12.1) ──────────────────────────────────────
+
+
+@pytest.fixture
+def main_and_old_branch(tmp_path, fresh_config, monkeypatch):
+    """A real repo whose main has the pool, and a worktree on a branch cut before it: its own
+    foldyard.toml declares APP_PORT plain. Both checkouts' configs are 'adopted' (the conftest seam
+    reads each tree)."""
+    import subprocess
+
+    main, wt = tmp_path / "repo", tmp_path / "repo-worktrees" / "old"
+    main.mkdir()
+
+    def git(*a, cwd=main):
+        subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    plain = '[project]\nname = "t"\n[ports]\nAPP_PORT = 3000\nPG_PORT = 5533\n'
+    (main / "foldyard.toml").write_text(plain)
+    git("add", "foldyard.toml")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "before the pool")
+    git("worktree", "add", "-q", "-b", "old", str(wt))
+    (main / "foldyard.toml").write_text(
+        plain.replace("APP_PORT = 3000", 'APP_PORT = { base = 3000, worktrees = "3001-3003" }')
+    )
+    monkeypatch.setattr(stack, "main_repo", lambda: main.resolve())
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 41)
+    for var in ("WT_OFFSET", "FY_WORKTREE_OFFSETS", "FY_WORKTREE_PORTS", "IN_DEVBOX", "WORKTREE"):
+        monkeypatch.delenv(var, raising=False)
+    reg.register(main.resolve(), "old", wt.resolve())
+    fresh_config(FOLDYARD_REPO=main)
+    return main, wt
+
+
+def test_a_branch_from_before_the_pool_still_gets_its_pooled_port(
+    main_and_old_branch, fresh_config
+):
+    # Live on Tangible (2026-11-19): `WORKTREE=pool-test fy up` from main published 3001, and
+    # `fy up` inside the worktree — whose branch's foldyard.toml had no pool yet — 3041.
+    _main, wt = main_and_old_branch
+    assert stack.claim_ports("old") == {"APP_PORT": 3001}
+    assert stack._published_ports("old")["APP_PORT"] == "3001"  # from main
+    fresh_config(FOLDYARD_REPO=wt)  # from inside the worktree
+    assert config.port_pools() == {"APP_PORT": range(3001, 3004)}
+    assert stack._published_ports("old") == {"APP_PORT": "3001", "PG_PORT": "5574"}
+
+
+def test_a_bound_worktree_config_reads_the_projects_pools(main_and_old_branch):
+    # The TUI card and the supervisor resolve each worktree under its own bound config.
+    _main, wt = main_and_old_branch
+    stack.claim_ports("old")
+    with config.using(config.resolve(worktree="old", repo=wt)):
+        assert stack.worktree_port("APP_PORT", "old") == 3001
+
+
+def test_in_a_box_the_pools_are_main_checkouts_tree(main_and_old_branch, fresh_config, monkeypatch):
+    _main, wt = main_and_old_branch
+    monkeypatch.setenv("IN_DEVBOX", "1")
+    monkeypatch.setenv("FY_WORKTREE_PORTS", json.dumps({"old": {"APP_PORT": 3002}}))
+    fresh_config(FOLDYARD_REPO=wt)
+    assert stack._published_ports("old")["APP_PORT"] == "3002"
+
+
+def test_outside_git_the_checkouts_own_pools_are_read(fresh_config, tmp_path):
+    _toml(fresh_config, tmp_path, 'APP_PORT = { base = 3000, worktrees = "3001-3005" }')
+    assert config.port_pools() == {"APP_PORT": range(3001, 3006)}

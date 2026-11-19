@@ -296,7 +296,11 @@ def clear_caches() -> None:
     # scope (both import config); a caller that never loaded one has nothing to clear; and tests
     # routinely monkeypatch main_repo to a plain lambda, which has no cache_clear — clearing a
     # cache must never be what breaks their teardown.
-    for module, fn in (("stack", "main_repo"), ("devmode", "_main_checkout")):
+    for module, fn in (
+        ("stack", "main_repo"),
+        ("stack", "main_checkout_of"),
+        ("devmode", "_main_checkout"),
+    ):
         loaded = sys.modules.get(f"{__package__}.{module}")
         clear = getattr(getattr(loaded, fn, None), "cache_clear", None)
         if clear is not None:
@@ -919,8 +923,13 @@ def port_bases() -> dict[str, int]:
     no ``[ports]`` table — then worktrees publish no offset ports (define ``[ports]``
     in ``foldyard.toml`` to enable second-stack-beside-main). A key may be a table,
     ``{ base = 3000, worktrees = "3001-3005" }``: its base is ``base`` (see :func:`port_pools`)."""
+    return _bases_of(_table("ports"))
+
+
+def _bases_of(table: dict) -> dict[str, int]:
+    """:func:`port_bases` of one ``[ports]`` table."""
     out: dict[str, int] = {}
-    for key, value in _table("ports").items():
+    for key, value in table.items():
         if isinstance(value, dict):
             value = value.get("base")
         if value is None or isinstance(value, bool):
@@ -936,12 +945,30 @@ _POOL_RANGE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 _BAND = 89  # a worktree's offsets: 1..89 (worktree_registry.SLOTS)
 
 
-def _declared_pools() -> tuple[dict[str, range], list[str]]:
-    """Every ``[ports]`` key's ``worktrees`` pool as written, and what's wrong with each that isn't
-    a range of ports."""
+def _project_ports() -> dict:
+    """The ``[ports]`` table the PROJECT's pools come from: its main checkout's, wherever `fy` runs.
+    A pool is one list of ports every worktree draws from, recorded once for the project, so one
+    checkout's config must define it — like ``[worktree-offsets]`` pins (``stack._pins``): on your
+    computer main's ADOPTED config, in a box main's working tree. Read per checkout, a worktree on a
+    branch cut before the pool published on its offset port run from inside it, and on its pooled
+    port run from main (Tangible, 2026-11-19). Outside git, or in main itself, the ambient one."""
+    from . import stack  # lazy: stack imports config at module load
+
+    root = repo_root()
+    main = stack.main_checkout_of(Path(root))
+    if main is None or main == Path(os.path.realpath(root)):
+        return _table("ports")
+    toml = _tree_toml(main) if in_box() else (_host_toml(main) or {})
+    ports = toml.get("ports")
+    return ports if isinstance(ports, dict) else {}
+
+
+def _declared_pools(table: dict) -> tuple[dict[str, range], list[str]]:
+    """Every ``[ports]`` key's ``worktrees`` pool as written in ``table``, and what's wrong with
+    each that isn't a range of ports."""
     pools: dict[str, range] = {}
     problems: list[str] = []
-    for key, value in _table("ports").items():
+    for key, value in table.items():
         if not isinstance(value, dict) or "worktrees" not in value:
             continue
         base = value.get("base")
@@ -960,12 +987,11 @@ def _declared_pools() -> tuple[dict[str, range], list[str]]:
     return pools, problems
 
 
-def _pool_clashes(pools: dict[str, range]) -> list[str]:
+def _pool_clashes(pools: dict[str, range], bases: dict[str, int]) -> list[str]:
     """A pool that overlaps another key's ports (its base, and the band its worktrees publish on),
     or another pool: a port there could be handed out twice. Its OWN band is fine — a worktree from
     before the pool still on it holds its port (:func:`foldyard.stack.claim_ports`)."""
     problems = []
-    bases = port_bases()
     for key, pool in pools.items():
         for other, base in bases.items():
             if other == key:
@@ -988,15 +1014,17 @@ def port_pools() -> dict[str, range]:
     allows only a few of (an OAuth tenant's callback URLs). ``fy worktree add`` gives each new
     worktree the lowest free one and refuses when none is. Empty while any pool has a problem
     (:func:`port_pool_problems`): a half-read pool could hand a port out twice."""
-    pools, problems = _declared_pools()
-    return {} if problems or _pool_clashes(pools) else pools
+    table = _project_ports()
+    pools, problems = _declared_pools(table)
+    return {} if problems or _pool_clashes(pools, _bases_of(table)) else pools
 
 
 def port_pool_problems() -> list[str]:
     """What's wrong with the ``[ports]`` pools — reported by ``fy worktree add`` (which refuses)
     and ``fy doctor``. Empty when every pool can be used."""
-    pools, problems = _declared_pools()
-    return problems + _pool_clashes(pools)
+    table = _project_ports()
+    pools, problems = _declared_pools(table)
+    return problems + _pool_clashes(pools, _bases_of(table))
 
 
 # ── egress proxy ────────────────────────────────────────────────────────────────────────
