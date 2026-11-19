@@ -85,6 +85,7 @@ nav:
       - gcp.md
       - security.md
       - git.md
+      - private-config.md
       - stack.md
       - compose-overlays.md
       - testing-modes.md
