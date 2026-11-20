@@ -568,7 +568,8 @@ def _verify(name: str, to: int, baseline: Snapshot, running: list[str],
     found = differences(baseline, after, sizes=sizes)
     # Read at rest, a size change is a finding of its own: kept past this run, since a rerun
     # compares no sizes and would otherwise pass over it.
-    resized = [d for d in found if d not in differences(baseline, after, sizes=False)]
+    present = set(differences(baseline, after, sizes=False))
+    resized = [d for d in found if d not in present]
     diffs += [d for d in found if d not in resized]
     if after.release != ("fedora", to):
         diffs.insert(0, f"the guest reports {after.release}, not Fedora {to}")
