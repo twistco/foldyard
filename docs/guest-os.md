@@ -278,6 +278,13 @@ in the new namespace. Reproduced on the example project with the real project's 
 the VM, the stack down, upgrade, `fy up`): before, `fy up` hung with the database unhealthy for 55
 minutes; after, it was up in 27 s, every container healthy and `exec`-able.
 
+**Under the gVisor posture** (`[machine] runtime = "gvisor"`, the example project, its box running):
+the verb took it to Fedora 45 and started the box again under `runsc-fy`, `exec`-able from the CLI.
+`podman-runsc.service`, which no socket restarts, came back in migrate's new user namespace with the
+API service and every CLI call (`user:[…495]`, from `[…361]` before), and a new box created through
+it after the upgrade was `exec`-able too. `fy verify` in the box read the same before and after (its
+one FAIL is the throwaway copy having no `origin` remote).
+
 **A project with the guest monitor and attribution.** A clone of a real BashArena VM
 (`monitor = "observe"`, `attribution = "record"`, Tetragon v1.7.1 observing): the verb took it to
 Fedora 45 in 186 s, re-recorded the monitor's boot provisioning, delivered Tetragon v1.8.0 (the
