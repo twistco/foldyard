@@ -241,7 +241,7 @@ the box, never in the repo, never in scrollback.
 There is no in-box login to fall back on. A `[claude]` or `[codex]` table without `keyless` is
 refused (by `fy box up` and `fy box recreate` on your computer, by `fy claude` and `fy codex` in the
 box); set it in your `foldyard.local.toml`
-([configuration](./configuration.md#claude--codex--vscode)). A login made in the box anyway
+([configuration](./configuration.md#claude--codex--copilot--vscode)). A login made in the box anyway
 (`/login` in `claude`, `codex login`) leaves a real credential in the box's volume, so `fy verify`
 fails on it and `fy doctor` in the box names the file to remove.
 
