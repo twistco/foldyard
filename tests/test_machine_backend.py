@@ -679,6 +679,94 @@ def test_lima_start_reaps_before_limactl(lima_pids, monkeypatch, capsys):
     assert "hostagent" in capsys.readouterr().err  # waited: said so
 
 
+# ── lima: a start whose watcher tripped on a half-written event ─────────────────────────────
+#
+# `limactl start` tails the hostagent's event log without nxadm/tail's CompleteLines: an event
+# caught half-written at the end of the file reaches it as a line of its own, fails to parse, and
+# the start exits fatally while the hostagent carries on bringing the VM up (Lima 2.3.0, whose
+# per-port events made it common: the e2e on main, 2026-11-20, two shards of six).
+
+
+def _event(when: str, status: str) -> str:
+    return f'{{"time":"{when}","status":{status}}}'
+
+
+def _running(when: str) -> str:
+    return _event(when, '{"running":true,"sshLocalPort":40000}')
+
+
+_LATER = "2999-01-01T00:00:00.000000001Z"  # an event this start's hostagent wrote
+_EARLIER = "2000-01-01T00:00:00Z"  # one an earlier boot left
+
+
+def _failed_start(lima_pids, monkeypatch, log: str, ha_alive=True):
+    """`limactl start` exits 1 (the watcher's fatal) after the hostagent wrote ``log``."""
+    write, alive, _kills = lima_pids
+    write(ha=500, qemu=600)
+    alive[500] = [ha_alive]
+    alive[600] = [True]
+    inst = mb.Path.home() / ".lima" / "acme"
+    monkeypatch.setattr(
+        mb.subprocess,
+        "run",
+        lambda cmd, **kw: (inst / "ha.stdout.log").write_text(log) and _Proc(1, ""),
+    )
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    return mb.LimaBackend().start("acme")
+
+
+def test_lima_start_that_tripped_on_a_half_written_event_reads_the_hostagents_own_word(
+    lima_pids, monkeypatch, capsys
+):
+    log = (
+        _event(_LATER, '{"requirementProgress":{"step":4}}')
+        + "\n"
+        + _running(_LATER)
+        + f'\n{{"time":"{_LATER}","status":{{"sshLocal'  # still being written
+    )
+    assert _failed_start(lima_pids, monkeypatch, log) is True
+    assert "event" in capsys.readouterr().err  # said why it carried on
+
+
+@pytest.mark.parametrize(
+    "status",
+    ['{"exiting":true,"errors":["boot failed"]}', '{"running":true,"degraded":true}'],
+    ids=["exiting", "degraded"],
+)
+def test_lima_start_that_tripped_still_fails_on_the_hostagents_failure(
+    lima_pids, monkeypatch, status
+):
+    log = _event(_LATER, status) + "\n"
+    assert _failed_start(lima_pids, monkeypatch, log) is False
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        _running(_EARLIER) + "\n",  # an earlier boot's
+        _running(_LATER),  # half-written: no newline yet, so maybe not the whole event
+    ],
+    ids=["earlier-boot", "unfinished-line"],
+)
+def test_lima_start_that_tripped_counts_only_a_whole_event_of_this_start(
+    lima_pids, monkeypatch, log
+):
+    monkeypatch.setattr(mb.LimaBackend, "_EVENT_POLL", 300.0)  # a few reads, then Lima's 10 min
+    assert _failed_start(lima_pids, monkeypatch, log) is False
+
+
+def test_lima_start_that_failed_with_its_hostagent_gone_fails_at_once(lima_pids, monkeypatch):
+    log = _running(_LATER) + "\n"
+    assert _failed_start(lima_pids, monkeypatch, log, ha_alive=False) is False
+
+
+def test_go_durations_read_as_seconds():
+    assert mb._seconds("60m") == 3600
+    assert mb._seconds("1h30m") == 5400
+    assert mb._seconds("90s") == 90
+    assert mb._seconds(None) == 600  # Lima's own default
+
+
 @pytest.mark.parametrize(
     ("recorded", "want"),
     [
