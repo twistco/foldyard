@@ -213,6 +213,27 @@ own images without their build cache and the other 36 volumes (~38 GB of node_mo
 `.next` and caches), through the proxy. While it runs, the old VM and the new one are both on the
 host's disk: the 18 GB carried took a Mac with 42 GiB free down to 24 GiB.
 
+### `fy machine upgrade`
+
+The prototype became a verb (`src/foldyard/upgrade.py`, its boot script
+`assets/upgrade/guest-upgrade.sh`). Two things changed on the way:
+
+- **The target is the Fedora the installed Lima's own podman template uses, and never past it.**
+  That is the check that Lima suits the release, with no table to keep: Lima's guest agent and boot
+  setup are made for what its template ships (ADR-0025 saw a newer guest boot degraded under an
+  older Lima), and the limit moves with Lima. Fedora upgrades at most two releases at a time, so a
+  guest further behind is refused with the step to take first.
+- **The baseline is taken once the containers have stopped.** The first live run took it while the
+  stack ran and reported a changed volume: Postgres's last checkpoint, written as it stopped, had
+  grown its anonymous volume from 45.8 to 45.9 MiB. Compared at rest, the store has to match
+  exactly: every volume at its byte size, every image, every container.
+
+Live, on foldyard's example project (Postgres and an API, both running) in a Fedora 44 VM foldyard
+made: `fy machine upgrade --yes` took it to Fedora 45 (kernel 7.3.4, podman 6.2.0) in 257 s,
+reported every volume, image and container kept, and started both containers again. A 64 MiB
+sentinel's sha256 was unchanged, the boot script was gone from `lima.yaml`, and sudo was narrowed
+again. The time is mostly the mirror's: the clone above took 153 s with the same steps.
+
 ## What this suggests
 
 - **Fedora 45 is ready for foldyard with these fixes.** Lima, the provisioning, the wall, the box,
@@ -222,8 +243,8 @@ host's disk: the 18 GB carried took a Mac with 42 GiB free down to 24 GiB.
   its rebuild, it keeps everything (the build cache and installs included), and it needs no room on
   the host. Carrying into a new VM is for when the disk itself is the problem, or the distro
   changes. The pattern is the one foldyard already uses for root: a recorded boot script under its
-  own marker, then a restart. It would make a `fy machine upgrade` verb: the same steps, refusing to
-  start without the snapshot and refusing to call it done unless the snapshot matches afterwards.
+  own marker, then a restart: `fy machine upgrade`. CI moves to Lima 2.3.0 with these fixes, so a
+  consumer upgrading Lima gets Fedora 45 in new VMs and the verb for the ones they have.
 - **The pasta port forwarder costs nothing in the tier** and saves ~28 MiB per port-publishing
   container. It wants setting when a VM is provisioned (or in that same upgrade, when the containers
   are stopped anyway), never changed under a running stack, and checking against IPv6: a host

@@ -191,6 +191,13 @@ your computer, installed once with `fy machine host-firewall`. See
 Sizing (`cpus`, `memory_mib`, `disk_gib`) applies when the VM is first created. To change it later,
 run `foldyard machine recreate`.
 
+A VM keeps the Fedora it was created with; upgrading Lima changes only what new VMs get.
+`fy machine upgrade` brings an existing VM to the release a new one would get, in place: it stops
+the containers, upgrades the guest at one boot, restarts it on the new kernel, checks every volume,
+image and container against a snapshot it took first, and starts what ran before. It never goes past
+the Fedora that your Lima's own podman template uses, so upgrade Lima first. `recreate` would start
+the VM over empty instead.
+
 ## Upgrading
 
 When a repo starts relying on a newer foldyard, it raises `min_foldyard_version` in the same commit.
