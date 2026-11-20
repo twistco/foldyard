@@ -238,12 +238,13 @@ prompt: paste your key or token. foldyard recognises its kind from the prefix an
 — and the proxy replaces that header with the real value in flight. The real value is never typed in
 the box, never in the repo, never in scrollback.
 
-There is no in-box login to fall back on. A `[claude]` or `[codex]` table without `keyless` is
-refused (by `fy box up` and `fy box recreate` on your computer, by `fy claude` and `fy codex` in the
-box); set it in your `foldyard.local.toml`
+There is no in-box login to fall back on. A `[claude]`, `[codex]` or `[copilot]` table without
+`keyless` is refused (by `fy box up` and `fy box recreate` on your computer, by `fy claude`,
+`fy codex` and `fy copilot` in the box); set it in your `foldyard.local.toml`
 ([configuration](./configuration.md#claude--codex--copilot--vscode)). A login made in the box anyway
-(`/login` in `claude`, `codex login`) leaves a real credential in the box's volume, so `fy verify`
-fails on it and `fy doctor` in the box names the file to remove.
+(`/login` in `claude`, `codex login`, `copilot login`) leaves a real credential in the box's volume
+— for Copilot, in its CLI-managed `config.json` or `COPILOT_GITHUB_TOKEN` — so `fy verify` fails on
+it and `fy doctor` in the box names the file or variable to clear.
 
 | keyless mode | dummy in the box | header the client sends | proxy rewrites on | real value lives in |
 | -- | -- | -- | -- | -- |
