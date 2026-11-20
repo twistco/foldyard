@@ -240,12 +240,16 @@ stopped:
   checkpoint isn't a change). If they don't all stop, or the baseline can't be read whole, the ones
   that stopped are started again and nothing else changes.
 - **Resumable from there**: the target, the baseline and which containers ran are saved in the
-  project's host state dir until the end. Running it again carries on from the guest's own record.
-  When the transaction runs again (it failed, or never started), the stack, which the failed run
-  started again, is stopped cleanly first and a new baseline read at rest, so the VM is never
-  powered off under it and a checkpoint since isn't read as a change. A `failed` record is upgraded
-  again even when the release number has already moved, but never past Lima's template or to a
-  release other than the one asked for; a `running` record without its context is left to finish.
+  project's host state dir (if they can't be, the stack is started again and nothing else happens),
+  and kept until the store is verified and the stack is back. Running it again carries on from the
+  guest's own record. When the transaction runs again (it failed, or never started), the stack,
+  which the failed run started again, is stopped cleanly first and the baseline's volume sizes read
+  again at rest, so the VM is never powered off under it and a checkpoint since isn't read as a
+  change; every volume, image and container the first attempt had stays in it, so one a failed
+  transaction lost still shows, and the containers started at the end are the original set and what
+  runs now. A `failed` record is upgraded again even when the release number has already moved, but
+  never past Lima's template or to a release other than the one asked for; a `running` record
+  without its context is left to finish.
 - **Never stopped mid-transaction**: when `limactl start` gives up on the upgrade boot, the guest's
   own record is read until it says done or failed; a record that can't be read counts as neither.
   One without an end after another hour is left running, with its log's path. The record says done

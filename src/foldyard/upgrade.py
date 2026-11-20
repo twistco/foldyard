@@ -167,6 +167,31 @@ def parse_snapshot(text: str) -> Snapshot:
     return s
 
 
+def dump(s: Snapshot) -> str:
+    """A snapshot back in :data:`SNAPSHOT`'s listing, as a context saves it."""
+    lines = [f"release {s.release[0]} {s.release[1]}"] if s.release else []
+    lines.append(f"free {s.free}")
+    lines += [f"volume {n} {b}" for n, b in sorted(s.volumes.items())]
+    lines += [f"image {i}" for i in sorted(s.images)]
+    lines += [f"container {c} {st}" for c, st in sorted(s.containers.items())]
+    if s.ended:
+        lines.append("end")
+    return "\n".join(lines) + "\n"
+
+
+def merged(original: Snapshot, now: Snapshot) -> Snapshot:
+    """A retry's baseline: ``now``'s volume sizes (the stack has run since), but every volume,
+    image and container ``original`` had, so one a failed transaction lost still shows missing."""
+    return Snapshot(
+        release=now.release,
+        free=now.free,
+        volumes={**original.volumes, **now.volumes},
+        images=original.images | now.images,
+        containers={**original.containers, **now.containers},
+        ended=now.ended,
+    )
+
+
 def _size(n: int) -> str:
     v = float(n)
     for unit in ("B", "KiB", "MiB", "GiB"):
@@ -219,6 +244,23 @@ def _save(path: Path, ctx: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(ctx))
     tmp.replace(path)
+
+
+def _saved(context: Path, name: str, to: int, running: list[str], baseline: Snapshot,
+           guest: Callable[[str], subprocess.CompletedProcess]) -> bool:  # fmt: skip
+    """Save what a rerun needs; when it can't be saved, the stack (stopped by now) is started
+    again and the run goes no further: an upgrade that couldn't be resumed isn't begun."""
+    try:
+        _save(context, {"machine": name, "target": to, "running": running,
+                        "baseline": dump(baseline)})  # fmt: skip
+    except OSError as e:
+        back = _restart(guest, running)
+        print(f"✗ couldn't save the upgrade's context ({context}: {e}); the containers were")
+        print("  started again and nothing else changed" + (
+            f", except these, which didn't start: {', '.join(c[:12] for c in back)}" if back else ""
+        ))  # fmt: skip
+        return False
+    return True
 
 
 def _load(path: Path, name: str) -> dict | None:
@@ -326,12 +368,15 @@ def run(
             # run since: stop it cleanly before the VM is powered off, and compare against the
             # store as it is now, at rest, not the first attempt's.
             now = _snapshot(guest)
-            running = now.running or running
+            # The original set (one that didn't come back after the failure is still owed a
+            # start), and what runs now.
+            running = list(dict.fromkeys([*running, *now.running]))
             got = _stop_stack(guest, running)
             if got is None:
                 return 1
-            baseline, text = got
-            _save(context, {"machine": name, "target": to, "running": running, "baseline": text})
+            baseline = merged(baseline, got[0])
+            if not _saved(context, name, to, running, baseline, guest):
+                return 1
     else:
         before = _snapshot(guest)
         if not before.complete:
@@ -390,8 +435,9 @@ def run(
         got = _stop_stack(guest, running)
         if got is None:
             return 1
-        baseline, text = got
-        _save(context, {"machine": name, "target": to, "running": running, "baseline": text})
+        baseline = got[0]
+        if not _saved(context, name, to, running, baseline, guest):
+            return 1
         state = ""
 
     if not state.startswith((f"done {to}", "running ")):
@@ -462,12 +508,16 @@ def run(
     back = _restart(guest, running)
     if back:
         diffs.append(f"not running again: {', '.join(c[:12] for c in back)} (`podman start` them)")
-    context.unlink(missing_ok=True)  # the upgrade is done either way: nothing to resume
     if diffs:
+        # Kept: a rerun resumes here (the record says done, so no new transaction) and checks
+        # again against the same baseline.
         print(f"✗ machine '{name}' upgraded, but not everything checks out:")
         for d in diffs:
             print(f"    {d}")
+        print("  Put it right and run `fy machine upgrade` again to check again, or remove")
+        print(f"  {context} to accept it as it is.")
         return 1
+    context.unlink(missing_ok=True)  # verified and restored: nothing left to resume
     print(
         f"✓ machine '{name}' is on Fedora {to}: {len(after.volumes)} volumes (sizes unchanged), "
         f"{len(after.images)} images and {len(after.containers)} containers kept; "

@@ -82,6 +82,11 @@ def test_a_snapshot_reads_the_guests_listing():
     assert s.running == ["1111"]
 
 
+def test_a_snapshot_survives_the_round_trip_a_context_puts_it_through():
+    s = upgrade.parse_snapshot(SNAP)
+    assert upgrade.parse_snapshot(upgrade.dump(s)) == s
+
+
 def test_a_snapshot_cut_short_or_with_an_unreadable_size_is_incomplete():
     # A failed ssh reads as empty output, and an empty baseline would match anything afterwards.
     assert not upgrade.parse_snapshot("").complete
@@ -345,6 +350,61 @@ def test_a_retry_after_a_failed_transaction_stops_the_stack_and_reads_a_new_base
     assert rc == 0
     assert calls[:2] == ["guest: podman stop", "stop"]
     assert not ctx.exists()
+
+
+def _resume(ctx, ctx_running, baseline_text, guest_kw=None, pending="failed 45: dnf exited 1"):
+    """A rerun from a saved context (``ctx_running`` ran before the first attempt; its baseline
+    ``baseline_text``), with a guest whose record reads ``pending``: rc, calls, the guest."""
+    from foldyard import machine
+
+    ctx.write_text(json.dumps({"machine": machine.MACHINE, "target": 45,
+                               "running": ctx_running, "baseline": baseline_text}))  # fmt: skip
+    calls: list[str] = []
+    world = _World(pending)
+    guest = _Guest(calls, world, **(guest_kw or {}))
+    rc = upgrade.run(
+        backend=_Backend(calls, world),
+        guest=guest,
+        template=lambda: 45,
+        ensure=lambda: calls.append("ensure"),
+        host_wall=lambda: False,
+        sleep=lambda s: None,
+        context=ctx,
+        assume_yes=True,
+    )
+    return rc, calls, guest
+
+
+AT_REST = SNAP.replace("52428800", "52531200").replace("1111 running", "1111 exited")
+
+
+def test_a_retry_starts_the_original_set_again_and_what_runs_now(ctx):
+    # 2222 ran before the first attempt but didn't come back after its failure; 1111 did. Both
+    # are started again at the end, not only what happens to run at the retry.
+    rc, _, guest = _resume(ctx, ["2222"], AT_REST)
+    assert rc == 0
+    assert sorted(guest.restarted) == ["1111", "2222"]
+
+
+def test_a_retry_keeps_the_original_identities_so_a_loss_still_shows(ctx):
+    # The failed transaction lost an image. The retry's new baseline refreshes volume sizes (the
+    # stack ran since), but keeps every volume, image and container the first one had.
+    rc, _, _ = _resume(ctx, ["1111"], AT_REST.replace("end\n", "image sha256:ccc\nend\n"))
+    assert rc == 1
+    assert ctx.exists()  # not verified: kept for the next run
+
+
+def test_a_context_that_cant_be_saved_starts_the_stack_again(tmp_path):
+    blocked = tmp_path / "a-file"
+    blocked.write_text("")
+    rc, calls = _run(context=blocked / "upgrade.json")  # its parent is a file: the save fails
+    assert rc == 1
+    assert calls == ["guest: podman stop", "guest: podman start"]  # the VM never touched
+
+
+def test_the_context_stays_until_the_stack_is_back_and_checked(ctx):
+    rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
+    assert rc == 1 and ctx.exists()
 
 
 def test_a_running_record_without_its_context_is_left_to_finish(ctx):
