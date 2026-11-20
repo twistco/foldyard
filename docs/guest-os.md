@@ -1,14 +1,18 @@
-# The guest OS — why Fedora, what a VM costs, and Fedora 45 (2026-11-20)
+# The guest OS — why Fedora, what a VM costs, and moving to Fedora 45 (2026-11-20)
 
 Each project VM is Fedora because foldyard creates it, and the base VM it clones them from, from
-Lima's `template:podman`. Could a smaller distro cut each VM's overhead or its attack surface, and
-what changes with Fedora 45 and podman 6, its pasta port forwarder included? This is the record of
-one round of measurements and tests on an Apple-silicon Mac with `vz`; foldyard is unchanged.
+Lima's `template:podman`. Could a smaller distro cut each VM's overhead or its attack surface? What
+changes with Fedora 45 and podman 6, its pasta port forwarder included, and can a project's VM move
+to it without losing what it holds? This is the record of one round of measurements, fixes and tests
+on an Apple-silicon Mac with `vz`.
 
 **In short:** a leaner distro would save a few tens of MiB per VM against gigabytes of page cache,
-and could make the VM less safe, not more. Its podman 6 can forward a compose stack's ports with
-pasta, saving ~28 MiB per port-publishing container, but the option is experimental and changing it
-under running containers jams ports.
+and could make the VM less safe, not more. Fedora 45 broke two things in foldyard, the guest monitor
+and build attribution; both are fixed here, and the whole host tier passes on Fedora 45 and still on
+44\. Podman 6 can forward a compose stack's ports with pasta, saving ~28 MiB per port-publishing
+container; the tier passes with it too, but the option is experimental and changing it under running
+containers jams ports. A clone of a real project VM upgraded from 44 to 45 in place in two and a
+half minutes, hands-off, with every image, volume and container kept.
 
 ## Why Fedora
 
@@ -114,60 +118,118 @@ Measured on Fedora 45 with a compose-style network (`podman network create`):
   them again, clears it, since the network's pasta exits with the last container. Going to pasta
   wants the same: stop every container, change it, start them.
 
-## foldyard's host tier on Fedora 45
+## What Fedora 45 broke, and the fixes
 
-Lima 2.3.0 from Homebrew on the Mac, so `template:podman` and every VM the tier creates are Fedora
-45 (podman 6.2.0, kernel 7.2.11); CI's two shards run one after the other, as CI lists them, with
-`MACHINE_CPUS=2` and no session base VM (every VM from the template). CI pins Lima 2.2.0, so Fedora
-44, and passes.
+Run first on Fedora 45 as foldyard stood (Lima 2.3.0 from Homebrew, so `template:podman` and every
+VM the tier creates are Fedora 45), the host tier failed in two places, both reproducing on a rerun
+of their module:
 
-| shard | rootlessport (the default) | pasta port forwarder |
-| -- | -- | -- |
-| 1: machine, verify, mount visibility, registry logins, guest compose, forwarder, e2e, probes, monitor | 59 passed, **1 failed, 8 errors**, 2 skipped | the same: 59 passed, 1 failed, 8 errors, 2 skipped |
-| 2: base VM, reclaim, host daemons, mounts, box, worktree, wall | 23 passed, 12 skipped | 23 passed, 12 skipped |
+- **The guest monitor never started** (`test_monitor_e2e`, all 8 at setup). Tetragon v1.7.1 exited
+  255 at every start: `load vmlinux: parsing .BTF header: header contains non-zero trailer`, a
+  header field of kernel 7.2's BTF its loader (cilium/ebpf) doesn't know. **Fix:** Tetragon v1.8.0
+  (`monitor.TETRAGON_VERSION`, its sha256s from the release's own files), which loads and attaches
+  the packaged policy on 7.2 (the policy carries no action, so v1.8.0's removal of the deprecated
+  ones doesn't touch it). That exposed a second break: v1.8.0's `tetra tracingpolicy list` puts a
+  `DOMAIN` column between `NAME` and `STATE`, so the guest's report never saw the policy as loaded
+  and `fy up` waited its full ten minutes before warning. **Fix:** `fy-monitor.sh`'s
+  `policy_enabled`, pure bash, reads either layout; the unit suite runs it against both tables, as
+  each release's source prints them.
+- **A build step's proxy request was refused under `[machine] attribution = "record"`**
+  (`test_forwarder_e2e::test_a_build_step_is_stamped_as_a_build`). On podman 5.8.9 a build step runs
+  in the VM's own network namespace (`net:[4026531833]`, the VM's), so the forwarder finds its
+  socket in the `buildah-buildah<N>` cgroup and stamps it `build`. On podman 6.2.0 each step gets a
+  namespace of its own (`net:[4026532499]`) served by a pasta of its own, in a `podman-<pid>.scope`
+  (`[containers] netns = "host"` would bring 5.x's behaviour back, but it is `podman run`'s default
+  too, which attribution needs on the bridge). The forwarder refuses a pasta helper's connections by
+  design, so the step saw `Connecting to 192.168.5.2:42400` then `wget: error getting response`.
+  **Fix:** a helper is a build's when every walled process in the network namespace it holds open
+  (its fd links, not its argv, which `--network pasta:<opts>` can add to) is in a build step's
+  cgroup (`fwd.Cgroups.served`); any other helper is still refused, including a container's own
+  pasta and a container joined to a build step's namespace. The `build` stamp grants nothing:
+  build-scoped grants come from the build's secret in its proxy URL (`buildgate`), not the stamp.
+  [ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md) carries the amendment.
 
-The skips are expected on a Mac: `test_wall_e2e` needs a Linux host for the host firewall, and
-`test_e2e`'s two need `CONTAINER_HOST`, which CI exports. For the pasta column, a temporary
-`provision:` script in Lima's `~/.lima/_config/override.yaml` wrote
-`rootless_port_forwarder = "pasta"` at every boot of a VM whose hostname is `lima-foldyard-example`
-(and did nothing on any other), so the VMs the tier recreates got it before their first container. A
-sampler read the VM every 20 s: in each of the 16 samples with a published port, the setting was
-there and pasta held every port, never rootlessport. Both failures reproduce on a rerun of their
-module, and both are Fedora 45's, not the forwarder setting's:
+## The host tier, after the fixes
 
-- **The guest monitor doesn't start** (`test_monitor_e2e`, all 8 at setup:
-  `⚠ the guest monitor is NOT observing: tetragon.service is activating`). Tetragon v1.7.1 exits 255
-  at every start: `load vmlinux: parsing .BTF header: header contains non-zero trailer`. Kernel
-  7.2's BTF has a header field v1.7.1's loader (cilium/ebpf) doesn't know. Tetragon v1.8.0 (30
-  October 2026) is the next release to try; `monitor.TETRAGON_VERSION` pins v1.7.1. `fy up` carries
-  on as designed (the monitor only observes) and `fy doctor` keeps its row red.
-- **A build step's request is refused under `[machine] attribution = "record"`**
-  (`test_forwarder_e2e::test_a_build_step_is_stamped_as_a_build`: no egress row). On podman 5.8.9 a
-  build step runs in the VM's own network namespace (`net:[4026531833]`, the VM's), so the forwarder
-  finds its socket in the `buildah-buildah<N>` cgroup and stamps it `build`. On podman 6.2.0 each
-  step gets a namespace of its own (`net:[4026532499]`) with a pasta of its own, in a
-  `podman-<pid>.scope`, and the forwarder refuses a pasta helper's connections by design ("nothing
-  here can say whose"). The step sees `Connecting to 192.168.5.2:42400` then
-  `wget: error getting response`, and the build itself passes, since the test's step ignores the
-  failure. Without attribution the wall passes builds as before (`test_box_e2e`, `fy up`'s builds).
-  Ways out, untried: `--network host` on the builds foldyard drives, which brings back 5.x's
-  behaviour (a box's own builds aside), or teaching the forwarder to tell a build step's pasta from
-  a container's.
+CI's two shards one after the other, as CI lists them, `MACHINE_CPUS=2`, no session base VM (every
+VM from the template). For the pasta column, a temporary `provision:` script in Lima's
+`~/.lima/_config/override.yaml` wrote `rootless_port_forwarder = "pasta"` at every boot of a VM
+whose hostname is `lima-foldyard-example` (and did nothing on any other), so the VMs the tier
+recreates got it before their first container. For Fedora 44, CI's guest, the same file set
+`images:` to Fedora 44's cloud image, which only a VM being created reads. A sampler read the VM
+every 20 s: each phase ran on the guest it names, and in the pasta phase every published port was
+held by pasta, never rootlessport.
+
+| shard | Fedora 45, before the fixes | Fedora 45 | Fedora 45, pasta forwarder | Fedora 44 |
+| -- | -- | -- | -- | -- |
+| 1: machine, verify, mount visibility, registry logins, guest compose, forwarder, e2e, probes, monitor | 59 passed, 1 failed, 8 errors | 68 passed | 68 passed | 68 passed |
+| 2: base VM, reclaim, host daemons, mounts, box, worktree, wall | 23 passed | 23 passed | 23 passed | 23 passed |
+
+Every column also skips 14, as on any Mac: `test_wall_e2e`'s 12 need a Linux host for the host
+firewall, and `test_e2e`'s 2 need `CONTAINER_HOST`, which CI exports. The template's own
+`dnf install podman` lifts the cloud image's podman (6.1.3 on Fedora 45) to the current one (6.2.0)
+before any test. CI pins Lima 2.2.0, so it still runs Fedora 44 until `LIMA_VERSION` is bumped.
+
+## Moving a project's VM to Fedora 45
+
+A VM keeps the Fedora it was created with: a newer Lima changes what NEW VMs get, and
+`fy machine recreate` would throw away the VM's podman store (images, the stack's volumes, agent
+logins). Two ways keep it, each tried on a copy-on-write `limactl clone` of a real project VM
+(Fedora 44, podman 5.8.9: 48 volumes holding ~40 GB, 98 images, 17 containers), with no mounts and
+every TCP port forward ignored, so nothing in it could touch the project's checkout or its ports.
+Lima 2.3.0's clone keeps the source's pinned `ssh.localPort`, which the running original holds; the
+clones needed it set back to `0`.
+
+**In place: 153 s, hands-off.** Root in the guest exists only at boot, so the upgrade is a one-off
+recorded `provision: mode: system` script under its own marker, which the host removes again
+([guest-os-kit/upgrade-inplace.sh](./guest-os-kit/upgrade-inplace.sh), the prototype that ran it):
+
+1. snapshot what must survive (every volume, image and container, and a 64 MiB random file in a
+   sentinel volume, by sha256); stop the VM; record the boot script (3 s);
+2. boot: the script stops the VM user's containers cleanly (`podman stop -a -t 30`, so a database
+   gets its shutdown, not a power cut), masks `user@<uid>.service` for that boot (a login, Lima's
+   readiness checks or a client of the podman socket would otherwise start podman mid-transaction),
+   runs `dnf -y --releasever=45 distro-sync --allowerasing`, and unmasks it (~2 min, the download
+   included);
+3. stop, drop the script, boot the new kernel (23 s);
+4. `podman system migrate`, and compare (2 s).
+
+Fedora 44 to 45, kernel 6.19 to 7.3.4, podman 5.8.9 to 6.2.0: every volume, image and container
+still there and the sentinel's sha256 unchanged. foldyard's own boot provisioning came back on the
+new release by itself (the wall with the project's port bands and its `firewall_allow` opening; sudo
+narrowed again). The project's Postgres image, started on its data volume, came up without recovery
+and read every database, its tables and rows. Both podman 6 removals that could strand a store were
+absent, as on every Lima VM foldyard makes: its database is SQLite, not BoltDB, and its containers
+are on netavark bridges, not slirp4netns.
+
+**A new VM, then carry the data: 211 s, and then the first `fy up`.** The way the project's own
+Podman-machine-to-Lima migration script works, made as cheap as it gets: by that script's rules (the
+agent homes, the stack's data volumes but not its installs and caches, the box image and the pulled
+base images), streamed VM to VM over two `limactl shell` pipes, nothing written on the host.
+Choosing what to carry took 5 s (11 volumes, 2.0 GB, and 27 images); a new VM from Lima's template,
+its image cached, 24 s; the images 163 s; the volumes 19 s; the sentinel's sha256 matched. That is
+before the first `fy up`, untimed here: it has to rebuild what wasn't carried, ~70 of the stack's
+own images without their build cache and the other 36 volumes (~38 GB of node_modules, venvs,
+`.next` and caches), through the proxy. While it runs, the old VM and the new one are both on the
+host's disk: the 18 GB carried took a Mac with 42 GiB free down to 24 GiB.
 
 ## What this suggests
 
-- **Fedora 45 is close, not there.** Lima, the VM provisioning, the wall, the box, worktrees,
-  mounts, the base VM and guest compose all pass on it unchanged. Before a consumer's VM is created
-  on it (any Lima 2.3.0 on their computer does that), the monitor needs a Tetragon that reads kernel
-  7.2's BTF, and `attribution = "record"` needs builds that the forwarder can attribute. CI pins
-  Lima 2.2.0, so it stays on Fedora 44 until `LIMA_VERSION` is bumped; bumping it is how these two
-  would show there.
+- **Fedora 45 is ready for foldyard with these fixes.** Lima, the provisioning, the wall, the box,
+  worktrees, mounts, the base VM, guest compose, the forwarder and the monitor all pass on it, and
+  still on 44.
+- **Move existing VMs in place.** It was the quicker of the two before the other had even started
+  its rebuild, it keeps everything (the build cache and installs included), and it needs no room on
+  the host. Carrying into a new VM is for when the disk itself is the problem, or the distro
+  changes. The pattern is the one foldyard already uses for root: a recorded boot script under its
+  own marker, then a restart. It would make a `fy machine upgrade` verb: the same steps, refusing to
+  start without the snapshot and refusing to call it done unless the snapshot matches afterwards.
 - **The pasta port forwarder costs nothing in the tier** and saves ~28 MiB per port-publishing
-  container. It would be a provisioning-time switch (the VM user's `containers.conf`, written before
-  any container starts, never changed under a running stack), and it wants checking against IPv6: a
-  host browser going to `localhost` through Lima's forward may try `::1` first, untried here. Worth
+  container. It wants setting when a VM is provisioned (or in that same upgrade, when the containers
+  are stopped anyway), never changed under a running stack, and checking against IPv6: a host
+  browser going to `localhost` through Lima's forward may try `::1` first, untried here. Worth
   making the default once podman stops calling it experimental.
-- **The distro stays.** Nothing here argues for leaving Fedora; the savings are in the VM's memory
+- **The distro stays.** Nothing here argues for leaving Fedora; the savings are in a VM's memory
   size and in podman's own processes.
 
 Sources: [Fedora Changes/Podman6](https://fedoraproject.org/wiki/Changes/Podman6),
