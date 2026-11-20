@@ -699,7 +699,9 @@ _LATER = "2999-01-01T00:00:00.000000001Z"  # an event this start's hostagent wro
 _EARLIER = "2000-01-01T00:00:00Z"  # one an earlier boot left
 
 
-def _failed_start(lima_pids, monkeypatch, log: str | bytes, ha_alive=True, took=0.0, ha_pid=500):
+def _failed_start(
+    lima_pids, monkeypatch, log: str | bytes, ha_alive=True, took=0.0, ha_pid: int | None = 500
+):
     """`limactl start` exits 1 (the watcher's fatal) after the hostagent wrote ``log``, ``took``
     seconds into the start. The clock moves only by that and by the poll's sleeps; returns
     (start's result, how many times the poll slept)."""
