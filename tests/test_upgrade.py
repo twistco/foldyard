@@ -135,9 +135,19 @@ def test_the_boot_script_is_valid_bash():
     assert res.returncode == 0, res.stderr
 
 
+class _World:
+    """What the fake backend and guest share: whether the upgrade boot has happened yet (before
+    it, the guest's record is whatever an earlier attempt left: ``pending``)."""
+
+    def __init__(self, pending=""):
+        self.booted = False
+        self.pending = pending
+
+
 class _Backend:
-    def __init__(self, calls, stop_ok=True, drop_ok=True):
+    def __init__(self, calls, world, stop_ok=True, drop_ok=True):
         self.calls = calls
+        self.world = world
         self.running = True
         self.stop_ok = stop_ok
         self.drop_ok = drop_ok
@@ -152,7 +162,7 @@ class _Backend:
     def stop(self, name):
         self.calls.append("stop")
         self.stops += 1
-        ok = self.stop_ok or self.stops == 1  # stop_ok=False fails the second stop only
+        ok = self.stop_ok or self.stops == 1  # stop_ok=False fails every stop but the first
         self.running = not ok
         return ok
 
@@ -167,19 +177,22 @@ class _Backend:
     def start(self, name, prefix=(), wait=None):
         self.calls.append(f"start {wait}" if wait else "start")
         self.running = True
+        if wait:
+            self.world.booted = True
         return True
 
 
 class _Guest:
-    """The VM user's shell: answers the snapshot (Fedora 44 before the upgrade boot, 45 after),
-    the upgrade's state (one per read, the last repeating), which containers run, and records
-    every other command."""
+    """The VM user's shell: answers the snapshot (Fedora 44 until the upgrade reports done, 45
+    after), the upgrade's record (``pending`` before the upgrade boot, then one of ``states`` per
+    read, the last repeating), which containers run, and records every other command."""
 
-    def __init__(self, calls, states=("done 45",), after=None, stop_rc=0, still_running=(),
-                 restart_fails=False, snapshot_rc=0):  # fmt: skip
+    def __init__(self, calls, world, states=("done 45",), after=None, stop_rc=0,
+                 still_running=(), restart_fails=False, snapshot_rc=0, stopped=False):  # fmt: skip
         self.calls = calls
+        self.world = world
         self.upgraded = False
-        self.stopped = False
+        self.stopped = stopped
         self.states = list(states)
         self.after = after
         self.stop_rc = stop_rc
@@ -189,7 +202,6 @@ class _Guest:
         self.restarted: list[str] = []
 
     def __call__(self, script):
-        ok = subprocess.CompletedProcess([], 0, "", "")
         if script == upgrade.SNAPSHOT:
             # A database writes its last checkpoint as it stops: the volume a running one sat on
             # is bigger once the containers are down.
@@ -202,7 +214,10 @@ class _Guest:
                 text = self.after or text.replace("fedora 44", "fedora 45")
             return subprocess.CompletedProcess([], self.snapshot_rc, text, "")
         if script.startswith("cat "):
-            state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            if not self.world.booted:
+                state = self.world.pending
+            else:
+                state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
             self.upgraded = state.startswith("done")
             return subprocess.CompletedProcess([], 0, state + "\n", "")
         if script.startswith("podman ps"):
@@ -214,28 +229,34 @@ class _Guest:
         if script.startswith("podman start"):
             if self.restart_fails:
                 return subprocess.CompletedProcess([], 125, "", "no such container")
-            self.restarted = script.split()[2:]
-            self.restarted = [c for c in self.restarted if not c.startswith(">")]
-        return ok
+            self.restarted = [c for c in script.split()[2:] if not c.startswith(">")]
+        return subprocess.CompletedProcess([], 0, "", "")
 
 
-def _run(guest_kw=None, backend_kw=None, host_wall=False, **kw):
+def _run(guest_kw=None, backend_kw=None, host_wall=False, pending="", context=None, **kw):
     calls: list[str] = []
+    world = _World(pending)
     rc = upgrade.run(
-        backend=_Backend(calls, **(backend_kw or {})),
-        guest=_Guest(calls, **(guest_kw or {})),
+        backend=_Backend(calls, world, **(backend_kw or {})),
+        guest=_Guest(calls, world, **(guest_kw or {})),
         template=lambda: 45,
         ensure=lambda: calls.append("ensure"),
         host_wall=lambda: host_wall,
         sleep=lambda s: None,
+        context=context,
         assume_yes=True,
         **kw,
     )
     return rc, calls
 
 
-def test_an_upgrade_stops_records_boots_drops_and_comes_back_through_ensure():
-    rc, calls = _run()
+@pytest.fixture
+def ctx(tmp_path):
+    return tmp_path / "upgrade-test.json"
+
+
+def test_an_upgrade_stops_records_boots_drops_and_comes_back_through_ensure(ctx):
+    rc, calls = _run(context=ctx)
     assert rc == 0
     assert calls == [
         "guest: podman stop",  # containers first: a database gets its shutdown, not a power cut
@@ -246,98 +267,133 @@ def test_an_upgrade_stops_records_boots_drops_and_comes_back_through_ensure():
         "drop # fy-upgrade",
         "ensure",  # foldyard's own boot provisioning, the wall and the checks, as any start
         "guest: podman system",
-        # migrate replaces the pause process, so the user namespace; the API service still in the
-        # old one would create containers no later CLI call can signal (exec, health checks, stop)
+        # migrate replaces the pause process, so the user namespace; the API services still in
+        # the old one would create containers no later CLI call can signal (exec, health checks,
+        # stop): podman.service is stopped (its socket restarts it), gVisor's restarted
         "guest: systemctl --user",
         "guest: podman start",  # what ran before runs again
     ]
+    assert not ctx.exists()  # done: nothing left to resume
 
 
-def test_the_baseline_is_the_store_once_its_containers_have_stopped():
+def test_the_baseline_is_the_store_once_its_containers_have_stopped(ctx):
     # Taken while the stack still ran, a database's shutdown would read as a changed volume
     # (seen live: Postgres's anonymous volume, 45.8 MiB before, 45.9 MiB after).
-    rc, _ = _run()
+    rc, _ = _run(context=ctx)
     assert rc == 0
 
 
-def test_a_failed_upgrade_still_drops_its_script_and_brings_the_vm_back():
-    rc, calls = _run(guest_kw={"states": ("failed 45: dnf exited 1",)})
+def test_a_failed_upgrade_starts_the_stack_again_and_keeps_its_context(ctx):
+    rc, calls = _run(guest_kw={"states": ("failed 45: dnf exited 1",)}, context=ctx)
     assert rc == 1
-    assert "drop # fy-upgrade" in calls and "ensure" in calls
+    assert calls[-3:] == ["drop # fy-upgrade", "ensure", "guest: podman start"]
     assert "guest: podman system" not in calls
+    assert ctx.exists()  # a rerun retries (distro-sync repairs a part-done transaction)
 
 
-def test_an_upgrade_still_running_when_the_start_gives_up_is_waited_for():
+def test_an_upgrade_still_running_when_the_start_gives_up_is_waited_for(ctx):
     # `limactl start` gives up on a VM that IS up when its boot scripts outlast the wait: the
     # guest's own record says when dnf is done.
-    rc, calls = _run(guest_kw={"states": ("running 45", "running 45", "done 45")})
+    rc, calls = _run(guest_kw={"states": ("running 45", "running 45", "done 45")}, context=ctx)
     assert rc == 0
     assert calls.count("stop") == 2  # the one before the upgrade boot, and only then the next
 
 
-def test_an_upgrade_that_never_finishes_is_never_stopped_mid_transaction():
-    rc, calls = _run(guest_kw={"states": ("running 45",)})
+@pytest.mark.parametrize("record", ["running 45", ""])
+def test_an_upgrade_that_never_reports_an_end_is_never_stopped(record, ctx):
+    # "" is a record that couldn't be read (a failed ssh): never taken for done.
+    rc, calls = _run(guest_kw={"states": (record,)}, context=ctx)
     assert rc == 1
     assert calls[-1] == f"start {upgrade.UPGRADE_WAIT}"  # no stop, no drop: dnf may still run
+    assert ctx.exists()
 
 
-def test_containers_that_wont_stop_refuse_before_the_vm_is_touched():
-    rc, calls = _run(guest_kw={"stop_rc": 125})
-    assert rc == 1 and calls == ["guest: podman stop"]
-    rc, calls = _run(guest_kw={"still_running": ("2222",)})
-    assert rc == 1 and calls == ["guest: podman stop"]
+def test_a_rerun_resumes_against_the_original_baseline_and_running_set(ctx):
+    rc, _ = _run(guest_kw={"states": ("running 45",)}, context=ctx)
+    assert rc == 1 and ctx.exists()
+    # Later: the transaction has ended. The VM still runs; its containers are still stopped.
+    rc, calls = _run(pending="done 45", guest_kw={"stopped": True}, context=ctx)
+    assert rc == 0
+    assert calls == [
+        "stop",
+        "drop # fy-upgrade",
+        "ensure",
+        "guest: podman system",
+        "guest: systemctl --user",
+        "guest: podman start",  # 1111, which ran before the FIRST attempt stopped it
+    ]
+    assert not ctx.exists()
 
 
-def test_an_incomplete_snapshot_refuses_before_anything_changes():
-    rc, calls = _run(guest_kw={"snapshot_rc": 255})
+def test_a_failed_record_is_upgraded_again_though_the_release_already_moved(ctx):
+    # No context (lost, or an older foldyard's attempt), but the guest's own record says a
+    # transaction to 45 failed: the release number may already read 45, so "already on Fedora
+    # 45" would leave it half done.
+    rc, calls = _run(pending="failed 45: dnf exited 1", context=ctx)
+    assert rc == 0
+    assert "record # fy-upgrade" in calls
+
+
+def test_containers_that_wont_stop_start_again_and_refuse(ctx):
+    rc, calls = _run(guest_kw={"stop_rc": 125}, context=ctx)
+    assert rc == 1 and calls == ["guest: podman stop", "guest: podman start"]
+    rc, calls = _run(guest_kw={"still_running": ("2222",)}, context=ctx)
+    assert rc == 1 and calls == ["guest: podman stop", "guest: podman start"]
+    assert not ctx.exists()  # nothing changed but a stop and a start: nothing to resume
+
+
+def test_an_incomplete_snapshot_refuses_before_anything_changes(ctx):
+    rc, calls = _run(guest_kw={"snapshot_rc": 255}, context=ctx)
     assert rc == 1 and calls == []
 
 
-def test_a_vm_that_wont_stop_or_keeps_the_script_is_left_stopped_and_explained():
+def test_a_vm_that_wont_stop_keeps_running_and_one_that_keeps_the_script_stays_stopped(ctx):
     # Booted again with the script still recorded, the root transaction would run once more; a
     # VM still up on the old kernel would read as upgraded (os-release is already new).
-    rc, calls = _run(backend_kw={"stop_ok": False})
+    rc, calls = _run(backend_kw={"stop_ok": False}, context=ctx)
     assert rc == 1 and "ensure" not in calls and "drop # fy-upgrade" not in calls
-    rc, calls = _run(backend_kw={"drop_ok": False})
+    rc, calls = _run(backend_kw={"drop_ok": False}, context=ctx)
     assert rc == 1 and "ensure" not in calls
 
 
-def test_containers_that_dont_come_back_fail_the_run():
-    rc, _ = _run(guest_kw={"restart_fails": True})
+def test_containers_that_dont_come_back_fail_the_run(ctx):
+    rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
     assert rc == 1
 
 
-def test_a_store_that_doesnt_match_afterwards_fails_the_run():
+def test_a_store_that_doesnt_match_afterwards_fails_the_run(ctx):
     rc, calls = _run(
         guest_kw={
             "after": SNAP.replace("fedora 44", "fedora 45")
             .replace("52428800", "52531200")
             .replace("1111 running", "1111 exited")
             .replace("image sha256:bbb\n", "")
-        }
+        },
+        context=ctx,
     )
     assert rc == 1
     assert "ensure" in calls
 
 
-def test_nothing_happens_when_the_target_is_refused():
-    rc, calls = _run(release=46)  # beyond Lima's template
-    assert rc == 1 and calls == []
+def test_nothing_happens_when_the_target_is_refused(ctx):
+    rc, calls = _run(release=46, context=ctx)  # beyond Lima's template
+    assert rc == 1 and calls == [] and not ctx.exists()
 
 
-def test_the_host_wall_refuses_before_anything_changes():
+def test_the_host_wall_refuses_before_anything_changes(ctx):
     # The upgrade boot needs the Fedora mirrors, which the host wall (rightly) doesn't allow, and
     # booting the VM outside its slice would leave it unwalled for the whole transaction.
-    rc, calls = _run(host_wall=True)
+    rc, calls = _run(host_wall=True, context=ctx)
     assert rc == 1 and calls == []
 
 
-def test_too_little_free_space_refuses_before_anything_changes():
+def test_too_little_free_space_refuses_before_anything_changes(ctx):
     calls: list[str] = []
-    guest = _Guest(calls)
+    world = _World()
+    guest = _Guest(calls, world)
     tight = SNAP.replace("free 64424509440", "free 1073741824")
     rc = upgrade.run(
-        backend=_Backend(calls),
+        backend=_Backend(calls, world),
         guest=lambda s: (
             subprocess.CompletedProcess([], 0, tight, "") if s == upgrade.SNAPSHOT else guest(s)
         ),
@@ -345,6 +401,7 @@ def test_too_little_free_space_refuses_before_anything_changes():
         ensure=lambda: calls.append("ensure"),
         host_wall=lambda: False,
         sleep=lambda s: None,
+        context=ctx,
         assume_yes=True,
     )
     assert rc == 1 and calls == []

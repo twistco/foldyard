@@ -60,7 +60,8 @@ snapshot() { # what must survive, as the VM user sees it
         podman volume ls --format "volume {{.Name}}" | sort
         podman images --format "image {{.ID}} {{.Repository}}:{{.Tag}}" | sort
         podman ps -a --format "container {{.Names}} {{.Image}}" | sort
-        printf "sentinel "; ! podman volume exists fy-upgrade-sentinel && echo none || podman run --rm --network none --entrypoint sha256sum -v fy-upgrade-sentinel:/s:ro "$1" /s/blob | cut -d" " -f1
+        if ! podman volume exists fy-upgrade-sentinel; then echo "sentinel none"
+        else h=$(podman run --rm --network none --entrypoint sha256sum -v fy-upgrade-sentinel:/s:ro "$1" /s/blob) || exit 1; echo "sentinel ${h%% *}"; fi
     ' _ "$SIMG" 2>/dev/null
 }
 

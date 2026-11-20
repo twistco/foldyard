@@ -14,8 +14,14 @@ upgrades the disk instead (docs/guest-os.md, where a clone of a real project VM 
    machine.py's provisioning section) that runs `dnf distro-sync --releasever=N`;
 3. boot it, read the guest's report, stop, drop the script, and start the VM as any start does
    (`machine.ensure`: foldyard's own provisioning, the wall, the checks), on the new kernel;
-4. `podman system migrate`, then stop the API service so the socket restarts it in migrate's new
-   user namespace; compare with the snapshot, start what ran before.
+4. `podman system migrate`, then restart the API services in migrate's new user namespace;
+   compare with the snapshot, start what ran before.
+
+Once the stack is stopped, the run's context (target, baseline, which containers ran) is saved in
+the project's host state dir until the end, so a run cut short (the transaction outlasting the
+wait, a failed dnf, a VM that won't stop) is resumed by running it again, against the original
+baseline. The guest's own record says where it got to; one that reads `failed` or `running` is
+re-run even when the release number has already moved.
 
 **The target never passes the Fedora the installed Lima's own podman template uses.** That is the
 Lima version check: a release Lima ships in its template is one its guest agent and boot setup are
@@ -25,6 +31,7 @@ forward with no table to keep. It is also the default: the VM is brought to what
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -199,6 +206,29 @@ def _snapshot(guest: Callable[[str], subprocess.CompletedProcess]) -> Snapshot:
     return snap
 
 
+def context_path(name: str) -> Path:
+    """Where an upgrade under way keeps what a rerun needs (its target, the store's baseline,
+    which containers ran): the project's host state dir, outside the repo mount."""
+    from . import config
+
+    return config.state_dir() / f"upgrade-{name}.json"
+
+
+def _save(path: Path, ctx: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(ctx))
+    tmp.replace(path)
+
+
+def _load(path: Path, name: str) -> dict | None:
+    try:
+        ctx = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return ctx if isinstance(ctx, dict) and ctx.get("machine") == name else None
+
+
 def run(
     release: int | None = None,
     assume_yes: bool = False,
@@ -209,6 +239,7 @@ def run(
     ensure: Callable[[], object] | None = None,
     host_wall: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    context: Path | None = None,
 ) -> int:
     from . import config, machine
 
@@ -225,6 +256,8 @@ def run(
         template = lima_template_release
     if host_wall is None:
         host_wall = machine._host_wall_wanted
+    if context is None:
+        context = context_path(name)
     if ensure is None:
         from . import stack
 
@@ -242,95 +275,142 @@ def run(
     if backend.state(name) != "running":
         ensure()
 
-    before = _snapshot(guest)
-    if not before.complete:
-        print(f"✗ couldn't read machine '{name}' whole (its release, volumes, images, containers)")
-        return 1
-    to = target(before.release, template(), release)
-    if isinstance(to, str):
-        print(("✓ " if to.startswith("already") else "✗ ") + f"machine '{name}': {to}")
-        return 0 if to.startswith("already") else 1
-    if before.free < MIN_FREE:
-        print(f"✗ {_size(before.free)} free in the VM: the upgrade wants {_size(MIN_FREE)}")
-        return 1
-    have = before.release[1] if before.release else 0
-    print(f"This upgrades machine '{name}' from Fedora {have} to {to} in place, keeping its")
-    print(
-        f"{len(before.volumes)} volumes, {len(before.images)} images and "
-        f"{len(before.containers)} containers."
-    )
-    print(f"It stops every container ({len(before.running)} running, started again after) and")
-    print("restarts the VM twice; the upgrade itself runs at the first boot, as root.")
-    if not assume_yes:
-        try:
-            answer = input("Proceed? (y/N): ").strip()
-        except EOFError:
-            answer = ""
-        if answer not in ("y", "Y"):
-            print("Aborted.")
-            return 0
+    ctx = _load(context, name)
+    if ctx is not None:
+        # An earlier run got as far as stopping the stack: carry on from there, against ITS
+        # baseline and its running set (this run would only see everything stopped).
+        to, running = int(ctx["target"]), list(ctx["running"])
+        baseline = parse_snapshot(ctx["baseline"])
+        state = _upgrade_state(guest)
+        _err(f"▶ resuming the upgrade to Fedora {to} (its record: {state or 'none yet'})")
+    else:
+        before = _snapshot(guest)
+        if not before.complete:
+            print(
+                f"✗ couldn't read machine '{name}' whole (its release, volumes, images, containers)"
+            )
+            return 1
+        state = _upgrade_state(guest)
+        if state.startswith(("failed ", "running ")):
+            # A transaction this VM's own record says didn't end well: its release number may
+            # already read the target, so it is re-run whatever `target` would say.
+            to = int(state.split()[1].rstrip(":"))
+            _err(f"▶ an earlier upgrade to Fedora {to} didn't finish ({state}): running it again")
+        else:
+            got = target(before.release, template(), release)
+            if isinstance(got, str):
+                print(("✓ " if got.startswith("already") else "✗ ") + f"machine '{name}': {got}")
+                return 0 if got.startswith("already") else 1
+            to = got
+        if before.free < MIN_FREE:
+            print(f"✗ {_size(before.free)} free in the VM: the upgrade wants {_size(MIN_FREE)}")
+            return 1
+        have = before.release[1] if before.release else 0
+        print(f"This upgrades machine '{name}' from Fedora {have} to {to} in place, keeping its")
+        print(
+            f"{len(before.volumes)} volumes, {len(before.images)} images and "
+            f"{len(before.containers)} containers."
+        )
+        print(f"It stops every container ({len(before.running)} running, started again after) and")
+        print("restarts the VM twice; the upgrade itself runs at the first boot, as root.")
+        if not assume_yes:
+            try:
+                answer = input("Proceed? (y/N): ").strip()
+            except EOFError:
+                answer = ""
+            if answer not in ("y", "Y"):
+                print("Aborted.")
+                return 0
+        sys.stdout.flush()  # the plan before the progress lines (stderr)
+        running = before.running
+        _err("▶ stopping the containers")
+        stopped = guest("podman stop -a -t 30 >/dev/null")
+        # The baseline is the store at rest: a database writes its last checkpoint as it stops,
+        # so a snapshot of a running stack would read its shutdown as a changed volume.
+        at_rest = guest(SNAPSHOT)
+        baseline = parse_snapshot(at_rest.stdout)
+        if at_rest.returncode != 0:
+            baseline.ended = False
+        if stopped.returncode != 0 or not baseline.complete or baseline.running:
+            still = ", ".join(c[:12] for c in baseline.running) or "unknown"
+            _restart(guest, [c for c in running if c not in baseline.running])
+            print(f"✗ the containers didn't all stop (still running: {still}); they were started")
+            print("  again and nothing else changed")
+            return 1
+        _save(
+            context, {"machine": name, "target": to, "running": running, "baseline": at_rest.stdout}
+        )
+        state = ""
 
-    sys.stdout.flush()  # the plan before the progress lines (stderr)
-    _err("▶ stopping the containers")
-    stopped = guest("podman stop -a -t 30 >/dev/null")
-    # The baseline is the store at rest: a database writes its last checkpoint as it stops, so a
-    # snapshot of a running stack would read its shutdown as a changed volume.
-    baseline = _snapshot(guest)
-    if stopped.returncode != 0 or not baseline.complete or baseline.running:
-        still = ", ".join(c[:12] for c in baseline.running) or "unknown"
-        print(f"✗ the containers didn't all stop (still running: {still}); nothing else changed")
-        return 1
-    _err(f"▶ recording the upgrade, then booting it (Fedora {have} → {to}; this is the long part)")
-    if not backend.stop(name) or not backend.set_provision(name, render(to), MARKER):
-        print(f"✗ couldn't record the upgrade on '{name}' (it is unchanged: `fy up` starts it)")
-        return 1
-    backend.start(name, wait=UPGRADE_WAIT)
-    state = _upgrade_state(guest)
+    if not state.startswith((f"done {to}", "running ")):
+        _err(f"▶ recording the upgrade, then booting it (to Fedora {to}; this is the long part)")
+        if backend.state(name) == "running" and not backend.stop(name):
+            print(f"✗ couldn't stop '{name}' to record the upgrade; `fy machine upgrade` resumes")
+            return 1
+        if not backend.set_provision(name, render(to), MARKER):
+            print(f"✗ couldn't record the upgrade on '{name}'; `fy machine upgrade` resumes")
+            return 1
+        backend.start(name, wait=UPGRADE_WAIT)
+        state = _upgrade_state(guest)
+    # Only the guest's own word ends the wait: "" is a record that couldn't be read, never "done".
     for _ in range(int(POLL_FOR / POLL_EVERY)):
-        if not state.startswith("running"):
+        if state.startswith((f"done {to}", "failed ")):
             break
         sleep(POLL_EVERY)
         state = _upgrade_state(guest)
-    if state.startswith("running"):
-        print(f"✗ the upgrade is still running in '{name}' after {UPGRADE_WAIT} and an hour more;")
-        print("  it is left to finish (never stopped mid-transaction). Its log:")
+    if not state.startswith((f"done {to}", "failed ")):
+        print(f"✗ the upgrade in '{name}' hasn't reported an end ({state or 'no record read'});")
+        print("  it is left running, never stopped mid-transaction. Its log:")
         print(f"    limactl shell {name} cat /var/lib/fy-upgrade/log")
-        print("  Run `fy machine upgrade` again once it ends: it picks up from the guest's record.")
+        print("  `fy machine upgrade` again resumes once it ends.")
         return 1
+
     _err("▶ dropping the upgrade script and starting the VM as usual")
     if not backend.stop(name):
-        print(f"✗ '{name}' didn't stop after the upgrade boot; it still runs the old kernel and")
-        print(f"  the upgrade script stays recorded. Stop it (`limactl stop {name}`), then run")
-        print("  `fy machine upgrade` again.")
+        print(
+            f"✗ '{name}' didn't stop after the upgrade boot: it still runs the old kernel, and the"
+        )
+        print(f"  upgrade script stays recorded. Stop it (`limactl stop {name}`), then")
+        print("  `fy machine upgrade` again resumes.")
         return 1
     if not backend.drop_provision(name, MARKER):
         print(
             f"✗ couldn't remove the upgrade script from '{name}' (left stopped, so it doesn't run"
         )
         print(f"  again): remove the provision entry whose script holds '{MARKER.strip()}' with")
-        print(f"  `limactl edit {name}`, then `fy up`.")
+        print(f"  `limactl edit {name}`, then `fy machine upgrade` again.")
         return 1
     ensure()
     if not state.startswith(f"done {to}"):
-        print(f"✗ the upgrade didn't finish: {state or 'no report from the guest'}")
-        print(f"  The guest's log: limactl shell {name} cat /var/lib/fy-upgrade/log")
+        back = _restart(guest, running)
+        print(f"✗ the upgrade didn't finish: {state}")
+        print("  The guest may be partly upgraded; `fy machine upgrade` again retries (dnf")
+        print("  distro-sync completes it). Its log:")
+        print(f"    limactl shell {name} cat /var/lib/fy-upgrade/log")
+        if back:
+            print(f"  Not running again: {', '.join(c[:12] for c in back)}")
         return 1
 
     guest("podman system migrate >/dev/null 2>&1")
     # Migrate replaces the pause process, and with it the rootless user namespace every podman
-    # call joins. The API service (socket-activated: foldyard's own start already woke it) stays
-    # in the old one, so containers it then creates (`fy up`'s) sit where no later CLI call can
-    # signal them: exec, health checks and stop all fail with EPERM (seen live on a project VM).
-    # Stopped, the socket starts it again on the next connection, in the new namespace.
-    guest("systemctl --user stop podman.service >/dev/null 2>&1; true")
+    # call joins. An API service already running stays in the old one, so containers it then
+    # creates (`fy up`'s) sit where no later CLI call can signal them: exec, health checks and
+    # stop all fail with EPERM (seen live on a project VM). podman.service is socket-activated:
+    # stopped, its socket starts it again in the new namespace. The gVisor posture's
+    # podman-runsc.service isn't, so it is restarted (its filter follows: Requires=).
+    guest(
+        "systemctl --user stop podman.service >/dev/null 2>&1; "
+        "systemctl --user try-restart podman-runsc.service >/dev/null 2>&1; true"
+    )
     after = _snapshot(guest)
     diffs = [] if after.complete else ["the store couldn't be read whole afterwards"]
     diffs += differences(baseline, after)
     if after.release != ("fedora", to):
         diffs.insert(0, f"the guest reports {after.release}, not Fedora {to}")
-    back = _restart(guest, before.running)
+    back = _restart(guest, running)
     if back:
         diffs.append(f"not running again: {', '.join(c[:12] for c in back)} (`podman start` them)")
+    context.unlink(missing_ok=True)  # the upgrade is done either way: nothing to resume
     if diffs:
         print(f"✗ machine '{name}' upgraded, but not everything checks out:")
         for d in diffs:
@@ -339,7 +419,7 @@ def run(
     print(
         f"✓ machine '{name}' is on Fedora {to}: {len(after.volumes)} volumes (sizes unchanged), "
         f"{len(after.images)} images and {len(after.containers)} containers kept; "
-        f"{len(before.running)} started again."
+        f"{len(running)} started again."
     )
     return 0
 

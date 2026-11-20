@@ -228,19 +228,31 @@ The prototype became a verb (`src/foldyard/upgrade.py`, its boot script
   grown its anonymous volume from 45.8 to 45.9 MiB. Compared at rest, the store has to match
   exactly: every volume at its byte size, every image, every container.
 
-It refuses rather than guesses, and never leaves a VM worse than it found it:
+It refuses rather than guesses, says what state it left the VM in, and a rerun picks up where it
+stopped:
 
 - **Before anything changes**: a snapshot that didn't arrive whole (a failed ssh reads as empty
-  output, which would match anything; every volume's size must be read), containers that didn't all
-  stop, too little room, a target past Lima's template, or `[machine] host_firewall` (the upgrade
-  boot needs the Fedora mirrors, which the host wall refuses, and booting outside the wall's slice
-  would leave the VM unwalled for the whole transaction; not supported yet).
+  output, which would match anything; every volume's size must be read), too little room, a target
+  past Lima's template, or `[machine] host_firewall` (the upgrade boot needs the Fedora mirrors,
+  which the host wall refuses, and booting outside the wall's slice would leave the VM unwalled for
+  the whole transaction; not supported yet).
+- **The stack first**: the containers are stopped before the baseline is read (a database's last
+  checkpoint isn't a change). If they don't all stop, or the baseline can't be read whole, the ones
+  that stopped are started again and nothing else changes.
+- **Resumable from there**: the target, the baseline and which containers ran are saved in the
+  project's host state dir until the end. Running it again carries on from the guest's own record,
+  against that original baseline, and starts the original set again; a record that reads `failed` or
+  `running` is upgraded again even when the release number has already moved.
 - **Never stopped mid-transaction**: when `limactl start` gives up on the upgrade boot, the guest's
-  own record is read until it says done or failed; one still running after another hour is left to
-  finish, with its log's path. The record says done only once dnf succeeded, never from the release
-  number, which a failed transaction can already have moved.
-- **The script never runs twice by accident**: a VM that won't stop after the upgrade boot, or a
-  script that can't be removed, is left stopped with what to do, not booted again.
+  own record is read until it says done or failed; a record that can't be read counts as neither.
+  One without an end after another hour is left running, with its log's path. The record says done
+  only once dnf succeeded, never from the release number.
+- **A failed transaction**: the guest may be left partly upgraded (dnf replaces packages one by
+  one). The script is dropped, the VM started as usual and the containers that ran started again;
+  running it again retries, and `dnf distro-sync` completes what the last one didn't.
+- **The script never runs twice by accident**: a VM that won't stop after the upgrade boot keeps
+  running the old kernel with the script still recorded (stop it, then run it again: it resumes); a
+  script that can't be removed leaves the VM stopped, with the `limactl edit` to remove it.
 - **Done means checked**: the store at rest matches, the guest reports the new release, and the
   containers that ran before run again; otherwise it says which and exits non-zero.
 
