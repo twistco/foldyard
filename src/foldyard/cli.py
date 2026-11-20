@@ -900,6 +900,26 @@ def machine_recreate(
     raise typer.Exit(machine.recreate(main, stack.worktrees_root(main), assume_yes=yes))
 
 
+@machine_app.command("upgrade")
+def machine_upgrade(
+    release: int | None = typer.Option(
+        None,
+        "--release",
+        help="the Fedora release to go to (default and limit: the one Lima's podman template uses)",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="skip the confirmation prompt"),
+) -> None:
+    """Upgrade the VM's Fedora in place, keeping every image, volume and container.
+
+    Brings an existing VM to the Fedora a new one would get (never past it: that is the check
+    that the installed Lima is made for it). Stops the containers, runs the upgrade as root at
+    one boot, restarts on the new kernel, then checks the store against a snapshot and starts
+    what ran before. A few minutes, hands-off (docs/guest-os.md)."""
+    from . import upgrade
+
+    raise typer.Exit(upgrade.run(release=release, assume_yes=yes))
+
+
 @machine_app.command("stop")
 def machine_stop() -> None:
     """Stop the machine VM and host supervisor (containers + volumes kept; `fy up` restarts)."""

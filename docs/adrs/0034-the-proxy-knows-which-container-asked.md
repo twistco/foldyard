@@ -50,6 +50,15 @@
     gVisor, podman 6, `fy verify` and `fy box up` with it on, and load from real image builds.
     Tested: the host-tier e2e (`tests/test_forwarder_e2e.py`) on CI's Linux (QEMU/KVM, x86_64) and
     WSL2 hosts, and by hand on a macOS vz/arm64 guest.
+- **Amended (2026-11-20): podman 6's build steps.** The Decision's premise that rootless build `RUN`
+  steps run in the VM's namespace holds for podman 5 only. On podman 6.2 (Fedora 45, Lima 2.3.0's
+  template) each step gets a namespace of its own with a pasta to serve it, so a build's proxy
+  connection reached the VM listener from a pasta helper and was refused
+  ([guest-os.md](https://github.com/twistco/foldyard/blob/main/docs/guest-os.md)). A helper is now a
+  build's when every walled process in the network namespace it holds open, other than its own, is
+  in a build step's cgroup (`Cgroups.served`). That is read from the kernel's links, not pasta's
+  argv, which `--network pasta:<opts>` can add to. A container's pasta, or a container joined to a
+  build step's namespace, still names a container there, and stays refused.
 - **Sources:** the 2026-10-22 investigation of a proxy stall during parallel BashArena image builds
   (the egress log, `lsof` on the host, a replay batch's monitor digest; not in the repo); the spike
   record [forwarder-spike.md](https://github.com/twistco/foldyard/blob/main/docs/forwarder-spike.md)

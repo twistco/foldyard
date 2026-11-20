@@ -107,3 +107,4 @@ nav:
       - monitor-pipeline.md
       - ebpf-monitoring-spike.md
       - forwarder-spike.md
+      - guest-os.md

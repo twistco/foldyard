@@ -80,7 +80,7 @@ class FakeBackend:
         self.calls.append(f"reap:{name}")
         return list(self._orphans)
 
-    def start(self, name, prefix=()):
+    def start(self, name, prefix=(), wait=None):
         self.calls.append(f"start:{name}" + (f" under {' '.join(prefix)}" if prefix else ""))
         self._state = "running"
         self._responsive = self._revives
@@ -504,6 +504,23 @@ def test_delete_stops_the_supervisor_after_removing_the_vm(fake, monkeypatch, tm
     assert machine.delete(assume_yes=True) == 0
     assert be.calls == ["remove:homelab"]
     assert stopped == [True]
+
+
+def test_delete_drops_an_upgrade_context_left_for_the_vm_it_removes(fake, monkeypatch, tmp_path):
+    # `fy machine upgrade`'s saved context belongs to the VM: with it gone, a later upgrade would
+    # otherwise refuse forever over a record the new VM never had.
+    from foldyard import upgrade
+
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    ctx = upgrade.context_path("homelab")
+    ctx.parent.mkdir(parents=True)
+    ctx.write_text("{}")
+    be = fake()
+    be._exists = True
+    be._state = "stopped"
+    monkeypatch.setattr(machine, "_stop_host_supervisor", lambda: True)
+    assert machine.delete(assume_yes=True) == 0
+    assert not ctx.exists()
 
 
 # ── recreate: refuses where there's no VM to recreate ──────────────────────────────────
@@ -1354,11 +1371,20 @@ def test_ensure_wall_off_does_not_require_the_rootful_socket_masked(lima_env, tm
     assert be.calls == []
 
 
-def test_recreate_provisions_the_fresh_machine_before_its_first_boot(lima_env, tmp_path):
+def test_recreate_provisions_the_fresh_machine_before_its_first_boot(
+    lima_env, tmp_path, monkeypatch
+):
+    from foldyard import upgrade
+
     be, _guest, set_wall, guest_ok = lima_env
     set_wall(True)
     guest_ok()
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    ctx = upgrade.context_path("homelab")
+    ctx.parent.mkdir(parents=True)
+    ctx.write_text("{}")
     assert machine.recreate(tmp_path / "repo", tmp_path / "repo-wt", assume_yes=True) == 0
+    assert not ctx.exists()  # an upgrade's context goes with the VM it was for
     assert be.calls == [
         "stop:homelab",
         "remove:homelab",
@@ -1366,6 +1392,25 @@ def test_recreate_provisions_the_fresh_machine_before_its_first_boot(lima_env, t
         f"provision:{machine.provision_id()}",
         "start:homelab",
     ]
+
+
+def test_recreate_stops_and_keeps_the_upgrade_context_when_the_old_vm_wont_go(
+    lima_env, tmp_path, monkeypatch
+):
+    # The old VM survives a failed remove, so its upgrade's context still belongs to it, and a
+    # create over it would only fail.
+    from foldyard import upgrade
+
+    be, _guest, _set_wall, guest_ok = lima_env
+    guest_ok()
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    ctx = upgrade.context_path("homelab")
+    ctx.parent.mkdir(parents=True)
+    ctx.write_text("{}")
+    monkeypatch.setattr(be, "remove", lambda name: be.calls.append(f"remove:{name}") and False)
+    assert machine.recreate(tmp_path / "repo", tmp_path / "repo-wt", assume_yes=True) == 1
+    assert ctx.exists()
+    assert be.calls == ["stop:homelab", "remove:homelab"]
 
 
 def test_wall_asset_script_shape():

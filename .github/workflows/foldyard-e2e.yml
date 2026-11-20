@@ -202,7 +202,7 @@ jobs:
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima
       FOLDYARD_STATE_DIR: /tmp/foldyard-state
-      LIMA_VERSION: "2.2.0" # the release the rig and the spike validated; bump deliberately
+      LIMA_VERSION: "2.3.0" # bump deliberately: it moves the guest (2.3.0: Fedora 45, podman 6; docs/guest-os.md)
       # The session's own base VM (baked first, below): with both set, the first machine and
       # the live modules' VMs are clones of it (conftest's isolated_base_vm_stamp) — no
       # per-create `dnf install podman` over the Fedora mirrors.
@@ -419,7 +419,7 @@ jobs:
     env:
       FY_E2E_MODULES: ${{ join(matrix.shard.modules, ' ') }} # as in lima-host-e2e
       MACHINE_CPUS: "2" # as in lima-host-e2e
-      LIMA_VERSION: "2.2.0" # keep in step with lima-host-e2e
+      LIMA_VERSION: "2.3.0" # keep in step with lima-host-e2e
       FOLDYARD_E2E: "1"
       FOLDYARD_ENGINE: podman
       MACHINE_BACKEND: lima

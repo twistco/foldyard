@@ -38,7 +38,7 @@ from pathlib import Path
 ASSETS = Path(__file__).resolve().parent / "nested_l1"
 REPO = Path(__file__).resolve().parents[2]
 
-LIMA_VERSION = "2.2.0"  # CI's (tests/test_nested.py holds them equal)
+LIMA_VERSION = "2.3.0"  # CI's (tests/test_nested.py holds them equal)
 TESTER = "fytest"  # its home isn't /home/<user>.guest, which Lima reserves in the L2
 SUDO_GRANT = "90-fy-nested-test"
 HAD_ROOT = "fy-nested-had-root"  # beside the VM's Lima files: out of its reach, deleted with it

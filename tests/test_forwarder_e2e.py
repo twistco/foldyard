@@ -185,7 +185,11 @@ def test_a_build_step_is_stamped_as_a_build(repo, tmp_path):
     try:
         assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
         rows = _rows_for(marker)
-        assert rows, f"no egress row for {marker}"
+        # Why the forwarder refused, if it did: each helper it weighed, and what it served.
+        why = _guest(
+            "journalctl -u fy-fwd --no-pager -o cat 2>/dev/null | grep -E 'refused|helper' | tail -8"
+        )
+        assert rows, f"no egress row for {marker}; the forwarder's last verdicts:\n{why}"
         origin = rows[-1].get("origin")
         assert isinstance(origin, dict) and origin["who"] == "build", rows[-1]
     finally:

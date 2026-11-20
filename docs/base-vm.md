@@ -79,6 +79,11 @@ packages either, so the age warning is about when the bake happened, not about c
 version that baked it is recorded for reference, but it doesn't make the base stale: nothing in the
 base depends on it except the box image, and the fingerprint covers that.
 
+Rebaking changes what NEW project VMs start from; an existing one keeps its Fedora. When Lima's
+template moves to a new release, `fy machine upgrade` moves an existing VM to it in place, its
+images, volumes and containers kept
+([guest-os.md](https://github.com/twistco/foldyard/blob/main/docs/guest-os.md)).
+
 ## Running a workshop
 
 Attendees bake the base at home (`fy prereq --fetch`), so on the day `fy init` and `fy box up` take
