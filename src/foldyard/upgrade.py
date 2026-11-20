@@ -14,7 +14,8 @@ upgrades the disk instead (docs/guest-os.md, where a clone of a real project VM 
    machine.py's provisioning section) that runs `dnf distro-sync --releasever=N`;
 3. boot it, read the guest's report, stop, drop the script, and start the VM as any start does
    (`machine.ensure`: foldyard's own provisioning, the wall, the checks), on the new kernel;
-4. `podman system migrate`, compare with the snapshot, start what ran before.
+4. `podman system migrate`, then stop the API service so the socket restarts it in migrate's new
+   user namespace; compare with the snapshot, start what ran before.
 
 **The target never passes the Fedora the installed Lima's own podman template uses.** That is the
 Lima version check: a release Lima ships in its template is one its guest agent and boot setup are
@@ -316,6 +317,12 @@ def run(
         return 1
 
     guest("podman system migrate >/dev/null 2>&1")
+    # Migrate replaces the pause process, and with it the rootless user namespace every podman
+    # call joins. The API service (socket-activated: foldyard's own start already woke it) stays
+    # in the old one, so containers it then creates (`fy up`'s) sit where no later CLI call can
+    # signal them: exec, health checks and stop all fail with EPERM (seen live on a project VM).
+    # Stopped, the socket starts it again on the next connection, in the new namespace.
+    guest("systemctl --user stop podman.service >/dev/null 2>&1; true")
     after = _snapshot(guest)
     diffs = [] if after.complete else ["the store couldn't be read whole afterwards"]
     diffs += differences(baseline, after)

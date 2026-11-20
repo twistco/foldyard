@@ -246,6 +246,9 @@ def test_an_upgrade_stops_records_boots_drops_and_comes_back_through_ensure():
         "drop # fy-upgrade",
         "ensure",  # foldyard's own boot provisioning, the wall and the checks, as any start
         "guest: podman system",
+        # migrate replaces the pause process, so the user namespace; the API service still in the
+        # old one would create containers no later CLI call can signal (exec, health checks, stop)
+        "guest: systemctl --user",
         "guest: podman start",  # what ran before runs again
     ]
 

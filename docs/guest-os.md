@@ -250,6 +250,30 @@ reported every volume, image and container kept, and started both containers aga
 sentinel's sha256 was unchanged, the boot script was gone from `lima.yaml`, and sudo was narrowed
 again. The time is mostly the mirror's: the clone above took 153 s with the same steps.
 
+**On the real project VM, and what it caught.** The verb took the real project VM from Fedora 44 to
+45 in 183 s, every volume, image and container kept. But the stack's first `fy up` after it hung:
+every container it started was healthy inside yet `unhealthy` to podman, because `podman exec` (and
+so every health check), `podman stop` and `podman restart` all failed with
+`crun: kill: Operation not permitted`, while a container started from the CLI was fine. A clean VM
+restart cleared it, and showed why it mattered: seven Postgres processes podman had marked stopped
+were still running on the data volume. The cause was the verb's own last step:
+`podman system migrate` replaces the rootless pause process, so the user namespace every podman call
+joins, but the API service, already woken by foldyard's start, stayed in the old one (seen side by
+side: the service in `user:[4026532501]`, the new pause and every CLI call in `user:[4026532503]`).
+`fy up` creates the stack's containers through that service, so they sat where no later CLI call
+could signal them. The verb now stops the API service after migrate, and the socket starts it again
+in the new namespace. Reproduced on the example project with the real project's sequence (compose in
+the VM, the stack down, upgrade, `fy up`): before, `fy up` hung with the database unhealthy for 55
+minutes; after, it was up in 27 s, every container healthy and `exec`-able.
+
+**A project with the guest monitor and attribution.** A clone of a real BashArena VM
+(`monitor = "observe"`, `attribution = "record"`, Tetragon v1.7.1 observing): the verb took it to
+Fedora 45 in 186 s, re-recorded the monitor's boot provisioning, delivered Tetragon v1.8.0 (the
+policy loaded, the relay running), the forwarder serving, its wall back, every volume, image and
+container kept, and its one running container started again and `exec`-able. A raw `limactl clone`
+needs its `sock/` set back to `0700` first ([base-vm.md](./base-vm.md)'s quirk), or the forwarded
+socket never appears and the start reads as failed.
+
 ## What this suggests
 
 - **Fedora 45 is ready for foldyard with these fixes.** Lima, the provisioning, the wall, the box,
