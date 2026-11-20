@@ -696,6 +696,40 @@ def test_an_unreadable_codex_auth_json_counts_as_a_login(tmp_path):
     assert keyless.codex_stored_login(tmp_path) == [str(tmp_path / "auth.json")]
 
 
+def test_copilot_config_json_user_rows_are_not_a_finding(tmp_path):
+    # A keyless session legitimately names its user in this CLI-managed file — those rows are NOT a
+    # stored login. This is JSONC, and a comment mentioning the dummy must not trip the scan either.
+    config = tmp_path / "config.json"
+    config.write_text(
+        '{\n  // CLI-managed\n  "loggedInUsers": [{"login": "someone", "host": "github.com"}],\n'
+        '  "lastLoggedInUser": "someone",\n  "token": "gho_foldyarddummy",\n}'
+    )
+    assert keyless.copilot_stored_token(tmp_path) == []
+
+
+@pytest.mark.parametrize("prefix", ["github_pat_", "gho_", "ghu_", "ghp_"])
+def test_copilot_config_json_with_a_real_token_is_found(tmp_path, prefix):
+    # Any shape of GitHub credential the CLI's `storeTokenPlaintext` can persist, wherever it sits
+    # in the file, is a finding. The path is returned, NEVER the token value itself.
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"auth": {"token": prefix + "A" * 40}}))
+    assert keyless.copilot_stored_token(tmp_path) == [str(config)]
+
+
+def test_copilot_config_json_short_names_are_not_credentials(tmp_path):
+    # A key such as `gho_id` is not a 40-character token; the length floor keeps it out.
+    (tmp_path / "config.json").write_text(json.dumps({"gho_id": "ghu_short"}))
+    assert keyless.copilot_stored_token(tmp_path) == []
+
+
+def test_copilot_config_json_absent_or_unparseable_is_clean(tmp_path):
+    # Unlike Codex's auth.json, this is ordinary CLI state: its presence (even torn) isn't a finding
+    # — only a token-shaped value is. The scan is textual, so JSONC comments/trailing commas are moot.
+    assert keyless.copilot_stored_token(tmp_path) == []
+    (tmp_path / "config.json").write_text("{torn // but no token")
+    assert keyless.copilot_stored_token(tmp_path) == []
+
+
 def test_credential_env_holding_anything_but_the_dummy_is_named():
     env = {"ANTHROPIC_API_KEY": "sk-ant-dummy", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-real"}
     assert keyless.credential_env_leaks(keyless.CLAUDE_KEYLESS, env) == ["CLAUDE_CODE_OAUTH_TOKEN"]

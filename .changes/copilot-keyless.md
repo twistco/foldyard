@@ -15,3 +15,6 @@ bump: minor
   `any_scheme` covers the `Bearer`/`token`/bare forms a GitHub client may send. `[copilot] keyless`
   cannot coexist with a `github-app`/`gh-cli` `[[inject]]` rule: both pin `api.github.com` with no
   path, and the config points that out rather than letting one silently shadow the other.
+  `fy verify` fails a real token left in the box — in `COPILOT_GITHUB_TOKEN` or in the CLI-managed
+  `$COPILOT_HOME/config.json` (which `storeTokenPlaintext` can write) — and `fy doctor` names it,
+  without ever editing that file or mistaking its `loggedInUsers` rows for a login.

@@ -32,6 +32,7 @@ import base64
 import fcntl
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -351,6 +352,30 @@ def codex_stored_login(codex_home: Path) -> list[str]:
     if any(tokens.get(name) and tokens[name] != dummy for name, dummy in dummies.items()):
         return [str(path)]
     return []
+
+
+# A real GitHub credential can reach a box's Copilot home via the CLI's OWN `storeTokenPlaintext`
+# setting (a token in the CLI-managed JSONC config.json when no system keychain exists). That file's
+# shape is CLI-version-dependent and CLI-owned, so this looks for a token-SHAPED VALUE anywhere in
+# it, never for a particular key — and never edits the file. The `loggedInUsers` rows are NOT the
+# signal: a keyless session legitimately names its user there. Length floor keeps a key such as
+# `gho_id` from reading as a credential; real tokens are 40+ characters. Only paths are returned,
+# never the value itself, so a token cannot reach verify/doctor output or logs.
+_COPILOT_TOKEN_SHAPE = re.compile(r"github_pat_[A-Za-z0-9_]{20,}|gh[pou]_[A-Za-z0-9_]{20,}")
+
+
+def copilot_stored_token(copilot_home: Path) -> list[str]:
+    """``$COPILOT_HOME/config.json`` when it holds a real-looking GitHub token: the path, or ``[]``.
+    Unlike Codex's auth.json — a file that exists only to hold a credential — this file is ordinary
+    CLI state, so its mere presence (or an unreadable one) is not a finding; only a token value is.
+    foldyard's dummy is exempt. Read-only: foldyard never writes this CLI-managed JSONC file."""
+    path = copilot_home / "config.json"
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    dummy = COPILOT_KEYLESS["api-key"]["dummy"]
+    return [str(path)] if any(m != dummy for m in _COPILOT_TOKEN_SHAPE.findall(text)) else []
 
 
 def stored_login_rows(

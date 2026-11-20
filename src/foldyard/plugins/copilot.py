@@ -19,7 +19,10 @@ untouched, rather than overwritten with the GitHub token the proxy mints for the
 
 Facts verified against the installed CLI (1.0.109): state lives in ``$COPILOT_HOME`` (default
 ``~/.copilot``: ``settings.json``, the CLI-managed ``config.json``, ``permissions-config.json``,
-``session-state/<uuid>/``, ``session-store.db``); ``--session-id <uuid>`` names a new session and
+``session-state/<uuid>/``, ``session-store.db``). That config.json can hold a real token when the
+CLI's ``storeTokenPlaintext`` setting is on with no keychain, so verify/doctor scan its VALUES for
+a token shape (never its user rows, which a keyless session legitimately fills, and never editing
+it); ``--session-id <uuid>`` names a new session and
 ``--resume <id>`` resumes one; ``--allow-all`` = tools + paths + urls; ``COPILOT_ALLOW_ALL=true``
 also trusts the working directory; there is no ``--append-system-prompt`` and no ad-hoc config
 override flag — orientation arrives as ``$COPILOT_HOME/instructions/foldyard.instructions.md``, one
@@ -34,6 +37,7 @@ import json
 import os
 from collections.abc import Iterator
 from dataclasses import replace
+from pathlib import Path
 
 from .. import boxmounts, config, keyless
 from ..keyless import COPILOT_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
@@ -66,11 +70,21 @@ _INSTALL = (
     '| PREFIX="$HOME/.local" PATH="$HOME/.local/bin:$PATH" bash)'
 )
 
-# What to do with a real token that reached the box. There is no foldyard-owned login file to
-# inspect: the CLI's `config.json` is CLI-managed and a keyless session legitimately names its user
-# there, so a login row in it is not a finding. What can leak is the credential env var itself.
+
+def _stored_token() -> list[str]:
+    """Where this box's Copilot has a real token in its CLI-managed config.json (see
+    :func:`foldyard.keyless.copilot_stored_token`), under the config dir `box_args` points it at."""
+    home = Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
+    return keyless.copilot_stored_token(home)
+
+
+# What to do with a real token that reached the box — either in the CLI-managed config.json (via
+# `storeTokenPlaintext`) or in the credential env var. The user ROWS in config.json are not the
+# finding: a keyless session legitimately names its user there. Never edit that CLI-owned file.
 _REMOVE_LOGIN = (
-    "unset it in the box; keyless injects the real token from your computer, never stored here"
+    "use `/logout` in `copilot` to clear a stored one (or delete $COPILOT_HOME/config.json), or "
+    "unset COPILOT_GITHUB_TOKEN; keyless injects the real token from your computer, never stored "
+    "here"
 )
 
 
@@ -219,26 +233,29 @@ class CopilotPlugin(Plugin):
         ]
 
     def verify_checks(self, ctx: VerifyContext) -> Iterator[tuple[str, str]]:
-        # In the box only (the volume isn't on your computer): no real Copilot token in it. The
-        # CLI-managed config.json is deliberately NOT inspected — a keyless session legitimately
-        # names its user there, so a `loggedInUsers` row is not a finding. What can leak is the
-        # credential env var itself. Watched in EVERY box, declared or not, like the other agents.
+        # In the box only (the volume isn't on your computer): no real Copilot token in it —
+        # neither a plaintext one the CLI stored in its own config.json nor a real value where the
+        # dummy env var belongs. The config.json USER rows are not inspected: a keyless session
+        # legitimately names its user there. Watched in EVERY box, declared or not, like the others.
         if not ctx.in_box:
             return
         leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
-        yield from keyless.stored_login_rows("Copilot", [], leaks, _REMOVE_LOGIN)
+        yield from keyless.stored_login_rows("Copilot", _stored_token(), leaks, _REMOVE_LOGIN)
 
     def box_doctor_checks(self, ctx: DoctorContext) -> Iterator[tuple[str, str, str]]:
         # As claude's/codex's: a row for a declared agent, and for an undeclared one only when
-        # there's a finding. Copilot's finding is an env var, not a file the CLI writes.
+        # there's a finding — a stored token in config.json or a real env var.
+        found = _stored_token()
         leaks = keyless.credential_env_leaks(_KEYLESS, os.environ)
-        if not leaks and not config.copilot_enabled():
+        if not found and not leaks and not config.copilot_enabled():
             return
+        problems = [keyless.stored_login_detail(found, _REMOVE_LOGIN)] if found else []
+        problems += [f"{name} holds a real token — {_REMOVE_LOGIN}" for name in leaks]
         yield ctx.result(
-            not leaks,
+            not problems,
             "copilot credential",
             "none in the box (keyless)",
-            "; ".join(f"{name} holds a real token — {_REMOVE_LOGIN}" for name in leaks),
+            "; ".join(problems),
         )
 
     def box_bootstrap(self, env: dict) -> list[dict]:

@@ -2944,16 +2944,23 @@ def test_copilot_keyless_cannot_share_api_github_com_with_a_github_injector(monk
     assert reg.mode_issues({"copilot": "on", "github": "off"}) == []
 
 
-def test_copilot_verify_ignores_the_cli_config_but_flags_a_real_token(monkeypatch, tmp_path):
-    # The CLI-managed config.json is not a login to flag: a keyless session legitimately names its
-    # user there. A real COPILOT_GITHUB_TOKEN in the box is the finding.
+def test_copilot_verify_ignores_user_rows_but_flags_a_stored_or_leaked_token(monkeypatch, tmp_path):
+    # The CLI-managed config.json's USER rows are not a login to flag: a keyless session legitimately
+    # names its user there. A real token stored in that file, or in the env var, is the finding.
     monkeypatch.setattr(config, "copilot_enabled", lambda: True)
     home = tmp_path / ".copilot"
     home.mkdir()
-    (home / "config.json").write_text(json.dumps({"loggedInUsers": [{"login": "someone"}]}))
+    config_json = home / "config.json"
+    config_json.write_text(json.dumps({"loggedInUsers": [{"login": "someone"}]}))
     monkeypatch.setenv("COPILOT_HOME", str(home))
     p = copilot.CopilotPlugin()
     assert _statuses(p.verify_checks(_vctx())) == ["pass"]
+
+    config_json.write_text(json.dumps({"auth": {"token": "gho_" + "A" * 40}}))
+    [(status, msg)] = list(p.verify_checks(_vctx()))
+    assert status == "fail" and str(config_json) in msg and "logout" in msg
+
+    config_json.write_text(json.dumps({"loggedInUsers": [{"login": "someone"}]}))
     monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "github_pat_real")
     failed = [msg for status, msg in p.verify_checks(_vctx()) if status == "fail"]
     assert len(failed) == 1 and "COPILOT_GITHUB_TOKEN" in failed[0]
@@ -2967,12 +2974,24 @@ def test_copilot_verify_watches_a_box_with_no_copilot_table(monkeypatch):
     assert any(s == "fail" for s, _ in copilot.CopilotPlugin().verify_checks(_vctx()))
 
 
-def test_copilot_doctor_names_the_leaked_env_var_and_the_fix(monkeypatch):
+def test_copilot_doctor_names_a_stored_or_leaked_token_and_the_fix(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "copilot_enabled", lambda: True)
-    [(status, name, detail)] = list(copilot.CopilotPlugin().box_doctor_checks(_ctx()))
+    home = tmp_path / ".copilot"
+    home.mkdir()
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    p = copilot.CopilotPlugin()
+    [(status, name, detail)] = list(p.box_doctor_checks(_ctx()))
     assert status == "ok" and name == "copilot credential" and "keyless" in detail
+
+    config_json = home / "config.json"
+    config_json.write_text(json.dumps({"auth": {"token": "github_pat_" + "A" * 40}}))
+    [(status, name, detail)] = list(p.box_doctor_checks(_ctx()))
+    assert status == "fail" and name == "copilot credential"
+    assert str(config_json) in detail and "logout" in detail
+
+    config_json.unlink()
     monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_real")
-    [(status, name, detail)] = list(copilot.CopilotPlugin().box_doctor_checks(_ctx()))
+    [(status, name, detail)] = list(p.box_doctor_checks(_ctx()))
     assert status == "fail" and name == "copilot credential"
     assert "COPILOT_GITHUB_TOKEN" in detail and "unset" in detail
 
