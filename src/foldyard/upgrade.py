@@ -282,6 +282,8 @@ def _load(path: Path, name: str) -> dict | None:
         and isinstance(ctx.get("running"), list)
         and isinstance(ctx.get("baseline"), str)
         and ctx.get("phase", "") in ("", "check")
+        and isinstance(ctx.get("size_changes", []), list)
+        and all(isinstance(s, str) for s in ctx.get("size_changes", []))
     )
     return ctx if ok else None
 
@@ -385,13 +387,27 @@ def run(
                 print(f"  the VM was recreated or its record is gone, remove {context}.")
                 return 1
             _err(f"▶ checking the upgrade to Fedora {to} again")
-            return _verify(name, to, baseline, running, guest, context, sizes=False)
+            owed = list(ctx.get("size_changes", []))
+            return _verify(name, to, baseline, running, guest, context, sizes=False, owed=owed)
         _err(f"▶ resuming the upgrade to Fedora {to} (its record: {state or 'none yet'})")
         if not state.startswith((f"done {to}", "running ")):
-            # The transaction runs again. A failed one started the stack again, and it may have
-            # run since: stop it cleanly before the VM is powered off, and compare against the
-            # store as it is now, at rest, not the first attempt's.
+            # The transaction runs again: its target meets the rules a fresh run's would.
+            ceiling = template()
+            if ceiling is None or to > ceiling or release not in (None, to):
+                print(f"✗ machine '{name}': the upgrade under way is to Fedora {to}, which")
+                print("  can't be run again as asked: this Lima's podman template is unreadable or")
+                print(f"  older, or `--release` asks for another. To start over, remove {context}.")
+                return 1
+            # A failed one started the stack again, and it may have run since: stop it cleanly
+            # before the VM is powered off, and compare against the store as it is now, at rest,
+            # not the first attempt's.
             now = _snapshot(guest)
+            if not now.complete:
+                # Its running set is owed a start at the end: one started since the failure
+                # would be stopped and never started again.
+                print(f"✗ couldn't read which containers run in '{name}' now; nothing stopped.")
+                print("  Run `fy machine upgrade` again.")
+                return 1
             # The original set (one that didn't come back after the failure is still owed a
             # start), and what runs now.
             running = list(dict.fromkeys([*running, *now.running]))
@@ -530,34 +546,60 @@ def run(
         _save(context, {"machine": name, "target": to, "running": running,
                         "baseline": dump(baseline), "phase": "check"})  # fmt: skip
     except OSError as e:
-        # The check runs now either way. Should it fail too, a rerun resumes from the earlier
-        # save, which goes through the finishing restart again: say so.
-        _err(f"⚠ couldn't record that the upgrade is done ({context}: {e}); if this check fails,")
-        _err("  stop the containers before running `fy machine upgrade` again")
+        # A rerun would resume from the earlier save and power the VM off for the finishing
+        # restart again: never under a stack this run started. It stays stopped until then.
+        print(f"✗ machine '{name}' is on Fedora {to}, but that couldn't be recorded ({context}:")
+        print(f"  {e}). Its containers stay stopped so a rerun can't power the VM off under them;")
+        print("  put that right, then `fy machine upgrade` again finishes (one more restart) and")
+        print("  starts them.")
+        return 1
     return _verify(name, to, baseline, running, guest, context, sizes=True)
 
 
 def _verify(name: str, to: int, baseline: Snapshot, running: list[str],
             guest: Callable[[str], subprocess.CompletedProcess], context: Path,
-            sizes: bool) -> int:  # fmt: skip
+            sizes: bool, owed: list[str] | None = None) -> int:  # fmt: skip
     """The store against the baseline, the release, and the original running set started
-    again; the context removed only once all of it holds."""
+    again; the context removed only once all of it holds. ``owed``: the size changes an earlier
+    check found at rest, which a check with the stack running can't clear: they stand until
+    the context is removed."""
     after = _snapshot(guest)
     diffs = [] if after.complete else ["the store couldn't be read whole afterwards"]
-    diffs += differences(baseline, after, sizes=sizes)
+    found = differences(baseline, after, sizes=sizes)
+    # Read at rest, a size change is a finding of its own: kept past this run, since a rerun
+    # compares no sizes and would otherwise pass over it.
+    resized = [d for d in found if d not in differences(baseline, after, sizes=False)]
+    diffs += [d for d in found if d not in resized]
     if after.release != ("fedora", to):
         diffs.insert(0, f"the guest reports {after.release}, not Fedora {to}")
     back = _restart(guest, running)
     if back:
         diffs.append(f"not running again: {', '.join(c[:12] for c in back)} (`podman start` them)")
-    if diffs:
+    owed = [*(owed or []), *resized]
+    if diffs or owed:
         # Kept: a rerun resumes here (the record says done, so no new transaction) and checks
         # again against the same baseline.
         print(f"✗ machine '{name}' upgraded, but not everything checks out:")
         for d in diffs:
             print(f"    {d}")
-        print("  Put it right and run `fy machine upgrade` again to check again, or remove")
-        print(f"  {context} to accept it as it is.")
+        if owed:
+            print("  Changed size between the store at rest before and after (a rerun can't check")
+            print("  these again, with the stack running; look into them):")
+            for d in owed:
+                print(f"    {d}")
+        if resized:
+            try:
+                _save(context, {"machine": name, "target": to, "running": running,
+                                "baseline": dump(baseline), "phase": "check",
+                                "size_changes": owed})  # fmt: skip
+            except OSError as e:
+                print(f"  ⚠ couldn't record the size changes ({context}: {e}): a rerun won't")
+                print("    report them again.")
+        if diffs:
+            print("  Put it right and run `fy machine upgrade` again to check again, or remove")
+            print(f"  {context} to accept it as it is.")
+        else:
+            print(f"  Remove {context} to accept them.")
         return 1
     context.unlink(missing_ok=True)  # verified and restored: nothing left to resume
     print(

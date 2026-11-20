@@ -1174,7 +1174,11 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
             return 0
     _check_box_dirs(main, wt_root)
     BACKEND.stop(MACHINE)
-    BACKEND.remove(MACHINE)
+    if not BACKEND.remove(MACHINE):
+        # The old VM survives, so whatever belongs to it stays (an upgrade's context too), and
+        # a create over it would only fail.
+        print(f"✗ '{BACKEND.cli}' failed to remove '{MACHINE}'; nothing was re-created.")
+        return 1
     from . import upgrade  # never at import: upgrade imports this module
 
     upgrade.forget(MACHINE)

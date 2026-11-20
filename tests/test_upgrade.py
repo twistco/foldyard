@@ -352,7 +352,8 @@ def test_a_retry_after_a_failed_transaction_stops_the_stack_and_reads_a_new_base
     assert not ctx.exists()
 
 
-def _resume(ctx, ctx_running, baseline_text, guest_kw=None, pending="failed 45: dnf exited 1"):
+def _resume(ctx, ctx_running, baseline_text, guest_kw=None, pending="failed 45: dnf exited 1",
+            template=45, **kw):  # fmt: skip
     """A rerun from a saved context (``ctx_running`` ran before the first attempt; its baseline
     ``baseline_text``), with a guest whose record reads ``pending``: rc, calls, the guest."""
     from foldyard import machine
@@ -365,12 +366,13 @@ def _resume(ctx, ctx_running, baseline_text, guest_kw=None, pending="failed 45: 
     rc = upgrade.run(
         backend=_Backend(calls, world),
         guest=guest,
-        template=lambda: 45,
+        template=lambda: template,
         ensure=lambda: calls.append("ensure"),
         host_wall=lambda: False,
         sleep=lambda s: None,
         context=ctx,
         assume_yes=True,
+        **kw,
     )
     return rc, calls, guest
 
@@ -392,6 +394,43 @@ def test_a_retry_keeps_the_original_identities_so_a_loss_still_shows(ctx):
     rc, _, _ = _resume(ctx, ["1111"], AT_REST.replace("end\n", "image sha256:ccc\nend\n"))
     assert rc == 1
     assert ctx.exists()  # not verified: kept for the next run
+
+
+def test_a_retry_that_cant_read_what_runs_now_stops_nothing(ctx):
+    # A container started since the failure would be stopped and never started again.
+    rc, calls, _ = _resume(ctx, ["1111"], AT_REST, guest_kw={"snapshot_rc": 255})
+    assert rc == 1 and calls == []
+
+
+@pytest.mark.parametrize(
+    "template, release", [(44, None), (None, None), (45, 44)], ids=["capped", "unread", "asked"]
+)
+def test_a_retry_runs_the_saved_target_only_as_a_fresh_run_could(template, release, ctx):
+    # The context's target meets the same rules as one read afresh: never past this Lima's
+    # template, never other than the release asked for.
+    rc, calls, _ = _resume(ctx, ["1111"], AT_REST, template=template, release=release)
+    assert rc == 1 and calls == []
+    assert ctx.exists()
+
+
+def test_a_check_phase_that_cant_be_recorded_leaves_the_stack_stopped(ctx, monkeypatch, capsys):
+    # A rerun would otherwise resume from the earlier context, and power the VM off under the
+    # stack the check started again.
+    save = upgrade._save
+
+    def failing(path, saved):
+        if saved.get("phase") == "check":
+            raise OSError("no space left on device")
+        save(path, saved)
+
+    monkeypatch.setattr(upgrade, "_save", failing)
+    rc, calls = _run(context=ctx)
+    assert rc == 1
+    assert "guest: podman start" not in calls
+    assert "no space left on device" in capsys.readouterr().out
+    monkeypatch.setattr(upgrade, "_save", save)
+    rc, calls = _run(pending="done 45", guest_kw={"stopped": True}, context=ctx)
+    assert rc == 0 and calls[-1] == "guest: podman start"
 
 
 def test_a_context_that_cant_be_saved_starts_the_stack_again(tmp_path):
@@ -426,6 +465,19 @@ def test_a_size_alone_doesnt_fail_the_check_on_a_rerun_but_a_missing_image_does(
         },
     )
     assert rc == 1 and ctx.exists()
+
+
+def test_a_size_changed_at_rest_isnt_forgotten_by_the_rerun_that_cant_compare_sizes(ctx, capsys):
+    # Across the upgrade, both at rest, a volume shrank. The rerun compares no sizes (the stack
+    # runs by then), so it must not pass on that: only removing the context accepts it.
+    shrunk = AT_REST.replace("fedora 44", "fedora 45").replace("52531200", "1048576")
+    rc, _ = _run(guest_kw={"after": shrunk}, context=ctx)
+    assert rc == 1
+    capsys.readouterr()
+    rc, _ = _run(pending="done 45", context=ctx)
+    assert rc == 1 and ctx.exists()
+    out = capsys.readouterr().out
+    assert "1.0 MiB" in out and str(ctx) in out
 
 
 def test_a_check_phase_with_an_unreadable_record_refuses_rather_than_upgrade_again(ctx):

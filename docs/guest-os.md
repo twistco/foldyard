@@ -242,8 +242,10 @@ stopped:
 - **Resumable from there**: the target, the baseline and which containers ran are saved in the
   project's host state dir (if they can't be, the stack is started again and nothing else happens),
   and kept until the store is verified and the stack is back. Running it again carries on from the
-  guest's own record. When the transaction runs again (it failed, or never started), the stack,
-  which the failed run started again, is stopped cleanly first and the baseline's volume sizes read
+  guest's own record. When the transaction runs again (it failed, or never started), its saved
+  target meets the same rules as a fresh one (never past Lima's template, never other than the
+  `--release` asked for), and the stack, which the failed run started again, is stopped cleanly
+  first (nothing is stopped if what runs now can't be read) and the baseline's volume sizes read
   again at rest, so the VM is never powered off under it and a checkpoint since isn't read as a
   change; every volume, image and container the first attempt had stays in it, so one a failed
   transaction lost still shows, and the containers started at the end are the original set and what
@@ -251,8 +253,11 @@ stopped:
   never past Lima's template or to a release other than the one asked for; a `running` record
   without its context is left to finish. Once the upgrade itself is done, a rerun only checks again,
   the VM untouched: what's there (every volume, image and container, and the release), not sizes,
-  since the stack runs by then, and it starts what of the original set isn't running.
-  `fy machine rm` and `recreate` drop the context with the VM it belongs to.
+  since the stack runs by then, and it starts what of the original set isn't running. A size change
+  the first check found at rest is kept in the context and reported by every rerun: only removing
+  the context accepts it. If the upgrade's end can't be recorded, the containers stay stopped, so a
+  rerun can't power the VM off under them. `fy machine rm` and `recreate` drop the context with the
+  VM it belongs to (`recreate` only once the old VM is gone).
 - **Never stopped mid-transaction**: when `limactl start` gives up on the upgrade boot, the guest's
   own record is read until it says done or failed; a record that can't be read counts as neither.
   One without an end after another hour is left running, with its log's path. The record says done

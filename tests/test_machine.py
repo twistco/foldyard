@@ -1394,6 +1394,25 @@ def test_recreate_provisions_the_fresh_machine_before_its_first_boot(
     ]
 
 
+def test_recreate_stops_and_keeps_the_upgrade_context_when_the_old_vm_wont_go(
+    lima_env, tmp_path, monkeypatch
+):
+    # The old VM survives a failed remove, so its upgrade's context still belongs to it, and a
+    # create over it would only fail.
+    from foldyard import upgrade
+
+    be, _guest, _set_wall, guest_ok = lima_env
+    guest_ok()
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path / "state"))
+    ctx = upgrade.context_path("homelab")
+    ctx.parent.mkdir(parents=True)
+    ctx.write_text("{}")
+    monkeypatch.setattr(be, "remove", lambda name: be.calls.append(f"remove:{name}") and False)
+    assert machine.recreate(tmp_path / "repo", tmp_path / "repo-wt", assume_yes=True) == 1
+    assert ctx.exists()
+    assert be.calls == ["stop:homelab", "remove:homelab"]
+
+
 def test_wall_asset_script_shape():
     # The provisioning script the sync copies in: correct verbs, own nft tables (NEVER a global
     # `flush ruleset` — netavark/pasta state must survive), fail-fast REJECT, no in-VM proxy.
