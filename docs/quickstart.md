@@ -44,8 +44,8 @@ Linux (x86-64; Debian/Ubuntu package names shown — `fy prereq` names your dist
 
 ```bash
 sudo apt-get update && sudo apt-get install qemu-system-x86 qemu-utils ovmf podman
-curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
-  | sudo tar Cxz /usr/local                               # Lima (2.2.0 is the version CI tests)
+curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.3.0/lima-2.3.0-Linux-x86_64.tar.gz \
+  | sudo tar Cxz /usr/local                               # Lima (2.3.0 is the version CI tests)
 ```
 
 On Linux, `/dev/kvm` must be writable by you (usually: be in the `kvm` group), and a machine you

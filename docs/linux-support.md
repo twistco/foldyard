@@ -20,9 +20,9 @@ Windows, not the credentials, so the VM is required inside the distro too. Both 
 
 **Where the results come from:**
 
-- **The CI host tier** — GitHub-hosted `ubuntu-24.04` (x86, `/dev/kvm`, Lima 2.2.0 from the release
-  tarball, QEMU 8.2, host podman CLI 4.9.3) booting a Fedora 44 / podman 5.8.4 guest; and the same
-  inside WSL2 on `windows-2025`.
+- **The CI host tier** — GitHub-hosted `ubuntu-24.04` (x86, `/dev/kvm`, Lima 2.3.0 from the release
+  tarball, QEMU 8.2, host podman CLI 4.9.3) booting a Fedora 45 / podman 6.2 guest (Fedora 44 /
+  podman 5.8.4 before 2026-11-20); and the same inside WSL2 on `windows-2025`.
 - **The nested-KVM rig** — a GCP VM (Fedora 44, Lima 2.2.0, podman 5.8.4, crun 1.28;
   [nested-virt.md](./nested-virt.md)). It is one hypervisor level deeper than a laptop, so its
   timings are upper bounds; correctness results transfer as they are.

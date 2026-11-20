@@ -67,11 +67,11 @@ sudo dnf install -y qemu-system-x86-core qemu-img edk2-ovmf podman git openssh-c
 sudo pacman -S --needed qemu-system-x86 qemu-img edk2-ovmf podman git openssh lsof
 ```
 
-Then, on any of them: Lima (2.2.0 is the version foldyard's CI tests), uv, access to KVM (the Linux
+Then, on any of them: Lima (2.3.0 is the version foldyard's CI tests), uv, access to KVM (the Linux
 kernel's hardware virtualisation), and a user session that keeps running:
 
 ```bash
-curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Linux-x86_64.tar.gz \
+curl -fsSL https://github.com/lima-vm/lima/releases/download/v2.3.0/lima-2.3.0-Linux-x86_64.tar.gz \
   | sudo tar Cxz /usr/local
 curl -LsSf https://astral.sh/uv/install.sh | sh
 sudo usermod -aG kvm $USER      # then log out and back in

@@ -168,7 +168,7 @@ held by pasta, never rootlessport.
 Every column also skips 14, as on any Mac: `test_wall_e2e`'s 12 need a Linux host for the host
 firewall, and `test_e2e`'s 2 need `CONTAINER_HOST`, which CI exports. The template's own
 `dnf install podman` lifts the cloud image's podman (6.1.3 on Fedora 45) to the current one (6.2.0)
-before any test. CI pins Lima 2.2.0, so it still runs Fedora 44 until `LIMA_VERSION` is bumped.
+before any test. CI moves to Lima 2.3.0 with these fixes, so it runs Fedora 45 from here on.
 
 ## Moving a project's VM to Fedora 45
 
