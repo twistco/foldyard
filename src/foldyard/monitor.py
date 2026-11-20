@@ -43,12 +43,13 @@ from pathlib import Path
 from . import config
 from .sandbox import SshBackend, _ssh
 
-TETRAGON_VERSION = "v1.7.1"
-# The release tarballs' sha256, from the release's own .sha256sum files (checked 2026-10-03).
+TETRAGON_VERSION = "v1.8.0"
+# The release tarballs' sha256, from the release's own .sha256sum files (checked 2026-11-20).
 # Pinned HERE, not fetched beside the download: the hash is the trust anchor the guest re-checks.
+# v1.7.1 can't parse kernel 7.2's BTF (Fedora 45: "header contains non-zero trailer").
 TETRAGON_SHA256 = {
-    "x86_64": "2f36a7bbb2b3d77a011383a01c8f804fe7761d934a76ff2fdf99ebad6f3e89ae",
-    "aarch64": "aa71d12eddd962003e9fd78e3b3534185af5b2728c7d21ab3cb0f7fe2dc87702",
+    "x86_64": "e88691c5f05a2a61aba58974a080603050b924c7f13ecc06f3d05172feb05f59",
+    "aarch64": "f894ff7fc0fe1d7c778bee183fd6710b4b70fc3269ce06994e8637c485c1f2af",
 }
 _RELEASE_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
 _BASE_URL = "https://github.com/cilium/tetragon/releases/download"

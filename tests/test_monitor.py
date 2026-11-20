@@ -55,6 +55,43 @@ def test_the_helper_is_valid_bash():
     assert res.returncode == 0, res.stderr
 
 
+# `tetra tracingpolicy list`'s table as each release prints it (tabwriter pads with spaces):
+# v1.8.0 put a DOMAIN column between NAME and STATE, which a v1.7-shaped match never sees.
+_V171 = (
+    "ID   NAME         STATE      FILTERID   NAMESPACE   SENSORS          KERNELMEMORY   MODE\n"
+    "1    fy-observe   {state}    0          (global)    generic_kprobe   1.23 MB        monitor\n"
+)
+_V180 = (
+    "ID   NAME         DOMAIN   STATE      FILTERID   NAMESPACE   SENSORS          KERNELMEMORY\n"
+    "1    fy-observe   grpc     {state}    0          (global)    generic_kprobe   1.23 MB\n"
+)
+
+
+@pytest.mark.spawns("bash")
+@pytest.mark.parametrize("table", [_V171, _V180], ids=["v1.7.1", "v1.8.0"])
+@pytest.mark.parametrize(
+    ("name", "state", "enabled"),
+    [
+        ("fy-observe", "enabled", True),
+        ("fy-observe", "disabled", False),
+        ("fy-observe", "load_error", False),
+        ("fy-observe-old", "enabled", False),  # another policy whose name starts the same
+    ],
+)
+def test_the_report_reads_the_policy_as_loaded_in_either_tetra_table(table, name, state, enabled):
+    if shutil.which("bash") is None:
+        pytest.skip("no bash on this host")
+    helper = (monitor._asset("fy-monitor.sh")).read_text()
+    fn = re.search(r"^policy_enabled\(\) \{.*?^\}", helper, re.S | re.M)
+    assert fn, "fy-monitor.sh defines policy_enabled()"
+    rows = table.format(state=state).replace("1    fy-observe", "1    " + name)
+    res = subprocess.run(
+        ["bash", "-c", f"POLICY=fy-observe\n{fn.group(0)}\npolicy_enabled"],
+        input=rows, text=True, capture_output=True,
+    )  # fmt: skip
+    assert (res.returncode == 0) is enabled, (rows, res.stderr)
+
+
 @pytest.mark.parametrize("on", [True, False])
 def test_boot_script_uses_only_limas_template_fields(on):
     # Lima renders every provision script as a Go template at each start: a stray `{{` (in the

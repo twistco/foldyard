@@ -13,6 +13,7 @@ import hmac
 import importlib.util
 import socket
 import struct
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -142,20 +143,30 @@ def test_the_sock_diag_request_names_the_clients_own_socket():
 
 
 class _Cgroups(fwd.Cgroups):
-    def __init__(self, paths: dict[int, str], comm: str | None) -> None:
+    def __init__(self, paths: dict[int, str], comm: str | None, serves: set[str]) -> None:
         super().__init__("/nonexistent")
         self.paths = paths
         self.comm = comm
+        self.serves = serves
 
     def _walk(self) -> None:
         pass
 
-    def owner_comm(self, path, inode, uids, proc="/proc"):
-        return self.comm
+    def holder(self, path, inode, uids, proc="/proc"):
+        return None if self.comm is None else ("200", self.comm)
+
+    def served(self, pid, uid, uids, proc="/proc"):
+        assert pid == "200"
+        return self.serves
 
 
-def _owner(cgroup_path: str | None, comm: str | None, found=(501, 77, 5)):
-    cg = _Cgroups({5: cgroup_path} if cgroup_path else {}, comm)
+def _owner(
+    cgroup_path: str | None,
+    comm: str | None,
+    found: tuple[int, int, int | None] | None = (501, 77, 5),
+    serves: Iterable[str] = (),
+):
+    cg = _Cgroups({5: cgroup_path} if cgroup_path else {}, comm, set(serves))
     return fwd.owner(
         ("192.168.5.15", 1), ("192.168.5.2", 41000), UID, [(501, 501)], cg, lambda a, b: found
     )
@@ -175,6 +186,54 @@ def test_owner_names_a_container_build_or_the_vm_and_refuses_pasta_or_the_unknow
     assert _owner(None, None) is None  # a cgroup that can't be found
     assert _owner(f"{USER}/x", None, found=None) is None  # no such socket
     assert _owner(f"{USER}/x", None, found=(501, 77, None)) is None  # no cgroup attribute
+
+
+def test_a_pasta_helper_serving_only_a_build_step_is_the_builds():
+    # podman 6 gives each build step a network namespace of its own and a pasta to serve it
+    # (podman 5's ran in the VM's): what the helper serves says whose its traffic is, and only an
+    # all-build namespace makes it a build's. A container's pasta, or a container that joined a
+    # build step's namespace, stays refused.
+    pasta = f"{USER}/user.slice/podman-6283.scope"
+    assert _owner(pasta, "pasta", serves={"build"}) == ("build", "", 501)
+    assert _owner(pasta, "pasta.avx2", serves={"build"}) == ("build", "", 501)
+    assert _owner(pasta, "pasta", serves={"container"}) == ("pasta", "", 501)
+    assert _owner(pasta, "pasta", serves={"build", "container"}) == ("pasta", "", 501)
+    assert _owner(pasta, "pasta", serves={"build", "vm"}) == ("pasta", "", 501)
+    assert _owner(pasta, "pasta", serves=set()) == ("pasta", "", 501)  # nothing found in it
+
+
+def _proc_entry(proc: Path, pid: str, comm: str, own_net: str, cgroup: str, fds=()) -> None:
+    (proc / pid / "fd").mkdir(parents=True)
+    (proc / pid / "ns").mkdir()
+    (proc / pid / "comm").write_text(comm + "\n")
+    (proc / pid / "cgroup").write_text(f"0::{cgroup}\n")
+    (proc / pid / "ns" / "net").symlink_to(own_net)
+    for n, target in enumerate(fds, start=3):
+        (proc / pid / "fd" / str(n)).symlink_to(target)
+
+
+def test_served_classifies_every_process_in_the_namespace_the_helper_holds(tmp_path):
+    # The kernel's own record, not pasta's argv (which `--network pasta:<opts>` can add to): the
+    # namespace a helper holds open that isn't its own, then each walled process in it.
+    proc = tmp_path / "proc"
+    vm, step_ns, other_ns = "net:[4026531833]", "net:[4026532574]", "net:[4026532999]"
+    step = f"{USER}/app.slice/crun-buildah-buildah951384594.scope/container"
+    _proc_entry(proc, "200", "pasta", vm, f"{USER}/user.slice/podman-6283.scope",
+                fds=("socket:[77]", step_ns, "/dev/net/tun"))  # fmt: skip
+    _proc_entry(proc, "300", "sleep", step_ns, step)
+    _proc_entry(proc, "400", "nginx", other_ns, f"{USER}/user.slice/libpod-{BOX}.scope/container")
+    _proc_entry(proc, "500", "podman", vm, f"{USER}/app.slice/podman.service")
+    me = (proc / "300").stat().st_uid
+    cg = fwd.Cgroups(str(tmp_path / "cg"))
+    assert cg.served("200", UID, [(me, me)], proc=str(proc)) == {"build"}
+    # a container joined to the step's namespace counts too
+    _proc_entry(proc, "600", "sh", step_ns, f"{USER}/user.slice/libpod-{BOX}.scope/container")
+    assert cg.served("200", UID, [(me, me)], proc=str(proc)) == {"build", "container"}
+    # only the walled uids' processes are looked at, and a helper that holds no other namespace
+    # (or has gone) serves nothing
+    assert cg.served("200", UID, [(me + 1, me + 1)], proc=str(proc)) == set()
+    assert cg.served("500", UID, [(me, me)], proc=str(proc)) == set()
+    assert cg.served("999", UID, [(me, me)], proc=str(proc)) == set()
 
 
 def test_owner_comm_finds_a_socket_moved_out_of_its_cgroup(tmp_path):

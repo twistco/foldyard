@@ -37,6 +37,17 @@ put() {
 
 installed() { [ -r "$LIB/installed" ] && [ "$(cat "$LIB/installed")" = "$SHA" ]; }
 
+# Whether `tetra tracingpolicy list` (on stdin) shows $POLICY enabled. Its table is ID NAME STATE …
+# up to v1.7, and ID NAME DOMAIN STATE … from v1.8.0 (a domain is never "enabled").
+policy_enabled() {
+    local id name third fourth rest
+    while read -r id name third fourth rest; do
+        [[ $id =~ ^[0-9]+$ && $name == "$POLICY" ]] || continue
+        [[ $third == enabled || $fourth == enabled ]] && return 0
+    done
+    return 1
+}
+
 start_tetragon() {
     systemctl daemon-reload
     put policy "loading"
@@ -118,7 +129,7 @@ verb_report() {
             put policy "failed: tetragon.service is $(systemctl is-active tetragon.service)"
             return 0
         fi
-        if /usr/local/bin/tetra tracingpolicy list 2>/dev/null | grep -Eq "^[0-9]+ +$POLICY +enabled"; then
+        if /usr/local/bin/tetra tracingpolicy list 2>/dev/null | policy_enabled; then
             put policy "loaded $POLICY"
             return 0
         fi

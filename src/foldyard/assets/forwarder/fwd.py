@@ -19,7 +19,8 @@ still known and is made the only way through:
   containers, the VM user's own processes. A policy route sends the walled principals' (the VM user
   and its subuids) gateway-port connections out through ``lo`` and an nft rule redirects them here,
   where each is attributed by its owning socket's cgroup (:func:`classify`). A pasta helper is
-  refused: its connections are some container's, and nothing here can say whose.
+  refused: its connections are some container's, and nothing here can say whose, unless all it
+  serves is build steps (podman 6 gives each one a namespace and a pasta of its own).
 
 On each connection to a proxy port the forwarder reads the request head (plain text even for HTTPS:
 ``CONNECT host:443``), removes every ``X-Fy-Origin`` line the client wrote, appends its own — where
@@ -331,10 +332,10 @@ class Cgroups:
             self._walk()
         return self.paths.get(cgroup_id)
 
-    def owner_comm(self, path: str, inode: int, uids: list[tuple[int, int]],
-                   proc: str = "/proc") -> str | None:  # fmt: skip
-        """The command name of the process holding socket ``inode``: looked for first among the
-        processes of cgroup ``path`` (the socket's own), then among every process the walled
+    def holder(self, path: str, inode: int, uids: list[tuple[int, int]],
+               proc: str = "/proc") -> tuple[str, str] | None:  # fmt: skip
+        """``(pid, command name)`` of the process holding socket ``inode``: looked for first among
+        the processes of cgroup ``path`` (the socket's own), then among every process the walled
         ``uids`` own. The second look matters: a socket keeps the cgroup it was MADE in, and pasta
         pre-opens a pool of sockets before podman moves it into its own scope, so a pasta socket
         can name a cgroup pasta is no longer in (seen live, 2026-10-23)."""
@@ -344,15 +345,7 @@ class Cgroups:
                 first = f.read().split()
         except OSError:
             first = []
-        rest = []
-        for pid in os.listdir(proc):
-            if pid.isdigit() and pid not in first:
-                try:
-                    uid = os.stat(f"{proc}/{pid}").st_uid
-                except OSError:
-                    continue
-                if any(a <= uid <= b for a, b in uids):
-                    rest.append(pid)
+        rest = [pid for pid in walled_pids(uids, proc) if pid not in first]
         for pid in first + rest:
             try:
                 fds = os.listdir(f"{proc}/{pid}/fd")
@@ -363,10 +356,67 @@ class Cgroups:
                     if os.readlink(f"{proc}/{pid}/fd/{fd}") != target:
                         continue
                     with open(f"{proc}/{pid}/comm") as f:
-                        return f.read().strip()
+                        return pid, f.read().strip()
                 except OSError:
                     continue  # that one fd closed since the listing: the rest still count
         return None
+
+    def owner_comm(self, path: str, inode: int, uids: list[tuple[int, int]],
+                   proc: str = "/proc") -> str | None:  # fmt: skip
+        """The command name of :meth:`holder`."""
+        held = self.holder(path, inode, uids, proc)
+        return held[1] if held else None
+
+    def served(self, pid: str, uid: int, uids: list[tuple[int, int]],
+               proc: str = "/proc") -> set[str]:  # fmt: skip
+        """What a network helper serves, as :func:`classify` names each walled process in it: the
+        network namespaces helper ``pid`` holds open other than its own (pasta keeps the one it
+        serves open; read from the kernel's links, not its argv, which ``--network pasta:<opts>``
+        can add to), then every process of the walled ``uids`` in one of them, by its cgroup. Empty
+        when it holds none, or has gone. Podman 6 gives each rootless build step a namespace of
+        its own and a pasta to serve it (podman 5's ran in the VM's), so a build's traffic reaches
+        the VM listener through one (seen live, 2026-11-20)."""
+        try:
+            own = os.readlink(f"{proc}/{pid}/ns/net")
+            fds = os.listdir(f"{proc}/{pid}/fd")
+        except OSError:
+            return set()
+        held = set()
+        for fd in fds:
+            try:
+                link = os.readlink(f"{proc}/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if link.startswith("net:[") and link != own:
+                held.add(link)
+        found: set[str] = set()
+        if not held:
+            return found
+        for other in walled_pids(uids, proc):
+            try:
+                if os.readlink(f"{proc}/{other}/ns/net") not in held:
+                    continue
+                with open(f"{proc}/{other}/cgroup") as f:
+                    line = f.read().strip()
+            except OSError:
+                continue  # exited since the listing
+            if line.startswith("0::"):
+                found.add(classify(line[3:], uid)[0])
+        return found
+
+
+def walled_pids(uids: list[tuple[int, int]], proc: str = "/proc") -> list[str]:
+    """Every process the walled ``uids`` own (the VM user and its subuids)."""
+    pids = []
+    for pid in os.listdir(proc):
+        if pid.isdigit():
+            try:
+                owner_uid = os.stat(f"{proc}/{pid}").st_uid
+            except OSError:
+                continue
+            if any(a <= owner_uid <= b for a, b in uids):
+                pids.append(pid)
+    return pids
 
 
 def owner(
@@ -381,7 +431,8 @@ def owner(
     :func:`classify` plus ``"pasta"`` for a pasta/slirp helper; ``None`` when that can't be told
     (the caller refuses). Only a socket that classifies as the VM's own is looked up by process:
     a container's or a build's cgroup already says whose it is, and a pasta helper is never in
-    one — it runs for podman, as the VM user."""
+    one — it runs for podman, as the VM user. A helper is a build's when every walled process in
+    the namespace it serves is a build step's (:meth:`Cgroups.served`)."""
     found = lookup(peer, dest)
     if found is None or found[2] is None:
         return None
@@ -391,10 +442,15 @@ def owner(
         return None
     who, cid = classify(path, uid)
     if who == "vm":
-        comm = cgroups.owner_comm(path, inode, walled)
-        if comm is None:
+        held = cgroups.holder(path, inode, walled)
+        if held is None:
             return None  # held by no walled process we can find: never a guess
+        pid, comm = held
         if comm in PASTA:
+            # A build step's own helper (podman 6) when all it serves is build steps; any other
+            # helper is some container's, and whose can't be told.
+            if cgroups.served(pid, uid, walled) == {"build"}:
+                return "build", "", sock_uid
             return "pasta", "", sock_uid
     return who, cid, sock_uid
 
