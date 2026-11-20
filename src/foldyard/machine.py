@@ -1134,6 +1134,9 @@ def delete(assume_yes: bool = False) -> int:
     if not BACKEND.remove(MACHINE):
         print(f"✗ '{BACKEND.cli}' failed to remove '{MACHINE}'.")
         return 1
+    from . import upgrade  # never at import: upgrade imports this module
+
+    upgrade.forget(MACHINE)
     # The boot provisioning lives in the instance config, which the backend removes with the VM;
     # the host-side wall is the operator's install, not the VM's.
     _note_host_wall_install()
@@ -1172,6 +1175,9 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     _check_box_dirs(main, wt_root)
     BACKEND.stop(MACHINE)
     BACKEND.remove(MACHINE)
+    from . import upgrade  # never at import: upgrade imports this module
+
+    upgrade.forget(MACHINE)
     wt_root.mkdir(parents=True, exist_ok=True)
     if not BACKEND.create(MACHINE, _resources(), vols):
         print(f"✗ creating {BACKEND.name} machine '{MACHINE}' failed.")

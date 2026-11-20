@@ -240,6 +240,12 @@ def context_path(name: str) -> Path:
     return config.state_dir() / f"upgrade-{name}.json"
 
 
+def forget(name: str) -> None:
+    """Drop an upgrade's context with the VM it belongs to (`fy machine rm`/`recreate`): a new
+    VM has no record of it, so a later upgrade would otherwise refuse over it for good."""
+    context_path(name).unlink(missing_ok=True)
+
+
 def _save(path: Path, ctx: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -373,7 +379,10 @@ def run(
                 print(
                     f"✗ couldn't confirm the upgrade to Fedora {to} in '{name}' to check it again"
                 )
-                print(f"  (its record read: {state or 'nothing'}). Run `fy machine upgrade` again.")
+                print(
+                    f"  (its record read: {state or 'nothing'}). Run `fy machine upgrade` again; if"
+                )
+                print(f"  the VM was recreated or its record is gone, remove {context}.")
                 return 1
             _err(f"▶ checking the upgrade to Fedora {to} again")
             return _verify(name, to, baseline, running, guest, context, sizes=False)

@@ -438,6 +438,14 @@ def test_a_check_phase_with_an_unreadable_record_refuses_rather_than_upgrade_aga
     assert json.loads(ctx.read_text())["phase"] == "check"  # untouched, for the next run
 
 
+def test_the_check_phase_refusal_names_the_way_out(ctx, capsys):
+    # A record gone for good (the VM recreated by hand, say) would refuse forever otherwise.
+    _run(guest_kw={"restart_fails": True}, context=ctx)
+    capsys.readouterr()
+    _run(pending="", context=ctx)
+    assert str(ctx) in capsys.readouterr().out
+
+
 def test_the_context_stays_until_the_stack_is_back_and_checked(ctx):
     rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
     assert rc == 1 and ctx.exists()

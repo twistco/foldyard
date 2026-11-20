@@ -252,6 +252,7 @@ stopped:
   without its context is left to finish. Once the upgrade itself is done, a rerun only checks again,
   the VM untouched: what's there (every volume, image and container, and the release), not sizes,
   since the stack runs by then, and it starts what of the original set isn't running.
+  `fy machine rm` and `recreate` drop the context with the VM it belongs to.
 - **Never stopped mid-transaction**: when `limactl start` gives up on the upgrade boot, the guest's
   own record is read until it says done or failed; a record that can't be read counts as neither.
   One without an end after another hour is left running, with its log's path. The record says done
