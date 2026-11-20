@@ -249,7 +249,9 @@ stopped:
   transaction lost still shows, and the containers started at the end are the original set and what
   runs now. A `failed` record is upgraded again even when the release number has already moved, but
   never past Lima's template or to a release other than the one asked for; a `running` record
-  without its context is left to finish.
+  without its context is left to finish. Once the upgrade itself is done, a rerun only checks again,
+  the VM untouched: what's there (every volume, image and container, and the release), not sizes,
+  since the stack runs by then, and it starts what of the original set isn't running.
 - **Never stopped mid-transaction**: when `limactl start` gives up on the upgrade boot, the guest's
   own record is read until it says done or failed; a record that can't be read counts as neither.
   One without an end after another hour is left running, with its log's path. The record says done

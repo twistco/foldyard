@@ -402,6 +402,32 @@ def test_a_context_that_cant_be_saved_starts_the_stack_again(tmp_path):
     assert calls == ["guest: podman stop", "guest: podman start"]  # the VM never touched
 
 
+def test_a_rerun_after_a_failed_check_checks_again_without_touching_the_vm(ctx):
+    # The first run upgraded but one container didn't start; the stack it did start is running.
+    # The rerun mustn't power the VM off under it, nor read its checkpoints as changed volumes:
+    # it checks what's there and starts what isn't running.
+    rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
+    assert rc == 1 and json.loads(ctx.read_text())["phase"] == "check"
+    rc, calls = _run(pending="done 45", context=ctx)
+    assert rc == 0
+    assert "stop" not in calls and "ensure" not in calls and "guest: podman stop" not in calls
+    assert calls == ["guest: podman start"]
+    assert not ctx.exists()
+
+
+def test_a_size_alone_doesnt_fail_the_check_on_a_rerun_but_a_missing_image_does(ctx):
+    rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
+    assert rc == 1
+    rc, _ = _run(
+        pending="done 45",
+        context=ctx,
+        guest_kw={
+            "after": SNAP.replace("fedora 44", "fedora 45").replace("image sha256:bbb\n", "")
+        },
+    )
+    assert rc == 1 and ctx.exists()
+
+
 def test_the_context_stays_until_the_stack_is_back_and_checked(ctx):
     rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
     assert rc == 1 and ctx.exists()

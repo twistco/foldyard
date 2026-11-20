@@ -201,13 +201,14 @@ def _size(n: int) -> str:
     return f"{n} B"
 
 
-def differences(before: Snapshot, after: Snapshot) -> list[str]:
-    """What the store lost or changed. A container's state may change (they were stopped)."""
+def differences(before: Snapshot, after: Snapshot, sizes: bool = True) -> list[str]:
+    """What the store lost or changed. A container's state may change (they were stopped).
+    ``sizes=False`` compares only what's there, for a store whose stack runs again."""
     out = []
     for name, size in sorted(before.volumes.items()):
         if name not in after.volumes:
             out.append(f"volume {name} is missing")
-        elif after.volumes[name] != size:
+        elif sizes and after.volumes[name] != size:
             out.append(f"volume {name} was {_size(size)}, is {_size(after.volumes[name])}")
     out += [f"image {i} is missing" for i in sorted(before.images - after.images)]
     out += [
@@ -274,6 +275,7 @@ def _load(path: Path, name: str) -> dict | None:
         and isinstance(ctx.get("target"), int)
         and isinstance(ctx.get("running"), list)
         and isinstance(ctx.get("baseline"), str)
+        and ctx.get("phase", "") in ("", "check")
     )
     return ctx if ok else None
 
@@ -362,6 +364,11 @@ def run(
         to, running = int(ctx["target"]), list(ctx["running"])
         baseline = parse_snapshot(ctx["baseline"])
         state = _upgrade_state(guest)
+        if ctx.get("phase") == "check" and state.startswith(f"done {to}"):
+            # Upgraded, rebooted and dropped already; the last run's check failed. Check again
+            # as the VM is now, its stack running: what's there, not the sizes.
+            _err(f"▶ checking the upgrade to Fedora {to} again")
+            return _verify(name, to, baseline, running, guest, context, sizes=False)
         _err(f"▶ resuming the upgrade to Fedora {to} (its record: {state or 'none yet'})")
         if not state.startswith((f"done {to}", "running ")):
             # The transaction runs again. A failed one started the stack again, and it may have
@@ -500,9 +507,24 @@ def run(
         "systemctl --user stop podman.service >/dev/null 2>&1; "
         "systemctl --user try-restart podman-runsc.service >/dev/null 2>&1; true"
     )
+    # From here on, a rerun only checks again: the transaction, reboot and drop are done, and
+    # the stack is about to run again, so it must neither stop the VM nor compare sizes.
+    try:
+        _save(context, {"machine": name, "target": to, "running": running,
+                        "baseline": dump(baseline), "phase": "check"})  # fmt: skip
+    except OSError:
+        pass  # the check runs now either way; a rerun would then resume from the last save
+    return _verify(name, to, baseline, running, guest, context, sizes=True)
+
+
+def _verify(name: str, to: int, baseline: Snapshot, running: list[str],
+            guest: Callable[[str], subprocess.CompletedProcess], context: Path,
+            sizes: bool) -> int:  # fmt: skip
+    """The store against the baseline, the release, and the original running set started
+    again; the context removed only once all of it holds."""
     after = _snapshot(guest)
     diffs = [] if after.complete else ["the store couldn't be read whole afterwards"]
-    diffs += differences(baseline, after)
+    diffs += differences(baseline, after, sizes=sizes)
     if after.release != ("fedora", to):
         diffs.insert(0, f"the guest reports {after.release}, not Fedora {to}")
     back = _restart(guest, running)
@@ -519,7 +541,8 @@ def run(
         return 1
     context.unlink(missing_ok=True)  # verified and restored: nothing left to resume
     print(
-        f"✓ machine '{name}' is on Fedora {to}: {len(after.volumes)} volumes (sizes unchanged), "
+        f"✓ machine '{name}' is on Fedora {to}: {len(after.volumes)} volumes "
+        f"({'sizes unchanged' if sizes else 'all there'}), "
         f"{len(after.images)} images and {len(after.containers)} containers kept; "
         f"{len(running)} started again."
     )
