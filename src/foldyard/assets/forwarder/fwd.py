@@ -391,6 +391,7 @@ class Cgroups:
                 held.add(link)
         found: set[str] = set()
         if not held:
+            log(ev="helper", pid=pid, held=[], found=[])
             return found
         for other in walled_pids(uids, proc):
             try:
@@ -402,6 +403,8 @@ class Cgroups:
                 continue  # exited since the listing
             if line.startswith("0::"):
                 found.add(classify(line[3:], uid)[0])
+        # What a helper was judged by, so a refusal says why (one line per helper connection).
+        log(ev="helper", pid=pid, held=sorted(held), found=sorted(found))
         return found
 
 
