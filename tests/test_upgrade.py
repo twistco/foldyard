@@ -428,6 +428,16 @@ def test_a_size_alone_doesnt_fail_the_check_on_a_rerun_but_a_missing_image_does(
     assert rc == 1 and ctx.exists()
 
 
+def test_a_check_phase_with_an_unreadable_record_refuses_rather_than_upgrade_again(ctx):
+    # One failed ssh read reads as "": an already-upgraded VM must not go through the whole
+    # transaction and two restarts again for it.
+    rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
+    assert rc == 1 and json.loads(ctx.read_text())["phase"] == "check"
+    rc, calls = _run(pending="", context=ctx)
+    assert rc == 1 and calls == []
+    assert json.loads(ctx.read_text())["phase"] == "check"  # untouched, for the next run
+
+
 def test_the_context_stays_until_the_stack_is_back_and_checked(ctx):
     rc, _ = _run(guest_kw={"restart_fails": True}, context=ctx)
     assert rc == 1 and ctx.exists()

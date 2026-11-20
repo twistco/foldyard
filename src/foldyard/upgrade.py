@@ -364,9 +364,17 @@ def run(
         to, running = int(ctx["target"]), list(ctx["running"])
         baseline = parse_snapshot(ctx["baseline"])
         state = _upgrade_state(guest)
-        if ctx.get("phase") == "check" and state.startswith(f"done {to}"):
+        if ctx.get("phase") == "check":
             # Upgraded, rebooted and dropped already; the last run's check failed. Check again
-            # as the VM is now, its stack running: what's there, not the sizes.
+            # as the VM is now, its stack running: what's there, not the sizes. Never fall
+            # through to the transaction: a record that can't be read (a failed ssh reads as "")
+            # mustn't send an upgraded VM through it and two restarts again.
+            if not state.startswith(f"done {to}"):
+                print(
+                    f"✗ couldn't confirm the upgrade to Fedora {to} in '{name}' to check it again"
+                )
+                print(f"  (its record read: {state or 'nothing'}). Run `fy machine upgrade` again.")
+                return 1
             _err(f"▶ checking the upgrade to Fedora {to} again")
             return _verify(name, to, baseline, running, guest, context, sizes=False)
         _err(f"▶ resuming the upgrade to Fedora {to} (its record: {state or 'none yet'})")
@@ -512,8 +520,11 @@ def run(
     try:
         _save(context, {"machine": name, "target": to, "running": running,
                         "baseline": dump(baseline), "phase": "check"})  # fmt: skip
-    except OSError:
-        pass  # the check runs now either way; a rerun would then resume from the last save
+    except OSError as e:
+        # The check runs now either way. Should it fail too, a rerun resumes from the earlier
+        # save, which goes through the finishing restart again: say so.
+        _err(f"⚠ couldn't record that the upgrade is done ({context}: {e}); if this check fails,")
+        _err("  stop the containers before running `fy machine upgrade` again")
     return _verify(name, to, baseline, running, guest, context, sizes=True)
 
 
