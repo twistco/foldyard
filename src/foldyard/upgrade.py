@@ -226,7 +226,45 @@ def _load(path: Path, name: str) -> dict | None:
         ctx = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    return ctx if isinstance(ctx, dict) and ctx.get("machine") == name else None
+    ok = (
+        isinstance(ctx, dict)
+        and ctx.get("machine") == name
+        and isinstance(ctx.get("target"), int)
+        and isinstance(ctx.get("running"), list)
+        and isinstance(ctx.get("baseline"), str)
+    )
+    return ctx if ok else None
+
+
+def _record(state: str) -> tuple[str, int | None]:
+    """The guest's record (``done 45``, ``failed 45: …``, ``running 45``) as (kind, release)."""
+    parts = state.split()
+    if not parts:
+        return "", None
+    n = parts[1].rstrip(":") if len(parts) > 1 else ""
+    return parts[0], int(n) if n.isdigit() else None
+
+
+def _stop_stack(
+    guest: Callable[[str], subprocess.CompletedProcess], running: list[str]
+) -> tuple[Snapshot, str] | None:
+    """Stop every container, then read the store at rest: the baseline (a database writes its
+    last checkpoint as it stops, so a snapshot of a running stack would read its shutdown as a
+    changed volume). ``None``, with the ones that stopped started again, when they didn't all
+    stop or the store can't be read whole."""
+    _err("▶ stopping the containers")
+    stopped = guest("podman stop -a -t 30 >/dev/null")
+    at_rest = guest(SNAPSHOT)
+    baseline = parse_snapshot(at_rest.stdout)
+    if at_rest.returncode != 0:
+        baseline.ended = False
+    if stopped.returncode != 0 or not baseline.complete or baseline.running:
+        still = ", ".join(c[:12] for c in baseline.running) or "unknown"
+        _restart(guest, [c for c in running if c not in baseline.running])
+        print(f"✗ the containers didn't all stop (still running: {still}); they were started")
+        print("  again and nothing else changed")
+        return None
+    return baseline, at_rest.stdout
 
 
 def run(
@@ -283,6 +321,17 @@ def run(
         baseline = parse_snapshot(ctx["baseline"])
         state = _upgrade_state(guest)
         _err(f"▶ resuming the upgrade to Fedora {to} (its record: {state or 'none yet'})")
+        if not state.startswith((f"done {to}", "running ")):
+            # The transaction runs again. A failed one started the stack again, and it may have
+            # run since: stop it cleanly before the VM is powered off, and compare against the
+            # store as it is now, at rest, not the first attempt's.
+            now = _snapshot(guest)
+            running = now.running or running
+            got = _stop_stack(guest, running)
+            if got is None:
+                return 1
+            baseline, text = got
+            _save(context, {"machine": name, "target": to, "running": running, "baseline": text})
     else:
         before = _snapshot(guest)
         if not before.complete:
@@ -291,10 +340,25 @@ def run(
             )
             return 1
         state = _upgrade_state(guest)
-        if state.startswith(("failed ", "running ")):
+        kind, left = _record(state)
+        if kind == "running":
+            # Without its context, but a transaction may really still be running: never start
+            # another over it.
+            print(f"✗ an upgrade is still running in '{name}' ({state}). Its log:")
+            print(f"    limactl shell {name} cat /var/lib/fy-upgrade/log")
+            print("  Run `fy machine upgrade` again once it has ended.")
+            return 1
+        if kind == "failed":
             # A transaction this VM's own record says didn't end well: its release number may
-            # already read the target, so it is re-run whatever `target` would say.
-            to = int(state.split()[1].rstrip(":"))
+            # already read the target, so it is re-run whatever the release says, but still
+            # never past Lima's template, and only as the release asked for, if one was.
+            ceiling = template()
+            if left is None or ceiling is None or left > ceiling or release not in (None, left):
+                print(f"✗ machine '{name}': an earlier upgrade didn't finish ({state}), and it")
+                print("  can't be run again as asked: its release is unreadable, past what this")
+                print("  Lima's podman template uses, or not the `--release` given.")
+                return 1
+            to = left
             _err(f"▶ an earlier upgrade to Fedora {to} didn't finish ({state}): running it again")
         else:
             got = target(before.release, template(), release)
@@ -323,23 +387,11 @@ def run(
                 return 0
         sys.stdout.flush()  # the plan before the progress lines (stderr)
         running = before.running
-        _err("▶ stopping the containers")
-        stopped = guest("podman stop -a -t 30 >/dev/null")
-        # The baseline is the store at rest: a database writes its last checkpoint as it stops,
-        # so a snapshot of a running stack would read its shutdown as a changed volume.
-        at_rest = guest(SNAPSHOT)
-        baseline = parse_snapshot(at_rest.stdout)
-        if at_rest.returncode != 0:
-            baseline.ended = False
-        if stopped.returncode != 0 or not baseline.complete or baseline.running:
-            still = ", ".join(c[:12] for c in baseline.running) or "unknown"
-            _restart(guest, [c for c in running if c not in baseline.running])
-            print(f"✗ the containers didn't all stop (still running: {still}); they were started")
-            print("  again and nothing else changed")
+        got = _stop_stack(guest, running)
+        if got is None:
             return 1
-        _save(
-            context, {"machine": name, "target": to, "running": running, "baseline": at_rest.stdout}
-        )
+        baseline, text = got
+        _save(context, {"machine": name, "target": to, "running": running, "baseline": text})
         state = ""
 
     if not state.startswith((f"done {to}", "running ")):

@@ -6,6 +6,7 @@ and container kept)."""
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -332,6 +333,45 @@ def test_a_failed_record_is_upgraded_again_though_the_release_already_moved(ctx)
     rc, calls = _run(pending="failed 45: dnf exited 1", context=ctx)
     assert rc == 0
     assert "record # fy-upgrade" in calls
+
+
+def test_a_retry_after_a_failed_transaction_stops_the_stack_and_reads_a_new_baseline(ctx):
+    # The failed run started the stack again; the stack has run since. The retry stops it cleanly
+    # before powering the VM off (no power cut under a database), and compares against the store
+    # as it is now, at rest, not the first attempt's (a checkpoint since then isn't a change).
+    rc, _ = _run(guest_kw={"states": ("failed 45: dnf exited 1",)}, context=ctx)
+    assert rc == 1 and ctx.exists()
+    rc, calls = _run(pending="failed 45: dnf exited 1", context=ctx)
+    assert rc == 0
+    assert calls[:2] == ["guest: podman stop", "stop"]
+    assert not ctx.exists()
+
+
+def test_a_running_record_without_its_context_is_left_to_finish(ctx):
+    # A transaction may really still be running: never start another over it.
+    rc, calls = _run(pending="running 45", context=ctx)
+    assert rc == 1 and calls == []
+
+
+@pytest.mark.parametrize(
+    ("pending", "release"),
+    [
+        ("failed 46: dnf exited 1", None),  # past what this Lima's template ships
+        ("failed 45: dnf exited 1", 44),  # an explicit release that isn't the one left half done
+        ("failed x", None),  # a record that doesn't parse
+    ],
+)
+def test_a_record_left_half_done_still_meets_the_targets_rules(pending, release, ctx):
+    rc, calls = _run(pending=pending, release=release, context=ctx)
+    assert rc == 1 and calls == []
+
+
+def test_a_context_missing_what_a_resume_needs_reads_as_none(ctx):
+    from foldyard import machine
+
+    ctx.write_text(json.dumps({"machine": machine.MACHINE, "target": 45}))
+    rc, calls = _run(context=ctx)
+    assert rc == 0 and calls[0] == "guest: podman stop"  # a fresh run, from the top
 
 
 def test_containers_that_wont_stop_start_again_and_refuse(ctx):
