@@ -2,17 +2,18 @@
 # fy-upgrade @@REL@@
 # foldyard's one-off boot script for `fy machine upgrade` (docs/guest-os.md): Fedora upgraded in
 # place to @@REL@@, as root, on the boot the host records it for; the host drops it again after.
-# Idempotent: a boot after success, or on @@REL@@ already, only reports. Never exits non-zero: a
+# Idempotent: a boot after success does nothing. Never exits non-zero: a
 # failure is the report, read by the host, not a failed Lima boot.
 set -uo pipefail
 S=/var/lib/fy-upgrade
 install -d -m 0755 "$S"
 report() { printf '%s\n' "$1" >"$S/state.tmp" && chmod 0644 "$S/state.tmp" && mv -f "$S/state.tmp" "$S/state"; }
-. /etc/os-release
-if [ "${ID:-}" = fedora ] && [ "${VERSION_ID:-0}" -ge @@REL@@ ]; then
-    report "done @@REL@@"
+# Done means this script's own transaction succeeded, never the release number: a failed one can
+# leave the new release's os-release installed, and running distro-sync again is its repair.
+if grep -qx "done @@REL@@" "$S/state" 2>/dev/null; then
     exit 0
 fi
+. /etc/os-release
 touch "$S/log" && chmod 0644 "$S/log"
 exec >>"$S/log" 2>&1
 echo "== $(date -u +%FT%TZ) Fedora ${VERSION_ID:-?} -> @@REL@@"

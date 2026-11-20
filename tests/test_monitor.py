@@ -92,6 +92,23 @@ def test_the_report_reads_the_policy_as_loaded_in_either_tetra_table(table, name
     assert (res.returncode == 0) is enabled, (rows, res.stderr)
 
 
+@pytest.mark.spawns("bash")
+def test_the_report_reads_tetras_whole_table_even_after_a_match():
+    # Returning at the match closes the pipe on a tetra still writing (one write per row, v1.8.0):
+    # SIGPIPE fails the pipeline under pipefail, and the report reads a loaded policy as not yet.
+    if shutil.which("bash") is None:
+        pytest.skip("no bash on this host")
+    helper = (monitor._asset("fy-monitor.sh")).read_text()
+    fn = re.search(r"^policy_enabled\(\) \{.*?^\}", helper, re.S | re.M)
+    assert fn
+    rows = _V180.format(state="enabled") + "2    other-policy   grpc     enabled    0\n"
+    res = subprocess.run(
+        ["bash", "-c", f"POLICY=fy-observe\n{fn.group(0)}\n{{ policy_enabled; echo rc=$?; while read -r l; do echo left; done; }}"],
+        input=rows, text=True, capture_output=True,
+    )  # fmt: skip
+    assert res.stdout.strip() == "rc=0", res.stdout
+
+
 @pytest.mark.parametrize("on", [True, False])
 def test_boot_script_uses_only_limas_template_fields(on):
     # Lima renders every provision script as a Go template at each start: a stray `{{` (in the

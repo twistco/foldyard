@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,14 +44,15 @@ UPGRADE_WAIT = "60m"
 MAX_STEP = 2
 
 # What must survive, as the VM user sees it. One `podman unshare du` for every volume: their files
-# belong to the user namespace's uids.
+# belong to the user namespace's uids. Any failure ends it early, and only a listing that reaches
+# `end` counts (a failed ssh reads as empty output, which would otherwise match anything).
 SNAPSHOT = r"""
+set -eo pipefail
 . /etc/os-release; echo "release ${ID:-?} ${VERSION_ID:-0}"
 echo "free $(df --output=avail -B1 / | tail -1 | tr -d ' ')"
 podman volume ls --format '{{.Name}} {{.Mountpoint}}' >/tmp/fy-upgrade-volumes
 if [ -s /tmp/fy-upgrade-volumes ]; then
-    podman unshare du -sb $(cut -d' ' -f2 /tmp/fy-upgrade-volumes) \
-        2>/dev/null >/tmp/fy-upgrade-sizes
+    podman unshare du -sb $(cut -d' ' -f2 /tmp/fy-upgrade-volumes) >/tmp/fy-upgrade-sizes
     while read -r name mp; do
         echo "volume $name $(awk -v p="$mp" '$2 == p {print $1}' /tmp/fy-upgrade-sizes)"
     done </tmp/fy-upgrade-volumes
@@ -58,6 +60,7 @@ fi
 rm -f /tmp/fy-upgrade-volumes /tmp/fy-upgrade-sizes
 podman images -a --no-trunc --format 'image {{.ID}}' | sort -u
 podman ps -a --no-trunc --format 'container {{.ID}} {{.State}}'
+echo end
 """
 
 
@@ -123,6 +126,12 @@ class Snapshot:
     volumes: dict[str, int] = field(default_factory=dict)
     images: frozenset[str] = frozenset()
     containers: dict[str, str] = field(default_factory=dict)
+    ended: bool = False
+
+    @property
+    def complete(self) -> bool:
+        """The whole listing arrived, and every volume's size was read."""
+        return self.ended and self.release is not None and -1 not in self.volumes.values()
 
     @property
     def running(self) -> list[str]:
@@ -144,6 +153,8 @@ def parse_snapshot(text: str) -> Snapshot:
             images.add(parts[1])
         elif len(parts) == 3 and parts[0] == "container":
             s.containers[parts[1]] = parts[2]
+        elif parts == ["end"]:
+            s.ended = True
     s.images = frozenset(images)
     return s
 
@@ -172,6 +183,21 @@ def differences(before: Snapshot, after: Snapshot) -> list[str]:
     return out
 
 
+# After `limactl start` gives up on the upgrade boot (it can, on a VM that IS up, while its boot
+# scripts run), the guest's own record is read this often, for this long, before the run leaves
+# it be: a VM is never stopped while its package transaction may still be running.
+POLL_EVERY = 10.0
+POLL_FOR = 3600.0
+
+
+def _snapshot(guest: Callable[[str], subprocess.CompletedProcess]) -> Snapshot:
+    res = guest(SNAPSHOT)
+    snap = parse_snapshot(res.stdout)
+    if res.returncode != 0:
+        snap.ended = False
+    return snap
+
+
 def run(
     release: int | None = None,
     assume_yes: bool = False,
@@ -180,6 +206,8 @@ def run(
     guest: Callable[[str], subprocess.CompletedProcess] | None = None,
     template: Callable[[], int | None] | None = None,
     ensure: Callable[[], object] | None = None,
+    host_wall: Callable[[], bool] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     from . import config, machine
 
@@ -194,18 +222,29 @@ def run(
         guest = _guest(backend, name)
     if template is None:
         template = lima_template_release
+    if host_wall is None:
+        host_wall = machine._host_wall_wanted
     if ensure is None:
         from . import stack
 
         main = stack.main_repo()
         ensure = lambda: machine.ensure(main, stack.worktrees_root(main))  # noqa: E731
+    if host_wall():
+        # The upgrade boot fetches from the Fedora mirrors, which the host wall rightly refuses,
+        # and booting outside the wall's slice would leave the VM unwalled for the whole of it.
+        print("✗ `[machine] host_firewall` is on: the upgrade needs the Fedora mirrors, which the")
+        print("  host wall refuses. Not supported yet; `fy machine recreate` starts over instead.")
+        return 1
     if not backend.exists(name):
         print(f"✗ no machine '{name}' to upgrade (`fy up` creates one on the template's Fedora)")
         return 1
     if backend.state(name) != "running":
         ensure()
 
-    before = parse_snapshot(guest(SNAPSHOT).stdout)
+    before = _snapshot(guest)
+    if not before.complete:
+        print(f"✗ couldn't read machine '{name}' whole (its release, volumes, images, containers)")
+        return 1
     to = target(before.release, template(), release)
     if isinstance(to, str):
         print(("✓ " if to.startswith("already") else "✗ ") + f"machine '{name}': {to}")
@@ -232,19 +271,44 @@ def run(
 
     sys.stdout.flush()  # the plan before the progress lines (stderr)
     _err("▶ stopping the containers")
-    guest("podman stop -a -t 30 >/dev/null")
+    stopped = guest("podman stop -a -t 30 >/dev/null")
     # The baseline is the store at rest: a database writes its last checkpoint as it stops, so a
     # snapshot of a running stack would read its shutdown as a changed volume.
-    baseline = parse_snapshot(guest(SNAPSHOT).stdout)
+    baseline = _snapshot(guest)
+    if stopped.returncode != 0 or not baseline.complete or baseline.running:
+        still = ", ".join(c[:12] for c in baseline.running) or "unknown"
+        print(f"✗ the containers didn't all stop (still running: {still}); nothing else changed")
+        return 1
     _err(f"▶ recording the upgrade, then booting it (Fedora {have} → {to}; this is the long part)")
     if not backend.stop(name) or not backend.set_provision(name, render(to), MARKER):
         print(f"✗ couldn't record the upgrade on '{name}' (it is unchanged: `fy up` starts it)")
         return 1
     backend.start(name, wait=UPGRADE_WAIT)
-    state = guest(f"cat {STATE} 2>/dev/null").stdout.strip()
+    state = _upgrade_state(guest)
+    for _ in range(int(POLL_FOR / POLL_EVERY)):
+        if not state.startswith("running"):
+            break
+        sleep(POLL_EVERY)
+        state = _upgrade_state(guest)
+    if state.startswith("running"):
+        print(f"✗ the upgrade is still running in '{name}' after {UPGRADE_WAIT} and an hour more;")
+        print("  it is left to finish (never stopped mid-transaction). Its log:")
+        print(f"    limactl shell {name} cat /var/lib/fy-upgrade/log")
+        print("  Run `fy machine upgrade` again once it ends: it picks up from the guest's record.")
+        return 1
     _err("▶ dropping the upgrade script and starting the VM as usual")
-    backend.stop(name)
-    backend.drop_provision(name, MARKER)
+    if not backend.stop(name):
+        print(f"✗ '{name}' didn't stop after the upgrade boot; it still runs the old kernel and")
+        print(f"  the upgrade script stays recorded. Stop it (`limactl stop {name}`), then run")
+        print("  `fy machine upgrade` again.")
+        return 1
+    if not backend.drop_provision(name, MARKER):
+        print(
+            f"✗ couldn't remove the upgrade script from '{name}' (left stopped, so it doesn't run"
+        )
+        print(f"  again): remove the provision entry whose script holds '{MARKER.strip()}' with")
+        print(f"  `limactl edit {name}`, then `fy up`.")
+        return 1
     ensure()
     if not state.startswith(f"done {to}"):
         print(f"✗ the upgrade didn't finish: {state or 'no report from the guest'}")
@@ -252,14 +316,16 @@ def run(
         return 1
 
     guest("podman system migrate >/dev/null 2>&1")
-    after = parse_snapshot(guest(SNAPSHOT).stdout)
-    if before.running:
-        guest("podman start " + " ".join(before.running) + " >/dev/null")
-    diffs = differences(baseline, after)
+    after = _snapshot(guest)
+    diffs = [] if after.complete else ["the store couldn't be read whole afterwards"]
+    diffs += differences(baseline, after)
     if after.release != ("fedora", to):
         diffs.insert(0, f"the guest reports {after.release}, not Fedora {to}")
+    back = _restart(guest, before.running)
+    if back:
+        diffs.append(f"not running again: {', '.join(c[:12] for c in back)} (`podman start` them)")
     if diffs:
-        print(f"✗ machine '{name}' upgraded, but its store doesn't match the snapshot:")
+        print(f"✗ machine '{name}' upgraded, but not everything checks out:")
         for d in diffs:
             print(f"    {d}")
         return 1
@@ -269,6 +335,19 @@ def run(
         f"{len(before.running)} started again."
     )
     return 0
+
+
+def _upgrade_state(guest: Callable[[str], subprocess.CompletedProcess]) -> str:
+    return guest(f"cat {STATE} 2>/dev/null").stdout.strip()
+
+
+def _restart(guest: Callable[[str], subprocess.CompletedProcess], ids: list[str]) -> list[str]:
+    """Start ``ids`` again; the ones that aren't running afterwards."""
+    if not ids:
+        return []
+    guest("podman start " + " ".join(ids) + " >/dev/null")
+    running = set(guest("podman ps --no-trunc --format '{{.ID}}'").stdout.split())
+    return [c for c in ids if c not in running]
 
 
 def _guest(backend, name: str) -> Callable[[str], subprocess.CompletedProcess]:

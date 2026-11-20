@@ -40,12 +40,14 @@ installed() { [ -r "$LIB/installed" ] && [ "$(cat "$LIB/installed")" = "$SHA" ];
 # Whether `tetra tracingpolicy list` (on stdin) shows $POLICY enabled. Its table is ID NAME STATE …
 # up to v1.7, and ID NAME DOMAIN STATE … from v1.8.0 (a domain is never "enabled").
 policy_enabled() {
-    local id name third fourth rest
+    # Reads to the end before answering: returning at the match would close the pipe on a tetra
+    # still writing its rows, and SIGPIPE would fail the pipeline under pipefail.
+    local id name third fourth rest found=1
     while read -r id name third fourth rest; do
         [[ $id =~ ^[0-9]+$ && $name == "$POLICY" ]] || continue
-        [[ $third == enabled || $fourth == enabled ]] && return 0
+        [[ $third == enabled || $fourth == enabled ]] && found=0
     done
-    return 1
+    return "$found"
 }
 
 start_tetragon() {

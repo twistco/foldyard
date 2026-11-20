@@ -228,6 +228,22 @@ The prototype became a verb (`src/foldyard/upgrade.py`, its boot script
   grown its anonymous volume from 45.8 to 45.9 MiB. Compared at rest, the store has to match
   exactly: every volume at its byte size, every image, every container.
 
+It refuses rather than guesses, and never leaves a VM worse than it found it:
+
+- **Before anything changes**: a snapshot that didn't arrive whole (a failed ssh reads as empty
+  output, which would match anything; every volume's size must be read), containers that didn't all
+  stop, too little room, a target past Lima's template, or `[machine] host_firewall` (the upgrade
+  boot needs the Fedora mirrors, which the host wall refuses, and booting outside the wall's slice
+  would leave the VM unwalled for the whole transaction; not supported yet).
+- **Never stopped mid-transaction**: when `limactl start` gives up on the upgrade boot, the guest's
+  own record is read until it says done or failed; one still running after another hour is left to
+  finish, with its log's path. The record says done only once dnf succeeded, never from the release
+  number, which a failed transaction can already have moved.
+- **The script never runs twice by accident**: a VM that won't stop after the upgrade boot, or a
+  script that can't be removed, is left stopped with what to do, not booted again.
+- **Done means checked**: the store at rest matches, the guest reports the new release, and the
+  containers that ran before run again; otherwise it says which and exits non-zero.
+
 Live, on foldyard's example project (Postgres and an API, both running) in a Fedora 44 VM foldyard
 made: `fy machine upgrade --yes` took it to Fedora 45 (kernel 7.3.4, podman 6.2.0) in 257 s,
 reported every volume, image and container kept, and started both containers again. A 64 MiB

@@ -11,6 +11,7 @@ SIMG="${SENTINEL_IMAGE:-docker.io/library/alpine:3.20}"
 REL="${2:-45}"
 MARK="# fy-upgrade"
 LOG="${LOG:-/dev/stderr}"
+SNAP="$(mktemp -d)/$VM"  # snapshot files, beside nothing the progress log names
 t0=$(date +%s)
 say() { printf '[%4ss] %s\n' "$(($(date +%s) - t0))" "$*" | tee -a "$LOG" >&2; }
 
@@ -23,9 +24,10 @@ read -r -d '' GUEST <<'EOS' || true
 set -uo pipefail
 S=/var/lib/fy-upgrade
 mkdir -p "$S"
+# Done only once this script's own transaction succeeded: a failed one can leave the new
+# os-release installed, and running distro-sync again is its repair.
 [ -f "$S/done-@@REL@@" ] && exit 0
 . /etc/os-release
-[ "$VERSION_ID" = "@@REL@@" ] && { touch "$S/done-@@REL@@"; exit 0; }
 exec >>"$S/log" 2>&1
 echo "== $(date -u +%FT%TZ) upgrading Fedora $VERSION_ID -> @@REL@@"
 # Nothing of the VM user's runs while its packages are swapped: its podman service, containers,
@@ -58,7 +60,7 @@ snapshot() { # what must survive, as the VM user sees it
         podman volume ls --format "volume {{.Name}}" | sort
         podman images --format "image {{.ID}} {{.Repository}}:{{.Tag}}" | sort
         podman ps -a --format "container {{.Names}} {{.Image}}" | sort
-        printf "sentinel "; podman volume exists fy-upgrade-sentinel && podman run --rm --network none --entrypoint sha256sum -v fy-upgrade-sentinel:/s:ro "$1" /s/blob | cut -d" " -f1
+        printf "sentinel "; ! podman volume exists fy-upgrade-sentinel && echo none || podman run --rm --network none --entrypoint sha256sum -v fy-upgrade-sentinel:/s:ro "$1" /s/blob | cut -d" " -f1
     ' _ "$SIMG" 2>/dev/null
 }
 
@@ -67,8 +69,8 @@ in_vm sh -c '. /etc/os-release; echo "Fedora $VERSION_ID, $(df -h / | awk "NR==2
 if [ "${SENTINEL:-1}" = 1 ]; then
     in_vm sh -c 'podman volume exists fy-upgrade-sentinel || { podman volume create fy-upgrade-sentinel >/dev/null && podman run --rm --network none --entrypoint sh -v fy-upgrade-sentinel:/s "$1" -c "head -c 67108864 /dev/urandom > /s/blob"; }' _ "$SIMG" >/dev/null
 fi
-snapshot >"$LOG.before"
-say "before: $(grep -c '^volume' "$LOG.before") volumes, $(grep -c '^image' "$LOG.before") images, $(grep -c '^container' "$LOG.before") containers, $(grep '^os\|^podman' "$LOG.before" | tr '\n' ' ')"
+snapshot >"$SNAP.before"
+say "before: $(grep -c '^volume' "$SNAP.before") volumes, $(grep -c '^image' "$SNAP.before") images, $(grep -c '^container' "$SNAP.before") containers, $(grep '^os\|^podman' "$SNAP.before" | tr '\n' ' ')"
 
 say "1/4 stop, record the upgrade boot script"
 limactl stop "$VM" >/dev/null 2>&1
@@ -87,11 +89,11 @@ limactl start "$VM" --tty=false --timeout 15m >/dev/null 2>&1
 
 say "4/4 podman system migrate, then compare"
 in_vm podman system migrate >/dev/null 2>&1 || true
-snapshot >"$LOG.after"
-say "after: $(grep '^os\|^kernel\|^podman' "$LOG.after" | tr '\n' ' ')"
-if diff <(grep -v '^os\|^kernel\|^podman' "$LOG.before") <(grep -v '^os\|^kernel\|^podman' "$LOG.after") >"$LOG.diff"; then
+snapshot >"$SNAP.after"
+say "after: $(grep '^os\|^kernel\|^podman' "$SNAP.after" | tr '\n' ' ')"
+if diff <(grep -v '^os\|^kernel\|^podman' "$SNAP.before") <(grep -v '^os\|^kernel\|^podman' "$SNAP.after") >"$SNAP.diff"; then
     say "✓ every volume, image and container is still there, and the sentinel's sha256 matches"
 else
-    say "✗ differences:"; cat "$LOG.diff" >&2
+    say "✗ differences:"; cat "$SNAP.diff" >&2
 fi
 say "done in $(($(date +%s) - t0)) s"
