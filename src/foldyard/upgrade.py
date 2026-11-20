@@ -5,10 +5,11 @@ A VM keeps the Fedora it was created with; a newer Lima changes only what new VM
 upgrades the disk instead (docs/guest-os.md, where a clone of a real project VM went from Fedora
 44 to 45 in 153 s with every volume, image and container kept):
 
-1. snapshot what must survive, as the VM user: every volume and its size, every image, every
-   container and whether it runs; refuse before anything changes when there's nothing to do, too
-   little room, or no release to go to;
-2. stop the containers (a database gets its shutdown, not a power cut), stop the VM, and record a
+1. read the guest, as the VM user: its release, free room, and which containers run; refuse
+   before anything changes when there's nothing to do, too little room, or no release to go to;
+2. stop the containers (a database gets its shutdown, not a power cut), then snapshot what must
+   survive (every volume and its size, every image, every container): the store at rest, so a
+   database's last checkpoint isn't read as a change; stop the VM, and record a
    one-off root boot script under its own marker (root in the guest is boot-time only:
    machine.py's provisioning section) that runs `dnf distro-sync --releasever=N`;
 3. boot it, read the guest's report, stop, drop the script, and start the VM as any start does
@@ -229,8 +230,12 @@ def run(
             print("Aborted.")
             return 0
 
+    sys.stdout.flush()  # the plan before the progress lines (stderr)
     _err("▶ stopping the containers")
     guest("podman stop -a -t 30 >/dev/null")
+    # The baseline is the store at rest: a database writes its last checkpoint as it stops, so a
+    # snapshot of a running stack would read its shutdown as a changed volume.
+    baseline = parse_snapshot(guest(SNAPSHOT).stdout)
     _err(f"▶ recording the upgrade, then booting it (Fedora {have} → {to}; this is the long part)")
     if not backend.stop(name) or not backend.set_provision(name, render(to), MARKER):
         print(f"✗ couldn't record the upgrade on '{name}' (it is unchanged: `fy up` starts it)")
@@ -250,7 +255,7 @@ def run(
     after = parse_snapshot(guest(SNAPSHOT).stdout)
     if before.running:
         guest("podman start " + " ".join(before.running) + " >/dev/null")
-    diffs = differences(before, after)
+    diffs = differences(baseline, after)
     if after.release != ("fedora", to):
         diffs.insert(0, f"the guest reports {after.release}, not Fedora {to}")
     if diffs:

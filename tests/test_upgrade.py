@@ -154,16 +154,19 @@ class _Guest:
     def __init__(self, calls, state="done 45", after=None):
         self.calls = calls
         self.upgraded = False
+        self.stopped = False
         self.state = state
         self.after = after
 
     def __call__(self, script):
+        if script.startswith("podman stop"):
+            self.stopped = True
         if script == upgrade.SNAPSHOT:
-            text = (
-                SNAP
-                if not self.upgraded
-                else (self.after or SNAP.replace("fedora 44", "fedora 45"))
-            )
+            # A database writes its last checkpoint as it stops: the volume a running one sat on
+            # is bigger once the containers are down.
+            text = SNAP.replace("52428800", "52531200") if self.stopped else SNAP
+            if self.upgraded:
+                text = self.after or text.replace("fedora 44", "fedora 45")
             return subprocess.CompletedProcess([], 0, text, "")
         if script.startswith("cat "):
             self.upgraded = self.state.startswith("done")
@@ -209,8 +212,19 @@ def test_a_failed_upgrade_still_drops_its_script_and_brings_the_vm_back():
     assert "guest: podman system" not in calls
 
 
+def test_the_baseline_is_the_store_once_its_containers_have_stopped():
+    # Taken while the stack still ran, a database's shutdown would read as a changed volume
+    # (seen live: Postgres's anonymous volume, 45.8 MiB before, 45.9 MiB after).
+    rc, _ = _run()
+    assert rc == 0
+
+
 def test_a_store_that_doesnt_match_afterwards_fails_the_run():
-    rc, calls = _run(after=SNAP.replace("fedora 44", "fedora 45").replace("image sha256:bbb\n", ""))
+    rc, calls = _run(
+        after=SNAP.replace("fedora 44", "fedora 45")
+        .replace("52428800", "52531200")
+        .replace("image sha256:bbb\n", "")
+    )
     assert rc == 1
     assert "ensure" in calls
 
