@@ -315,7 +315,7 @@ class _BakeLima(_FakeLima):
         self.instances[name] = "stopped"  # a failed create can still leave the instance dir
         return self.create_ok
 
-    def start(self, name, prefix=()):
+    def start(self, name, prefix=(), wait=None):
         self.log.append(f"start {name}")
         self.instances[name] = "running"
         return self.start_ok

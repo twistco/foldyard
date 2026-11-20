@@ -80,7 +80,7 @@ class FakeBackend:
         self.calls.append(f"reap:{name}")
         return list(self._orphans)
 
-    def start(self, name, prefix=()):
+    def start(self, name, prefix=(), wait=None):
         self.calls.append(f"start:{name}" + (f" under {' '.join(prefix)}" if prefix else ""))
         self._state = "running"
         self._responsive = self._revives

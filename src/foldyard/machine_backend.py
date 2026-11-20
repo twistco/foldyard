@@ -191,6 +191,11 @@ class Backend(ABC):
         stored config can't be edited."""
         return False
 
+    def drop_provision(self, name: str, marker: str) -> bool:
+        """Remove the root boot script recorded under ``marker`` (a one-off's, after it ran),
+        leaving every other entry — the VM must be stopped. False where it can't be edited."""
+        return False
+
     def proxy_propagation(self, name: str) -> bool | None:
         """Whether the VM's stored config copies the host's ``*_proxy`` variables into the guest
         at each start; ``None`` where the backend has no such setting."""
@@ -239,10 +244,12 @@ class Backend(ABC):
     def stop_argv(self, name: str) -> list[str]: ...
 
     @abstractmethod
-    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+    def start(self, name: str, prefix: Sequence[str] = (), wait: str | None = None) -> bool:
         """Start the VM. ``prefix`` is prepended to :meth:`start_argv` — the caller's way to
         launch the VM's host processes inside a cgroup of its choosing (the host-side wall's
-        ``systemd-run --scope``, :mod:`foldyard.hostwall`) without the backend knowing why."""
+        ``systemd-run --scope``, :mod:`foldyard.hostwall`) without the backend knowing why.
+        ``wait`` overrides how long the start may take (a Go duration, ``"60m"``): a boot
+        script that upgrades the guest outlasts the default."""
 
     def host_pids(self, name: str) -> list[int]:
         """The host pids of the VM's own processes — the VMM first, then its siblings sharing
@@ -414,6 +421,11 @@ class LimaBackend(Backend):
         entry = f'{{"mode": "system", "script": {json.dumps(script, ensure_ascii=False)}}}'
         expr = f".provision = ([{keep}] + [{entry}])"
         cmd = ["limactl", "edit", "--tty=false", name, "--set", expr]
+        return subprocess.run(cmd).returncode == 0
+
+    def drop_provision(self, name: str, marker: str) -> bool:
+        keep = f'(.provision // [])[] | select((.script // "") | test({json.dumps(marker)}) | not)'
+        cmd = ["limactl", "edit", "--tty=false", name, "--set", f".provision = [{keep}]"]
         return subprocess.run(cmd).returncode == 0
 
     def proxy_propagation(self, name: str) -> bool | None:
@@ -605,7 +617,7 @@ class LimaBackend(Backend):
     # hostagent, so `vz.pid` names the hostagent's own pid (checked live, Lima 2.1).
     _DRIVER_PIDFILES = ("qemu.pid", "vz.pid")
 
-    def start(self, name: str, prefix: Sequence[str] = ()) -> bool:
+    def start(self, name: str, prefix: Sequence[str] = (), wait: str | None = None) -> bool:
         inst = self._instance(name)
         if inst and str(inst.get("status", "")).lower() == "broken":
             # Lima's own verdict on a hostagent that stopped answering — a hung VM, on vz the
@@ -617,7 +629,8 @@ class LimaBackend(Backend):
             _run(["limactl", "stop", "--force", name])
         if self.reap_orphans(name):
             _err("  (the hostagent lingered — reaped it)")
-        if subprocess.run([*prefix, *self.start_argv(name)]).returncode != 0:
+        timeout = ["--timeout", wait] if wait else []
+        if subprocess.run([*prefix, *self.start_argv(name), *timeout]).returncode != 0:
             return False
         return self._wait_for_socket(name)
 
