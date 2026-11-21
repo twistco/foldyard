@@ -1493,6 +1493,7 @@ def doctor(deep: bool = False):
     # mount, so both are yielded before the split rather than duplicated into each branch.
     yield from _version_window_check()
     yield from _git_config_check()
+    yield from _private_check()
     yield from _shadow_volume_check()
     yield from _box_shadow_check()
     yield from _engine_refused_check()
@@ -1978,6 +1979,25 @@ def _git_config_check():
         f"intact ({len(remotes)} remote{'s' if len(remotes) != 1 else ''}: {', '.join(remotes)})",
         "intact, but no remote — `fy verify` cannot prove the push refusal without an origin",
     )
+
+
+def _private_check():
+    """A private setup (``[project].private``, ADR-0037): git must see none of foldyard's files.
+    fail = git tracks one (the next push carries it); warn = one git would show, or foldyard's
+    block in ``.gitignore``. No row for an ordinary setup."""
+    if not config.private():
+        return
+    from . import privatecfg, stack
+
+    try:
+        main = stack.main_repo()
+    except SystemExit:
+        return
+    fails, warns = privatecfg.problems(main)
+    if fails or warns:
+        yield ("fail" if fails else "warn", "private setup", "; ".join([*fails, *warns]))
+        return
+    yield ("ok", "private setup", "git sees none of foldyard's files")
 
 
 # ── box git is foldyard's shim (ADR-0021) ─────────────────────────────────────────────────────

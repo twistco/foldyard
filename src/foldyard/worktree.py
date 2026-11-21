@@ -1246,6 +1246,7 @@ def add(
     worktree_registry.register(main, name, wt_dir)
     _claim_ports(name)
 
+    _private_copy(main, wt_dir)  # a private setup's untracked files, from main's adopted copy
     _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
 
     # Its first adoption also mirrors main's keyless posture in (configpin.adopt), here or later.
@@ -1402,7 +1403,19 @@ def init_config(name: str) -> int:
     if not wt_dir.is_dir():
         _err(f"✗ no worktree at {wt_dir} — `fy worktree add {name}` first")
         return 1
+    _private_copy(main, wt_dir)
     return _init_in_yard(main, wt_dir)
+
+
+def _private_copy(main: Path, wt_dir: Path) -> None:
+    """In a private setup (``[project] private`` in main's ADOPTED config, ADR-0037), write the
+    files git doesn't bring along into ``wt_dir``: main's adopted config and the foldyard skill,
+    from your computer (:func:`foldyard.privatecfg.sync_worktree`). Non-fatal, like the init
+    script: a worktree already made must not be stranded by its config copy."""
+    from . import privatecfg
+
+    if privatecfg.enabled(main):
+        privatecfg.sync_worktree(main, wt_dir.parent, wt_dir.name)
 
 
 def _init_in_yard(main: Path, wt_dir: Path) -> int:

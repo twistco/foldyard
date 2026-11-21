@@ -1682,3 +1682,78 @@ def test_add_again_refuses_a_pool_that_is_misconfigured(pooled, monkeypatch, cap
     monkeypatch.setattr(config, "port_pool_problems", lambda: ["APP_PORT: the pool is backwards"])
     assert worktree.add("old") == 1
     assert "the pool is backwards" in capsys.readouterr().err
+
+
+# ── a private setup: the worktree's config is main's adopted copy (ADR-0037) ──────────────
+#
+# Untracked, the private files don't come with `git worktree add`. Your computer writes them from
+# main's ADOPTED copy (what you reviewed, never main's tree, which the box can write), through
+# mountwrite (never through a link the box planted), and the bundled skill beside them.
+
+PRIVATE = '[project]\nname = "acme"\nprivate = true\n\n[proxy]\npassthrough = ["trusted.example"]\n'
+
+
+def test_a_private_worktree_gets_mains_adopted_config_and_is_adopted_without_asking(
+    fake_main, monkeypatch, capsys
+):
+    _adopt_main(fake_main, PRIVATE)
+    (fake_main["main"] / "foldyard.toml").write_text(EDITED)  # main's tree, edited since
+    _no_prompt(monkeypatch)
+    assert worktree.add("feat") == 0
+    wt = fake_main["wt_root"] / "feat"
+    assert (wt / "foldyard.toml").read_text() == PRIVATE
+    assert (wt / ".claude" / "skills" / "foldyard" / "SKILL.md").is_file()
+    assert _wt_adopted("feat")
+    assert "adopted — identical to main's" in capsys.readouterr().out
+
+
+def test_a_private_worktree_is_written_by_your_computer_not_a_script(fake_main, monkeypatch):
+    _adopt_main(fake_main, PRIVATE)
+    assert worktree.add("feat") == 0
+    assert not any(c[:2] == ["podman", "run"] and "sh" in c for c in fake_main["calls"])
+
+
+def test_refreshing_a_private_worktree_replaces_a_planted_link_never_writes_through_it(
+    fake_main, tmp_path
+):
+    _adopt_main(fake_main, PRIVATE)
+    assert worktree.add("feat") == 0
+    wt = fake_main["wt_root"] / "feat"
+    target = tmp_path / "authorized_keys"
+    target.write_text("mine\n")
+    (wt / "foldyard.toml").unlink()
+    (wt / "foldyard.toml").symlink_to(target)  # the box can write the worktree
+    assert worktree.init_config("feat") == 0
+    assert target.read_text() == "mine\n"
+    assert not (wt / "foldyard.toml").is_symlink()
+    assert (wt / "foldyard.toml").read_text() == PRIVATE
+
+
+def test_a_private_worktree_waits_for_main_to_be_adopted(fake_main, capsys):
+    (fake_main["main"] / "foldyard.toml").write_text(PRIVATE)  # private, but never adopted
+    assert worktree.add("feat") == 0
+    assert not (fake_main["wt_root"] / "feat" / ".claude" / "skills" / "foldyard").exists()
+    out = capsys.readouterr()
+    assert "fy config adopt" in out.out + out.err
+
+
+def test_an_ordinary_worktree_gets_no_private_copy(fake_main):
+    _adopt_main(fake_main)
+    assert worktree.add("feat") == 0
+    assert not (fake_main["wt_root"] / "feat" / ".claude" / "skills" / "foldyard").exists()
+
+
+def test_a_private_copy_never_writes_through_a_worktree_dir_the_box_replaced(fake_main, tmp_path):
+    # The worktrees root is mounted into the VM: the box can swap a worktree's own directory for a
+    # link to one of yours, and your computer must not write the copy there.
+    _adopt_main(fake_main, PRIVATE)
+    assert worktree.add("feat") == 0
+    wt = fake_main["wt_root"] / "feat"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    import shutil
+
+    shutil.rmtree(wt)
+    wt.symlink_to(elsewhere)
+    worktree.init_config("feat")
+    assert list(elsewhere.iterdir()) == []

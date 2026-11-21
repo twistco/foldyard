@@ -45,3 +45,18 @@ def test_install_targets_the_resolved_repo_root(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path)
     skills.install("bootstrap-devbox")
     assert (config.repo_root() / ".claude" / "skills" / "bootstrap-devbox").is_dir()
+
+
+def test_install_never_writes_through_a_planted_link(fresh_config, tmp_path):
+    # The checkout is box-writable: a `.claude` that is a link would have your computer create,
+    # or with --force delete, a `skills/<name>` wherever it points.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "skills" / "bootstrap-devbox").mkdir(parents=True)
+    (elsewhere / "skills" / "bootstrap-devbox" / "mine.txt").write_text("mine\n")
+    (repo / ".claude").symlink_to(elsewhere)
+    fresh_config(FOLDYARD_REPO=repo)
+    assert skills.install("bootstrap-devbox", force=True) == 1
+    assert (elsewhere / "skills" / "bootstrap-devbox" / "mine.txt").read_text() == "mine\n"
+    assert not (elsewhere / "skills" / "bootstrap-devbox" / "SKILL.md").exists()
