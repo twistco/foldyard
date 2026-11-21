@@ -1415,7 +1415,7 @@ def _private_copy(main: Path, wt_dir: Path) -> None:
     from . import privatecfg
 
     if privatecfg.enabled(main):
-        privatecfg.sync_worktree(main, wt_dir)
+        privatecfg.sync_worktree(main, wt_dir.parent, wt_dir.name)
 
 
 def _init_in_yard(main: Path, wt_dir: Path) -> int:

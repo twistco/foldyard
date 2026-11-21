@@ -100,16 +100,17 @@ def _git(main: Path, *args: str) -> tuple[int, list[str]]:
     return res.returncode, [ln for ln in (res.stdout or "").splitlines() if ln]
 
 
-def tracked_paths(main: Path, *paths: str) -> list[str]:
-    """Which of ``paths`` git tracks in ``main``: a file, or any file under a directory."""
+def tracked_paths(main: Path, *paths: str) -> list[str] | None:
+    """Which of ``paths`` git tracks in ``main``: a file, or any file under a directory. ``None``
+    when git couldn't say (a damaged index, a config it refused): never read as "none"."""
     rc, out = _git(main, "ls-files", "--", *paths)
     if rc != 0:
-        return []
+        return None
     return [p for p in paths if any(f == p or f.startswith(p + "/") for f in out)]
 
 
-def tracked(main: Path) -> list[str]:
-    """Which of :data:`TRACKABLE` git tracks in ``main``."""
+def tracked(main: Path) -> list[str] | None:
+    """Which of :data:`TRACKABLE` git tracks in ``main``; ``None`` when git couldn't say."""
     return tracked_paths(main, *TRACKABLE)
 
 
@@ -202,7 +203,7 @@ def drop_gitignore_block(main: Path) -> str | None:
     if not fence.search(text):
         return None
     rest = fence.sub("", text, count=1)
-    if not rest.strip() and not tracked_paths(main, ".gitignore"):
+    if not rest.strip() and tracked_paths(main, ".gitignore") == []:
         mountwrite.unlink(main, ".gitignore")
         return "removed"
     if rest and not rest.endswith("\n"):
@@ -214,31 +215,34 @@ def drop_gitignore_block(main: Path) -> str | None:
 # ── a worktree's copy ────────────────────────────────────────────────────────────────────
 
 
-def sync_worktree(main: Path, wt_dir: Path) -> bool:
-    """Write main's ADOPTED private files and the bundled foldyard skill into ``wt_dir``, from
-    your computer, never through a link the box planted. False, with the reason said, when there's
-    nothing adopted to copy or the worktree can't be written safely."""
+def sync_worktree(main: Path, wt_root: Path, name: str) -> bool:
+    """Write main's ADOPTED private files and the bundled foldyard skill into worktree ``name``,
+    from your computer. Rooted at ``wt_root``, never at the worktree's own directory: the box can
+    write the worktrees root, so ``name`` itself may be a link to a directory of yours, and every
+    step below ``wt_root`` is walked without following one (:mod:`mountwrite`). Main's working
+    tree isn't read at all. False, with the reason said, when there's nothing adopted to copy or
+    the worktree can't be written safely."""
     from . import config, configpin, skills
 
-    main_cfg = config.Config(repo_root=main, worktree="", toml={})
-    drift = configpin.inspect(main_cfg)
-    if not drift.adopted:
+    selected = configpin.current_dir(config.Config(repo_root=main, worktree="", toml={}))
+    if selected is None:
         _err("⚠ main's config isn't adopted, so there's no reviewed config to give the worktree:")
-        _err(f"  `fy config adopt` in main, then `fy worktree init {wt_dir.name}`")
+        _err(f"  `fy config adopt` in main, then `fy worktree init {name}`")
         return False
+    adopted = configpin._read_files(selected)
+    wt = Path(name)
     try:
-        for name in FILES:
-            data = drift.pinned[name]
+        present = set(mountwrite.listdir(wt_root, wt))
+        for file in FILES:
+            data = adopted[file]
             if data is not None:
-                mountwrite.write(wt_dir, name, data)
-            elif os.path.lexists(wt_dir / name):
-                _err(f"  ({name} in the worktree isn't in main's adopted config: kept, so its")
+                mountwrite.write(wt_root, wt / file, data)
+            elif file in present:
+                _err(f"  ({file} in the worktree isn't in main's adopted config: kept, so its")
                 _err("  config is reviewed rather than adopted as main's)")
-        src = skills._bundled_dir() / "foldyard"
-        for f in sorted(p for p in src.rglob("*") if p.is_file()):
-            mountwrite.write(wt_dir, SKILL / f.relative_to(src), f.read_bytes())
+        skills.write_bundled(wt_root, wt / SKILL, "foldyard")
     except (OSError, ValueError) as e:
-        _err(f"✗ couldn't write the private foldyard files into {wt_dir}: {e}")
+        _err(f"✗ couldn't write the private foldyard files into {wt_root / name}: {e}")
         return False
     print("▶ wrote main's adopted config and the foldyard skill into the worktree (private setup)")
     return True
@@ -253,6 +257,8 @@ def problems(main: Path) -> tuple[list[str], list[str]]:
     from . import init
 
     found = tracked(main)
+    if found is None:
+        return [], ["couldn't ask git which files it tracks here (`git ls-files` failed)"]
     fails = [f"git tracks {p}: take it out of your branch's history before you push" for p in found]
     warns = [
         f"git would show {p}: `fy init --private` again hides it"

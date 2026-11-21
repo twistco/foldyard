@@ -1741,3 +1741,19 @@ def test_an_ordinary_worktree_gets_no_private_copy(fake_main):
     _adopt_main(fake_main)
     assert worktree.add("feat") == 0
     assert not (fake_main["wt_root"] / "feat" / ".claude" / "skills" / "foldyard").exists()
+
+
+def test_a_private_copy_never_writes_through_a_worktree_dir_the_box_replaced(fake_main, tmp_path):
+    # The worktrees root is mounted into the VM: the box can swap a worktree's own directory for a
+    # link to one of yours, and your computer must not write the copy there.
+    _adopt_main(fake_main, PRIVATE)
+    assert worktree.add("feat") == 0
+    wt = fake_main["wt_root"] / "feat"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    import shutil
+
+    shutil.rmtree(wt)
+    wt.symlink_to(elsewhere)
+    worktree.init_config("feat")
+    assert list(elsewhere.iterdir()) == []

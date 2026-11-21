@@ -3,6 +3,7 @@ each worktree's copy from main's adopted config, the agent's note and doctor's r
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -213,3 +214,42 @@ def test_init_never_writes_through_a_dangling_link(repo, tmp_path, private):
     (repo / "foldyard.toml").symlink_to(target)
     init.init(path=str(repo), private=private, force=True)
     assert not target.exists()
+
+
+def test_private_init_never_installs_the_skill_through_a_planted_link(repo, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (repo / ".claude").symlink_to(elsewhere)
+    init.init(path=str(repo), private=True)
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_private_init_refuses_when_git_cant_say_what_it_tracks(repo, monkeypatch, capsys):
+    # A git the box made fail (a corrupt index, say) must not read as "nothing tracked".
+    monkeypatch.setattr(privatecfg, "_git", lambda main, *args: (128, []))
+    assert init.init(path=str(repo), private=True) == 1
+    assert "couldn't ask git" in capsys.readouterr().out
+    assert not (repo / "foldyard.toml").exists()
+
+
+def test_doctor_warns_when_git_cant_say_what_it_tracks(private_repo, monkeypatch):
+    monkeypatch.setattr(privatecfg, "_git", lambda main, *args: (128, []))
+    [(status, _name, detail)] = _row()
+    assert status == "warn" and "couldn't ask git" in detail
+
+
+def test_a_worktree_copy_never_reads_mains_tree(tmp_path, monkeypatch):
+    # Only main's adopted copy is used; a FIFO planted as main's foldyard.toml would hang a read.
+    from foldyard import configpin
+
+    main = tmp_path / "main"
+    main.mkdir()
+    (main / "foldyard.toml").write_text('[project]\nname = "a"\nprivate = true\n')
+    monkeypatch.setattr(config, "state_dir", lambda: tmp_path / "state")
+    configpin.adopt(config.resolve(worktree="", repo=main))
+    (main / "foldyard.toml").unlink()
+    os.mkfifo(main / "foldyard.toml")
+    wt_root = tmp_path / "wts"
+    (wt_root / "feat").mkdir(parents=True)
+    assert privatecfg.sync_worktree(main, wt_root, "feat") is True
+    assert "private = true" in (wt_root / "feat" / "foldyard.toml").read_text()

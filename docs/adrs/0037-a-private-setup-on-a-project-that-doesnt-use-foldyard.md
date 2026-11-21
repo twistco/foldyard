@@ -53,14 +53,21 @@ drifted from what the installed foldyard knew.
    - the bundled foldyard skill.
 
    Every write goes through `mountwrite`, so a link the box planted is replaced, never written
-   through. Being main's adopted bytes, the config is then adopted without a prompt by the existing
-   rule. `[project].worktree_init` still runs afterwards, for a project's own untracked files.
+   through. The writes are rooted at the worktrees root, not at the worktree's own directory: the
+   box can write the worktrees root, so the worktree's directory may itself be a link. Main's
+   working tree isn't read at all. `worktree_init`, as before, runs only in a container in the VM.
+   Being main's adopted bytes, the config is then adopted without a prompt by the existing rule.
+   `[project].worktree_init` still runs afterwards, for a project's own untracked files.
 
 4. **The agent is told by foldyard.** In a private setup, `[claude]`'s and `[codex]`'s system
    prompts get a fixed note: the files are untracked on purpose, what not to run, and to ask before
    changing the config. It's foldyard's own text, so it follows the installed version.
 
-5. **Doctor checks it.** A tracked private file fails (the next push carries it). A file git would
+5. **The skill goes in through `mountwrite` too**, for `fy init` and `fy skill install` alike: a
+   `.claude` link in the checkout is refused, and `--force` overwrites files rather than deleting a
+   directory first.
+
+6. **Doctor checks it.** A tracked private file fails (the next push carries it). A file git would
    show, or foldyard's block back in `.gitignore`, warns.
 
 Git on your computer runs only `ls-files` and `check-ignore`, through the same hookless,

@@ -720,7 +720,7 @@ def _install_agent_skill(target: Path, *, force: bool) -> None:
 
     with config.using(config.resolve(worktree="", repo=target)):
         dest = target / ".claude" / "skills" / "foldyard"
-        if dest.exists() and not force:
+        if os.path.lexists(dest) and not force:
             return  # already there — a re-run must not clobber a consumer's edits
         skills.install("foldyard", force=True)
 
@@ -800,7 +800,13 @@ def _private_refusal(target: Path) -> str | None:
             f"✗ --private needs a git clone's main checkout: {target} has no .git directory.\n"
             "  (In a worktree, run it in the main checkout: worktrees get their copy from there.)"
         )
-    if found := privatecfg.tracked(target):
+    found = privatecfg.tracked(target)
+    if found is None:
+        return (
+            f"✗ couldn't ask git which files it tracks in {target} (`git ls-files` failed), so\n"
+            "  whether this setup can be private is unknown. Check `git status` there first."
+        )
+    if found:
         return (
             f"✗ git tracks {', '.join(found)} here, so this setup can't be private. If it's yours,\n"
             "  take it out of your branch's history before anything is pushed (`fy docs\n"
@@ -828,9 +834,7 @@ def _init_private(target: Path, *, convert: bool) -> int:
                 print(f"✓ marked {target / 'foldyard.toml'} private ([project] private = true)")
         gitignore = privatecfg.drop_gitignore_block(target)
         example = target / LOCAL_EXAMPLE
-        if example.is_file() and LOCAL_EXAMPLE not in privatecfg.tracked_paths(
-            target, LOCAL_EXAMPLE
-        ):
+        if example.is_file() and privatecfg.tracked_paths(target, LOCAL_EXAMPLE) == []:
             mountwrite.unlink(target, LOCAL_EXAMPLE)
             print(f"✓ removed {example} (a template for a team; there's none here)")
         exclude = privatecfg.write_exclude(target)
