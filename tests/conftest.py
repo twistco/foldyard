@@ -231,7 +231,12 @@ def isolated_home(tmp_path_factory, monkeypatch, request):
 # The credentials the agents read from their environment. The suite drives `fy verify` in the
 # box, which fails on a real-looking one: a value from the operator's shell, or one a test let the
 # supervisor load from a host.env, must never reach another test.
-_AGENT_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY")
+_AGENT_CREDENTIAL_ENV = (
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "COPILOT_GITHUB_TOKEN",
+)
 
 
 @pytest.fixture(autouse=True)

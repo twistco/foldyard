@@ -269,6 +269,12 @@ class InjectRule:
     # A dummy may also follow ONE auth-scheme word (`token x`, `Bearer x`) — for a dummy handed to
     # a client the mechanism doesn't control, as :class:`HeldCredential`'s ``any_scheme``.
     any_scheme: bool = False
+    # Preserve a credential ALREADY in this rule's place when it is neither our dummy nor our own
+    # injection: a client that exchanges the injected token for a short-lived one (Copilot's
+    # `/copilot_internal/v2/token`) sends THAT to the API host, and overwriting it with the token
+    # we mint would break it. Requests carrying the dummy — or nothing — are still injected.
+    # Default False so every other injector keeps overwriting its place as before.
+    preserve_foreign: bool = False
     # The credential this rule delivers can push (the operator's own gh token). While a rule with
     # it is injecting, the proxy stops refusing git pushes sent to THIS rule's host (its live
     # file's ``push_hosts``) — where the token goes, the mode already says a push is possible —
@@ -1151,11 +1157,11 @@ def load_plugins(
     asks for.
 
     Order is preserved from before the split (gcp, inject, proxy, auth0-sim, llm, claude, vscode,
-    codex when all are present) because it sets switch + doctor-row order (``fy mode`` output) AND
-    overlay stacking order (identity/storage → auth0 → llm). There is no github plugin: GitHub is
-    two ``[[inject]]`` kinds (``github-app``, ``gh-cli``) plus data (ADR-0031)."""
+    codex, copilot when all are present) because it sets switch + doctor-row order (``fy mode``
+    output) AND overlay stacking order (identity/storage → auth0 → llm). There is no github plugin:
+    GitHub is two ``[[inject]]`` kinds (``github-app``, ``gh-cli``) plus data (ADR-0031)."""
     from .. import config as config_mod
-    from . import auth0_sim, claude, codex, fakecred, gcp, inject, llm, proxy, vscode
+    from . import auth0_sim, claude, codex, copilot, fakecred, gcp, inject, llm, proxy, vscode
 
     cfg = config if config is not None else config_mod.current()
 
@@ -1175,6 +1181,7 @@ def load_plugins(
     plugins.append(claude.ClaudePlugin())  # CORE: switch only when [claude].keyless
     plugins.append(vscode.VscodePlugin())  # CORE: no switch, [vscode]-gated box volume only
     plugins.append(codex.CodexPlugin())  # CORE: switch only when [codex].keyless
+    plugins.append(copilot.CopilotPlugin())  # CORE: switch only when [copilot].keyless
 
     if discover:
         plugins += _entry_point_plugins()
