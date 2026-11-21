@@ -679,6 +679,130 @@ def test_lima_start_reaps_before_limactl(lima_pids, monkeypatch, capsys):
     assert "hostagent" in capsys.readouterr().err  # waited: said so
 
 
+# ── lima: a start whose watcher tripped on a half-written event ─────────────────────────────
+#
+# `limactl start` tails the hostagent's event log without nxadm/tail's CompleteLines: an event
+# caught half-written at the end of the file reaches it as a line of its own, fails to parse, and
+# the start exits fatally while the hostagent carries on bringing the VM up (Lima 2.3.0, whose
+# per-port events made it common: the e2e on main, 2026-11-20, two shards of six).
+
+
+def _event(when: str, status: str) -> str:
+    return f'{{"time":"{when}","status":{status}}}'
+
+
+def _running(when: str) -> str:
+    return _event(when, '{"running":true,"sshLocalPort":40000}')
+
+
+_LATER = "2999-01-01T00:00:00.000000001Z"  # an event this start's hostagent wrote
+_EARLIER = "2000-01-01T00:00:00Z"  # one an earlier boot left
+
+
+def _failed_start(
+    lima_pids, monkeypatch, log: str | bytes, ha_alive=True, took=0.0, ha_pid: int | None = 500
+):
+    """`limactl start` exits 1 (the watcher's fatal) after the hostagent wrote ``log``, ``took``
+    seconds into the start. The clock moves only by that and by the poll's sleeps; returns
+    (start's result, how many times the poll slept)."""
+    write, alive, _kills = lima_pids
+    write(ha=ha_pid, qemu=600)
+    alive[500] = [ha_alive]
+    alive[600] = [True]
+    inst = mb.Path.home() / ".lima" / "acme"
+    clock = [1000.0]
+    slept: list[float] = []
+
+    def run(cmd, **kw):
+        data = log if isinstance(log, bytes) else log.encode()
+        (inst / "ha.stdout.log").write_bytes(data)
+        clock[0] += took
+        return _Proc(1, "")
+
+    def sleep(s):
+        slept.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(mb.subprocess, "run", run)
+    monkeypatch.setattr(mb, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(mb.time, "sleep", sleep)
+    monkeypatch.setattr(mb.LimaBackend, "_wait_for_socket", lambda self, name: True)
+    return mb.LimaBackend().start("acme"), len(slept)
+
+
+def test_lima_start_that_tripped_on_a_half_written_event_reads_the_hostagents_own_word(
+    lima_pids, monkeypatch, capsys
+):
+    log = (
+        _event(_LATER, '{"requirementProgress":{"step":4}}')
+        + "\n"
+        + _running(_LATER)
+        + f'\n{{"time":"{_LATER}","status":{{"sshLocal'  # still being written
+    )
+    assert _failed_start(lima_pids, monkeypatch, log)[0] is True
+    assert "event" in capsys.readouterr().err  # said why it carried on
+
+
+@pytest.mark.parametrize(
+    "status",
+    ['{"exiting":true,"errors":["boot failed"]}', '{"running":true,"degraded":true}'],
+    ids=["exiting", "degraded"],
+)
+def test_lima_start_that_tripped_still_fails_on_the_hostagents_failure(
+    lima_pids, monkeypatch, status
+):
+    log = _event(_LATER, status) + "\n"
+    assert _failed_start(lima_pids, monkeypatch, log)[0] is False
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        _running(_EARLIER) + "\n",  # an earlier boot's
+        _running(_LATER),  # half-written: no newline yet, so maybe not the whole event
+    ],
+    ids=["earlier-boot", "unfinished-line"],
+)
+def test_lima_start_that_tripped_counts_only_a_whole_event_of_this_start(
+    lima_pids, monkeypatch, log
+):
+    assert _failed_start(lima_pids, monkeypatch, log)[0] is False
+
+
+def test_lima_start_that_failed_with_its_hostagent_gone_fails_at_once(lima_pids, monkeypatch):
+    log = _running(_LATER) + "\n"
+    assert _failed_start(lima_pids, monkeypatch, log, ha_alive=False) == (False, 0)
+
+
+def test_lima_start_without_a_hostagent_pid_fails_at_once(lima_pids, monkeypatch):
+    # No ha.pid reads as pid 0, and kill(0, 0) signals OUR process group: alive, wrongly.
+    monkeypatch.setattr(mb, "_alive", lambda pid: True)
+    assert _failed_start(lima_pids, monkeypatch, "", ha_pid=None) == (False, 0)
+
+
+def test_lima_start_that_tripped_waits_only_what_is_left_of_its_timeout(lima_pids, monkeypatch):
+    # A start that used up its own 10 min (a stalled boot) gets one more read, not 10 min more.
+    assert _failed_start(lima_pids, monkeypatch, "", took=600.0) == (False, 0)
+    # One that tripped early still has the rest of it.
+    rc, slept = _failed_start(lima_pids, monkeypatch, "", took=1.0)
+    assert rc is False and 590 <= slept <= 600
+
+
+def test_lima_start_that_tripped_survives_a_character_cut_in_half(lima_pids, monkeypatch):
+    log = (_running(_LATER) + "\n").encode() + '{"msg":"é'.encode()[:-1]  # é is two bytes
+    assert _failed_start(lima_pids, monkeypatch, log)[0] is True
+
+
+def test_go_durations_read_as_seconds():
+    assert mb._seconds("60m") == 3600
+    assert mb._seconds("1h30m") == 5400
+    assert mb._seconds("90s") == 90
+    assert mb._seconds("500ms") == 0.5  # not 500 minutes
+    assert mb._seconds("1m30.5s") == 90.5
+    assert mb._seconds(None) == 600  # Lima's own default
+    assert mb._seconds("soon") == 600  # Lima refuses it anyway
+
+
 @pytest.mark.parametrize(
     ("recorded", "want"),
     [

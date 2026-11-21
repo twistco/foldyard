@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -29,6 +30,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from shutil import which
 
@@ -39,6 +41,43 @@ PROVISION_MARKER = "# fy-provision "
 
 def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
+
+
+_GO_UNITS = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+_GO_PART = re.compile(r"(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)")  # the two-letter units first
+_monotonic = time.monotonic  # a seam: the start's deadline, in tests
+
+
+def _seconds(duration: str | None) -> float:
+    """A Go duration (``"60m"``, ``"1h30m"``, ``"500ms"``) in seconds. ``None``, or what isn't
+    one, is Lima's own start timeout (which refuses such a ``--timeout`` itself)."""
+    if duration is None or not re.fullmatch(f"(?:{_GO_PART.pattern})+", duration):
+        return 600.0
+    return sum(float(n) * _GO_UNITS[u] for n, u in _GO_PART.findall(duration))
+
+
+def _hostagent_verdict(log: Path, since: datetime) -> bool | None:
+    """The hostagent's own word on a start, from its event log: True once it reports running
+    (not degraded), False once it reports exiting or degraded, ``None`` while it hasn't said.
+    Whole lines only (the last, unended one may still be being written, even cut inside a
+    character, so each line is decoded alone), and only events since ``since``."""
+    try:
+        data = log.read_bytes()
+    except OSError:
+        return None
+    for line in data.split(b"\n")[:-1]:
+        try:
+            event = json.loads(line.decode())
+            if datetime.fromisoformat(event["time"]) < since:
+                continue
+            status = event.get("status") or {}
+        except (ValueError, KeyError, TypeError, AttributeError):  # ValueError: bad UTF-8 too
+            continue
+        if status.get("exiting"):
+            return False
+        if status.get("running"):
+            return not status.get("degraded")
+    return None
 
 
 def _alive(pid: int) -> bool:
@@ -630,9 +669,44 @@ class LimaBackend(Backend):
         if self.reap_orphans(name):
             _err("  (the hostagent lingered — reaped it)")
         timeout = ["--timeout", wait] if wait else []
-        if subprocess.run([*prefix, *self.start_argv(name), *timeout]).returncode != 0:
+        begin = datetime.now(UTC)
+        deadline = _monotonic() + _seconds(wait)  # the fallback has only what the start left
+        failed = subprocess.run([*prefix, *self.start_argv(name), *timeout]).returncode != 0
+        if failed and not self._came_up_anyway(name, begin, deadline):
             return False
         return self._wait_for_socket(name)
+
+    _EVENT_POLL = 1.0  # seconds between reads of the hostagent's event log
+
+    def _came_up_anyway(self, name: str, begin: datetime, deadline: float) -> bool:
+        """A failed ``limactl start`` whose VM comes up regardless. Its watcher tails the
+        hostagent's event log with nxadm/tail but without ``CompleteLines``: an event caught
+        half-written at the end of the file reaches it as a line of its own, fails to parse,
+        and the start exits fatally ("failed to unmarshal … as events.Event: unexpected end of
+        JSON input") while the hostagent carries on (Lima 2.3.0, whose per-port events made it
+        common: two of the six e2e shards on main, 2026-11-20; lima-vm/lima#5835). So while the
+        hostagent lives, its log is read the way the watcher means to, whole events since this
+        start only, until its own verdict, by the start's own deadline (``_monotonic`` time): a
+        start that used its whole timeout gets one more read, not another timeout."""
+        inst = Path.home() / ".lima" / name
+        if not self._hostagent_alive(inst):
+            return False
+        _err(f"  (`limactl start` stopped watching '{name}' but its hostagent runs on: reading")
+        _err("  the hostagent's events for its own verdict)")
+        while True:
+            verdict = _hostagent_verdict(inst / "ha.stdout.log", begin)
+            if verdict is not None:
+                return verdict
+            left = deadline - _monotonic()
+            if left <= 0 or not self._hostagent_alive(inst):
+                return False
+            time.sleep(min(self._EVENT_POLL, left))
+
+    def _hostagent_alive(self, inst: Path) -> bool:
+        """Lima's own ``ha.pid`` names a live process. A missing or unreadable one reads as pid
+        0, which :func:`_alive` would take for this process's own group: never alive here."""
+        pid = self._pid(inst / "ha.pid")
+        return pid > 0 and _alive(pid)
 
     @staticmethod
     def _pid(pidfile: Path) -> int:
