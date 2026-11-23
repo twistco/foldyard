@@ -25,7 +25,17 @@ import sys
 import time
 from pathlib import Path
 
-from . import boxmounts, config, forwarder, guestlog, hostwall, monitor, podman_desktop, sandbox
+from . import (
+    boxmounts,
+    config,
+    forwarder,
+    guestfiles,
+    guestlog,
+    hostwall,
+    monitor,
+    podman_desktop,
+    sandbox,
+)
 from .machine_backend import LimaBackend, Mount, retired_block, unavailable_block
 
 MACHINE = config.machine_name()
@@ -329,7 +339,9 @@ def _note_host_wall_install() -> None:
 # no path to VM-root; (2) installs or removes the nftables wall (`machine-wall.sh`, embedded and
 # root-owned in the guest — never read from the repo mount); (3) links ENGINE_SOCK_IN_VM to the
 # VM user's engine socket (the gVisor filter's under that posture); (4) writes what it applied
-# to /run/fy-wall/state, world-readable, so the host can check without root.
+# to /run/fy-wall/state, world-readable, so the host can check without root. Two pieces of
+# housekeeping that need root ride along: the journal cap (guestlog.py) and letting go of shared
+# files (guestfiles.py).
 #
 # The host therefore never runs `sudo` in the guest: it records the script while the VM is
 # STOPPED (`limactl edit` refuses a running one) and reads the guest's report after boot. A
@@ -484,6 +496,7 @@ def _render_provisioning() -> tuple[str, str]:
         .replace("@@ENGINE_SOCK@@", _engine_sock_name())
         .replace("@@WANT@@", _provision_want())
         .replace("@@JOURNAL@@", guestlog.journal_snippet().strip("\n"))
+        .replace("@@RELEASE_FILES@@", guestfiles.release_snippet(config.machine_release_files()))
     )
     ident = hashlib.sha256(body.encode()).hexdigest()[:16]
     return body.replace("@@ID@@", ident, 1), ident

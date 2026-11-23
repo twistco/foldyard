@@ -34,6 +34,9 @@
   ([ADR-0036](./0036-lima-only-podman-machine-backend-removed.md)), but the ~5 s visibility margin
   measured on its libkrun virtio-fs stays: Lima's `krunkit` driver is libkrun virtio-fs too, and
   hasn't been measured. Lima's `vz` measures ~1 s. Narrow the margin only after krunkit is.
+- **Amended 2026-11-23:** the VM now drops expired lookups once a minute (`fuse.inval_wq`,
+  `[machine] release_files`), for your computer's open files, not for git: see the rejected
+  *Dropping the VM's file-lookup cache* for how the two differ.
 
 ## Context
 
@@ -255,7 +258,13 @@ Shim mechanics (each point traces to a verified failure mode):
 - **Dropping the VM's file-lookup cache** (2026-09-29; a root loop writing `drop_caches`) — every 50
   ms it shrinks the stale window to ~0.1 s and makes plain git safe in the measured flows, but
   `git status` gets 8–9× slower for every container in the VM, and working-tree files still read
-  absent 7.5% of the time. With the shim covering git, it isn't worth that cost.
+  absent 7.5% of the time. With the shim covering git, it isn't worth that cost. **Amended
+  2026-11-23:** still rejected as a fix for the races, but a gentle form of it ships for another
+  reason. Your computer keeps a file open for each one the VM remembers, and four VMs used up a
+  Mac's whole table. `inval_wq` expires only the shared folders' own lookups, every 60 s, and keeps
+  what is in use. Measured with `git status` on 10k files every 2 s: at 60 s one run in 59 was slow
+  (1.7 s against 0.14 s), none of 149 at 300 s, 6 of 23 at 5 s. No claim is made that it narrows the
+  stale window, which the shim still covers.
 
 - **A time budget for the sealed heal** (2026-09-29) — giving the seal up when it runs long would
   spare host commits a "HEAD.lock: File exists", but it gives the seal up exactly when the VM is

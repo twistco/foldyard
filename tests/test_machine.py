@@ -644,6 +644,28 @@ def test_provision_script_caps_the_journal_as_root_at_boot(lima_env):
     assert "sudo" not in script.split("# 2. The firewall script")[0].split("# 1b.")[-1]
 
 
+def test_provision_script_releases_shared_files_before_the_wall_is_applied(lima_env, monkeypatch):
+    from foldyard import guestfiles
+
+    _, _, set_wall, _ = lima_env
+    set_wall(False)
+    monkeypatch.setattr(machine.config, "machine_release_files", lambda: 60)
+    script = machine.guest_provision_script()
+    assert f"echo 60 >{guestfiles.KNOB}" in script
+    # Reported last: whatever this step does, the state line the host fails closed on follows it.
+    assert script.index(guestfiles.KNOB) < script.index("# 4. Report, LAST")
+
+
+def test_provision_id_changes_with_release_files(lima_env, monkeypatch):
+    _, _, set_wall, _ = lima_env
+    set_wall(False)
+    ids = set()
+    for seconds in (0, 60, 300):
+        monkeypatch.setattr(machine.config, "machine_release_files", lambda s=seconds: s)
+        ids.add(machine.provision_id())
+    assert len(ids) == 3
+
+
 def test_provision_script_wall_off_still_drops_the_sudo_grant(lima_env):
     _, _, set_wall, _ = lima_env
     set_wall(False)

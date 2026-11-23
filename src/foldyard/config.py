@@ -1530,6 +1530,26 @@ def machine_vmtype() -> str:
     return str(os.environ.get("MACHINE_VMTYPE") or _table("machine").get("vmtype") or "").lower()
 
 
+def machine_release_files() -> int:
+    """``[machine].release_files`` — how often, in seconds, the VM drops the shared files nothing
+    is using, so your computer can close them (:mod:`foldyard.guestfiles`); ``0`` is off. Default:
+    on. Only a period the kernel takes is accepted: it lands in a script root runs. Changing it
+    re-provisions at boot (``fy machine stop && fy up``). ``MACHINE_RELEASE_FILES`` env wins."""
+    from . import guestfiles  # lazy: only the boot script's render asks
+
+    low, high = guestfiles.MIN_SECONDS, guestfiles.MAX_SECONDS
+    raw: object = os.environ.get("MACHINE_RELEASE_FILES")
+    if raw is None:
+        raw = _table("machine").get("release_files", guestfiles.DEFAULT_SECONDS)
+    elif re.fullmatch(r"[0-9]+", str(raw)):
+        raw = int(str(raw))
+    if not isinstance(raw, int) or isinstance(raw, bool) or not (raw == 0 or low <= raw <= high):
+        raise SystemExit(
+            f"✗ [machine].release_files must be 0 (off) or {low} to {high} seconds, not {raw!r}."
+        )
+    return raw
+
+
 def machine_resources() -> dict[str, str]:
     """The VM's sizing as strings. Env (``MACHINE_CPUS`` /
     ``MACHINE_MEMORY`` MiB / ``MACHINE_DISK`` GiB) wins, then ``[machine]``, then
