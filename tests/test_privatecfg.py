@@ -12,10 +12,14 @@ import pytest
 
 from foldyard import config, init, privatecfg
 
+# An inherited one (pytest run by a git hook) would send the fixture's git to that repo.
+_REPO_LOCATION = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+
 
 def _git(repo: Path, *args: str) -> str:
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_LOCATION}
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env
     ).stdout
 
 
@@ -123,6 +127,38 @@ def test_marking_a_config_private_edits_only_that_key(text, want):
     assert privatecfg.mark_private(text) == want
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[ project ]\nname = "a"\n',
+        '["project"]\nname = "a"\n',
+        '[project]\nname = "a"\n"private" = false\n',
+        "['project']\n'private' = false\n[box]\nx = 1\n",
+    ],
+    ids=["spaced", "quoted", "quoted-key", "literal"],
+)
+def test_marking_takes_tomls_other_spellings(text):
+    before, after = tomllib.loads(text), tomllib.loads(privatecfg.mark_private(text))
+    assert after == {**before, "project": {**before["project"], "private": True}}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'project.name = "a"\n',  # a table put first would swallow it
+        'project = { name = "a" }\n',
+        'note = """\n[project]\n"""\n',  # no table: text that looks like one
+        "[project\n",
+    ],
+    ids=["dotted", "inline", "in-a-string", "broken"],
+)
+def test_converting_refuses_what_it_cannot_mark_and_leaves_the_file_alone(repo, text, capsys):
+    (repo / "foldyard.toml").write_text(text)
+    assert init.init(path=str(repo), private=True) == 1
+    assert (repo / "foldyard.toml").read_text() == text
+    assert "private = true" in capsys.readouterr().out  # what to add by hand
+
+
 def test_the_exclude_list_is_never_written_through_a_planted_link(repo, tmp_path):
     info = repo / ".git" / "info"
     for f in info.iterdir():
@@ -166,6 +202,7 @@ def private_repo(repo, monkeypatch):
 
     assert init.init(path=str(repo), private=True) == 0
     monkeypatch.setattr(stack, "main_repo", lambda: repo)
+    monkeypatch.setattr(config, "repo_root", lambda: repo)
     monkeypatch.setattr(config, "private", lambda: True)
     return repo
 
@@ -190,6 +227,65 @@ def test_doctor_warns_of_foldyards_block_in_gitignore(private_repo):
     (private_repo / ".gitignore").write_text("node_modules/\n" + init._gitignore_block() + "\n")
     [(status, _name, detail)] = _row()
     assert status == "warn" and ".gitignore" in detail
+
+
+def test_doctor_in_a_worktree_judges_that_worktrees_index(private_repo, tmp_path, monkeypatch):
+    # A worktree has its own index: one force-added there is in its next push, whatever main says.
+    wt = tmp_path / "wt"
+    _git(private_repo, "worktree", "add", "-q", "-b", "wt", str(wt))
+    (wt / "foldyard.toml").write_text("[project]\nprivate = true\n")
+    monkeypatch.setattr(config, "repo_root", lambda: wt)
+    assert _row() == [("ok", "private setup", "git sees none of foldyard's files")]
+    _git(wt, "add", "-f", "foldyard.toml")
+    [(status, _name, detail)] = _row()
+    assert status == "fail" and "git tracks foldyard.toml" in detail
+
+
+@pytest.mark.parametrize("what", ["link", "not-utf8"])
+def test_doctor_warns_of_a_gitignore_it_cannot_read(private_repo, tmp_path, what):
+    path = private_repo / ".gitignore"
+    path.unlink()
+    if what == "link":
+        path.symlink_to(tmp_path / "nowhere")
+    else:
+        path.write_bytes(b"\xff\xfe\n")
+    [(status, _name, detail)] = _row()
+    assert status == "warn" and "couldn't read .gitignore" in detail
+
+
+@pytest.mark.parametrize("name", ["a\tb.md", "café.md", 'q"uote.md'])
+def test_a_tracked_file_with_a_name_git_quotes_is_seen(private_repo, name):
+    skill = private_repo / ".claude" / "skills" / "foldyard" / name
+    skill.write_text("x")
+    _git(private_repo, "add", "-f", str(skill))
+    assert privatecfg.tracked(private_repo) == [".claude/skills/foldyard"]
+
+
+@pytest.mark.parametrize("var", ["GIT_DIR", "GIT_INDEX_FILE"])
+def test_an_inherited_git_location_answers_for_no_other_repo(
+    private_repo, tmp_path, monkeypatch, var
+):
+    # A git hook's environment: without the scrub the answer is about the hook's repo.
+    _git(private_repo, "add", "-f", "foldyard.toml")
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    where = other / ".git" if var == "GIT_DIR" else other / ".git" / "index"
+    monkeypatch.setenv(var, str(where))
+    assert privatecfg.tracked(private_repo) == ["foldyard.toml"]
+
+
+def test_a_config_that_cannot_be_checked_for_hooks_reads_as_unknown(
+    private_repo, monkeypatch, capsys
+):
+    from foldyard import worktree
+
+    def refuse(*a, **k):
+        raise worktree.HookScanError("no")
+
+    monkeypatch.setattr(worktree, "_hookless_env", refuse)
+    assert privatecfg.tracked(private_repo) is None
+    assert "not running git" in capsys.readouterr().err
 
 
 def test_doctor_has_no_row_for_an_ordinary_setup(monkeypatch):
@@ -226,14 +322,14 @@ def test_private_init_never_installs_the_skill_through_a_planted_link(repo, tmp_
 
 def test_private_init_refuses_when_git_cant_say_what_it_tracks(repo, monkeypatch, capsys):
     # A git the box made fail (a corrupt index, say) must not read as "nothing tracked".
-    monkeypatch.setattr(privatecfg, "_git", lambda main, *args: (128, []))
+    monkeypatch.setattr(privatecfg, "_git", lambda main, *args: (128, ""))
     assert init.init(path=str(repo), private=True) == 1
     assert "couldn't ask git" in capsys.readouterr().out
     assert not (repo / "foldyard.toml").exists()
 
 
 def test_doctor_warns_when_git_cant_say_what_it_tracks(private_repo, monkeypatch):
-    monkeypatch.setattr(privatecfg, "_git", lambda main, *args: (128, []))
+    monkeypatch.setattr(privatecfg, "_git", lambda main, *args: (128, ""))
     [(status, _name, detail)] = _row()
     assert status == "warn" and "couldn't ask git" in detail
 

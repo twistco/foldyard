@@ -1737,6 +1737,34 @@ def test_a_private_worktree_waits_for_main_to_be_adopted(fake_main, capsys):
     assert "fy config adopt" in out.out + out.err
 
 
+@pytest.mark.parametrize("name", ["..", ".", "", "a/b", "../elsewhere", "/etc"])
+def test_init_takes_only_a_worktrees_name(fake_main, tmp_path, capsys, name):
+    # It writes main's config into <worktrees root>/<name>: never anywhere a path would lead.
+    _adopt_main(fake_main, PRIVATE)
+    for d in (fake_main["wt_root"] / "a" / "b", tmp_path / "elsewhere"):
+        d.mkdir(parents=True)
+    assert worktree.init_config(name) == 1
+    assert "single" in capsys.readouterr().err
+    assert not list(tmp_path.glob("*/.claude")) and not (tmp_path / "foldyard.toml").exists()
+    assert not (fake_main["wt_root"] / "a" / "b" / "foldyard.toml").exists()
+
+
+def test_registering_an_existing_worktree_gives_it_the_private_files_it_lacks(fake_main):
+    _adopt_main(fake_main, PRIVATE)
+    wt = _existing_git_worktree(fake_main, "old")
+    assert worktree.add("old", assume_yes=True) == 0
+    assert (wt / "foldyard.toml").read_text() == PRIVATE
+
+
+def test_registering_never_overwrites_a_config_already_there(fake_main, capsys):
+    _adopt_main(fake_main, PRIVATE)
+    wt = _existing_git_worktree(fake_main, "old")
+    (wt / "foldyard.toml").write_text("# mine\n")
+    assert worktree.add("old", assume_yes=True) == 0
+    assert (wt / "foldyard.toml").read_text() == "# mine\n"
+    assert "fy worktree init old" in capsys.readouterr().out
+
+
 def test_an_ordinary_worktree_gets_no_private_copy(fake_main):
     _adopt_main(fake_main)
     assert worktree.add("feat") == 0

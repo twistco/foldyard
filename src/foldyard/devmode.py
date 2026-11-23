@@ -1987,13 +1987,11 @@ def _private_check():
     block in ``.gitignore``. No row for an ordinary setup."""
     if not config.private():
         return
-    from . import privatecfg, stack
+    from . import privatecfg
 
-    try:
-        main = stack.main_repo()
-    except SystemExit:
-        return
-    fails, warns = privatecfg.problems(main)
+    # The checkout doctor runs in, never main from a worktree: each has its own index, and a file
+    # force-added in a worktree is in that branch's next push.
+    fails, warns = privatecfg.problems(config.repo_root())
     if fails or warns:
         yield ("fail" if fails else "warn", "private setup", "; ".join([*fails, *warns]))
         return

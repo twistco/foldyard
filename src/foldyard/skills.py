@@ -62,7 +62,8 @@ def write_bundled(root: Path, rel: Path, name: str) -> None:
 
 
 def install(name: str, *, force: bool = False) -> int:
-    """Copy a bundled skill into ``<repo>/.claude/skills/<name>/`` (:func:`write_bundled`)."""
+    """Copy a bundled skill into ``<repo>/.claude/skills/<name>/`` (:func:`write_bundled`).
+    ``force`` overwrites its files and deletes none: one a newer version dropped stays."""
     names = bundled()
     if name not in names:
         avail = ", ".join(names) or "(none)"

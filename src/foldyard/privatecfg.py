@@ -22,9 +22,10 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
-from . import mountwrite
+from . import hostgit, mountwrite
 
 FILES = ("foldyard.toml", "foldyard.local.toml")
 SKILL = Path(".claude") / "skills" / "foldyard"
@@ -59,13 +60,32 @@ def with_note(prompt: str) -> str:
 
 
 _TABLE = re.compile(r"^\s*\[")
-_PROJECT = re.compile(r"^\s*\[project\]\s*(#.*)?$")
-_KEY = re.compile(r"^\s*private\s*=")
+_PROJECT = re.compile(r"""^\s*\[\s*(?:project|"project"|'project')\s*\]\s*(#.*)?$""")
+_KEY = re.compile(r"""^\s*(?:private|"private"|'private')\s*=""")
 
 
 def mark_private(text: str) -> str:
     """``text`` with ``[project] private = true``, touching nothing else: the key flipped where it
-    is, else added first in ``[project]``, else a ``[project]`` table put first."""
+    is, else added first in ``[project]``, else a ``[project]`` table put first. Proven by parsing
+    both: ``ValueError`` where the edit would change anything else (dotted ``project.x`` keys, an
+    inline table, a string holding what looks like the header) or ``text`` isn't TOML."""
+    marked = _marked(text)
+    by_hand = "add `private = true` to its [project] table yourself, then run this again"
+    try:
+        before, after = tomllib.loads(text), tomllib.loads(marked)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"foldyard.toml can't be edited safely ({e}): {by_hand}") from e
+    project = before.get("project", {})
+    if not isinstance(project, dict) or after != {
+        **before,
+        "project": {**project, "private": True},
+    }:
+        raise ValueError(f"foldyard.toml can't be edited safely: {by_hand}")
+    return marked
+
+
+def _marked(text: str) -> str:
+    """:func:`mark_private`'s edit, unproven."""
     lines = text.splitlines(keepends=True)
     start = next((i for i, ln in enumerate(lines) if _PROJECT.match(ln)), None)
     if start is None:
@@ -91,22 +111,34 @@ def enabled(main: Path) -> bool:
 # ── git's view ───────────────────────────────────────────────────────────────────────────
 
 
-def _git(main: Path, *args: str) -> tuple[int, list[str]]:
+# Where an inherited environment (a git hook's) would point git instead of at ``-C``.
+_REPO_LOCATION = (*hostgit.REPO_ENV, "GIT_INDEX_FILE")
+
+
+def _git(checkout: Path, *args: str) -> tuple[int, str]:
     """git on your computer with none of the repo's code run (``worktree._host_git``): its hooks,
-    fsmonitor and fetches off. Only commands that neither check a file out nor hash one."""
+    fsmonitor and fetches off, and asked of ``checkout`` whatever repo the environment names. Only
+    commands that neither check a file out nor hash one."""
     from . import worktree
 
-    res = worktree._host_git(main, *args, capture_output=True, text=True)
-    return res.returncode, [ln for ln in (res.stdout or "").splitlines() if ln]
+    try:
+        env = worktree._hookless_env(checkout)
+    except worktree.HookScanError as e:
+        worktree._refuse_unscanned(e)
+        return 1, ""
+    env = {k: v for k, v in env.items() if k not in _REPO_LOCATION}
+    res = worktree._host_git(checkout, *args, env=env, capture_output=True)
+    return res.returncode, os.fsdecode(res.stdout or b"")
 
 
 def tracked_paths(main: Path, *paths: str) -> list[str] | None:
     """Which of ``paths`` git tracks in ``main``: a file, or any file under a directory. ``None``
     when git couldn't say (a damaged index, a config it refused): never read as "none"."""
-    rc, out = _git(main, "ls-files", "--", *paths)
+    rc, out = _git(main, "ls-files", "-z", "--", *paths)  # -z: git quotes odd names otherwise
     if rc != 0:
         return None
-    return [p for p in paths if any(f == p or f.startswith(p + "/") for f in out)]
+    files = out.split("\0")
+    return [p for p in paths if any(f == p or f.startswith(p + "/") for f in files)]
 
 
 def tracked(main: Path) -> list[str] | None:
@@ -120,7 +152,7 @@ def unhidden(main: Path) -> list[str]:
     if not present:
         return []
     _rc, out = _git(main, "check-ignore", "--", *present)
-    ignored = {ln.rstrip("/") for ln in out}
+    ignored = {ln.rstrip("/") for ln in out.splitlines()}
     return [p for p in present if p not in ignored]
 
 
@@ -251,20 +283,28 @@ def sync_worktree(main: Path, wt_root: Path, name: str) -> bool:
 # ── doctor ───────────────────────────────────────────────────────────────────────────────
 
 
-def problems(main: Path) -> tuple[list[str], list[str]]:
-    """What breaks the setup: (failures, warnings). A tracked private file fails: the next push
-    carries it. One git would show, or foldyard's block in ``.gitignore``, warns."""
+def problems(checkout: Path) -> tuple[list[str], list[str]]:
+    """What breaks the setup in ``checkout`` (main or a worktree: each has its own index):
+    (failures, warnings). A tracked private file fails: the next push carries it. One git would
+    show, or foldyard's block in ``.gitignore``, warns."""
     from . import init
 
-    found = tracked(main)
+    found = tracked(checkout)
     if found is None:
         return [], ["couldn't ask git which files it tracks here (`git ls-files` failed)"]
+    again = "`fy init --private` again"
+    if not is_main_checkout(checkout):
+        again += " in the main checkout"
     fails = [f"git tracks {p}: take it out of your branch's history before you push" for p in found]
-    warns = [
-        f"git would show {p}: `fy init --private` again hides it"
-        for p in unhidden(main)
-        if p not in found
-    ]
-    if init.GITIGNORE_BEGIN in (read_nofollow(main, Path(".gitignore")) or ""):
-        warns.append("foldyard's block is in .gitignore: `fy init --private` again moves it out")
+    warns = [f"git would show {p}: {again} hides it" for p in unhidden(checkout) if p not in found]
+    try:
+        gitignore = read_nofollow(checkout, Path(".gitignore")) or ""
+    except (OSError, ValueError):  # a link, or not UTF-8: either may be the box's
+        warns.append("couldn't read .gitignore (a link?), so foldyard's block may be in it")
+    else:
+        if init.GITIGNORE_BEGIN in gitignore:
+            fix = f"{again} moves it out"
+            if not is_main_checkout(checkout):
+                fix = "take it out of this branch"
+            warns.append(f"foldyard's block is in .gitignore: {fix}")
     return fails, warns
