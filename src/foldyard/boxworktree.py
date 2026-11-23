@@ -262,7 +262,8 @@ def mount_all() -> int:
 def _git(where: Path, *args: str) -> int:
     cmd = ["git", "-C", str(where), *args]
     _err("+ " + " ".join(shlex.quote(c) for c in cmd))
-    return subprocess.run(cmd).returncode
+    # The box's git shim sends a plain `git worktree add` here (FY_WORKTREE_ADD: this is it).
+    return subprocess.run(cmd, env={**os.environ, "FY_WORKTREE_ADD": "1"}).returncode
 
 
 def _add_argv(main: Path, wt_dir: Path, branch: str, base: str) -> list[str] | None:

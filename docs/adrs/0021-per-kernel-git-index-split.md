@@ -37,6 +37,9 @@
 - **Amended 2026-11-23:** the VM now drops expired lookups once a minute (`fuse.inval_wq`,
   `[machine] release_files`), for your computer's open files, not for git: see the rejected
   *Dropping the VM's file-lookup cache* for how the two differ.
+- **Amended 2026-11-23:** the shim also answers `git worktree add` and `prune` in the box's own
+  project, with `fy worktree add` (ADR-0004's amendment). Guidance at the moment of the mistake, in
+  place of prose an agent may not read; nothing rests on it.
 
 ## Context
 
