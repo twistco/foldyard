@@ -14,9 +14,11 @@ registers it, like any existing worktree, and gives it the rest.
   your computer runs, and nothing is asked of it.
 * **Before anything installs.** ``git worktree add`` runs with the repo's hooks off, the volumes go
   on, and only then does the post-checkout hook run (a hook that installs is the usual one).
-* **The dir underneath is read-only** (0555), and your computer's share enforces that on the box's
-  root too. So where the volume isn't mounted (the box was restarted, gVisor) an install fails
-  instead of landing on your computer. Run the verb again to mount it; ``fy box up`` does it too.
+* **The dir underneath is read-only** (0555), for when the volume isn't mounted: the box was
+  restarted, or it runs under gVisor. A safety net, not a wall: it stops the installs that write
+  into the dir (npm, uv, pnpm's hoisted linker; measured 2026-11-23), and the box's root can
+  ``chmod`` it, or replace it, as pnpm's isolated linker does. Run the verb again to mount the
+  volume; ``fy box up`` does it too, when it makes the box.
 * **The volume is named as that worktree's own box would name it**, so promoting the worktree
   (``fy worktree add <name>`` on your computer) moves nothing: its box finds them as they are, and
   ``fy worktree remove`` sweeps them. Registering it also masks those dirs in this box, read-only
@@ -183,8 +185,8 @@ def _this_box() -> tuple[str, dict, str, str] | str:
     """``(engine, env, this box's name, its image)``, or why volumes can't be mounted into it."""
     from . import agents, box, sandbox
 
-    if sandbox.wanted():
-        return "this box runs under gVisor, whose own kernel never sees a mount added from outside"
+    if os.environ.get(sandbox.BAKED_ENV) == "gvisor":  # what this box runs under, not the config
+        return "this box runs under gVisor, which has no way to add one to a running box"
     engine, env = box.engine_env()
     name = agents.this_box().name
     out = subprocess.run(
@@ -205,7 +207,7 @@ def _why(status: str) -> str:
 
 def mount(wt_dir: Path, name: str) -> bool:
     """Put worktree ``name``'s volumes on its dependency dirs in this box, saying what happened.
-    True when every one is there. Where one isn't, its dir stays read-only: an install fails."""
+    True when every one is there. Where one isn't, its dir stays read-only (the net above)."""
     vols = volumes(wt_dir, name)
     if not vols:
         return True

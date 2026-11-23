@@ -283,10 +283,10 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   the box's own socket (`assets/boxworktree/attach.py` on stdin to the BOX's python, chrooted
   through `/proc/1/root`, as images needn't have one): `--pid container:<box>`, three capabilities,
   never `--privileged`, and `tests/test_boxworktree.py` pins that. The checkout runs with the repo's
-  hooks off, then the volumes, then the post-checkout hook. The dir underneath is 0555, which the
-  share enforces on the box's root, so an install without the volume fails. The marker that says a
-  box made one sits in the shared `.git`: reporting and in-box refusals only, nothing on the host
-  decides from it.
+  hooks off, then the volumes, then the post-checkout hook. The dir underneath is 0555, a safety net
+  while the volume isn't mounted: npm, uv and pnpm hoisted fail on it, but pnpm isolated replaces it
+  and the box's root can `chmod` it. The marker that says a box made one sits in the shared `.git`:
+  reporting and in-box refusals only, nothing on the host decides from it.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` · `vscode.py`
   · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI, `foldyard init`,
   bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>` podman connection

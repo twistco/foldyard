@@ -275,9 +275,10 @@ The volumes go into the running box through a one-off container that shares only
 processes and has three capabilities and no network; foldyard prints the command. Nothing runs on
 your computer. A restart of the box or the VM drops the mounts and keeps the volumes:
 `fy worktree add <name>` mounts them again, and so does creating the box. Until then each dir is
-read-only and empty, so an install fails instead of landing on your computer. Under the gVisor
-posture nothing can be mounted, so it stays that way: edit and commit there, and to install, ask for
-`fy worktree add` on your computer.
+read-only and empty, which stops npm, uv and pnpm's hoisted linker from installing onto your
+computer's disk. It is a safety net only: pnpm's isolated linker replaces the dir, and the box's
+root can. Under the gVisor posture nothing can be mounted, so it stays that way: edit and commit
+there, and to install, ask for `fy worktree add` on your computer.
 
 What it doesn't have is a stack, ports, a mode or adopted config. Commands in it run in the box that
 made it, under that box's mode, and `fy up` there is refused. To give it those, run the same command

@@ -46,12 +46,12 @@ def world(tmp_path, monkeypatch):
         (config, "worktree_base", lambda: None),
         (config, "in_box", lambda: True),
         (config, "active_worktree", lambda: ""),
-        (sandbox, "wanted", lambda: False),
         (box, "engine_env", lambda: ("podman", {"CONTAINER_HOST": "unix:///nonexistent/fy"})),
         (boxworktree, "_OWN_MOUNTINFO", table),
         (boxworktree.os.path, "ismount", lambda p: True),
     ):
         monkeypatch.setattr(mod, name, value)
+    monkeypatch.delenv(sandbox.BAKED_ENV, raising=False)
     monkeypatch.setenv(crossmask.SNAPSHOT_ENV, json.dumps({"registered": 3}))
     state: dict = {"calls": [], "answer": None, "order": []}
 
@@ -142,8 +142,8 @@ def test_the_hook_runs_once_the_volumes_are_on_and_not_at_the_checkout(world):
 
 
 def test_the_dir_under_a_volume_is_read_only(world):
-    # Your computer's share enforces the mode on the box's root too: where the volume isn't mounted
-    # (a restart), an install fails instead of landing on your disk.
+    # A safety net for where the volume isn't mounted (a restart): the share holds the box's root to
+    # the mode too, so an install that writes into the dir fails instead of landing on your disk.
     boxworktree.add("fix")
     for d in DIRS:
         assert (world["root"] / "fix" / d).stat().st_mode & 0o777 == 0o555
@@ -183,10 +183,17 @@ def test_a_dir_inside_another_declared_one_is_on_that_ones_volume(world, monkeyp
 
 
 def test_gvisor_mounts_nothing(world, monkeypatch, capsys):
-    monkeypatch.setattr(sandbox, "wanted", lambda: True)
+    monkeypatch.setenv(sandbox.BAKED_ENV, "gvisor")
     boxworktree.add("fix")
     assert _runs(world, "attach") == []
     assert "gVisor" in capsys.readouterr().err
+
+
+def test_what_the_box_runs_under_is_the_boxs_own_word_not_the_configs(world, monkeypatch):
+    # A posture turned on since this box was made: it still runs under the engine's own runtime.
+    monkeypatch.setattr(sandbox, "wanted", lambda: True)
+    boxworktree.add("fix")
+    assert len(_runs(world, "attach")) == 1
 
 
 def test_again_after_a_restart_mounts_the_volumes_again(world):
