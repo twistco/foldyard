@@ -1338,18 +1338,27 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     """Doctor row: worktree checkouts the host has NO record of (:mod:`foldyard.worktree_registry`)
     and therefore runs nothing for — no daemons, no git heal. WARN, naming each and the verb that
     registers it, so a worktree that went quiet (every one did, once, when the registry landed)
-    says why instead of looking broken."""
+    says why instead of looking broken. One a box made (:mod:`foldyard.boxworktree`) is meant to be
+    unregistered: named, not warned about — by the box's own marker, so it says whose word it is."""
     main = main_repo()
     try:
         known = worktree_registry.checkouts(main)
-        stray = worktree_registry.unregistered(main, config.worktrees_root(main))
+        from . import boxworktree
+
+        box_made = [n for n in boxworktree.names(main) if n not in known]
+        stray = [
+            n
+            for n in worktree_registry.unregistered(main, config.worktrees_root(main))
+            if n not in box_made
+        ]
     except OSError as e:  # pragma: no cover — unreadable state dir
         return _result(None, "worktrees", "", f"couldn't read the worktree registry: {e}")
     fixes = "; ".join(f"`fy worktree add {n}`" for n in stray)
     return _result(
         True if not stray else None,
         "worktrees",
-        f"{len(known)} registered",
+        f"{len(known)} registered"
+        + (f"; made in a box (by its own word): {', '.join(box_made)}" if box_made else ""),
         f"not registered, so your computer runs nothing for them: {', '.join(stray)} — {fixes}",
     )
 

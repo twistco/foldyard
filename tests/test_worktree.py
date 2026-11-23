@@ -1399,16 +1399,16 @@ def test_remove_retries_volume_cleanup_when_checkout_and_state_gone(fake_main, m
     assert not any("worktree" in c and "remove" in c for c in fake_main["calls"])
 
 
-def test_add_refuses_in_box(fake_main, monkeypatch, capsys):
-    # What `add` sets up — the registry, the adoption, a box of its own — is your computer's to
-    # make. The refusal points at what a box CAN do: a plain worktree inside the checkout.
+def test_add_in_a_box_is_the_boxs_own(fake_main, monkeypatch):
+    # The same verb, and nothing of your computer's: no registry, adoption or box.
+    from foldyard import boxworktree
+
+    seen = []
     monkeypatch.setattr(config, "in_box", lambda: True)
-    assert worktree.add("feat") == 1
-    assert not fake_main["calls"]  # bailed before shelling git
-    err = capsys.readouterr().err
-    assert "run on your computer" in err
-    assert "git worktree add --no-track -b <branch> .claude/worktrees/feat" in err
-    assert "fy docs git" in err
+    monkeypatch.setattr(boxworktree, "add", lambda *a, **k: seen.append((a, k)) or 0)
+    assert worktree.add("feat", "b", "main", box_up=False) == 0
+    assert seen == [(("feat", "b", "main"), {"box_up": False})]
+    assert not fake_main["calls"] and worktree_registry.checkouts(fake_main["main"]) == {}
 
 
 def test_remove_in_box_points_nowhere_else(fake_main, monkeypatch, capsys):
@@ -1515,7 +1515,7 @@ def test_remove_refuses_when_the_yard_cannot_answer(fake_main, capsys):
 
 
 def _nest(fake_main, wt, rel=".claude/worktrees/quick"):
-    """A worktree an agent made inside ``wt`` from its box (docs/git.md, quick worktrees)."""
+    """A worktree an agent made inside ``wt`` from its box (docs/git.md, worktrees a box makes)."""
     inner = wt / rel
     inner.mkdir(parents=True)
     (inner / ".git").write_text("")

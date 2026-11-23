@@ -314,8 +314,8 @@ def test_init_creates_gitignore_with_generated_artifacts(tmp_path):
     assert gi.count(init.GITIGNORE_BEGIN) == 1
 
 
-def test_init_ignores_agents_quick_worktrees(tmp_path):
-    # An agent's quick worktree lives in the checkout (docs/git.md, "Quick worktrees in a box"):
+def test_init_ignores_agents_own_worktrees(tmp_path):
+    # One an agent's own worktree tool makes lives in the checkout (docs/git.md, "Worktrees a box makes"):
     # Claude Code's own `.claude/worktrees/<name>`. Unignored, every one shows up in main's status.
     assert init.init(path=str(tmp_path)) == 0
     assert ".claude/worktrees/" in (tmp_path / ".gitignore").read_text().splitlines()

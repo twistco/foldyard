@@ -1803,10 +1803,22 @@ def worktree_add(
     its box comes up next, once its config is adopted.
 
     On a worktree that already exists, registers it with your computer instead (after showing its
-    real path), so its daemons run again."""
+    real path), so its daemons run again.
+
+    In a box, makes a worktree to use from that box: a checkout whose dependency dirs are volumes,
+    with no stack, ports or mode of its own. Again mounts the volumes after the box restarted; on
+    your computer, registers it and gives it the rest."""
     from . import worktree
 
     raise typer.Exit(worktree.add(name, branch, base, assume_yes=yes, box_up=box_up))
+
+
+@worktree_app.command("remount", hidden=True)
+def worktree_remount() -> None:
+    """Mount the volumes of every worktree a box made (the box's bootstrap runs this)."""
+    from . import boxworktree, config
+
+    raise typer.Exit(boxworktree.mount_all() if config.in_box() else 1)
 
 
 @worktree_app.command("init")

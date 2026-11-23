@@ -1368,6 +1368,12 @@ def up() -> int:
     from . import preflight
 
     preflight.check_or_abort("fy up")
+    if config.in_box():  # before resolve(): the ports of a worktree made in a box aren't known
+        from . import boxworktree
+
+        main = main_repo()
+        if boxworktree.refuse_stack(main, _active_worktree(config.worktrees_root(main)), "fy up"):
+            return 1
     ctx = resolve()  # ensures the machine (so it's up even when there's no stack to start)
     _print_banner(ctx.env)
     # A successful `fy up` always restores the host-side half of the machine lifecycle, including

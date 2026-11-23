@@ -86,18 +86,20 @@ with their own tools. Don't route around it (another install dir, a copy, `chmod
 checkout's own box — the `RUN-IT-IN-ITS-OWN-BOX` file in the read-only dir has the command. If that
 box isn't running, `fy box up` for it runs only on their computer: ask them.
 
-## A quick worktree for a small change
+## A worktree of your own
 
-`fy worktree add` gives a worktree its own box, stack and ports, and only the human can run it. For
-a small change that needs none of that, make a plain git worktree from your box, inside the
-checkout: `git worktree add --no-track -b <branch> .claude/worktrees/<name> [<start>]` (where your
-own worktree tool puts it), and `git worktree remove` it when done. Always pass `--no-track`: from a
-remote start such as `origin/main` the branch would otherwise track it, and a push can land there.
-Inside the checkout its path is the same on their computer as in your box, which git's shared record
-of worktrees needs. Never put one anywhere else (`/tmp`, your home, the worktrees root), and never
-run `git worktree prune`. It has no volumes over its dependency dirs, so keep an install's output in
-the box (`UV_PROJECT_ENVIRONMENT=/tmp/<name>-venv`, say) rather than in the worktree. If the change
-needs a stack, ask for `fy worktree add`. `fy docs git` has the details.
+Run `fy worktree add <name>` in your box for a worktree that needs no stack: a checkout on its own
+branch, in the worktrees root, whose dependency dirs are volumes, so installs there are fast and
+stay off the human's disk. Commands in it run in your box, under its mode.
+`fy worktree remove <name>` removes it. `fy up` there is refused. If the change turns out to need a
+stack, ports or a box of its own, ask the human to run `fy worktree add <name> --box` on their
+computer, which registers it in place.
+
+If its dependency dirs are read-only and empty, the box was restarted: `fy worktree add <name>`
+mounts them again. Under gVisor it can't, and says so: if you need to install, ask the human for
+`fy worktree add <name> --box` and install in the box it makes. Don't make one with plain
+`git worktree add` (an install in it lands on the human's disk), and never run `git worktree prune`.
+`fy docs git` has the details.
 
 ## When you need something you don't have
 

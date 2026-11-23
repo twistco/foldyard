@@ -88,6 +88,12 @@ def _names(ctx) -> tuple[str, str]:
     return f"{ctx.project}-devbox", f"{ctx.project}_default"
 
 
+def shadow_volume(box: str, d: str) -> str:
+    """The named volume box ``box`` mounts over its ``[box].shadow_volumes`` dir ``d``. A worktree a box
+    made takes the name its own box would use (:mod:`foldyard.boxworktree`)."""
+    return f"{box}-shadow-" + d.replace("/", "-").replace(".", "-")
+
+
 def engine_env() -> tuple[str, dict]:
     """``(engine, env)`` for a one-off container run — no machine provisioning (``no_machine``), so a
     caller that only wants to run something in the yard doesn't create a VM to find out it can't.
@@ -399,6 +405,15 @@ def _mask_gaps(
     unreg = crossmask.unregistered(main)
     # `targets` always adds the main checkout's masks; those are `masks`', not an unregistered one's.
     strays = [m for m in crossmask.targets(checkout, main, wt_root, unreg, dirs)[0] if m.checkout]
+    if strays and _own_box(checkout):  # a box-made one's dirs hold volumes in this box
+        from . import boxworktree
+
+        held: set[str] = set()
+        for n, p in unreg.items():
+            held |= boxworktree.attached(boxworktree.volumes(p, n))
+        strays = [
+            m for m in strays if not any(m.path == h or m.path.startswith(f"{h}/") for h in held)
+        ]
     live = crossinject.check(
         engine,
         box,
@@ -2224,6 +2239,12 @@ fy_doctor_report || true
 """
 
 
+def _remount_worktrees() -> str:
+    """The bootstrap's last step before the doctor: a new box starts with none of the box-made
+    worktrees' volumes (:mod:`foldyard.boxworktree`). Best-effort, and quiet where there are none."""
+    return "command -v foldyard >/dev/null 2>&1 && foldyard worktree remount </dev/null || true"
+
+
 def _bootstrap_script(
     checkout: str, here: str, env: dict, subst: dict[str, str] | None = None
 ) -> str:
@@ -2266,6 +2287,7 @@ def _bootstrap_script(
         '[ -n "$_FY_BOOTSTRAP_FAILS" ] '
         '&& printf "⚠ bootstrap: step(s) failed:%s\\n" "$_FY_BOOTSTRAP_FAILS" || true'
     )
+    lines.append(_remount_worktrees())
     lines.append(_doctor_report(checkout))  # LAST: it judges what the steps left behind
     return "\n".join(lines)
 
@@ -2564,8 +2586,7 @@ def _up(
     # workaround): the volume masks the host bind mount at that subpath.
     shadow_args = []
     for d in config.box_shadow_volumes():
-        vn = f"{box}-shadow-" + d.replace("/", "-").replace(".", "-")
-        shadow_args += ["-v", f"{vn}:{checkout}/{d}"]
+        shadow_args += ["-v", f"{shadow_volume(box, d)}:{checkout}/{d}"]
     # …and every OTHER checkout this box binds gets those dirs masked read-only (crossmask): an
     # install there from this box would otherwise land on your computer's disk, shared with your
     # own tools. The worktrees come from the host's registry, never a listing of the mount.
