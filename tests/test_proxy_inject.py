@@ -1485,14 +1485,11 @@ async def test_no_credential_is_injected_or_reissued_on_cleartext(gh, monkeypatc
     assert inj._rule_for(tls) is not None
 
 
-async def test_preserve_foreign_leaves_an_exchanged_token_alone(
-    gh, monkeypatch, fake_minter, tmp_path
-):
-    # Copilot exchanges the injected GitHub token for a short-lived Copilot token via
-    # /copilot_internal/v2/token, then sends THAT as `Authorization: Bearer <exchanged>` to its API
-    # hosts. A lone matching rule must not overwrite it with the GitHub token it minted, or the CLI
-    # breaks. A request carrying the dummy (any scheme) — or no credential at all — still injects,
-    # and our own 401 re-issue (which reads the original dummy from `egress_proxy_sent`) still does.
+async def test_a_lone_rule_overwrites_a_box_held_credential(gh, monkeypatch, fake_minter, tmp_path):
+    # A Copilot rule names the dummy but injects on every matching request: the proxy decides the
+    # identity reaching the host. A stray in-box login (or an exchanged token a future CLI may
+    # send) is overwritten with our token, not forwarded. A request carrying the dummy in any
+    # scheme — or no credential at all — injects, and our own 401 re-issue still finds the rule.
     monkeypatch.setenv(
         "INJECT_RULES",
         json.dumps(
@@ -1504,22 +1501,21 @@ async def test_preserve_foreign_leaves_an_exchanged_token_alone(
                     "value_prefix": "Bearer ",
                     "dummies": ["gho_foldyarddummy"],
                     "any_scheme": True,
-                    "preserve_foreign": True,
                 }
             ]
         ),
     )
     monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
     inj = gh.Injector()
-    assert len(inj.rules) == 1 and inj.rules[0].preserve_foreign is True
+    assert len(inj.rules) == 1
 
-    exchanged = "Bearer tid=abc;exp=123;sku=bus"
+    box_token = "Bearer tid=abc;exp=123;sku=bus"  # what a login/exchange in the box would send
     f = _Flow("api.githubcopilot.com", path="/v1/chat/completions")
-    f.request.headers["Authorization"] = exchanged
-    assert inj._rule_for(f) is None
+    f.request.headers["Authorization"] = box_token
+    assert inj._rule_for(f) is inj.rules[0]
     await inj.request(f)
-    assert f.request.headers["Authorization"] == exchanged  # not overwritten
-    assert not f.metadata.get("egress_proxy_injected")
+    assert f.request.headers["Authorization"] == "Bearer token FAKE"
+    assert f.metadata.get("egress_proxy_injected") is True
 
     for sent in ("gho_foldyarddummy", "Bearer gho_foldyarddummy", "token gho_foldyarddummy"):
         f = _Flow("api.githubcopilot.com", path="/v1/chat/completions")

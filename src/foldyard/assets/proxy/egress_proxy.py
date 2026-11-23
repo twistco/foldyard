@@ -73,7 +73,7 @@ Without LIVE_FILE:
                     rewriting N hosts, each with its OWN minter + token cache + 401 retry:
                       [{"host","command","header"?,"value_prefix"?,"query_param"?,
                         "path_prefix"?,"retry_401"?,"ca_bundle"?,"dummies"?,"any_scheme"?,
-                        "preserve_foreign"?,"switch"?}, ...]
+                        "switch"?}, ...]
                     When set (non-empty) it WINS over the single INJECT_* vars below. Each object
                     is the same shape as one rule; an entry missing host or command is dropped.
                     EMPTY (default) → fall back to the legacy single-rule env below.
@@ -1060,9 +1060,6 @@ class _Rule:
             d for d in (dummies if isinstance(dummies, list) else ()) if isinstance(d, str) and d
         )
         self.any_scheme = spec.get("any_scheme") is True
-        # Leave a foreign credential in this rule's place alone (Copilot's exchanged token): see
-        # `Injector._rule_for`. Off by default — every other injector still overwrites its place.
-        self.preserve_foreign = spec.get("preserve_foreign") is True
         self.switch = str(spec.get("switch") or "")  # what turns it on, for `_unnamed_body`
         # This rule's own cached value + the monotonic time it stops being usable, behind a
         # lock because they are read/written from more than one thread: the `running` hook
@@ -1578,11 +1575,9 @@ class Injector:
         credential, on the way out (`request`) or on a 401 re-issue (`response`).
 
         One rule matching the host and path is THE rule, whatever the request carries — exactly as
-        before rules could share a host — save two cases: a request carrying only the dummy of
-        another credential on that host (on or at rest, whatever its path), in another place, which
-        gets that one's held answer or `_misdirected`'s instead; and a request to a rule that
-        `preserve_foreign`s carrying a credential that is neither its dummy nor its own injection
-        (Copilot's exchanged token), which is left alone. Several
+        before rules could share a host — save a request carrying only the dummy of another
+        credential on that host (on or at rest, whatever its path), in another place, which gets
+        that one's held answer or `_misdirected`'s instead. Several
         (header-disjoint injectors: the registry lets rules share a host and path only when each
         writes its own place and the box sends a dummy for each) → the one rule whose dummy the
         request carries in that rule's place, else none: a request naming none of them, or more
@@ -1601,18 +1596,6 @@ class Injector:
             # rule's own place the rule overwrites the dummy, and an active rule wins.)
             if rule is not None and not self._names(flow, rule) and self._stray(flow, rule):
                 rule = None
-            # A rule that must preserve a foreign credential (Copilot exchanges the injected
-            # GitHub token for a short-lived Copilot token and sends THAT to its API hosts)
-            # leaves the request alone when it already carries a credential in the rule's place
-            # that is neither our dummy nor our own injection. Carrying the dummy — or nothing —
-            # still injects, exactly as before.
-            if (
-                rule is not None
-                and rule.preserve_foreign
-                and not self._names(flow, rule)
-                and self._credential_in(flow, rule) is not None
-            ):
-                rule = None
         else:
             named = [rule for rule in matching if self._names(flow, rule)]
             rule = named[0] if len(named) == 1 else None
@@ -1629,23 +1612,18 @@ class Injector:
         return [rule for rule in self.rules if rule.matches(dest, flow.request.path)]
 
     @staticmethod
-    def _credential_in(flow: http.HTTPFlow, rule: _Rule) -> str | None:
-        """The value in the place this rule writes, READ AS THE BOX SENT IT: our own injection
-        (`egress_proxy_sent`) stands in for the original so a 401 re-issue still names the rule."""
-        sent = flow.metadata.get("egress_proxy_sent") or {}
-        if rule.place() in sent:
-            return sent[rule.place()]
-        if rule.query_param:
-            return flow.request.query.get(rule.query_param)
-        return flow.request.headers.get(rule.header)
-
-    @staticmethod
     def _names(flow: http.HTTPFlow, rule: _Rule) -> bool:
         """Does this request carry one of ``rule``'s dummies in the place it injects? Read as the
         box SENT it: once a rule has written its credential there (`_on_request`), the dummy it
         replaced is what counts — so the 401 re-issue and the log find the rule the request
         named, not whichever the minted value happens to look like."""
-        value = Injector._credential_in(flow, rule)
+        sent = flow.metadata.get("egress_proxy_sent") or {}
+        if rule.place() in sent:
+            value = sent[rule.place()]
+        elif rule.query_param:
+            value = flow.request.query.get(rule.query_param)
+        else:
+            value = flow.request.headers.get(rule.header)
         return any(_carries_dummy(value, d, rule.any_scheme) for d in rule.dummies)
 
     def _unnamed(self, flow: http.HTTPFlow) -> tuple[list[_Rule], int] | None:

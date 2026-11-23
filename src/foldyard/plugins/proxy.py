@@ -533,8 +533,6 @@ def _rule_to_json(rule, switch: str = "") -> dict:
         out["dummies"] = list(rule.dummies)  # how a request on a shared host names this rule
         if rule.any_scheme:
             out["any_scheme"] = True
-    if rule.preserve_foreign:
-        out["preserve_foreign"] = True
     if switch:
         out["switch"] = switch
     return out

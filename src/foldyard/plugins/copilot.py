@@ -13,9 +13,10 @@ injects it in flight (composes in the shared proxy's multi-injector rule set wit
 :data:`~foldyard.keyless.COPILOT_KEYLESS_HOSTS`. That list is not one host because Copilot talks to
 a PLAN-SPECIFIC API host (individual/business/enterprise) and ALWAYS validates the token against
 ``api.github.com`` before its first call — so the rule set covers each host that can carry it. A
-rule names the dummy (``any_scheme``: ``Bearer``/``token``/bare) and is flagged
-``preserve_foreign``: a request already carrying the real, exchanged Copilot token is left
-untouched, rather than overwritten with the GitHub token the proxy mints for the exchange.
+rule names the dummy (``any_scheme``: ``Bearer``/``token``/bare) and the proxy overwrites
+``Authorization`` on its hosts — so a credential obtained in the box is never forwarded. If a
+future CLI exchanges the injected token, that belongs in a new host-side keyless kind
+(ADR-0031), not in proxy routing.
 
 Facts verified against the installed CLI (1.0.109): state lives in ``$COPILOT_HOME`` (default
 ``~/.copilot``: ``settings.json``, the CLI-managed ``config.json``, ``permissions-config.json``,
@@ -116,10 +117,9 @@ class CopilotPlugin(Plugin):
         # experiments host. `any_scheme` because a GitHub client may send the bare token as
         # `Bearer x`, `token x` or bare — name the rule by the BARE taxonomy dummy (what the box
         # bakes), and let the proxy's `any_scheme` match whichever form the client puts on the
-        # header. `preserve_foreign`: the CLI exchanges that token for a short-lived Copilot token
-        # (via `copilot_internal/v2/token`) and sends THE EXCHANGED token to the API hosts — a lone
-        # rule would otherwise overwrite it with the GitHub token and break the CLI. Requests
-        # carrying the dummy (or nothing) are still injected as usual.
+        # header. There is no exchange special case: the proxy overwrites `Authorization` on these
+        # hosts, so a stray box-held token is never forwarded. A future CLI that exchanges the
+        # token should surface as a 401 and be handled by a new host-side keyless kind (ADR-0031).
         kind = config.copilot_keyless()
         if not kind or mode.get("copilot", "off") == "off":
             return []
@@ -136,7 +136,6 @@ class CopilotPlugin(Plugin):
                         rule,
                         dummies=(spec["dummy"],),
                         any_scheme=True,
-                        preserve_foreign=True,
                     )
                 )
         return out
