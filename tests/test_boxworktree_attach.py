@@ -1,5 +1,5 @@
-"""The helper that puts a quick worktree's volume on a dir of a running box, its logic over a fake
-kernel (the real one: test_box_e2e's quick worktree)."""
+"""The helper that puts a box-made worktree's volume on a dir of a running box, its logic over a fake
+kernel (the real one: test_box_e2e's box-made worktree)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import quick
+from foldyard import boxworktree
 
-_spec = importlib.util.spec_from_file_location("fy_quick_attach", quick.HELPER)
+_spec = importlib.util.spec_from_file_location("fy_boxworktree_attach", boxworktree.HELPER)
 assert _spec and _spec.loader
 attach = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(attach)
@@ -99,4 +99,4 @@ def test_usage_and_a_refusal_are_json():
         raise OSError(errno.EPERM, "setns")
 
     assert attach.main(["attach", "/w/a"], no) == {"refused": "setns", "results": {}}
-    assert Path(quick.HELPER).is_file()
+    assert Path(boxworktree.HELPER).is_file()

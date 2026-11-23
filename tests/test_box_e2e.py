@@ -48,8 +48,8 @@ LINKED = "linked"
 # One `fy worktree add` makes for real, once the box image exists: its files are checked out in a
 # container from that image, never on your computer.
 FRESH = "fresh"
-# One the BOX makes for itself (`fy worktree quick`), then one promoted on your computer.
-QUICK = "quick"
+# One the BOX makes (`fy worktree add`, in it), then registered on your computer.
+MADE = "made"
 
 
 @pytest.fixture(scope="module")
@@ -73,7 +73,7 @@ def repo(tmp_path_factory):
     fy_ok(["box", "up"], r, timeout=1500)
     yield r
     fy(["box", "down"], r, timeout=300)
-    for name in (FRESH, OTHER, LATE, LINKED, QUICK):  # FRESH, QUICK: if their tests failed
+    for name in (FRESH, OTHER, LATE, LINKED, MADE):  # FRESH, MADE: if their tests failed
         if _other(r, name).exists():
             fy(["worktree", "remove", name, "--yes", "--force"], r, timeout=600)
     fy(["down"], r, timeout=180)
@@ -248,14 +248,14 @@ def _in_box(repo, cmd, ok=True):
     return (fy_ok if ok else fy)(["box", "exec", cmd], repo, timeout=300)
 
 
-def test_a_box_makes_a_quick_worktree_and_your_computer_promotes_it(repo):
+def test_a_box_makes_a_worktree_and_your_computer_registers_it(repo):
     # Made by the box alone: a volume over the dependency dir, through the socket it already holds.
-    wt, venv = _other(repo, QUICK), _other(repo, QUICK) / "api" / ".venv"
-    made = _in_box(repo, f"cd {repo} && fy worktree quick {QUICK}")
+    wt, venv = _other(repo, MADE), _other(repo, MADE) / "api" / ".venv"
+    made = _in_box(repo, f"cd {repo} && fy worktree add {MADE}")
     assert "api/.venv is on a volume in this box" in made.out, made.out
     assert "no volume on" not in made.out, made.out
     assert (wt / "compose.yml").read_text() == (repo / "compose.yml").read_text()
-    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"wt/{QUICK}"
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD").strip() == f"wt/{MADE}"
     _in_box(repo, f"touch {venv}/installed")
     assert list(venv.iterdir()) == []  # nothing reached your computer's disk
     assert _git(wt, "status", "--porcelain") == ""
@@ -264,36 +264,36 @@ def test_a_box_makes_a_quick_worktree_and_your_computer_promotes_it(repo):
     # Neither side calls it a problem, and it has no stack.
     doctor = _in_box(repo, f"cd {repo} && fy doctor", ok=False)
     assert f"{wt}/" not in doctor.out, doctor.out  # (LINKED's link is rightly still named)
-    assert "(quick)" in fy_ok(["worktree", "list"], repo, timeout=120).out
+    assert "(made in a box)" in fy_ok(["worktree", "list"], repo, timeout=120).out
     up = _in_box(repo, f"cd {wt} && fy up", ok=False)
-    assert up.rc != 0 and "is a quick worktree" in up.out, up.out
+    assert up.rc != 0 and f"a box made '{MADE}'" in up.out, up.out
 
     # A restart drops the mount: the box's root can't install onto your computer's disk meanwhile.
     assert engine("restart", "-t", "1", BOX, timeout=120).returncode == 0
     blocked = _in_box(repo, f"touch {venv}/x", ok=False)
     assert blocked.rc != 0 and "Permission denied" in blocked.out, blocked.out
-    _in_box(repo, f"cd {repo} && fy worktree quick {QUICK}")
+    _in_box(repo, f"cd {repo} && fy worktree add {MADE}")
     assert "installed" in _in_box(repo, f"ls {venv}").out  # the volume kept what was there
 
     # Uncommitted work keeps it; committed, it goes, volume and all, and comes back empty.
     _in_box(repo, f"touch {wt}/notes")
-    kept = _in_box(repo, f"cd {repo} && fy worktree remove {QUICK}", ok=False)
+    kept = _in_box(repo, f"cd {repo} && fy worktree remove {MADE}", ok=False)
     assert kept.rc != 0 and "uncommitted work" in kept.out, kept.out
     _in_box(repo, f"rm {wt}/notes")
-    _in_box(repo, f"cd {repo} && fy worktree remove {QUICK}")
+    _in_box(repo, f"cd {repo} && fy worktree remove {MADE}")
     assert not wt.exists()
-    assert f"{PROJECT}-{QUICK}-devbox-shadow" not in engine("volume", "ls", "-q").stdout
-    _in_box(repo, f"cd {repo} && fy worktree quick {QUICK} && touch {venv}/installed")
+    assert f"{PROJECT}-{MADE}-devbox-shadow" not in engine("volume", "ls", "-q").stdout
+    _in_box(repo, f"cd {repo} && fy worktree add {MADE} && touch {venv}/installed")
 
-    # Promoted: registered in place, its volume kept, and this box's view of it masked over it.
-    added = fy_ok(["worktree", "add", QUICK, "--yes"], repo, timeout=300)
-    assert f"worktree '{QUICK}' registered" in added.out, added.out
+    # Registered in place: its volume kept, and this box's view of it masked over it.
+    added = fy_ok(["worktree", "add", MADE, "--yes"], repo, timeout=300)
+    assert f"worktree '{MADE}' registered" in added.out, added.out
     _adopt_on_host(wt)  # so the teardown's `worktree remove` can resolve its stack
-    assert "(quick)" not in fy_ok(["worktree", "list"], repo, timeout=120).out
+    assert "(made in a box)" not in fy_ok(["worktree", "list"], repo, timeout=120).out
     masked = _in_box(repo, f"touch {venv}/x", ok=False)
     assert masked.rc != 0 and "Read-only file system" in masked.out, masked.out
     assert venv.stat().st_mode & 0o777 == 0o755  # an ordinary dir again, on your computer
     held = engine(
-        "run", "--rm", "-v", f"{PROJECT}-{QUICK}-devbox-shadow-api--venv:/v:ro", ALPINE, "ls", "/v"
+        "run", "--rm", "-v", f"{PROJECT}-{MADE}-devbox-shadow-api--venv:/v:ro", ALPINE, "ls", "/v"
     )
     assert "installed" in held.stdout, held.stdout + held.stderr

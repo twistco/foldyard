@@ -1792,36 +1792,22 @@ def worktree_add(
     its box comes up next, once its config is adopted.
 
     On a worktree that already exists, registers it with your computer instead (after showing its
-    real path), so its daemons run again."""
+    real path), so its daemons run again.
+
+    In a box, makes a worktree to use from that box: a checkout whose dependency dirs are volumes,
+    with no stack, ports or mode of its own. Again mounts the volumes after the box restarted; on
+    your computer, registers it and gives it the rest."""
     from . import worktree
 
     raise typer.Exit(worktree.add(name, branch, base, assume_yes=yes, box_up=box_up))
 
 
-@worktree_app.command("quick")
-def worktree_quick(
-    name: str = typer.Argument("", help="worktree dir name (under the worktrees root)"),
-    branch: str = typer.Argument("", help="branch (default: wt/<name>; created if it's new)"),
-    base: str = typer.Option(
-        "", "--from", help="ref a NEW branch forks from (default: the project's default branch)"
-    ),
-    every: bool = typer.Option(
-        False, "--all", help="mount every quick worktree's volumes again (after a box restart)"
-    ),
-) -> None:
-    """Make a worktree from inside the box, for a change that needs no stack of its own.
+@worktree_app.command("remount", hidden=True)
+def worktree_remount() -> None:
+    """Mount the volumes of every worktree a box made (the box's bootstrap runs this)."""
+    from . import boxworktree, config
 
-    A checkout on its own branch, whose dependency dirs are volumes, so installs there are fast
-    and stay off your computer's disk. Nothing is asked of the operator. Run it again to mount the
-    volumes after the box restarted. `fy worktree remove` removes it; `fy worktree add <name>` on
-    your computer gives it a box, a stack and ports."""
-    from . import quick
-
-    if every:
-        raise typer.Exit(quick.mount_all() if quick.config.in_box() else 1)
-    if not name:
-        raise typer.BadParameter("a worktree name (or --all)")
-    raise typer.Exit(quick.add(name, branch, base))
+    raise typer.Exit(boxworktree.mount_all() if config.in_box() else 1)
 
 
 @worktree_app.command("init")

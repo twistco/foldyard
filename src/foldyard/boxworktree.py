@@ -1,16 +1,17 @@
-"""Quick worktrees — ``fy worktree quick <name>``, the worktree a box makes for itself.
+"""Worktrees a box makes: ``fy worktree add <name>``, run in a box.
 
-``fy worktree add`` sets up a worktree's own box, stack, ports and adopted config, which only your
-computer can do. A change that needs none of that needs a checkout and somewhere to install: this
-makes both, from the box, with nobody asked. The checkout goes in the worktrees root, where every
-worktree is, on its own branch; each ``[box].shadow_volumes`` dir in it gets a volume, so an
-install there runs at VM-disk speed and leaves nothing on your computer's disk (a plain ``git
-worktree add`` puts all of it there, through the share).
+On your computer that verb sets up a worktree's own box, stack, ports and adopted config, which only
+your computer can do. A change that needs none of that needs a checkout and somewhere to install,
+and in a box the same verb makes both, with nobody asked. The checkout goes in the worktrees root,
+where every worktree is, on its own branch; each ``[box].shadow_volumes`` dir in it gets a volume,
+so an install there runs at VM-disk speed and leaves nothing on your computer's disk (a plain ``git
+worktree add`` puts all of it there, through the share). The same command on your computer later
+registers it, like any existing worktree, and gives it the rest.
 
 * **The volume is mounted into the running box** by a one-off container (:func:`_helper`,
-  ``assets/quick/attach.py``) through the engine socket the box already holds. It shares the box's
-  pid namespace, drops every capability and takes back the three the mount needs. Nothing on your
-  computer runs, and nothing is asked of it.
+  ``assets/boxworktree/attach.py``) through the engine socket the box already holds. It shares the
+  box's pid namespace, drops every capability and takes back the three the mount needs. Nothing on
+  your computer runs, and nothing is asked of it.
 * **Before anything installs.** ``git worktree add`` runs with the repo's hooks off, the volumes go
   on, and only then does the post-checkout hook run (a hook that installs is the usual one).
 * **The dir underneath is read-only** (0555), and your computer's share enforces that on the box's
@@ -21,7 +22,7 @@ worktree add`` puts all of it there, through the share).
   ``fy worktree remove`` sweeps them. Registering it also masks those dirs in this box, read-only
   on top of the volume, like any registered worktree's (:mod:`foldyard.crossmask`).
 
-What makes one "quick" is :data:`MARKER` in its git admin dir, inside the shared ``.git`` the box
+What makes one box-made is :data:`MARKER` in its git admin dir, inside the shared ``.git`` the box
 writes: reporting, and the in-box refusals below. Your computer decides nothing from it."""
 
 from __future__ import annotations
@@ -36,8 +37,8 @@ from pathlib import Path
 
 from . import config, crossmask, stack, worktree
 
-MARKER = "fy-quick"
-HELPER = Path(__file__).resolve().parent / "assets" / "quick" / "attach.py"
+MARKER = "fy-box-made"
+HELPER = Path(__file__).resolve().parent / "assets" / "boxworktree" / "attach.py"
 CAPS = ("sys_admin", "sys_chroot", "sys_ptrace")  # setns + mount, its chroot, reading /proc/1/ns
 TIMEOUT_S = 60.0
 _OWN_MOUNTINFO = Path("/proc/self/mountinfo")
@@ -55,7 +56,7 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
 
 
-# ── what a quick worktree is ──────────────────────────────────────────────────────────
+# ── what a box-made worktree is ──────────────────────────────────────────────────────────
 
 
 def _marker(main: Path, wt_dir: Path) -> Path | None:
@@ -70,8 +71,8 @@ def _marker(main: Path, wt_dir: Path) -> Path | None:
     return home / admin.name / MARKER
 
 
-def is_quick(main: Path, wt_dir: Path) -> bool:
-    """Whether ``wt_dir`` is a quick worktree (and not one promoted since). REPORTING, and the
+def is_box_made(main: Path, wt_dir: Path) -> bool:
+    """Whether a box made worktree ``wt_dir`` (and it isn't registered since). REPORTING, and the
     in-box refusals: the marker is box-written."""
     marker = _marker(main, wt_dir)
     try:
@@ -81,13 +82,13 @@ def is_quick(main: Path, wt_dir: Path) -> bool:
 
 
 def names(main: Path) -> list[str]:
-    """The quick worktrees under the worktrees root. REPORTING only."""
+    """The box-made worktrees under the worktrees root. REPORTING only."""
     root = config.worktrees_root(main)
     try:
         dirs = sorted(d for d in root.iterdir() if d.is_dir() and not d.is_symlink())
     except OSError:
         return []
-    return [d.name for d in dirs if is_quick(main, d)]
+    return [d.name for d in dirs if is_box_made(main, d)]
 
 
 def volumes(wt_dir: Path, name: str) -> dict[str, str]:
@@ -237,8 +238,9 @@ def mount(wt_dir: Path, name: str) -> bool:
 
 
 def mount_all() -> int:
-    """``fy worktree quick --all``: every quick worktree's volumes, after a restart of the box
-    dropped them (the box's bootstrap runs it). Best-effort: a report, never a failed bootstrap."""
+    """Every box-made worktree's volumes again, after a restart of the box dropped them (the box's
+    bootstrap runs it, as the hidden ``fy worktree remount``). Best-effort: a report, never a
+    failed bootstrap."""
     main = stack.main_repo()
     root = config.worktrees_root(main)
     for name in names(main):
@@ -270,11 +272,13 @@ def _add_argv(main: Path, wt_dir: Path, branch: str, base: str) -> list[str] | N
     return ["worktree", "add", "--no-track", "-b", branch, str(wt_dir), *([ref] if ref else [])]
 
 
-def add(name: str, branch: str = "", base: str = "") -> int:
-    """Make quick worktree ``name``, or (it exists) mount its volumes again."""
-    if not config.in_box():
-        _err("✗ `fy worktree quick` runs in a box. On your computer:")
-        _err(f"  `fy worktree add {shlex.quote(name)}`.")
+def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> int:
+    """``fy worktree add`` in a box: make worktree ``name``, or (one it made) mount its volumes
+    again. ``box_up`` (``--box``) is your computer's to do, so it is refused."""
+    if box_up:
+        _err("✗ --box: a box can't start another worktree's. Without it, this makes a worktree to")
+        _err("  use from this box; with it, on the operator's computer, one with a box of its own:")
+        _err(f"  `fy worktree add {shlex.quote(name)} --box`.")
         return 1
     if worktree.refuse_name(name, branch):
         return 1
@@ -286,8 +290,8 @@ def add(name: str, branch: str = "", base: str = "") -> int:
         _err(f"  `WORKTREE={shlex.quote(name)} fy box exec '<command>'`.")
         return 1
     if wt_dir.is_symlink() or wt_dir.exists():
-        if not is_quick(main, wt_dir):
-            _err(f"✗ {wt_dir} already exists and isn't a quick worktree")
+        if not is_box_made(main, wt_dir):
+            _err(f"✗ {wt_dir} already exists, and no box made it with `fy worktree add`")
             return 1
         return 0 if mount(wt_dir, name) else 1
     inside = str(root).startswith(f"{main}/")  # then the checkout's own mount covers it
@@ -304,7 +308,9 @@ def add(name: str, branch: str = "", base: str = "") -> int:
         _err("✗ git worktree add failed")
         return rc
     if (marker := _marker(main, wt_dir)) is not None:
-        marker.write_text("made by `fy worktree quick`; `fy worktree add` promotes it\n")
+        marker.write_text(
+            "made by `fy worktree add` in a box; the same on your computer registers it\n"
+        )
     ready = mount(wt_dir, name)
     head = worktree._git_read(wt_dir, "rev-parse", "HEAD", capture_output=True, text=True).stdout
     if ready:
@@ -313,7 +319,7 @@ def add(name: str, branch: str = "", base: str = "") -> int:
             _err("⚠ the repo's post-checkout hook failed (above); the worktree is fine")
     else:
         _err("  The repo's post-checkout hook wasn't run: it may install.")
-    print(f"\n✓ quick worktree: {wt_dir}  (branch {branch})")
+    print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
     print("  It has no stack, ports or mode of its own: commands in it run in this box.")
     print(f"  Done with it:  fy worktree remove {shlex.quote(name)}")
     print(
@@ -323,7 +329,7 @@ def add(name: str, branch: str = "", base: str = "") -> int:
 
 
 def remove(name: str, force: bool = False) -> int:
-    """``fy worktree remove`` in a box, for a quick worktree: its checkout and its volumes. The
+    """``fy worktree remove`` in a box, for one a box made: its checkout and its volumes. The
     branch stays. Uncommitted work refuses, unless ``force``."""
     if worktree.refuse_name(name):
         return 1
@@ -365,31 +371,31 @@ def remove(name: str, force: bool = False) -> int:
         )
         if gone.returncode != 0:
             _err(f"⚠ some of its volumes stay ({gone.stderr.strip()})")
-    print(f"✓ quick worktree '{name}' removed (its branch stays)")
+    print(f"✓ worktree '{name}' removed (its branch stays)")
     return 0
 
 
 def refuse_stack(main: Path, name: str, verb: str) -> bool:
-    """Refuse (True) a stack verb in quick worktree ``name``, in a box: it has no ports or adopted
+    """Refuse (True) a stack verb in box-made worktree ``name``, in a box: no ports or adopted
     config of its own, so the stack would be one nothing on your computer manages. Never on your
     computer: the marker is the box's word (planted in a registered worktree's admin dir, it would
     stop that worktree's `fy up`), and an unregistered worktree has no adopted config to run."""
-    if not config.in_box() or not name or not is_quick(main, config.worktrees_root(main) / name):
+    if not config.in_box() or not name or not is_box_made(main, config.worktrees_root(main) / name):
         return False
-    _err(f"✗ `{verb}`: '{name}' is a quick worktree, which has no stack of its own. Promote it on")
+    _err(f"✗ `{verb}`: a box made '{name}', so it has no stack of its own. Register it on")
     _err(f"  your computer first: `fy worktree add {shlex.quote(name)} --box`.")
     return True
 
 
 def promoted(main: Path, wt_dir: Path) -> None:
-    """On your computer, once ``wt_dir`` is registered: it is no longer quick, and the read-only
+    """On your computer, once ``wt_dir`` is registered: an ordinary worktree now, and the read-only
     dirs its volumes sat on are ordinary ones again (an install of yours there works, as in any
     worktree). Every path below ``main`` and the worktrees root is box-writable: no link is
     followed. Best-effort."""
     from . import mountwrite
 
     marker = _marker(main, wt_dir)
-    if marker is None or not is_quick(main, wt_dir):
+    if marker is None or not is_box_made(main, wt_dir):
         return
     for t in volumes(wt_dir, wt_dir.name):
         try:
@@ -399,4 +405,4 @@ def promoted(main: Path, wt_dir: Path) -> None:
     try:
         mountwrite.unlink(main, marker.relative_to(main))
     except (OSError, ValueError) as e:
-        _err(f"⚠ couldn't clear the quick-worktree marker ({e}): `fy up` in a box refuses it")
+        _err(f"⚠ couldn't clear the box-made marker ({e}): `fy up` in a box refuses it")

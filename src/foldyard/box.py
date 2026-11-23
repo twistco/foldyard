@@ -89,8 +89,8 @@ def _names(ctx) -> tuple[str, str]:
 
 
 def shadow_volume(box: str, d: str) -> str:
-    """The named volume box ``box`` mounts over its ``[box].shadow_volumes`` dir ``d``. A quick
-    worktree's volumes take the name its own box would use (:mod:`foldyard.quick`)."""
+    """The named volume box ``box`` mounts over its ``[box].shadow_volumes`` dir ``d``. A worktree a box
+    made takes the name its own box would use (:mod:`foldyard.boxworktree`)."""
     return f"{box}-shadow-" + d.replace("/", "-").replace(".", "-")
 
 
@@ -405,12 +405,12 @@ def _mask_gaps(
     unreg = crossmask.unregistered(main)
     # `targets` always adds the main checkout's masks; those are `masks`', not an unregistered one's.
     strays = [m for m in crossmask.targets(checkout, main, wt_root, unreg, dirs)[0] if m.checkout]
-    if strays and _own_box(checkout):  # a quick worktree's dirs hold its own volumes in this box
-        from . import quick
+    if strays and _own_box(checkout):  # a box-made one's dirs hold volumes in this box
+        from . import boxworktree
 
         held: set[str] = set()
         for n, p in unreg.items():
-            held |= quick.attached(quick.volumes(p, n))
+            held |= boxworktree.attached(boxworktree.volumes(p, n))
         strays = [m for m in strays if m.path not in held]
     live = crossinject.check(
         engine,
@@ -2237,10 +2237,10 @@ fy_doctor_report || true
 """
 
 
-def _quick_remount() -> str:
-    """The bootstrap's last step before the doctor: a new box starts with none of the quick
-    worktrees' volumes (:mod:`foldyard.quick`). Best-effort, and quiet where there are none."""
-    return "command -v foldyard >/dev/null 2>&1 && foldyard worktree quick --all </dev/null || true"
+def _remount_worktrees() -> str:
+    """The bootstrap's last step before the doctor: a new box starts with none of the box-made
+    worktrees' volumes (:mod:`foldyard.boxworktree`). Best-effort, and quiet where there are none."""
+    return "command -v foldyard >/dev/null 2>&1 && foldyard worktree remount </dev/null || true"
 
 
 def _bootstrap_script(
@@ -2285,7 +2285,7 @@ def _bootstrap_script(
         '[ -n "$_FY_BOOTSTRAP_FAILS" ] '
         '&& printf "⚠ bootstrap: step(s) failed:%s\\n" "$_FY_BOOTSTRAP_FAILS" || true'
     )
-    lines.append(_quick_remount())
+    lines.append(_remount_worktrees())
     lines.append(_doctor_report(checkout))  # LAST: it judges what the steps left behind
     return "\n".join(lines)
 

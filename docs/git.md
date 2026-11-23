@@ -188,7 +188,7 @@ For parallel work, make a worktree on your computer with `fy worktree add <name>
 and branch (`wt/<name>` by default, forked from the trunk), its own box, stack, mode and ports, all
 in the one VM. `fy worktree add` runs only on your computer and refuses in a box. For a small change
 that needs none of that, an agent can make a plain git worktree in its box instead: see
-[quick worktrees in a box](#quick-worktrees-in-a-box).
+[worktrees a box makes](#worktrees-a-box-makes).
 
 Your computer runs each checkout's *adopted* `foldyard.toml`, never the working tree
 ([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)), so
@@ -223,7 +223,7 @@ them). Where it can't — a box under the gVisor posture, a rootful engine in th
 than Linux 5.12, or a dependency dir that's a symlink — it names the box and says why, and
 recreating that box masks it; `fy doctor`'s `box shadowing` row reports a box that still lacks one.
 Only worktrees registered with your computer are masked: a
-[quick worktree](#quick-worktrees-in-a-box) has volumes instead, and one made with plain
+[worktree a box made](#worktrees-a-box-makes) has volumes instead, and one made with plain
 `git worktree add` is masked in no box, recreated or not, until `fy worktree add <name>` on your
 computer registers it (it asks first). The row lists those apart, with that fix.
 
@@ -254,18 +254,18 @@ the worktree matters, `--discard` removes it without checking or saving anything
 submodules still needs `--force` as well, as without `--discard`). If the check or the save fails,
 the worktree is kept.
 
-### Quick worktrees in a box
+### Worktrees a box makes
 
 A change that needs no stack of its own (a fix, a doc edit, a review branch, unit tests) doesn't
-need its own box. From a box, an agent or you can make a worktree without anyone on your computer:
+need its own box. Run in a box, `fy worktree add` makes a worktree with nobody on your computer:
 
 ```bash
-fy worktree quick <name> [<branch>]     # branch: wt/<name>, off the default branch, untracked
+fy worktree add <name> [<branch>]       # branch: wt/<name>, off the default branch, untracked
 # … edit, install, test, commit …
 fy worktree remove <name>               # in the box: its checkout and volumes; the branch stays
 ```
 
-It is an ordinary git worktree in the worktrees root, beside the ones `fy worktree add` makes. Your
+It is an ordinary git worktree in the worktrees root, beside those made on your computer. Your
 computer sees the files, the branch and its commits at once. Its dependency dirs
 (`[box].shadow_volumes`) are volumes in the box that made it, so an install there runs at VM-disk
 speed and leaves nothing on your computer's disk. They are mounted before the repo's post-checkout
@@ -274,16 +274,17 @@ hook runs, so a hook that installs is covered too.
 The volumes go into the running box through a one-off container that shares only the box's own
 processes and has three capabilities and no network; foldyard prints the command. Nothing runs on
 your computer. A restart of the box or the VM drops the mounts and keeps the volumes:
-`fy worktree quick <name>` mounts them again, and so does creating the box. Until then each dir is
+`fy worktree add <name>` mounts them again, and so does creating the box. Until then each dir is
 read-only and empty, so an install fails instead of landing on your computer. Under the gVisor
-posture nothing can be mounted, so it stays that way: edit and commit there, but ask for
-`fy worktree add` to install.
+posture nothing can be mounted, so it stays that way: edit and commit there, and to install, ask for
+`fy worktree add` on your computer.
 
 What it doesn't have is a stack, ports, a mode or adopted config. Commands in it run in the box that
-made it, under that box's mode, and `fy up` there is refused. To give it those, promote it, on your
-computer: `fy worktree add <name> --box`. Its new box finds the dependency volumes as they are, and
-the box that made it then sees them read-only, like any other registered worktree's. Promoting
-doesn't run `[project].worktree_init`: `fy worktree init <name>` does.
+made it, under that box's mode, and `fy up` there is refused. To give it those, run the same command
+on your computer, which registers it: `fy worktree add <name> --box`. Its new box finds the
+dependency volumes as they are, and the box that made it then sees them read-only, like any other
+registered worktree's. Registering doesn't run `[project].worktree_init`: `fy worktree init <name>`
+does.
 
 Don't use a plain `git worktree add` in a box instead: an install in one lands on your computer's
 disk, with paths only the box can run, and macOS keeps a file open for each file of it the VM reads.

@@ -36,20 +36,15 @@ def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
 
 
-def _host_only(verb: str, quick: str = "") -> int | None:
-    """Worktree add/remove are host-only: what they make and unmake is your computer's — the
-    worktree registry, the adopted config, a box and a stack of its own — and a box can't make its
-    own box. (A box sees the worktrees root at the same path your computer does; the old reason
-    here, a box-local root, no longer holds.) For ``add``, ``quick`` names the quick worktree a box
-    CAN make itself (:mod:`foldyard.quick`). None when OK
-    to proceed."""
+def _host_only(verb: str) -> int | None:
+    """Removing a worktree your computer registered is your computer's: its registry, adopted
+    config, box and stack are there. (In a box, ``add`` and ``remove`` work on the box's own:
+    :mod:`foldyard.boxworktree`.) None when OK to proceed."""
     if config.in_box():
-        _err(f"✗ run on your computer — `fy worktree {verb}` sets up the worktree's own box, stack")
-        _err("  and config there, which a box can't do for itself.")
-        if quick:
-            _err("  For a change that needs none of that, make a quick one from here:")
-            _err(f"      fy worktree quick {shlex.quote(quick)}")
-            _err("  (`fy docs git`, under quick worktrees in a box, says what it lacks).")
+        _err(
+            f"✗ run on your computer — `fy worktree {verb}` of a worktree registered there, or of a"
+        )
+        _err("  plain git one, acts on what a box can't reach. (A box removes the ones it made.)")
         return 1
     return None
 
@@ -1129,8 +1124,8 @@ def _box_up(name: str) -> int:
 
 
 def refuse_name(name: str, branch: str = "") -> bool:
-    """Refuse (True), saying why, a worktree ``name`` foldyard can't use: the shared rules of
-    ``fy worktree add`` and ``quick``."""
+    """Refuse (True), saying why, a worktree ``name`` foldyard can't use: the same rules on
+    your computer and in a box."""
     if name == "main":
         # "main" is the positional label for the PRIMARY checkout (the repo root) in the workspaces
         # view + its posture dir; a worktree named "main" would show as a second "main" card (and
@@ -1185,8 +1180,10 @@ def add(
     worktree add``) it registers instead, once the operator has confirmed its real path — the one
     way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
     ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
-    if (rc := _host_only("add", quick=name)) is not None:
-        return rc
+    if config.in_box():
+        from . import boxworktree
+
+        return boxworktree.add(name, branch, base, box_up=box_up)
     if refuse_name(name, branch):
         return 1
     main = stack.main_repo()
@@ -1384,9 +1381,9 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
     except ValueError as e:
         _err(f"✗ {e}")
         return 1
-    from . import quick
+    from . import boxworktree
 
-    quick.promoted(main, wt_dir)
+    boxworktree.promoted(main, wt_dir)
     _claim_ports(name)
     print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
     _say_unmasked(main, name, fresh=False)
@@ -1487,12 +1484,12 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
     :func:`_registered_worktree`): under ``--force`` the dir is deleted directly +
     ``git worktree prune``, since ``git worktree remove`` can't remove what git no longer
     tracks. Git has nothing there to check or park, so no yard is needed."""
-    from . import box, quick, transcripts
+    from . import box, boxworktree, transcripts
 
-    if config.in_box() and quick.is_quick(
+    if config.in_box() and boxworktree.is_box_made(
         stack.main_repo(), config.worktrees_root(stack.main_repo()) / name
     ):
-        return quick.remove(name, force=force or discard)
+        return boxworktree.remove(name, force=force or discard)
     if (rc := _host_only("remove")) is not None:
         return rc
     main = stack.main_repo()
@@ -1661,22 +1658,22 @@ def list_() -> int:
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
     known = set() if config.in_box() else set(worktree_registry.checkouts(main))
-    from . import quick
+    from . import boxworktree
 
-    quick_names = set(quick.names(main)) - known
+    made_here = set(boxworktree.names(main)) - known
     print(f"  {'main':<18} {_branch_of(main):<28} {main}")
     if wt_root.is_dir():
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
                 if d.name in known:
                     note = ""
-                elif d.name in quick_names:
-                    note = "  (quick)"
+                elif d.name in made_here:
+                    note = "  (made in a box)"
                 else:
                     note = "" if config.in_box() else "  (not registered)"
                 print(f"  {d.name:<18} {_branch_of(d):<28} {d}{note}")
     stray = [] if config.in_box() else worktree_registry.unregistered(main, wt_root)
-    if stray := [n for n in stray if n not in quick_names]:
+    if stray := [n for n in stray if n not in made_here]:
         print(f"\n  Not registered — your computer runs nothing for: {', '.join(stray)}.")
         print("  If one is yours: `fy worktree add <name>` (asks before registering).")
     return 0

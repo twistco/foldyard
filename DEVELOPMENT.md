@@ -276,16 +276,17 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   adoptions, through `configpin.drop`, and only where the FOLDER is gone: a box can delete a
   `foldyard.toml`, and a forgotten adoption makes the next review a whole file instead of a diff.
   VMs and state folders hold data and secrets, so they're named with a command, never removed.
-- `quick.py` — `fy worktree quick`, the worktree a BOX makes for itself (ADR-0004's amendment): a
-  git worktree in the worktrees root, a volume on each `[box].shadow_volumes` dir, named as its own
-  box would name it (`box.shadow_volume`), so `fy worktree add` promotes it and `remove` sweeps it.
-  The mount goes in through a one-off container over the box's own socket (`assets/quick/attach.py`
-  on stdin to the BOX's python, chrooted through `/proc/1/root`, as images needn't have one):
-  `--pid container:<box>`, three capabilities, never `--privileged`, and `tests/test_quick.py` pins
-  that. The checkout runs with the repo's hooks off, then the volumes, then the post-checkout hook.
-  The dir underneath is 0555, which the share enforces on the box's root, so an install without the
-  volume fails. The marker that makes one "quick" sits in the shared `.git`: reporting and in-box
-  refusals only, nothing on the host decides from it.
+- `boxworktree.py` — `fy worktree add` IN A BOX, the worktree a box makes for itself (ADR-0004's
+  amendment): a git worktree in the worktrees root, a volume on each `[box].shadow_volumes` dir,
+  named as its own box would name it (`box.shadow_volume`), so `fy worktree add` on the host
+  registers it in place and `remove` sweeps it. The mount goes in through a one-off container over
+  the box's own socket (`assets/boxworktree/attach.py` on stdin to the BOX's python, chrooted
+  through `/proc/1/root`, as images needn't have one): `--pid container:<box>`, three capabilities,
+  never `--privileged`, and `tests/test_boxworktree.py` pins that. The checkout runs with the repo's
+  hooks off, then the volumes, then the post-checkout hook. The dir underneath is 0555, which the
+  share enforces on the box's root, so an install without the volume fails. The marker that says a
+  box made one sits in the shared `.git`: reporting and in-box refusals only, nothing on the host
+  decides from it.
 - `worktree.py` · `transcripts.py` · `tui.py` · `init.py` · `skills.py` · `browser.py` · `vscode.py`
   · `podman_desktop.py` — worktrees, agent-transcript sync, the Textual TUI, `foldyard init`,
   bundled skills, `fy open`, `fy code`, `fy machine desktop` (an `fy-<machine>` podman connection

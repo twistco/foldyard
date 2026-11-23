@@ -1,9 +1,9 @@
-"""foldyard's volume helper for a quick worktree: a volume over a dependency dir of a RUNNING box.
+"""foldyard's volume helper for a box-made worktree: a volume over a dir of a RUNNING box.
 
-Run in a one-off container beside the box (``quick._helper``), which shares the box's pid namespace
-and nothing of the VM's: with the volumes mounted under ``/fy``, its shell opens ``/proc/1/ns/mnt``
-(fd 3) and ``/fy`` (fd 4), then chroots into the box's root for the box's own python, as
-``python -I -`` with this file on stdin. Stdlib-only:
+Run in a one-off container beside the box (``boxworktree._helper``), which shares the box's pid
+namespace and nothing of the VM's: with the volumes mounted under ``/fy``, its shell opens
+``/proc/1/ns/mnt`` (fd 3) and ``/fy`` (fd 4), then chroots into the box's root for the box's own
+python, as ``python -I -`` with this file on stdin. Stdlib-only:
 
     attach <target>...     the volume at /fy/<n> over the nth target
     detach <target>...     take that volume off it again
