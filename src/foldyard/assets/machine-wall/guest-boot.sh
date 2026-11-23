@@ -40,6 +40,8 @@ echo "sudo: '$user' may only 'shutdown -h now' without a password"
 
 # 1b. The journal cap (guestlog.py) — root-owned /etc, so only this script can place it here.
 @@JOURNAL@@
+# 1b2. Let go of shared files nothing is using (guestfiles.py) — a module parameter, so root's.
+@@RELEASE_FILES@@
 # 1c. A stable path to the VM user's engine socket for a stack service to bind-mount, since the
 #     socket's own path carries the uid. Under gVisor it is the filtered socket, so a container
 #     holding it can't create one outside gVisor. Root-owned, so nothing below root repoints it.

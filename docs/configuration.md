@@ -533,6 +533,15 @@ disk_gib = 60
 - **`cpus`** / **`memory_mib`** / **`disk_gib`** — sizing at first creation. Defaults: `4` / `8192`
   / `60`. Env: `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK`.
 
+- **`release_files`** — how often, in seconds, the VM lets go of the shared files nothing is using.
+  Your computer keeps a file open for every file the VM remembers, and without this it remembers
+  each one it ever touched: a few worktrees with their own `node_modules` can use up every open file
+  macOS allows ("Too many open files in system"). Files in use are kept. The cost is that the next
+  read of a dropped file starts cold (`git status` on 10,000 files: 1.7 s instead of 0.14 s, about
+  once a minute at most), so a longer period is gentler and a shorter one holds fewer files. `0`
+  turns it off; otherwise `5` to `65535`. Default: `60`. A guest kernel without the setting ignores
+  it. A change takes `fy machine stop && fy up`. Env: `MACHINE_RELEASE_FILES`.
+
 - **`worktrees_root`** — the parent dir of sibling worktree checkouts, mounted into the VM beside
   the repo. Relative values resolve against the main checkout's path. Default: `<repo>-worktrees`
   beside the repo. Env: `FOLDYARD_WORKTREES_ROOT`.
@@ -1488,7 +1497,7 @@ Per-key overrides are listed with their keys above. The globals:
 | `WORKTREE` | The active worktree; empty = the main checkout. Set in the box; inferred from the working directory on your computer. |
 | `WT_OFFSET` | Worktree port offset, bypassing pins and the hash. |
 | `PODMAN_MACHINE` | The VM name. |
-| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_MONITOR` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
+| `MACHINE_BACKEND` / `MACHINE_VMTYPE` / `MACHINE_FIREWALL` / `MACHINE_HOST_FIREWALL` / `MACHINE_RUNTIME` / `MACHINE_MONITOR` / `MACHINE_RELEASE_FILES` / `MACHINE_CPUS` / `MACHINE_MEMORY` / `MACHINE_DISK` | `[machine]` overrides. |
 | `FY_PROXY_PORT` | The proxy's base port, bypassing the port-range registry. |
 | `GCP_MINTER_PORT` | The gcp token service's base port, likewise. |
 | `FY_HOST_ALIAS` | The address containers use to reach daemons on your computer — for a customised Lima network with a different host gateway. |
