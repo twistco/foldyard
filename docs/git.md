@@ -222,19 +222,20 @@ box instead, without recreating it ("masked '<name>' in <box> without recreating
 them). Where it can't — a box under the gVisor posture, a rootful engine in the VM, a kernel older
 than Linux 5.12, or a dependency dir that's a symlink — it names the box and says why, and
 recreating that box masks it; `fy doctor`'s `box shadowing` row reports a box that still lacks one.
-Only worktrees registered with your computer are masked: one made with plain `git worktree add` is
-masked in no box, recreated or not, until `fy worktree add <name>` on your computer registers it (it
-asks first). The row lists those apart, with that fix.
+Only worktrees registered with your computer are masked: a
+[quick worktree](#quick-worktrees-in-a-box) has volumes instead, and one made with plain
+`git worktree add` is masked in no box, recreated or not, until `fy worktree add <name>` on your
+computer registers it (it asks first). The row lists those apart, with that fix.
 
 `fy worktree remove <name>` takes down that worktree's box, stack and volumes, deletes the checkout
 and its adopted config, and keeps its branch, so a worktree added later under the same name starts
 with nothing adopted. A worktree with uncommitted work needs `--force`; that work is saved first on
 a ref in the main checkout (`refs/fy/removed/<name>-<time>`), and the command prints how to restore
-it. A worktree that holds another one, such as an agent's
-[quick worktree](#quick-worktrees-in-a-box) inside it, is refused before anything is taken down:
-deleting it would delete the one inside, uncommitted work and all, which neither git nor that save
-would notice. Remove the inner one first, from a box, with `git worktree remove <path>`; `--discard`
-removes both anyway, and git then lists the inner one as prunable until `git worktree prune`.
+it. A worktree that holds another one, such as one an agent's own worktree tool made under
+`.claude/worktrees/` inside it, is refused before anything is taken down: deleting it would delete
+the one inside, uncommitted work and all, which neither git nor that save would notice. Remove the
+inner one first, from a box, with `git worktree remove <path>`; `--discard` removes both anyway, and
+git then lists the inner one as prunable until `git worktree prune`.
 
 Uncommitted work here means files that differ from the worktree's last commit once everything is
 unstaged: changed, deleted or untracked files that aren't gitignored, and changes inside a
@@ -255,37 +256,42 @@ the worktree is kept.
 
 ### Quick worktrees in a box
 
-A small change that needs no stack (a fix, a doc edit, a review branch) doesn't need its own box. An
-agent can make a plain git worktree from its box, under `.claude/worktrees/` in the checkout, which
-is where Claude Code puts its own:
+A change that needs no stack of its own (a fix, a doc edit, a review branch, unit tests) doesn't
+need its own box. From a box, an agent or you can make a worktree without anyone on your computer:
 
 ```bash
-git worktree add --no-track -b <branch> .claude/worktrees/<name> [<start>]
-# … edit, commit …
-git worktree remove .claude/worktrees/<name>
+fy worktree quick <name> [<branch>]     # branch: wt/<name>, off the default branch, untracked
+# … edit, install, test, commit …
+fy worktree remove <name>               # in the box: its checkout and volumes; the branch stays
 ```
 
-`--no-track` matters when `<start>` is a remote branch such as `origin/main`: without it the new
-branch tracks that branch, so a later `git push` can head for `main` instead of a branch of its own.
-`fy worktree add` passes it for the same reason.
+It is an ordinary git worktree in the worktrees root, beside the ones `fy worktree add` makes. Your
+computer sees the files, the branch and its commits at once. Its dependency dirs
+(`[box].shadow_volumes`) are volumes in the box that made it, so an install there runs at VM-disk
+speed and leaves nothing on your computer's disk. They are mounted before the repo's post-checkout
+hook runs, so a hook that installs is covered too.
 
-Git records a worktree's path in the shared `.git`, so the path must be the same on both sides,
-which holds only inside the checkout. Never make one outside it (`/tmp`, your home in the box): your
-computer can't see that path, so a `git worktree prune` there, or in time git's own garbage
-collection, deletes its record and breaks it in the box. Never make one in the worktrees root
-either: that's where `fy worktree add` puts the worktrees your computer registers, and `fy doctor`
-lists anything else there as unregistered. And don't run `git worktree prune` in a box, which
-deletes the record of any worktree made somewhere the box can't see.
+The volumes go into the running box through a one-off container that shares only the box's own
+processes and has three capabilities and no network; foldyard prints the command. Nothing runs on
+your computer. A restart of the box or the VM drops the mounts and keeps the volumes:
+`fy worktree quick <name>` mounts them again, and so does creating the box. Until then each dir is
+read-only and empty, so an install fails instead of landing on your computer. Under the gVisor
+posture nothing can be mounted, so it stays that way: edit and commit there, but ask for
+`fy worktree add` to install.
 
-`.claude/worktrees/` must be ignored, or main's `git status` lists each one: `fy init` adds it to
-the `.gitignore` block it manages, and `.git/info/exclude` works too. Your computer sees the branch
-and its commits at once, and `git status` there agrees with the box's.
+What it doesn't have is a stack, ports, a mode or adopted config. Commands in it run in the box that
+made it, under that box's mode, and `fy up` there is refused. To give it those, promote it, on your
+computer: `fy worktree add <name> --box`. Its new box finds the dependency volumes as they are, and
+the box that made it then sees them read-only, like any other registered worktree's. Promoting
+doesn't run `[project].worktree_init`: `fy worktree init <name>` does.
 
-A quick worktree has none of what `fy worktree add` sets up: no box, stack, mode, ports or adopted
-config of its own, and no volumes over its dependency dirs. So an install in it writes onto your
-computer's disk, with paths only the box can run. Keep it in the box instead, for example
-`UV_PROJECT_ENVIRONMENT=/tmp/<name>-venv uv sync`. When the change needs a stack or its own
-installs, ask for a `fy worktree add` on your computer.
+Don't use a plain `git worktree add` in a box instead: an install in one lands on your computer's
+disk, with paths only the box can run, and macOS keeps a file open for each file of it the VM reads.
+Claude Code's own worktree tool makes plain ones under `.claude/worktrees/` (`fy init` adds it to
+the `.gitignore` block it manages), which is fine for edits; don't install there. Never make one
+where your computer can't see it (`/tmp`, your home in the box): a `git worktree prune` there
+deletes its record. And don't run `git worktree prune` in a box, which does the same to any worktree
+the box can't see.
 
 ## What `fy doctor` checks
 

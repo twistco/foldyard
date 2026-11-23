@@ -2,6 +2,8 @@
 
 - **Status:** Accepted (2026-06-08, with the spike) — implemented; default-branch forking fixed
   2026-07-06 (`de962868`), pinned offsets added with PR #21
+- **Amended 2026-11-23:** a box can make a worktree itself, with no stack of its own
+  (`fy worktree quick`; *Quick worktrees* below).
 - **Sources:** SPIKE.md ("Worktrees — one machine, namespaced projects"), PLAN.md §4.1,
   `src/foldyard/worktree.py`, `src/foldyard/stack.py`, `src/foldyard/machine.py`
 
@@ -50,6 +52,25 @@ One machine; worktrees are **namespaced compose projects** on it.
 - **Worktree lifecycle verbs**: `fy worktree add|list|remove`. `remove` tears down the worktree's
   box and stack, archives its Claude transcripts to the durable host-side store *before* git deletes
   the checkout, and refuses (without `--force`) if archiving fails.
+
+**Quick worktrees (amended 2026-11-23).** Everything above needs the operator, and most changes an
+agent makes need only a checkout and somewhere to install. Agents made plain `git worktree add`
+ones, whose installs go onto the operator's disk through the share; three of Tangible's held 95% of
+the files its VM kept open on the Mac. `fy worktree quick <name>`, in the box, makes a git worktree
+in the worktrees root with a volume on each `[box].shadow_volumes` dir, named as that worktree's own
+box would name it, so promoting it (`fy worktree add`) moves nothing. The volumes are mounted into
+the running box by a one-off container over the socket the box holds. It shares the box's pid
+namespace (not the VM's), drops every capability and adds `sys_admin`, `sys_chroot` and
+`sys_ptrace`: the least that worked, where `--privileged --pid=host` was the first that did. It is
+no new power (whoever holds the socket can start such a container), and no new channel to the host.
+Rejected:
+
+- *The host mounts on the box's request*: the same result, but the host then acts on box-written
+  requests.
+- *Symlinked dependency dirs*: Turbopack refuses a link out of its root, a `node_modules/` ignore
+  pattern doesn't match a link, and your computer sees them dangling.
+- *A stack for quick worktrees*: not now. It needs ports that can't collide with registered ones and
+  a way to find and end such stacks; it would run under main's mode.
 
 **Escape hatch:** for a genuinely untrusted worktree — reviewing unknown code — spin a *throwaway
 dedicated machine* for just that one. Isolation is a spectrum, light by default; the heavy shape is

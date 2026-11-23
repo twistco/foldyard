@@ -1342,14 +1342,21 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     main = main_repo()
     try:
         known = worktree_registry.checkouts(main)
-        stray = worktree_registry.unregistered(main, config.worktrees_root(main))
+        from . import quick
+
+        quick_ones = [n for n in quick.names(main) if n not in known]
+        stray = [
+            n
+            for n in worktree_registry.unregistered(main, config.worktrees_root(main))
+            if n not in quick_ones
+        ]
     except OSError as e:  # pragma: no cover — unreadable state dir
         return _result(None, "worktrees", "", f"couldn't read the worktree registry: {e}")
     fixes = "; ".join(f"`fy worktree add {n}`" for n in stray)
     return _result(
         True if not stray else None,
         "worktrees",
-        f"{len(known)} registered",
+        f"{len(known)} registered" + (f", {len(quick_ones)} quick" if quick_ones else ""),
         f"not registered, so your computer runs nothing for them: {', '.join(stray)} — {fixes}",
     )
 

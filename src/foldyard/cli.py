@@ -1798,6 +1798,32 @@ def worktree_add(
     raise typer.Exit(worktree.add(name, branch, base, assume_yes=yes, box_up=box_up))
 
 
+@worktree_app.command("quick")
+def worktree_quick(
+    name: str = typer.Argument("", help="worktree dir name (under the worktrees root)"),
+    branch: str = typer.Argument("", help="branch (default: wt/<name>; created if it's new)"),
+    base: str = typer.Option(
+        "", "--from", help="ref a NEW branch forks from (default: the project's default branch)"
+    ),
+    every: bool = typer.Option(
+        False, "--all", help="mount every quick worktree's volumes again (after a box restart)"
+    ),
+) -> None:
+    """Make a worktree from inside the box, for a change that needs no stack of its own.
+
+    A checkout on its own branch, whose dependency dirs are volumes, so installs there are fast
+    and stay off your computer's disk. Nothing is asked of the operator. Run it again to mount the
+    volumes after the box restarted. `fy worktree remove` removes it; `fy worktree add <name>` on
+    your computer gives it a box, a stack and ports."""
+    from . import quick
+
+    if every:
+        raise typer.Exit(quick.mount_all() if quick.config.in_box() else 1)
+    if not name:
+        raise typer.BadParameter("a worktree name (or --all)")
+    raise typer.Exit(quick.add(name, branch, base))
+
+
 @worktree_app.command("init")
 def worktree_init(
     name: str = typer.Argument(..., help="worktree dir name (under the worktrees root)"),

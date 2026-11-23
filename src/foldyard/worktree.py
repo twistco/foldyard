@@ -40,16 +40,15 @@ def _host_only(verb: str, quick: str = "") -> int | None:
     """Worktree add/remove are host-only: what they make and unmake is your computer's — the
     worktree registry, the adopted config, a box and a stack of its own — and a box can't make its
     own box. (A box sees the worktrees root at the same path your computer does; the old reason
-    here, a box-local root, no longer holds.) For ``add``, ``quick`` names the plain worktree a box
-    CAN make itself, inside the checkout (docs/git.md, "Quick worktrees in a box"). None when OK
+    here, a box-local root, no longer holds.) For ``add``, ``quick`` names the quick worktree a box
+    CAN make itself (:mod:`foldyard.quick`). None when OK
     to proceed."""
     if config.in_box():
         _err(f"✗ run on your computer — `fy worktree {verb}` sets up the worktree's own box, stack")
         _err("  and config there, which a box can't do for itself.")
         if quick:
-            path = shlex.quote(f".claude/worktrees/{quick}")
-            _err("  For a small change that needs none of that, a plain worktree inside the")
-            _err(f"  checkout works from here:  git worktree add --no-track -b <branch> {path}")
+            _err("  For a change that needs none of that, make a quick one from here:")
+            _err(f"      fy worktree quick {shlex.quote(quick)}")
             _err("  (`fy docs git`, under quick worktrees in a box, says what it lacks).")
         return 1
     return None
@@ -626,7 +625,7 @@ def _worktree_listing(main: Path) -> str | None:
 
 
 def _nested_worktrees(main: Path, wt_dir: Path) -> list[str] | None:
-    """The worktrees git records INSIDE ``wt_dir`` — an agent's quick worktree under
+    """The worktrees git records INSIDE ``wt_dir`` — one an agent's own worktree tool made under
     ``.claude/worktrees/``, say (docs/git.md) — or None when git can't list them. Deleting
     ``wt_dir`` deletes them, uncommitted work and all: ``git worktree remove`` takes a worktree
     nested in an ignored dir even without ``--force``, and the yard's check reads only ``wt_dir``'s
@@ -1129,36 +1128,21 @@ def _box_up(name: str) -> int:
     return subprocess.run(selfspawn.python_m("foldyard", "box", "up"), env=env).returncode
 
 
-def add(
-    name: str, branch: str = "", base: str = "", assume_yes: bool = False, box_up: bool = False
-) -> int:
-    """Create a host-sibling worktree under the worktrees root, record it in the host's
-    worktree registry, init its config, and offer that config for adoption (:func:`_adopt_config`)
-    — a first adoption, wherever it happens, mirrors main's keyless posture into the worktree
-    (:func:`foldyard.keyless.seed_posture`). ``box_up`` then starts its box (:func:`_box_up`) —
-    only once its config is adopted, since the host would run nothing for it otherwise.
-
-    A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
-    branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
-
-    On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
-    worktree add``) it registers instead, once the operator has confirmed its real path — the one
-    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
-    ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
-    if (rc := _host_only("add", quick=name)) is not None:
-        return rc
+def refuse_name(name: str, branch: str = "") -> bool:
+    """Refuse (True), saying why, a worktree ``name`` foldyard can't use: the shared rules of
+    ``fy worktree add`` and ``quick``."""
     if name == "main":
         # "main" is the positional label for the PRIMARY checkout (the repo root) in the workspaces
         # view + its posture dir; a worktree named "main" would show as a second "main" card (and
         # used to collide in posture state). Reserve it so the two are always distinct.
         _err("✗ 'main' is reserved for the primary checkout — pick another worktree name")
-        return 1
+        return True
     if name == "worktrees":
         # "worktrees" collides with the legacy VS Code state layout: vscode/<name> for this name
         # IS the legacy root (see _local_state_roots), so removing the worktree's state would
         # delete every worktree's legacy state. Reserve it outright.
         _err("✗ 'worktrees' is reserved (collides with foldyard's state layout) — pick another")
-        return 1
+        return True
     path = Path(name)
     if path.is_absolute() or len(path.parts) != 1 or name in ("..", "."):
         # Must be a single plain relative path component: devmode.worktree_keys() discovers
@@ -1181,6 +1165,29 @@ def add(
             if _branch_name_ok(suggested) and not dashed.startswith("-"):
                 hint = f"fy worktree add {shlex.quote(dashed)} {shlex.quote(suggested)}"
                 _err(f"  the first argument is the worktree's directory — did you mean `{hint}`?")
+        return True
+    return False
+
+
+def add(
+    name: str, branch: str = "", base: str = "", assume_yes: bool = False, box_up: bool = False
+) -> int:
+    """Create a host-sibling worktree under the worktrees root, record it in the host's
+    worktree registry, init its config, and offer that config for adoption (:func:`_adopt_config`)
+    — a first adoption, wherever it happens, mirrors main's keyless posture into the worktree
+    (:func:`foldyard.keyless.seed_posture`). ``box_up`` then starts its box (:func:`_box_up`) —
+    only once its config is adopted, since the host would run nothing for it otherwise.
+
+    A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
+    branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
+
+    On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
+    worktree add``) it registers instead, once the operator has confirmed its real path — the one
+    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
+    ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
+    if (rc := _host_only("add", quick=name)) is not None:
+        return rc
+    if refuse_name(name, branch):
         return 1
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
@@ -1377,6 +1384,9 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
     except ValueError as e:
         _err(f"✗ {e}")
         return 1
+    from . import quick
+
+    quick.promoted(main, wt_dir)
     _claim_ports(name)
     print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
     _say_unmasked(main, name, fresh=False)
@@ -1477,8 +1487,12 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
     :func:`_registered_worktree`): under ``--force`` the dir is deleted directly +
     ``git worktree prune``, since ``git worktree remove`` can't remove what git no longer
     tracks. Git has nothing there to check or park, so no yard is needed."""
-    from . import box, transcripts
+    from . import box, quick, transcripts
 
+    if config.in_box() and quick.is_quick(
+        stack.main_repo(), config.worktrees_root(stack.main_repo()) / name
+    ):
+        return quick.remove(name, force=force or discard)
     if (rc := _host_only("remove")) is not None:
         return rc
     main = stack.main_repo()
@@ -1647,13 +1661,22 @@ def list_() -> int:
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
     known = set() if config.in_box() else set(worktree_registry.checkouts(main))
+    from . import quick
+
+    quick_names = set(quick.names(main)) - known
     print(f"  {'main':<18} {_branch_of(main):<28} {main}")
     if wt_root.is_dir():
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
-                note = "" if config.in_box() or d.name in known else "  (not registered)"
+                if d.name in known:
+                    note = ""
+                elif d.name in quick_names:
+                    note = "  (quick)"
+                else:
+                    note = "" if config.in_box() else "  (not registered)"
                 print(f"  {d.name:<18} {_branch_of(d):<28} {d}{note}")
-    if not config.in_box() and (stray := worktree_registry.unregistered(main, wt_root)):
+    stray = [] if config.in_box() else worktree_registry.unregistered(main, wt_root)
+    if stray := [n for n in stray if n not in quick_names]:
         print(f"\n  Not registered — your computer runs nothing for: {', '.join(stray)}.")
         print("  If one is yours: `fy worktree add <name>` (asks before registering).")
     return 0

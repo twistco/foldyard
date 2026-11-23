@@ -109,6 +109,18 @@ def listdir(root: Path, rel: str | Path) -> list[str]:
         os.close(dfd)
 
 
+def chmod_dir(root: Path, rel: str | Path, mode: int) -> None:
+    """Set the mode of the EXISTING directory ``root/rel``, following no symlink below ``root``."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise ValueError(f"{rel!r} is not a path inside {root}")
+    dfd = _open_dir(root, parts)
+    try:
+        os.fchmod(dfd, mode)
+    finally:
+        os.close(dfd)
+
+
 def unlink(root: Path, rel: str | Path) -> None:
     """Remove the file ``root/rel``, following no symlink below ``root``: a planted link as the
     LAST component is removed itself (``unlink`` never follows it), one on the way refuses."""

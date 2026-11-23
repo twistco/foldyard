@@ -1327,6 +1327,11 @@ def _report_unregistered() -> None:
     try:
         main = devmode.main_repo()
         stray = worktree_registry.unregistered(main, config.worktrees_root(main))
+        if stray:
+            from . import quick  # a quick worktree is meant to be unregistered
+
+            made = set(quick.names(main))
+            stray = [n for n in stray if n not in made]
     except OSError as e:  # pragma: no cover — unreadable worktrees root
         log(f"worktrees: registry check failed: {e}")
         return

@@ -1401,13 +1401,13 @@ def test_remove_retries_volume_cleanup_when_checkout_and_state_gone(fake_main, m
 
 def test_add_refuses_in_box(fake_main, monkeypatch, capsys):
     # What `add` sets up — the registry, the adoption, a box of its own — is your computer's to
-    # make. The refusal points at what a box CAN do: a plain worktree inside the checkout.
+    # make. The refusal points at what a box CAN do: a quick worktree.
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert worktree.add("feat") == 1
     assert not fake_main["calls"]  # bailed before shelling git
     err = capsys.readouterr().err
     assert "run on your computer" in err
-    assert "git worktree add --no-track -b <branch> .claude/worktrees/feat" in err
+    assert "fy worktree quick feat" in err
     assert "fy docs git" in err
 
 
