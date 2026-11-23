@@ -56,17 +56,24 @@
 # …your orientation prompt for `fy codex`.
 # """
 #
-# GitHub Copilot CLI (`fy copilot`) — `api-key` only: a GitHub PAT Copilot accepts (a
-# fine-grained PAT, a `gh auth token` OAuth token, or a `ghu_` token; classic `ghp_` PATs are
-# refused by Copilot itself). Captured host-side like the others; the box holds a dummy and the
-# proxy swaps in the real one. Then `fy mode copilot=on`. `keyless` is required: a [copilot]
-# table without it is refused (there is no in-box login).
+# GitHub Copilot CLI (`fy copilot`) — two keyless rungs. RECOMMENDED: `api-key`, a Copilot-only
+# fine-grained PAT (https://github.com/settings/personal-access-tokens/new): resource owner your
+# personal account, Account permissions → Copilot Requests only, NO repository access (starts
+# `github_pat_`). It is injected on api.github.com with no path limit, so it must be able to do
+# nothing else there. Classic `ghp_` PATs and pasted `gho_`/`ghu_` are refused.
+# `oauth` is for seats that can't use such a PAT: it reuses `gh auth token` on your computer — your
+# whole GitHub identity — so its `on` is a timed emergency switch (`fy mode copilot=on ttl=30m`)
+# and its api.github.com rule is limited to /copilot_internal/. Nothing is pasted or stored.
+# Captured host-side like the others (for `api-key`); the box holds a dummy and the proxy swaps in
+# the real token. Then `fy mode copilot=on`. `keyless` is required: a [copilot] table without it is
+# refused (there is no in-box login).
 # `system_prompt` works here exactly as it does for [claude]; `fy copilot` writes it into
 # $COPILOT_HOME/instructions/, which every session in this box loads.
 # A keyless [copilot] needs api.github.com to itself: the GitHub `[[inject]]` rows deliver a
 # credential to that same host, so turn them off while a Copilot rung is on.
 # [copilot]
-# keyless = "api-key"  # experimental
+# keyless = "api-key"  # experimental (recommended)
+# keyless = "oauth"    # experimental: gh token, timed emergency switch
 # system_prompt = """
 # …your orientation prompt for `fy copilot`.
 # """

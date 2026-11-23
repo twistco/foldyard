@@ -88,7 +88,7 @@ def issues() -> list[str]:
     for table, normalised, allowed in (
         ("claude", config.claude_keyless(), "api-key | oauth | true"),
         ("codex", config.codex_keyless(), "api-key | chatgpt | true"),
-        ("copilot", config.copilot_keyless(), "api-key | true"),
+        ("copilot", config.copilot_keyless(), "api-key | oauth | true"),
     ):
         raw = config._table(table).get("keyless")
         # By identity: `1 == True`, so a membership test let `keyless = 1` through as "fine".

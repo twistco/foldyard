@@ -6,17 +6,28 @@ monitored ``box_bootstrap`` step) and mount its persisted ``~/.copilot`` — set
 required (ADR-0008, amended 2026-11-18): there is no in-box login. The launcher is ``fy copilot``
 (in ``box.py``).
 
-KEYLESS auth (``[copilot].keyless = "api-key"``) — no real token in the box; the egress proxy
-injects it in flight (composes in the shared proxy's multi-injector rule set with claude / codex /
-``[[inject]]``). The box bakes a dummy ``COPILOT_GITHUB_TOKEN``; the proxy rewrites the
-``Authorization`` header with ``Bearer `` + the real token from ``host.env`` on every host in
-:data:`~foldyard.keyless.COPILOT_KEYLESS_HOSTS`. That list is not one host because Copilot talks to
-a PLAN-SPECIFIC API host (individual/business/enterprise) and ALWAYS validates the token against
-``api.github.com`` before its first call — so the rule set covers each host that can carry it. A
-rule names the dummy (``any_scheme``: ``Bearer``/``token``/bare) and the proxy overwrites
-``Authorization`` on its hosts — so a credential obtained in the box is never forwarded. If a
-future CLI exchanges the injected token, that belongs in a new host-side keyless kind
-(ADR-0031), not in proxy routing.
+KEYLESS auth (``[copilot].keyless``) — no real token in the box; the egress proxy supplies it in
+flight (composes in the shared proxy's multi-injector rule set with claude / codex /
+``[[inject]]``). The box bakes a dummy ``COPILOT_GITHUB_TOKEN``; a rule names it (``any_scheme``:
+``Bearer``/``token``/bare) and the proxy overwrites ``Authorization`` on its hosts — so a credential
+obtained in the box is never forwarded. Two rungs, because the token's SCOPE decides whether an
+unpath-limited rule is safe (ADR-0031):
+
+* ``"api-key"`` (recommended) captures a Copilot-ONLY fine-grained PAT into ``host.env`` and injects
+  it on every host in :data:`~foldyard.keyless.COPILOT_KEYLESS_HOSTS` — no path limit needed,
+  because a PAT scoped to Account → Copilot Requests with no repository access can do nothing else
+  on GitHub.
+* ``"oauth"`` mints `gh auth token` host-side with the packaged ``gh-cli`` minter (nothing pasted or
+  stored). That is the operator's WHOLE GitHub identity, so its ``on`` is an emergency level with a
+  TTL, and its ``api.github.com`` rule is limited to ``/copilot_internal/`` — the only calls the CLI
+  made there in the observed trace. The token still reaches Copilot's own hosts (including the MCP
+  endpoint, which acts with the token's full scope); the time limit bounds that reach without having
+  to track every Copilot endpoint.
+
+The host list is not one host because Copilot talks to a PLAN-SPECIFIC API host
+(individual/business/enterprise) and ALWAYS validates the token against ``api.github.com`` before
+its first call. If a future CLI exchanges the injected token, that belongs in a new host-side
+keyless kind (ADR-0031), not in proxy routing.
 
 Facts verified against the installed CLI (1.0.109): state lives in ``$COPILOT_HOME`` (default
 ``~/.copilot``: ``settings.json``, the CLI-managed ``config.json``, ``permissions-config.json``,
@@ -36,11 +47,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
-from .. import boxmounts, config, keyless
+from .. import boxmounts, config, keyless, selfspawn
 from ..keyless import COPILOT_KEYLESS as _KEYLESS  # the shared keyless taxonomy (stdlib-only)
 from ..keyless import COPILOT_KEYLESS_HOSTS as _KEYLESS_HOSTS
 from . import (
@@ -99,6 +111,19 @@ _REMOVE_LOGIN = (
     "here"
 )
 
+# The `oauth` rung reuses the gh-cli kind's packaged minter. It returns `Bearer <token>` itself
+# (with its own short TTL), so this rule must NOT add a second `value_prefix`, and it reads no
+# host.env var — `gh` holds its own credential on your computer. Not `GhCliKind().rule()` directly:
+# that rule sets `grants_push`, which would lift the proxy's push refusal even though this rule
+# never injects on a repository-write path.
+_OAUTH_MINTER = shlex.join(selfspawn.python_m("foldyard.plugins.gh_cli_token"))
+# The only api.github.com calls the Copilot CLI needed in the observed trace — token validation and
+# `copilot_internal/*`. Everything else on that host (repository reads/writes through the REST API,
+# including push) must NOT receive the operator's full-identity gh token. Copilot's own hosts keep
+# the whole host: narrowing those by path would mean chasing the CLI's endpoints as they are added;
+# the emergency TTL is what bounds the token there.
+_OAUTH_GITHUB_PATH = "/copilot_internal/"
+
 
 class CopilotPlugin(Plugin):
     name = "copilot"
@@ -107,7 +132,11 @@ class CopilotPlugin(Plugin):
         # Only when keyless is configured: an on/off injector axis, like claude's/codex's. Off (the
         # zero-secret default) → the box holds only a dummy token; on → the proxy injects the real
         # one host-side. Maps to the shared "egress-proxy" daemon (one proxy, many injectors).
-        if not config.copilot_keyless():
+        # `oauth` carries your whole GitHub identity, so its `on` is an emergency level:
+        # `fy mode copilot=on [ttl=30m]` expires and auto-reverts (default TTL 1h). The PAT rung
+        # needs no TTL.
+        kind = config.copilot_keyless()
+        if not kind:
             return []
         return [
             Switch(
@@ -115,9 +144,15 @@ class CopilotPlugin(Plugin):
                 levels=("off", "on"),
                 blurb={
                     "off": "no Copilot credential reaches GitHub (box holds only a dummy)",
-                    "on": "keyless Copilot: proxy injects your token host-side (none in box)",
+                    "on": (
+                        "oauth (emergency, TTL): your host's gh token, path-limited on "
+                        "api.github.com"
+                        if kind == "oauth"
+                        else "keyless api-key: proxy injects your Copilot-only PAT host-side"
+                    ),
                 },
                 daemon="egress-proxy",
+                emergency=("on",) if kind == "oauth" else (),
             )
         ]
 
@@ -131,30 +166,43 @@ class CopilotPlugin(Plugin):
         # header. There is no exchange special case: the proxy overwrites `Authorization` on these
         # hosts, so a stray box-held token is never forwarded. A future CLI that exchanges the
         # token should surface as a 401 and be handled by a new host-side keyless kind (ADR-0031).
+        #
+        # The rung decides the MINTER and the api.github.com PATH: a Copilot-only PAT is safe on the
+        # whole host, while the gh token is not — see the module docstring.
         kind = config.copilot_keyless()
         if not kind or mode.get("copilot", "off") == "off":
             return []
         spec = _KEYLESS[kind]
         out: list[InjectRule] = []
         for host in _KEYLESS_HOSTS:
-            inject_spec = keyless.inject_spec(
-                _KEYLESS, host, kind, f"Copilot keyless proxy ({kind}, {host})"
-            )
-            rule = _spec_to_rule(inject_spec) if inject_spec else None
-            if rule:
-                out.append(
-                    replace(
-                        rule,
-                        dummies=(spec["dummy"],),
-                        any_scheme=True,
-                    )
+            if kind == "oauth":
+                rule: InjectRule | None = InjectRule(
+                    host=host,
+                    header=spec["header"],
+                    minter=_OAUTH_MINTER,
+                    replay_on_401=False,  # the minter re-runs on its short TTL anyway
+                    env=(),  # `gh` holds its own credential; nothing from host.env
+                    label=f"Copilot keyless proxy (oauth, {host})",
+                    path_prefix=_OAUTH_GITHUB_PATH if host == "api.github.com" else "",
+                    dummies=(spec["dummy"],),
+                    any_scheme=True,
                 )
+            else:
+                inject_spec = keyless.inject_spec(
+                    _KEYLESS, host, kind, f"Copilot keyless proxy ({kind}, {host})"
+                )
+                base = _spec_to_rule(inject_spec) if inject_spec else None
+                rule = replace(base, dummies=(spec["dummy"],), any_scheme=True) if base else None
+            if rule is not None:
+                out.append(rule)
         return out
 
     def held_credentials(self, mode: dict) -> list[HeldCredential]:
         # As claude's/codex's: at rest the box's dummy is answered by the proxy, in a JSON error
         # shape the CLI prints. The box bakes the BARE taxonomy dummy; `any_scheme` lets the held
-        # entry match it however the client prefixes it (`Bearer x`, `token x` or bare).
+        # entry match it however the client prefixes it (`Bearer x`, `token x` or bare). The oauth
+        # rung's api.github.com answer is path-limited like its injector, so a box request to a
+        # repository path is not answered as if the gh token were injectable there.
         kind = config.copilot_keyless()
         if not kind or mode.get("copilot", "off") != "off":
             return []
@@ -162,24 +210,35 @@ class CopilotPlugin(Plugin):
         message = keyless.at_rest_message("Copilot", "copilot")
         body = json.dumps({"error": {"message": message, "type": "invalid_request_error"}})
         return [
-            HeldCredential(host, spec["header"], spec["dummy"], "copilot", body, any_scheme=True)
+            HeldCredential(
+                host,
+                spec["header"],
+                spec["dummy"],
+                "copilot",
+                body,
+                path_prefix=_OAUTH_GITHUB_PATH
+                if kind == "oauth" and host == "api.github.com"
+                else "",
+                any_scheme=True,
+            )
             for host in _KEYLESS_HOSTS
         ]
 
     def secrets(self, mode: dict) -> list[Secret]:
-        # Asked for when the axis goes on. The pattern accepts every token shape Copilot accepts
-        # (fine-grained PAT, gh OAuth token, user token) — classic ghp_ PATs are not among them,
-        # which is why they are absent here rather than silently stored and refused by GitHub.
+        # Asked for when the axis goes on — but ONLY for the PAT rung. `oauth` mints its token
+        # host-side from `gh`, so there is nothing to paste or store. The PAT pattern is narrow on
+        # purpose: a `gho_`/`ghu_` whole-identity paste would be injected on api.github.com with no
+        # path limit, which is exactly what the `oauth` rung's TTL + path limit exist to contain.
         kind = config.copilot_keyless()
         spec = _KEYLESS.get(kind)
-        if not spec or mode.get("copilot", "off") == "off":
+        if not spec or kind == "oauth" or mode.get("copilot", "off") == "off":
             return []
         return [
             Secret(
                 var=spec["env"],
                 label=f"GitHub Copilot token ({kind})",
                 how=spec["how"],
-                pattern="github_pat_*|gho_*|ghu_*",
+                pattern=f"{spec['prefix']}*",
             )
         ]
 

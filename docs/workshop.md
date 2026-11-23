@@ -178,9 +178,13 @@ manager:
 - **Codex with a ChatGPT subscription:** install the [Codex CLI](https://github.com/openai/codex) on
   your computer, not only in an editor, and run `codex login` there once. foldyard reads that login
   on your computer and keeps it fresh; nothing is pasted.
-- **GitHub Copilot:** a fine-grained PAT with Copilot access from
-  https://github.com/settings/personal-access-tokens/new (it starts `github_pat_`), or a
-  `gh auth token` (starts `gho_`). Classic `ghp_` PATs are refused by Copilot itself.
+- **GitHub Copilot (recommended):** a fine-grained PAT from
+  https://github.com/settings/personal-access-tokens/new — resource owner your personal account,
+  Account permissions → **Copilot Requests only**, no repository access (it starts `github_pat_`).
+  It is injected on `api.github.com`, so it must be able to do nothing else there. Classic `ghp_`
+  PATs, and pasted `gho_`/`ghu_` tokens, are refused; if your seat can't use such a PAT, use
+  `[copilot] keyless = "oauth"` instead — it mints `gh auth token` on your computer on a timed
+  emergency switch, with the GitHub API rule limited to `/copilot_internal/`.
 
 ### What success looks like
 

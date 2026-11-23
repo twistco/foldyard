@@ -145,17 +145,35 @@ REGISTER: tuple[Feature, ...] = (
         reader="copilot_keyless",
         kinds=(UNPROVEN,),
         unproven=(
-            "the fixed host list has only been exercised with one CLI build and a fine-grained PAT "
-            "on github.com; it hasn't been lived with across the individual/business/enterprise "
-            "hosts, and an `oauth` kind (if one is added) would be unproven too"
+            "the fixed host list has only been exercised with one CLI build and a Copilot-only "
+            "fine-grained PAT on github.com; it hasn't been lived with across the "
+            "individual/business/enterprise hosts, and the PAT's Copilot Requests scope hasn't "
+            "been checked against every CLI call. The `oauth` rung has its own entry."
         ),
         graduates_when=(
             'a maintainer has run a real project with `[copilot] keyless = "api-key"` day to day '
             "for a month, on the plan-specific hosts their seat uses, with nothing filed against "
-            "it in that time still open; an `oauth` kind would get its own register entry and "
-            "graduate separately"
+            "it in that time still open"
         ),
-        doc_mark="  - **`keyless`** *(experimental)*",
+        doc_mark='    - **`"api-key"`** *(experimental)*',
+    ),
+    Feature(
+        key="copilot.keyless",
+        value="oauth",
+        reader="copilot_keyless",
+        kinds=(UNPROVEN,),
+        unproven=(
+            "the `/copilot_internal/` path limit and the emergency TTL are a bet on the CLI's "
+            "current endpoints: a new api.github.com call outside that prefix gets no token, and "
+            "the broad gh token still reaches Copilot's own hosts (including the MCP endpoint) "
+            "until the TTL lapses. Neither has been lived with on an org/enterprise seat."
+        ),
+        graduates_when=(
+            'a maintainer has run a real project with `[copilot] keyless = "oauth"` day to day for '
+            "a month, including an org/enterprise seat, finding no missing path and no need to "
+            "lengthen the TTL, with nothing filed against it in that time still open"
+        ),
+        doc_mark='    - **`"oauth"`** *(experimental)*',
     ),
 )
 

@@ -1271,12 +1271,12 @@ def test_codex_keyless_modes(fresh_config, tmp_path):
 
 
 def test_copilot_keyless_modes(fresh_config, tmp_path):
-    # `api-key` is the only mode (a GitHub PAT); `true` aliases it, everything else is off — and
-    # `"oauth"` is NOT silently accepted the way [claude]'s is.
+    # `api-key` (the Copilot-only PAT, aliased by `true`) and `oauth` (host-minted gh token) are the
+    # two modes; anything else is off, including [claude]'s `oauth` typo of a Copilot value.
     cases = {
         "keyless = true": "api-key",
         'keyless = "api-key"': "api-key",
-        'keyless = "oauth"': "",
+        'keyless = "oauth"': "oauth",
         'keyless = "nope"': "",
         "": "",
     }

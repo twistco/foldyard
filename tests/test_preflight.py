@@ -177,13 +177,13 @@ def test_recognised_keyless_value_does_not_block(monkeypatch):
 
 
 def test_unrecognised_copilot_keyless_value_blocks(monkeypatch):
-    # `"oauth"` is Claude's mode, not Copilot's: it normalises to "" (silently off) — say so.
-    _wire(monkeypatch, copilot_keyless="", tables={"copilot": {"keyless": "oauth"}})
+    # A typo normalises to "" (silently off) — say so, and name both supported rungs.
+    _wire(monkeypatch, copilot_keyless="", tables={"copilot": {"keyless": "oath"}})
     problems = preflight.issues()
     assert any(
-        "[copilot].keyless" in p and "oauth" in p and "api-key | true" in p for p in problems
+        "[copilot].keyless" in p and "oath" in p and "api-key | oauth | true" in p for p in problems
     )
-    _wire(monkeypatch, copilot_keyless="api-key", tables={"copilot": {"keyless": "api-key"}})
+    _wire(monkeypatch, copilot_keyless="oauth", tables={"copilot": {"keyless": "oauth"}})
     assert not any("isn't recognised" in p for p in preflight.issues())
 
 

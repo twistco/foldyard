@@ -174,8 +174,11 @@ tui = { raw_output_mode = false }
 # $COPILOT_HOME (settings + sessions). Keyless like Claude (a [copilot] without `keyless` is
 # refused): the proxy injects the PAT host-side, never in the box. It needs api.github.com to
 # itself, so the GitHub [[inject]] rows below must be off while a Copilot rung is on.
-# `keyless = "api-key"` (experimental) prompts once for a PAT Copilot accepts (fine-grained,
-# `gho_` or `ghu_`; classic `ghp_` is refused).
+# `keyless = "api-key"` (experimental, RECOMMENDED) prompts once for a Copilot-only fine-grained
+# PAT: personal-account resource owner, Account permissions → Copilot Requests only, no repository
+# access. Classic `ghp_` PATs and pasted `gho_`/`ghu_` are refused — use `oauth` for the latter.
+# `keyless = "oauth"` (experimental) instead reuses `gh auth token` on your computer on a timed
+# emergency switch, with the api.github.com rule limited to /copilot_internal/.
 # [copilot]
 # keyless = "api-key"
 # transcript_sync_seconds = 5

@@ -2035,20 +2035,28 @@ def copilot_enabled() -> bool:
 
 def copilot_keyless() -> str:
     """``[copilot].keyless`` — opt the box into KEYLESS Copilot auth: NO real token in the box, the
-    egress proxy injects the real ``COPILOT_GITHUB_TOKEN`` (held in ``host.env`` on the host) in
-    flight, like the Claude/Codex/``[[inject]]`` injectors. Modes:
+    egress proxy supplies the real one host-side, like the Claude/Codex/``[[inject]]`` injectors.
+    Modes:
 
-      - ``"api-key"`` (``true`` aliases it) — dummy ``COPILOT_GITHUB_TOKEN``; rewrite
-        ``Authorization`` with ``Bearer `` + the real token on every Copilot API host
-        (:data:`foldyard.keyless.COPILOT_KEYLESS_HOSTS`). The token is a fine-grained PAT
-        (``github_pat_…``), an OAuth token (``gho_``) or a user token (``ghu_``); classic ``ghp_``
-        PATs are not accepted by Copilot and are refused at the capture prompt.
+      - ``"api-key"`` (``true`` aliases it) — the recommended rung. A Copilot-ONLY fine-grained PAT
+        (``github_pat_…``: personal-account resource owner, Account permissions → Copilot Requests,
+        no repository access) is captured into ``host.env``; the box bakes a dummy
+        ``COPILOT_GITHUB_TOKEN`` and the proxy rewrites ``Authorization`` with ``Bearer `` + that
+        PAT on every Copilot API host (:data:`foldyard.keyless.COPILOT_KEYLESS_HOSTS`). Its scope is
+        why an unpath-limited rule on ``api.github.com`` is fine here.
+      - ``"oauth"`` — no paste and nothing stored: the packaged ``gh-cli`` minter runs `gh auth
+        token` on your computer. That is your whole GitHub identity, so the ``on`` level is an
+        emergency with a TTL and the ``api.github.com`` rule is limited to ``/copilot_internal/``.
 
-    Absent/false/unrecognised ⇒ ``""``, which a declared ``[copilot]`` is refused with: there is no
-    in-box login (ADR-0008, amended 2026-11-18; ``preflight.agent_issues``)."""
+    Classic ``ghp_`` PATs are refused by Copilot; ``gho_``/``ghu_`` pastes are refused at the
+    capture prompt — use ``oauth`` for a token from `gh`. Absent/false/unrecognised ⇒ ``""``, which
+    a declared ``[copilot]`` is refused with: there is no in-box login (ADR-0008, amended
+    2026-11-18; ``preflight.agent_issues``)."""
     raw = _table("copilot").get("keyless")
     if raw is True or raw == "api-key":
         return "api-key"
+    if raw == "oauth":
+        return "oauth"
     return ""
 
 

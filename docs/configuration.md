@@ -918,7 +918,7 @@ when    = { sentry = "on" }                  # mode gate, same semantics as `[[o
   URL, "ask Ops").
 - **`pattern`** — a glob (`*`, `?`, `[seq]`) the value must match, checked after decoding when
   `base64`. A non-matching paste stores nothing. `|` separates whole-value alternatives — any may
-  match, e.g. `github_pat_*|gho_*|ghu_*` for a token a provider accepts in several shapes. These are
+  match, e.g. `sk-ant-api*|sk-ant-oat*` for a token a provider accepts in several shapes. These are
   still globs, not a regex: no backtracking, so a crafted pattern from repo config can't hang
   `fy box up`.
 - **`base64`** — store the value base64-encoded, the only way `host.env` (single-line `KEY=VALUE`)
@@ -1194,29 +1194,50 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
   volume too, so a recreated box just relinks it with no downloads: the recommended GitHub hosts are
   needed for the first install only.
 
-  - **`keyless`** *(experimental)* — `"api-key"` (or `true`) keeps the real token out of the box:
-    the box holds a dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with
-    `Bearer ` + your token from `host.env`. Copilot validates the token on `api.github.com` before
-    its first call and then talks to a **plan-specific** API host (individual/business/enterprise),
-    so the injection covers every host that can carry it, not one. The list is fixed to github.com's
-    hosts: keyless does not yet cover GitHub Enterprise Cloud with data residency (`*.ghe.com`).
-    Required: a `[copilot]` without it is refused, by `fy box up` and `fy box recreate` on your
-    computer and by `fy copilot` in the box. A PAT must be one Copilot accepts: a fine-grained PAT,
-    a `gh auth token` OAuth token (`gho_`) or a `ghu_` token. Classic `ghp_` PATs are refused by
-    Copilot itself, so foldyard refuses to store one too. There is no in-box login: a real token in
-    `$COPILOT_HOME/config.json` (which the CLI can write with its own `storeTokenPlaintext` setting)
-    or in `COPILOT_GITHUB_TOKEN` fails `fy verify`, and `fy doctor` in the box names it. The
-    config.json **user rows** alone are not a finding — a keyless session legitimately names its
-    user there — and foldyard never edits that CLI-managed file. A keyless `[copilot]` also needs
-    `api.github.com` to itself: the two GitHub `[[inject]]` rows deliver a credential to that same
-    host, and one host takes one injection rule — turn those rows off while a Copilot rung is on
-    (`fy mode` reports the conflict and the fix).
+  - **`keyless`** — keeps the real token out of the box: the box holds a dummy
+    `COPILOT_GITHUB_TOKEN` and the proxy supplies the real one host-side. Copilot validates the
+    token on `api.github.com` before its first call and then talks to a **plan-specific** API host
+    (individual/business/enterprise), so the injection covers every host that can carry it, not one.
+    The list is fixed to github.com's hosts: keyless does not yet cover GitHub Enterprise Cloud with
+    data residency (`*.ghe.com`). Required: a `[copilot]` without it is refused, by `fy box up` and
+    `fy box recreate` on your computer and by `fy copilot` in the box. There is no in-box login: a
+    real token in `$COPILOT_HOME/config.json` (which the CLI can write with its own
+    `storeTokenPlaintext` setting) or in `COPILOT_GITHUB_TOKEN` fails `fy verify`, and `fy doctor`
+    in the box names it. The config.json **user rows** alone are not a finding — a keyless session
+    legitimately names its user there — and foldyard never edits that CLI-managed file. A keyless
+    `[copilot]` also needs `api.github.com` to itself: the two GitHub `[[inject]]` rows deliver a
+    credential to that same host, and one host takes one injection rule — turn those rows off while
+    a Copilot rung is on (`fy mode` reports the conflict and the fix).
+
+    - **`"api-key"`** *(experimental)* — `"api-key"` (or `true`) is the recommended rung. Create a
+      [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) with **resource
+      owner your personal account** and **Account permissions → Copilot Requests**, nothing else —
+      no repository access. It is captured once into `host.env`; the box bakes a dummy and the proxy
+      rewrites `Authorization` with `Bearer ` + that PAT on every Copilot host. That rule has no
+      path limit, so the PAT must be able to do nothing else on GitHub's API: that is how "the
+      credential owns its scope"
+      ([ADR-0031](./adrs/0031-credentials-are-protocol-kinds-the-credential-owns-its-scope.md))
+      holds. Classic `ghp_` PATs are refused by Copilot itself, and pasted `gho_`/`ghu_` values are
+      refused too — they carry your whole GitHub identity, which is what the `oauth` rung contains.
+      Some seats (SAML SSO, managed users) may not be able to create such a PAT; use `oauth` then.
+    - **`"oauth"`** *(experimental)* — nothing is pasted or stored. With `fy mode copilot=on` the
+      packaged `gh-cli` minter runs `gh auth token` on **your computer**, so the token never enters
+      the box or `host.env`. That is your whole GitHub identity (repositories, workflows, gists,
+      organisations…), so this rung has two limits the PAT rung does not need. `on` is an
+      **emergency** level with a TTL (`fy mode copilot=on ttl=30m`, default 1h) that auto-reverts;
+      and the `api.github.com` rule injects only on `/copilot_internal/`, the calls the CLI needed
+      in the observed trace. Copilot's own hosts still receive the token, including the GitHub MCP
+      endpoint (`/mcp/…` on `api.*.githubcopilot.com`) that acts with the token's full scope — the
+      TTL is what bounds that reach without chasing the CLI's endpoints. `gh auth logout` revokes
+      the source token within the minter's short TTL.
+
   - **`system_prompt`** — same key and job as `[claude]`'s, but a different delivery: the Copilot
     CLI has no `--append-system-prompt` and no ad-hoc config override, so `fy copilot` writes it to
     `$COPILOT_HOME/instructions/foldyard.instructions.md`, one of the personal instruction sources
     the CLI loads for every session. Setting it to `""` removes the file again. Every box of a
     project shares that volume, so two launches from different worktrees with **different** prompts
     race (last writer wins) — identical prompts make it invisible. Default: `""`.
+
   - `fy copilot` runs the CLI with `--allow-all` (tools, file paths and URLs — the rootless box IS
     the boundary) and `COPILOT_ALLOW_ALL=true`, which additionally trusts the working directory it
     starts in (its skills, plugins, MCP servers and hooks). It also sets

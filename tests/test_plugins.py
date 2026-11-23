@@ -579,8 +579,11 @@ def test_keyless_agents_declare_their_credential_only_when_on(monkeypatch):
     ids=["claude", "codex", "copilot"],
 )
 def test_keyless_prefix_agrees_with_the_classifier(taxonomy):
-    # the Secret's glob and box-up's prefix classifier must accept the same pastes
+    # the Secret's glob and box-up's prefix classifier must accept the same pastes. A rung with no
+    # ``prefix`` (Copilot oauth) mints host-side and has nothing to paste, so it has no shape here.
     for spec in taxonomy.values():
+        if not spec["prefix"]:
+            continue
         who = keyless.classify(spec["prefix"] + "x")
         assert who is not None and who[0] == spec["env"]
 
@@ -2966,20 +2969,44 @@ def test_copilot_keyless_one_rule_per_host_any_scheme(monkeypatch):
     assert all("preserve_foreign" not in live[h] for h in keyless.COPILOT_KEYLESS_HOSTS)
 
 
-def test_copilot_keyless_accepts_the_three_token_shapes(monkeypatch):
+def test_copilot_api_key_pastes_only_a_copilot_only_pat(monkeypatch):
     monkeypatch.setattr(config, "copilot_enabled", lambda: True)
     monkeypatch.setattr(config, "copilot_keyless", lambda: "api-key")
     p = copilot.CopilotPlugin()
     assert p.secrets({"copilot": "off"}) == []
     (secret,) = p.secrets({"copilot": "on"})
     assert secret.var == "COPILOT_GITHUB_TOKEN"
-    assert secret.pattern == "github_pat_*|gho_*|ghu_*"  # classic ghp_ is refused by Copilot
-    assert "fine-grained PAT" in secret.how
-    for value in ("github_pat_abc", "gho_abc", "ghu_abc"):
-        assert keyless.secret_ok(value, secret.pattern, False) == value
-    assert keyless.secret_ok("ghp_classic", secret.pattern, False) is None
+    assert secret.pattern == "github_pat_*"  # no gho_/ghu_ (whole GitHub identity) or ghp_
+    assert "fine-grained PAT" in secret.how and "Copilot Requests" in secret.how
+    assert keyless.secret_ok("github_pat_abc", secret.pattern, False) == "github_pat_abc"
+    for value in ("gho_abc", "ghu_abc", "ghp_classic"):
+        assert keyless.secret_ok(value, secret.pattern, False) is None
+        assert keyless.classify(value) is None  # the capture prompt refuses the paste too
     monkeypatch.setattr(config, "copilot_keyless", lambda: "")
     assert p.secrets({"copilot": "on"}) == []
+
+
+def test_copilot_oauth_mints_host_side_with_no_paste_and_an_emergency_switch(monkeypatch):
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    monkeypatch.setattr(config, "copilot_keyless", lambda: "oauth")
+    p = copilot.CopilotPlugin()
+    assert p.secrets({"copilot": "on"}) == []  # gh holds the credential; nothing to store
+    (switch,) = p.switches()
+    assert switch.emergency == ("on",) and "TTL" in switch.blurb["on"]
+    assert "COPILOT_GITHUB_TOKEN=gho_foldyarddummy" in p.box_args({**_BOX_ENV, "FY_PROXY": "1"})
+
+    rules = p.proxy_rules({"copilot": "on"})
+    assert [r.host for r in rules] == list(keyless.COPILOT_KEYLESS_HOSTS)
+    for rule in rules:
+        assert "foldyard.plugins.gh_cli_token" in rule.minter
+        assert rule.dummies == ("gho_foldyarddummy",) and rule.any_scheme is True
+        assert rule.grants_push is False and rule.value_prefix == ""  # minter adds `Bearer `
+        assert rule.path_prefix == ("/copilot_internal/" if rule.host == "api.github.com" else "")
+    # At rest the held answer is path-limited the same way, so a repository path isn't answered as
+    # if the gh token were injectable there.
+    for held in p.held_credentials({"copilot": "off"}):
+        assert held.path_prefix == ("/copilot_internal/" if held.host == "api.github.com" else "")
+    assert p.proxy_rules({"copilot": "off"}) == []
 
 
 def test_copilot_keyless_at_rest_is_held_by_the_proxy(monkeypatch):

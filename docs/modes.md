@@ -252,7 +252,15 @@ it and `fy doctor` in the box names the file or variable to clear.
 | `[claude] oauth` | `CLAUDE_CODE_OAUTH_TOKEN` env | `authorization: Bearer …` | `api.anthropic.com` | `host.env` |
 | `[codex] api-key` | `OPENAI_API_KEY` env | `Authorization: Bearer …` | `api.openai.com` | `host.env` |
 | `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex's API + workspace-discovery paths) | your real `auth.json` on your computer, refreshed by the token service |
-| `[copilot] api-key` | `COPILOT_GITHUB_TOKEN` env | `Authorization: Bearer …` | `api.github.com` + the plan's `api.*.githubcopilot.com` host | `host.env` |
+| `[copilot] api-key` | `COPILOT_GITHUB_TOKEN` env | `Authorization: Bearer …` | `api.github.com` + the plan's `api.*.githubcopilot.com` host | `host.env` (a Copilot-only fine-grained PAT) |
+| `[copilot] oauth` | `COPILOT_GITHUB_TOKEN` env | `Authorization: Bearer …` | `api.github.com` only `/copilot_internal/`, + the plan's `api.*.githubcopilot.com` host | your host's `gh auth token`, minted on demand; `on` is a timed emergency |
+
+The Copilot rungs differ because of what the token can do. `api-key` is a fine-grained PAT scoped to
+**Copilot Requests only**, so injecting it on all of `api.github.com` is harmless. `oauth` reuses
+`gh auth token` — your whole GitHub identity — so `fy mode copilot=on` carries a TTL and reverts by
+itself, and its `api.github.com` rule is limited to `/copilot_internal/`. Copilot's own hosts still
+get the token (including the MCP endpoint that acts on GitHub with your full scope); the time limit
+bounds that reach. See [configuration](./configuration.md#claude--codex--copilot--vscode).
 
 With the switch `off`, the box holds only the dummy and can't reach the provider at all. The proxy
 doesn't forward the dummy either: it answers the request itself with a 401 whose message names the
