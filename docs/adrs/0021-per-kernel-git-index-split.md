@@ -261,10 +261,10 @@ Shim mechanics (each point traces to a verified failure mode):
   absent 7.5% of the time. With the shim covering git, it isn't worth that cost. **Amended
   2026-11-23:** still rejected as a fix for the races, but a gentle form of it ships for another
   reason. Your computer keeps a file open for each one the VM remembers, and four VMs used up a
-  Mac's whole table. `inval_wq` expires only the shared folders' own lookups, every 60 s, and keeps
-  what is in use. Measured with `git status` on 10k files every 2 s: at 60 s one run in 59 was slow
-  (1.7 s against 0.14 s), none of 149 at 300 s, 6 of 23 at 5 s. No claim is made that it narrows the
-  stale window, which the shim still covers.
+  Mac's whole table. `inval_wq` expires FUSE lookups only (the whole FUSE module's, which in these
+  VMs means the shared folders), every 60 s, and keeps what is in use. Measured with `git status` on
+  10k files every 2 s: at 60 s one run in 59 was slow (1.7 s against 0.14 s), none of 149 at 300 s,
+  6 of 23 at 5 s. No claim is made that it narrows the stale window, which the shim still covers.
 
 - **A time budget for the sealed heal** (2026-09-29) — giving the seal up when it runs long would
   spare host commits a "HEAD.lock: File exists", but it gives the seal up exactly when the VM is

@@ -1539,7 +1539,7 @@ def machine_release_files() -> int:
 
     low, high = guestfiles.MIN_SECONDS, guestfiles.MAX_SECONDS
     raw: object = os.environ.get("MACHINE_RELEASE_FILES")
-    if raw is None:
+    if not raw:  # empty is unset, as for the other MACHINE_* variables; "0" is off
         raw = _table("machine").get("release_files", guestfiles.DEFAULT_SECONDS)
     elif re.fullmatch(r"[0-9]+", str(raw)):
         raw = int(str(raw))

@@ -78,6 +78,12 @@ def test_anything_else_is_refused_by_name(monkeypatch, value):
         config.machine_release_files()
 
 
+def test_an_empty_env_is_unset(monkeypatch):
+    monkeypatch.setattr(config, "_table", lambda name: {"release_files": 300})
+    monkeypatch.setenv("MACHINE_RELEASE_FILES", "")
+    assert config.machine_release_files() == 300
+
+
 def test_env_wins(monkeypatch):
     monkeypatch.setattr(config, "_table", lambda name: {"release_files": 300})
     monkeypatch.setenv("MACHINE_RELEASE_FILES", "0")

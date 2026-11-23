@@ -634,8 +634,8 @@ def _record_provisioning() -> None:
     if state() == "running":
         _err(f"✗ '{MACHINE}' is running with STALE boot provisioning — the sudo grant, the VM")
         _err("  firewall, its port range, [machine] firewall_allow, the proxy CA, [proxy]")
-        _err("  no_proxy or [machine] runtime changed (or the VM predates boot provisioning,")
-        _err("  or foldyard was upgraded).")
+        _err("  no_proxy, [machine] runtime or release_files changed (or the VM predates boot")
+        _err("  provisioning, or foldyard was upgraded).")
         _err("  It applies at boot, as root, from the recorded config, so restart:")
         _err("      fy machine stop && fy up")
         raise SystemExit(1)
