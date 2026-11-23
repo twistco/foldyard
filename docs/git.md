@@ -186,8 +186,7 @@ then saves the result on a ref and deletes the checkout.
 
 For parallel work, make a worktree on your computer with `fy worktree add <name>`: its own checkout
 and branch (`wt/<name>` by default, forked from the trunk), its own box, stack, mode and ports, all
-in the one VM. `fy worktree add` runs only on your computer and refuses in a box. For a small change
-that needs none of that, an agent can make a plain git worktree in its box instead: see
+in the one VM. Run in a box, `fy worktree add` makes one with no stack of its own: see
 [worktrees a box makes](#worktrees-a-box-makes).
 
 Your computer runs each checkout's *adopted* `foldyard.toml`, never the working tree
@@ -267,9 +266,10 @@ fy worktree remove <name>               # in the box: its checkout and volumes; 
 
 It is an ordinary git worktree in the worktrees root, beside those made on your computer. Your
 computer sees the files, the branch and its commits at once. Its dependency dirs
-(`[box].shadow_volumes`) are volumes in the box that made it, so an install there runs at VM-disk
-speed and leaves nothing on your computer's disk. They are mounted before the repo's post-checkout
-hook runs, so a hook that installs is covered too.
+(`[box].shadow_volumes`) are volumes in the box that made it, so an install runs at VM-disk speed
+and those dirs stay off your computer's disk (whatever else it writes, a lockfile say, is in the
+checkout). They are mounted before the repo's post-checkout hook runs, so a hook that installs is
+covered too.
 
 The volumes go into the running box through a one-off container that shares only the box's own
 processes and has three capabilities and no network; foldyard prints the command. Nothing runs on

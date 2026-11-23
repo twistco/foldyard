@@ -1368,11 +1368,13 @@ def up() -> int:
     from . import preflight
 
     preflight.check_or_abort("fy up")
-    ctx = resolve()  # ensures the machine (so it's up even when there's no stack to start)
-    from . import boxworktree
+    if config.in_box():  # before resolve(): the ports of a worktree made in a box aren't known
+        from . import boxworktree
 
-    if boxworktree.refuse_stack(ctx.main, ctx.worktree, "fy up"):
-        return 1
+        main = main_repo()
+        if boxworktree.refuse_stack(main, _active_worktree(config.worktrees_root(main)), "fy up"):
+            return 1
+    ctx = resolve()  # ensures the machine (so it's up even when there's no stack to start)
     _print_banner(ctx.env)
     # A successful `fy up` always restores the host-side half of the machine lifecycle, including
     # a box-only consumer (which returns below before any compose work). The call is idempotent and

@@ -55,7 +55,7 @@ GITIGNORE_ENTRIES = (
     # merge, so committing one silently re-points everyone else's posture. Recursive so a worktree's
     # copy is ignored too; the committed `.example` beside it is what the team shares.
     "**/foldyard.local.toml",
-    # Not written by foldyard: where an agent's quick worktree goes in a box (Claude Code's own
+    # Not written by foldyard: where an agent's own worktree tool makes one in a box (Claude Code's
     # default), inside the checkout so its path is the same on both sides (docs/git.md).
     ".claude/worktrees/",
 )
@@ -658,7 +658,7 @@ def _gitignore_block() -> str:
     return "\n".join(
         [
             GITIGNORE_BEGIN,
-            "# Box/host-generated files foldyard writes beside foldyard.toml, and agents' quick",
+            "# Box/host-generated files foldyard writes beside foldyard.toml, and agents' own",
             "# worktrees; never commit.",
             *GITIGNORE_ENTRIES,
             GITIGNORE_END,

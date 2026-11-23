@@ -1515,7 +1515,7 @@ def test_remove_refuses_when_the_yard_cannot_answer(fake_main, capsys):
 
 
 def _nest(fake_main, wt, rel=".claude/worktrees/quick"):
-    """A worktree an agent made inside ``wt`` from its box (docs/git.md, quick worktrees)."""
+    """A worktree an agent made inside ``wt`` from its box (docs/git.md, worktrees a box makes)."""
     inner = wt / rel
     inner.mkdir(parents=True)
     (inner / ".git").write_text("")

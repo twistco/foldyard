@@ -100,3 +100,36 @@ def test_usage_and_a_refusal_are_json():
 
     assert attach.main(["attach", "/w/a"], no) == {"refused": "setns", "results": {}}
     assert Path(boxworktree.HELPER).is_file()
+
+
+@pytest.mark.parametrize("python", ["3.12+", "3.11"])
+def test_it_joins_the_boxs_namespace_on_every_python_foldyard_runs_on(monkeypatch, python):
+    # `os.setns` is 3.12's; the helper runs on the box's own python, and foldyard supports 3.11.
+    calls = []
+
+    class Libc:
+        def setns(self, fd, kind):
+            calls.append(("libc", fd, kind))
+            return 0
+
+    monkeypatch.setattr(attach.ctypes, "CDLL", lambda *a, **k: Libc())
+    if python == "3.11":
+        monkeypatch.delattr(attach.os, "setns", raising=False)
+    else:
+        monkeypatch.setattr(
+            attach.os, "setns", lambda fd, kind: calls.append(("os", fd, kind)), raising=False
+        )
+    attach.Kernel(0)
+    assert calls == [("libc" if python == "3.11" else "os", attach.BOX_NS, 0x20000)]
+
+
+def test_a_refused_setns_is_an_error_on_the_older_python(monkeypatch):
+    class Libc:
+        def setns(self, fd, kind):
+            return -1
+
+    monkeypatch.setattr(attach.ctypes, "CDLL", lambda *a, **k: Libc())
+    monkeypatch.setattr(attach.ctypes, "get_errno", lambda: errno.EPERM)
+    monkeypatch.delattr(attach.os, "setns", raising=False)
+    with pytest.raises(OSError):
+        attach.Kernel(0)

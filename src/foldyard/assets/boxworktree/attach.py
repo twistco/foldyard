@@ -37,6 +37,7 @@ MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV = 0x2, 0x4
 MS_PRIVATE = 1 << 18
 RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS = 0x02, 0x04
 MNT_DETACH = 0x2
+CLONE_NEWNS = 0x20000
 BOX_NS, VOLUMES = 3, 4  # the fds the container's shell hands over
 
 # Statuses, per target.
@@ -68,7 +69,16 @@ class Kernel:
             os.open(str(n), os.O_PATH | os.O_DIRECTORY, dir_fd=VOLUMES) for n in range(count)
         ]
         self._trees = [self._clone(fd) for fd in self._vols]
-        os.setns(BOX_NS, os.CLONE_NEWNS)
+        self._join(BOX_NS)
+
+    def _join(self, fd: int) -> None:
+        """setns into the mount namespace ``fd``. ``os.setns`` is Python 3.12's, and this runs on
+        the box's python, where foldyard supports 3.11."""
+        if hasattr(os, "setns"):
+            os.setns(fd, CLONE_NEWNS)
+        elif self._libc.setns(fd, CLONE_NEWNS) != 0:
+            e = ctypes.get_errno()
+            raise OSError(e, f"setns: {os.strerror(e)}")
 
     def _sys(self, name: str, *args: object) -> int:
         r = self._libc.syscall(_NR[name], *args)

@@ -102,7 +102,13 @@ def volumes(wt_dir: Path, name: str) -> dict[str, str]:
         # `box up` mounts the entry as written: a shape crossmask can't name either is left out.
         if rel := crossmask._norm(d):
             out[f"{wt_dir}/{rel}"] = box.shadow_volume(owner, d)
-    return {t: v for t, v in out.items() if not crossmask._UNSAFE & set(t)}
+    return {
+        t: v
+        for t, v in out.items()
+        if not crossmask._UNSAFE & set(t)
+        # One inside another declared dir is on that one's volume already.
+        and not any(t.startswith(f"{other}/") for other in out)
+    }
 
 
 def attached(paths: dict[str, str]) -> set[str]:
@@ -272,6 +278,25 @@ def _add_argv(main: Path, wt_dir: Path, branch: str, base: str) -> list[str] | N
     return ["worktree", "add", "--no-track", "-b", branch, str(wt_dir), *([ref] if ref else [])]
 
 
+_MADE = "made by `fy worktree add` in a box; the same on your computer registers it\n"
+_HOOK_PENDING = "post-checkout hook: not run yet\n"
+
+
+def _hook_is_pending(main: Path, wt_dir: Path) -> bool:
+    marker = _marker(main, wt_dir)
+    return marker is not None and _HOOK_PENDING in marker.read_text()
+
+
+def _run_hook(main: Path, wt_dir: Path) -> None:
+    """The repo's post-checkout hook, as ``git worktree add`` would call it, once."""
+    head = worktree._git_read(wt_dir, "rev-parse", "HEAD", capture_output=True, text=True).stdout
+    hook = ("hook", "run", "--ignore-missing", "post-checkout", "--")
+    if _git(wt_dir, *hook, _NULL_OID, head.strip(), "1") != 0:
+        _err("⚠ the repo's post-checkout hook failed (above); the worktree is fine")
+    if (marker := _marker(main, wt_dir)) is not None:
+        marker.write_text(_MADE)
+
+
 def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> int:
     """``fy worktree add`` in a box: make worktree ``name``, or (one it made) mount its volumes
     again. ``box_up`` (``--box``) is your computer's to do, so it is refused."""
@@ -293,7 +318,11 @@ def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> in
         if not is_box_made(main, wt_dir):
             _err(f"✗ {wt_dir} already exists, and no box made it with `fy worktree add`")
             return 1
-        return 0 if mount(wt_dir, name) else 1
+        if not mount(wt_dir, name):
+            return 1
+        if _hook_is_pending(main, wt_dir):
+            _run_hook(main, wt_dir)
+        return 0
     inside = str(root).startswith(f"{main}/")  # then the checkout's own mount covers it
     if not root.is_dir() or not (inside or os.path.ismount(root)):
         _err(f"✗ the worktrees root ({root}) isn't mounted in this box, so your computer would")
@@ -308,17 +337,12 @@ def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> in
         _err("✗ git worktree add failed")
         return rc
     if (marker := _marker(main, wt_dir)) is not None:
-        marker.write_text(
-            "made by `fy worktree add` in a box; the same on your computer registers it\n"
-        )
-    ready = mount(wt_dir, name)
-    head = worktree._git_read(wt_dir, "rev-parse", "HEAD", capture_output=True, text=True).stdout
-    if ready:
-        hook = ("hook", "run", "--ignore-missing", "post-checkout", "--")
-        if _git(wt_dir, *hook, _NULL_OID, head.strip(), "1") != 0:
-            _err("⚠ the repo's post-checkout hook failed (above); the worktree is fine")
+        marker.write_text(_MADE + _HOOK_PENDING)
+    if mount(wt_dir, name):
+        _run_hook(main, wt_dir)
     else:
-        _err("  The repo's post-checkout hook wasn't run: it may install.")
+        _err("  The repo's post-checkout hook wasn't run (it may install): it will be once the")
+        _err(f"  volumes are on, by `fy worktree add {shlex.quote(name)}` again.")
     print(f"\n✓ worktree ready: {wt_dir}  (branch {branch})")
     print("  It has no stack, ports or mode of its own: commands in it run in this box.")
     print(f"  Done with it:  fy worktree remove {shlex.quote(name)}")

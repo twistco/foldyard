@@ -159,6 +159,29 @@ def test_no_volume_means_no_hook_and_says_so(world, capsys):
     assert "fy worktree add fix" in err
 
 
+def test_the_hook_a_failed_mount_skipped_runs_once_the_volumes_are_on(world):
+    world["answer"] = {"refused": "setns: no", "results": {}}
+    boxworktree.add("fix")
+    world["answer"] = None
+    assert boxworktree.add("fix") == 0
+    assert world["order"].count("hook") == 1
+    world["table"].write_text("")
+    assert boxworktree.add("fix") == 0  # a restart later: its setup is done
+    assert world["order"].count("hook") == 1
+
+
+def test_a_dir_inside_another_declared_one_is_on_that_ones_volume(world, monkeypatch):
+    # A placeholder for either would be in the other's way, whichever came first.
+    for dirs in (
+        ["web/node_modules", "web/node_modules/.cache"],
+        ["web/node_modules/.cache", "web/node_modules", "web/node_modules2"],
+    ):
+        monkeypatch.setattr(config, "box_shadow_volumes", lambda d=dirs: list(d))
+        got = boxworktree.volumes(world["root"] / "fix", "fix")
+        rels = [t.removeprefix(str(world["root"] / "fix") + "/") for t in got]
+        assert rels == [d for d in dirs if not d.endswith(".cache")]
+
+
 def test_gvisor_mounts_nothing(world, monkeypatch, capsys):
     monkeypatch.setattr(sandbox, "wanted", lambda: True)
     boxworktree.add("fix")
@@ -269,6 +292,19 @@ def test_fy_up_is_refused_there_and_nowhere_else(world, capsys):
     assert "fy worktree add fix --box" in capsys.readouterr().err
     assert not boxworktree.refuse_stack(world["main"], "", "fy up")
     assert not boxworktree.refuse_stack(world["main"], "other", "fy up")
+
+
+def test_fy_up_says_so_before_it_resolves_the_stack(world, monkeypatch, capsys):
+    # A pooled port is unknown to the box for a worktree made in it: resolving it would stop the
+    # verb first, with the wrong advice.
+    from foldyard import preflight
+
+    boxworktree.add("fix")
+    monkeypatch.setattr(preflight, "check_or_abort", lambda v: None)
+    monkeypatch.setattr(stack, "_active_worktree", lambda root: "fix")
+    monkeypatch.setattr(stack, "resolve", lambda *a, **k: pytest.fail("resolved"))
+    assert stack.up() == 1
+    assert "fy worktree add fix --box" in capsys.readouterr().err
 
 
 def test_on_your_computer_the_boxs_marker_refuses_nothing(world, monkeypatch):

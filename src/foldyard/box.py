@@ -411,7 +411,9 @@ def _mask_gaps(
         held: set[str] = set()
         for n, p in unreg.items():
             held |= boxworktree.attached(boxworktree.volumes(p, n))
-        strays = [m for m in strays if m.path not in held]
+        strays = [
+            m for m in strays if not any(m.path == h or m.path.startswith(f"{h}/") for h in held)
+        ]
     live = crossinject.check(
         engine,
         box,
