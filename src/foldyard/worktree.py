@@ -1246,7 +1246,9 @@ def add(
     worktree_registry.register(main, name, wt_dir)
     _claim_ports(name)
 
-    _init_in_yard(main, wt_dir)  # first: it copies foldyard.local.toml, which is adopted too
+    # Both before the adoption: they bring the config that is adopted.
+    _private_copy(main, wt_dir)  # a private setup's untracked files, from main's adopted copy
+    _init_in_yard(main, wt_dir)  # the project's own script, which may copy foldyard.local.toml
 
     # Its first adoption also mirrors main's keyless posture in (configpin.adopt), here or later.
     adopted = _adopt_config(name)
@@ -1378,6 +1380,15 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
         _err(f"✗ {e}")
         return 1
     _claim_ports(name)
+    if os.path.lexists(wt_dir / "foldyard.toml"):  # never over a config already there
+        from . import privatecfg
+
+        if privatecfg.enabled(main):
+            print(
+                f"  its foldyard.toml was kept: `fy worktree init {name}` replaces it with main's"
+            )
+    else:
+        _private_copy(main, wt_dir)
     print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
     _say_unmasked(main, name, fresh=False)
     return 0
@@ -1397,12 +1408,29 @@ def init_config(name: str) -> int:
     Returns 0 when it ran (or there's nothing to run). Non-fatal by design: a config-copy hiccup
     must not strand the already-created worktree, and when the engine or box image isn't available
     yet this SKIPS with the command to run later rather than falling back to the host."""
+    plain = Path(name)
+    if plain.is_absolute() or len(plain.parts) != 1 or name == "..":
+        # It is joined to the worktrees root and written to: a path would lead somewhere else.
+        _err(f"✗ '{name}' must be a single relative path component, a worktree's name")
+        return 1
     main = stack.main_repo()
     wt_dir = config.worktrees_root(main) / name
     if not wt_dir.is_dir():
         _err(f"✗ no worktree at {wt_dir} — `fy worktree add {name}` first")
         return 1
+    _private_copy(main, wt_dir)
     return _init_in_yard(main, wt_dir)
+
+
+def _private_copy(main: Path, wt_dir: Path) -> None:
+    """In a private setup (``[project] private`` in main's ADOPTED config, ADR-0037), write the
+    files git doesn't bring along into ``wt_dir``: main's adopted config and the foldyard skill,
+    from your computer (:func:`foldyard.privatecfg.sync_worktree`). Non-fatal, like the init
+    script: a worktree already made must not be stranded by its config copy."""
+    from . import privatecfg
+
+    if privatecfg.enabled(main):
+        privatecfg.sync_worktree(main, wt_dir.parent, wt_dir.name)
 
 
 def _init_in_yard(main: Path, wt_dir: Path) -> int:

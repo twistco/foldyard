@@ -7,10 +7,10 @@ tool and need no separate registry. ``install`` copies one into a consumer repo'
 
 from __future__ import annotations
 
-import shutil
+import os
 from pathlib import Path
 
-from . import config
+from . import config, mountwrite
 
 
 def _bundled_dir() -> Path:
@@ -51,25 +51,34 @@ def list_() -> int:
     return 0
 
 
+def write_bundled(root: Path, rel: Path, name: str) -> None:
+    """Write bundled skill ``name``'s files under ``root/rel``, following no link below ``root``
+    (:mod:`foldyard.mountwrite`): the checkout is box-writable, so a ``.claude`` there may be a
+    link to a directory of yours. Files already there are overwritten, never deleted first.
+    Raises ``OSError`` when a directory on the way is a link."""
+    src = _bundled_dir() / name
+    for f in sorted(p for p in src.rglob("*") if p.is_file()):
+        mountwrite.write(root, rel / f.relative_to(src), f.read_bytes())
+
+
 def install(name: str, *, force: bool = False) -> int:
-    """Copy a bundled skill into ``<repo>/.claude/skills/<name>/``."""
+    """Copy a bundled skill into ``<repo>/.claude/skills/<name>/`` (:func:`write_bundled`).
+    ``force`` overwrites its files and deletes none: one a newer version dropped stays."""
     names = bundled()
     if name not in names:
         avail = ", ".join(names) or "(none)"
         print(f"✗ no bundled skill '{name}'. Available: {avail}")
         return 1
-    dest = config.repo_root() / ".claude" / "skills" / name
-    if dest.exists() and not force:
+    root = config.repo_root()
+    rel = Path(".claude") / "skills" / name
+    dest = root / rel
+    if os.path.lexists(dest) and not force:
         print(f"✗ {dest} already exists — pass --force to overwrite.")
         return 1
-    src = _bundled_dir() / name
     try:
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dest)
+        write_bundled(root, rel, name)
     except OSError as e:
-        print(f"✗ could not install skill: {e}")
+        print(f"✗ could not install skill (a link in the way?): {e}")
         return 1
     print(f"✓ installed skill '{name}' → {dest}")
     print("  Claude Code picks it up from .claude/skills/; invoke it with /" + name + ".")

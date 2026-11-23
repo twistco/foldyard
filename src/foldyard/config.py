@@ -897,6 +897,12 @@ def ensure_dirs() -> list[str]:
     return [str(x) for x in raw] if isinstance(raw, list) else []
 
 
+def private() -> bool:
+    """``[project].private``: the project itself doesn't use foldyard, so this clone's foldyard
+    files are untracked and hidden from git (ADR-0037, :mod:`foldyard.privatecfg`)."""
+    return _project_table().get("private") is True
+
+
 def worktree_init() -> str | None:
     """Optional per-project init script ``foldyard worktree add`` runs in each new
     worktree, as ``sh <script> --source <main-repo>`` with cwd = the new worktree — it
@@ -1869,7 +1875,7 @@ def claude_system_prompt() -> str:
     """Inline box-orientation prompt ``fy claude`` passes via ``--append-system-prompt``. From
     ``[claude].system_prompt`` (""). ``fy init`` seeds a generic default; edit it in place."""
     raw = _table("claude").get("system_prompt")
-    return str(raw) if isinstance(raw, str) else ""
+    return _with_private_note(str(raw) if isinstance(raw, str) else "")
 
 
 def claude_settings() -> dict:
@@ -2022,7 +2028,17 @@ def codex_system_prompt() -> str:
     only the delivery differs, because Codex has no ``--append-system-prompt``: it goes in as a
     DEVELOPER INSTRUCTION (``codex -c developer_instructions=…``, see ``box._codex_argv``)."""
     raw = _table("codex").get("system_prompt")
-    return str(raw) if isinstance(raw, str) else ""
+    return _with_private_note(str(raw) if isinstance(raw, str) else "")
+
+
+def _with_private_note(prompt: str) -> str:
+    """``prompt``, followed in a private setup by the note telling the agent so: foldyard's own
+    words, so they follow the installed version rather than a copy in each config."""
+    if not private():
+        return prompt
+    from . import privatecfg  # lazy: privatecfg reaches configpin, which imports this module
+
+    return privatecfg.with_note(prompt)
 
 
 def codex_config() -> dict:

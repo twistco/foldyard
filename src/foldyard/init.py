@@ -22,11 +22,12 @@ auto-init'd on the first ``foldyard box up`` (``machine.ensure``), so the flow i
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import compat
+from . import compat, mountwrite
 
 # config defaults mirrored here so `init` writes the SAME numbers foldyard would otherwise
 # fall back to (config.machine_resources defaults: cpus=4, memory=8192 MiB, disk=60 GiB).
@@ -97,6 +98,8 @@ class InitOptions:
     version: str = field(default_factory=_running_version)
     #: The :data:`BLOCKS` written ACTIVE instead of commented (``fy init --with``).
     blocks: frozenset[str] = frozenset()
+    #: ``[project] private = true``: the project doesn't use foldyard (``fy init --private``).
+    private: bool = False
 
 
 #: Stand-in for an unorderable running version in the file's EXAMPLE lines (the commented
@@ -323,6 +326,15 @@ def render(opts: InitOptions) -> str:
         "# file), which can also switch a block below OFF for one person with `disabled = true`.",
         "",
         "[project]",
+        *(
+            [
+                "# Private to this clone: the project itself doesn't use foldyard, so git never",
+                "# sees foldyard's files here (`fy docs private-config`).",
+                "private = true",
+            ]
+            if opts.private
+            else []
+        ),
         # json.dumps escapes quotes/backslashes/control chars — JSON string syntax is valid
         # TOML basic-string syntax, so any name round-trips instead of breaking the parse.
         f"name = {json.dumps(opts.name)}",
@@ -708,7 +720,7 @@ def _install_agent_skill(target: Path, *, force: bool) -> None:
 
     with config.using(config.resolve(worktree="", repo=target)):
         dest = target / ".claude" / "skills" / "foldyard"
-        if dest.exists() and not force:
+        if os.path.lexists(dest) and not force:
             return  # already there — a re-run must not clobber a consumer's edits
         skills.install("foldyard", force=True)
 
@@ -722,8 +734,10 @@ def init(
     disk: int = DEFAULT_DISK_GIB,
     force: bool = False,
     blocks: list[str] | None = None,
+    private: bool = False,
 ) -> int:
-    """Write ``<path>/foldyard.toml``. Returns a process exit code."""
+    """Write ``<path>/foldyard.toml``. Returns a process exit code. ``private``: for a project
+    that doesn't use foldyard, nothing git would see (:func:`_init_private`)."""
     target = Path(path).expanduser().resolve()
     dest = target / "foldyard.toml"
     try:
@@ -731,17 +745,28 @@ def init(
     except ValueError as e:
         print(f"✗ {e}")
         return 1
-    if dest.exists() and not force:
+    if private and (refusal := _private_refusal(target)):
+        print(refusal)
+        return 1
+    if os.path.lexists(dest) and not force:  # a link counts, even one that leads nowhere
+        if private:
+            return _init_private(target, convert=True)
         print(f"✗ {dest} already exists — pass --force to overwrite.")
         return 1
     opts = InitOptions(
-        name=name or target.name, cpus=cpus, memory_mib=memory, disk_gib=disk, blocks=active
+        name=name or target.name,
+        cpus=cpus,
+        memory_mib=memory,
+        disk_gib=disk,
+        blocks=active,
+        private=private,
     )
     try:
         target.mkdir(parents=True, exist_ok=True)
-        dest.write_text(render(opts))
-        local_status = _write_local_example(target, opts, force=force)
-        gitignore_status = _update_gitignore(target)
+        # Replaces a link rather than writing through it: the checkout may be box-writable.
+        mountwrite.write(target, "foldyard.toml", render(opts).encode())
+        local_status = "private" if private else _write_local_example(target, opts, force=force)
+        gitignore_status = "unchanged" if private else _update_gitignore(target)
     except OSError as e:
         print(f"✗ could not write {dest}: {e}")
         return 1
@@ -757,7 +782,75 @@ def init(
         verb = "created" if gitignore_status == "created" else "updated"
         print(f"✓ {verb} {target / '.gitignore'} (box-generated dirs + foldyard.local.toml)")
     _install_agent_skill(target, force=force)
+    if private:
+        return _init_private(target, convert=False)
     print("  A locked-down, stack-less Lima box. Next: `fy prereq` (what this computer still")
     print("  needs; `--fetch` bakes the base VM), then `fy box up` and `fy box shell`. The file")
     print("  itself guides what to uncomment next.")
+    return 0
+
+
+def _private_refusal(target: Path) -> str | None:
+    """Why ``target`` can't be set up private, or ``None``: it must be a clone's main checkout
+    (the exclude list is the clone's), and git must track none of foldyard's files there."""
+    from . import privatecfg
+
+    if not privatecfg.is_main_checkout(target):
+        return (
+            f"✗ --private needs a git clone's main checkout: {target} has no .git directory.\n"
+            "  (In a worktree, run it in the main checkout: worktrees get their copy from there.)"
+        )
+    found = privatecfg.tracked(target)
+    if found is None:
+        return (
+            f"✗ couldn't ask git which files it tracks in {target} (`git ls-files` failed), so\n"
+            "  whether this setup can be private is unknown. Check `git status` there first."
+        )
+    if found:
+        return (
+            f"✗ git tracks {', '.join(found)} here, so this setup can't be private. If it's yours,\n"
+            "  take it out of your branch's history before anything is pushed (`fy docs\n"
+            "  private-config`); if the project ships it, it uses foldyard: plain `fy init`."
+        )
+    return None
+
+
+def _init_private(target: Path, *, convert: bool) -> int:
+    """The private half of `fy init --private` (ADR-0037): foldyard's ignore block in the clone's
+    own ``.git/info/exclude`` (and out of ``.gitignore``, for a setup made the usual way), no team
+    template, and ``private = true`` in a config kept as it is when ``convert``. Everything written
+    from here goes through :mod:`mountwrite`: a clone used with foldyard is box-writable."""
+    from . import mountwrite, privatecfg
+
+    try:
+        marked = ""
+        if convert:
+            # Never through a link: one the box planted would have your computer copy the file it
+            # names into the checkout.
+            text = privatecfg.read_nofollow(target, Path("foldyard.toml")) or ""
+            marked = privatecfg.mark_private(text)
+            if marked != text:
+                mountwrite.write(target, "foldyard.toml", marked.encode())
+                print(f"✓ marked {target / 'foldyard.toml'} private ([project] private = true)")
+        gitignore = privatecfg.drop_gitignore_block(target)
+        example = target / LOCAL_EXAMPLE
+        if example.is_file() and privatecfg.tracked_paths(target, LOCAL_EXAMPLE) == []:
+            mountwrite.unlink(target, LOCAL_EXAMPLE)
+            print(f"✓ removed {example} (a template for a team; there's none here)")
+        exclude = privatecfg.write_exclude(target)
+    except (OSError, ValueError) as e:  # ValueError: a file that isn't UTF-8
+        print(f"✗ couldn't set up {target} privately: {e}")
+        return 1
+    if gitignore:
+        print(f"✓ took foldyard's block back out of .gitignore ({gitignore})")
+    if exclude != "unchanged":
+        print(f"✓ hid foldyard's files with {target / privatecfg.EXCLUDE} (this clone only)")
+    if left := privatecfg.unhidden(target):
+        print(f"⚠ git would still show {', '.join(left)}: add it to {privatecfg.EXCLUDE}")
+    if convert and ".fy/" in marked:
+        print("  Worktrees now get their copy from foldyard: `[project].worktree_init` and the")
+        print("  .fy/ script it names can go, as can the private-setup paragraph in system_prompt")
+        print("  (foldyard adds its own).")
+    print("  Private: git sees none of foldyard's files here, and the agent is told so. Next:")
+    print("  `fy config diff`, `fy config adopt`, then `fy box up` (`fy docs private-config`).")
     return 0

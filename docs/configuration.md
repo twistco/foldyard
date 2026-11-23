@@ -123,6 +123,11 @@ min_foldyard_version = "0.2.0"
   `external: true` and an explicit `name`. Use it when the box's permanent attachment makes a
   compose-owned network noisy (`down` warnings, `box up` before the first `up` failing). Default:
   `false`.
+- **`private`** — `true` when the project itself doesn't use foldyard and this clone's foldyard
+  files are yours alone: untracked, hidden by the clone's `.git/info/exclude`. `fy init --private`
+  sets it, with the rest of the setup. Each new worktree then gets main's adopted config and the
+  foldyard skill from your computer, and each agent's system prompt gets a note saying the files are
+  private. See [private-config.md](./private-config.md). Default: `false`.
 - **`worktree_init`** — a script `fy worktree add` runs for each new worktree, to copy gitignored
   local config (env files, editor settings) across. It runs in a throwaway container in the VM from
   the box image, never on your computer, as `sh <script> --source <main-repo>` with the new worktree
