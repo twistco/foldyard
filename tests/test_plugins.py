@@ -2837,9 +2837,13 @@ def test_copilot_plugin_mounts_and_installs_when_enabled(monkeypatch, tmp_path):
     assert (tmp_path / "tx").is_dir()  # box_args created the host-side bind source
     (boot,) = p.box_bootstrap(env)
     assert boot["check"] == "command -v copilot"
-    assert "github/copilot-cli" in boot["run"] and 'PREFIX="$HOME/.local"' in boot["run"]
-    # The installer is a bash script (bash arrays), so it must not be fed to the box's dash.
-    assert boot["run"].rstrip().endswith("bash)")
+    assert "github/copilot-cli" in boot["run"] and 'PREFIX="$home"' in boot["run"]
+    # The payload is cached in the persisted home; only the ~/.local/bin symlink is ephemeral.
+    assert 'home="${COPILOT_HOME:-$HOME/.copilot}"' in boot["run"]
+    assert 'cached="$home/bin/copilot"' in boot["run"]
+    assert 'ln -sf "$cached" "$HOME/.local/bin/copilot"' in boot["run"]
+    # The installer itself is a bash script (bash arrays), never fed to the box's dash.
+    assert "| PREFIX=" in boot["run"] and " bash) " in boot["run"]
 
 
 def test_copilot_bootstrap_runs_the_installer_under_bash(monkeypatch):
@@ -2849,10 +2853,62 @@ def test_copilot_bootstrap_runs_the_installer_under_bash(monkeypatch):
     (step,) = copilot.CopilotPlugin().box_bootstrap(dict(_BOX_ENV))
     script = step["run"]
     assert "install.sh" in script
-    assert "| PREFIX=" in script and script.split("install.sh", 1)[1].rstrip().endswith("bash)")
+    after = script.split("install.sh", 1)[1]
+    assert after.startswith(" | PREFIX=") and " bash) " in after
     assert " sh)" not in script
     # A failed download must fail the step, not pipe an empty script into bash (which exits 0).
     assert "set -o pipefail" in script
+    assert " bash) && mkdir -p" in script  # installer failure short-circuits the cache/symlink
+
+
+@pytest.mark.spawns("bash")
+def test_copilot_install_caches_the_binary_and_relinks_without_egress(monkeypatch, tmp_path):
+    """Mirror of Codex's warm cache: the payload lives in the persisted COPILOT_HOME volume, only
+    the ~/.local/bin symlink dies with the container. A recreated box relinks with ZERO egress."""
+    import shlex
+    import subprocess
+
+    monkeypatch.setattr(config, "copilot_enabled", lambda: True)
+    (step,) = copilot.CopilotPlugin().box_bootstrap(dict(_BOX_ENV))
+    run = step["run"]
+    home, vol = tmp_path / "home", tmp_path / "copilot"
+    cached, link = vol / "bin" / "copilot", home / ".local" / "bin" / "copilot"
+    calls = tmp_path / "curl.calls"
+    # What upstream does — extract $PREFIX/bin/copilot and chmod it. curl itself is never reached:
+    # the stub records each call so the warm path can assert there was NO egress at all.
+    fake_installer = (
+        'mkdir -p "$PREFIX/bin"; printf x > "$PREFIX/bin/copilot"; chmod +x "$PREFIX/bin/copilot"'
+    )
+    stub = (
+        f"curl() {{ printf 'x\\n' >> {shlex.quote(str(calls))}; "
+        f"printf '%s\\n' {shlex.quote(fake_installer)}; }}\n"
+    )
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "COPILOT_HOME": str(vol)}
+
+    def execute():
+        return subprocess.run(
+            ["bash", "-c", f"{stub}\neval {shlex.quote(run)}\nprintf 'rc=%s\\n' \"$?\""],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    # Cold: no cached binary → the installer runs, the payload lands in the volume, the symlink
+    # points into it, and ~/.local/bin itself stays inside the (ephemeral) HOME.
+    out = execute()
+    assert out.returncode == 0 and "rc=0" in out.stdout, out.stdout + out.stderr
+    assert calls.read_text().splitlines() == ["x"]
+    assert cached.is_file() and cached.stat().st_mode & 0o111
+    assert link.is_symlink() and link.resolve() == cached
+
+    # Recreated box: HOME is gone but the volume survives. Drop the symlink (fresh container) and
+    # refuse any curl call outright — the step must still succeed by relinking from the cache.
+    link.unlink()
+    stub = "curl() { printf 'unexpected curl\\n' >&2; return 99; }\n"
+    out = execute()
+    assert out.returncode == 0 and "rc=0" in out.stdout, out.stdout + out.stderr
+    assert link.is_symlink() and link.resolve() == cached
+    assert cached.read_text() == "x"  # the cached binary was not re-downloaded
 
 
 def test_copilot_bootstrap_is_image_agnostic(monkeypatch):

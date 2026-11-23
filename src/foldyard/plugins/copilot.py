@@ -56,19 +56,30 @@ from .inject import _spec_to_rule  # reuse the static-token minter wiring (same 
 
 # The upstream installer: a static release tarball fetched from github.com (redirecting to
 # release-assets.githubusercontent.com) and verified against its SHA256SUMS, which is why both hosts
-# are in `egress_recommend` below. PREFIX puts the binary at $HOME/.local/bin/copilot — a dir the
-# box already has FIRST on PATH (the same one the Claude/Codex steps install into). PATH is set for
-# the installer's own "is the install dir on PATH?" probe: with it present the script skips its
-# "add this to your shell rc?" prompt, which otherwise reads /dev/tty — a bootstrap step must never
-# block. `cd /tmp` keeps a download from landing in the repo if curl is interrupted.
+# are in `egress_recommend` below. Like the Codex/Claude steps, the payload lands in the AGENT'S
+# PERSISTED volume — here ${COPILOT_HOME:-$HOME/.copilot}/bin (the mounted `devbox_copilot_home`) —
+# so only the ~/.local/bin symlink dies with the container: a recreated box relinks from the cache
+# with ZERO egress, instead of re-downloading through the broad github.com grant. `PREFIX` points
+# the installer at that volume, and PATH puts its bin dir first for the installer's "is the install
+# dir on PATH?" probe: the binary it just extracted is then found, so it skips the "add this to
+# your shell rc?" prompt, which otherwise reads /dev/tty — a bootstrap step must never block.
+# `cd /tmp` keeps a download from landing in the repo if curl is interrupted.
 # Run it under `bash`, not `sh`: the script is `#!/usr/bin/env bash` and uses bash arrays
 # (`CURL_AUTH=()`), which the box's dash rejects with `Syntax error: "(" unexpected`.
 # `pipefail` makes a failed `curl` fail the step: without it the pipeline's status is bash's, and
-# an empty download would "install" nothing yet report success.
+# an empty download would "install" nothing yet report success. The `&&` chain after the installer
+# propagates that failure to `run_step` (which judges the whole `eval`'d script by its exit status).
 _INSTALL = (
-    "(set -o pipefail && cd /tmp && curl -fsSL --retry 3 "
+    'home="${COPILOT_HOME:-$HOME/.copilot}"\n'
+    'cached="$home/bin/copilot"\n'
+    'if [ -x "$cached" ]; then\n'
+    '  mkdir -p "$HOME/.local/bin" && ln -sf "$cached" "$HOME/.local/bin/copilot"\n'
+    "else\n"
+    "  (set -o pipefail && cd /tmp && curl -fsSL --retry 3 "
     "https://raw.githubusercontent.com/github/copilot-cli/refs/heads/main/install.sh "
-    '| PREFIX="$HOME/.local" PATH="$HOME/.local/bin:$PATH" bash)'
+    '| PREFIX="$home" PATH="$home/bin:$HOME/.local/bin:$PATH" bash) '
+    '&& mkdir -p "$HOME/.local/bin" && ln -sf "$cached" "$HOME/.local/bin/copilot"\n'
+    "fi"
 )
 
 
@@ -213,8 +224,10 @@ class CopilotPlugin(Plugin):
 
     def egress_recommend(self) -> list[dict]:
         """What `_INSTALL` reaches for, so a walled box can install the CLI after one consented yes
-        instead of a blocked-host hunt: only the installer's hosts. Never the API or auth hosts —
-        there is no in-box login (ADR-0008, amended 2026-11-18), and every host in
+        instead of a blocked-host hunt: only the installer's hosts. The binary is cached in the
+        COPILOT_HOME volume, so these are needed for the FIRST install only — a recreated box
+        relinks from the cache with no egress. Never the API or auth hosts — there is no in-box
+        login (ADR-0008, amended 2026-11-18), and every host in
         :data:`~foldyard.keyless.COPILOT_KEYLESS_HOSTS` is the injector's, exempt from the wall
         structurally. Telemetry (``telemetry.*.githubcopilot.com``) is deliberately absent: the CLI
         degrades without it, and a dev box gains nothing from shipping usage data."""

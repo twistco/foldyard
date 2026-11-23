@@ -1190,7 +1190,9 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
     `features.daemon_auto_start = true` in `[codex.config]` turns it back on.
 
 - **`[copilot]`** — installs the GitHub Copilot CLI at box-up (its installer's static release
-  tarball) and mounts its `$COPILOT_HOME` (settings, `session-state`).
+  tarball) and mounts its `$COPILOT_HOME` (settings, `session-state`). The binary is cached in that
+  volume too, so a recreated box just relinks it with no downloads: the recommended GitHub hosts are
+  needed for the first install only.
 
   - **`keyless`** *(experimental)* — `"api-key"` (or `true`) keeps the real token out of the box:
     the box holds a dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with
