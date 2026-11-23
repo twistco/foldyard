@@ -240,8 +240,8 @@ def mount(wt_dir: Path, name: str) -> bool:
         dirs = ", ".join(os.path.relpath(t, wt_dir) for t, w in left.items() if w == why)
         _err(f"⚠ no volume on {dirs}: {why}.")
     if left:
-        _err("  An install there fails or lands on your computer's disk. Ask the operator for")
-        _err(f"  `fy worktree add {shlex.quote(name)}` on their computer, which gives it a box.")
+        _err("  An install there fails or lands on your computer's disk. Give it a box of its own:")
+        _err(f"  `fy worktree add {shlex.quote(name)} --box`, on the operator's computer.")
     return not left
 
 
@@ -354,24 +354,63 @@ def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> in
     return 0
 
 
-def remove(name: str, force: bool = False) -> int:
+def _uncommitted(wt_dir: Path, name: str, *, save: bool) -> tuple[str, str] | None:
+    """``("clean"|"dirty"|"saved", commit id or "")``: the check ``fy worktree remove`` makes on
+    your computer (``worktree._UNCOMMITTED_SH``), run here, in the box. None when it fails."""
+    who, email = worktree._PARKED_BY
+    env = {
+        f"GIT_{role}_{k}": v
+        for role in ("AUTHOR", "COMMITTER")
+        for k, v in (("NAME", who), ("EMAIL", email))
+    }
+    message = f"fy: uncommitted work in worktree '{name}' at removal"
+    cmd = [
+        "sh",
+        "-c",
+        worktree._UNCOMMITTED_SH,
+        "fy-uncommitted",
+        "save" if save else "check",
+        message,
+    ]
+    got = subprocess.run(cmd, cwd=wt_dir, env={**os.environ, **env}, stdout=subprocess.PIPE)
+    return worktree._verdict(got.stdout or b"", save=save) if got.returncode == 0 else None
+
+
+def _settled(main: Path, wt_dir: Path, name: str, *, force: bool) -> bool:
+    """Whether ``wt_dir`` may go: nothing uncommitted in it, or (``force``) it is saved on a ref."""
+    from datetime import datetime
+
+    verdict = _uncommitted(wt_dir, name, save=force)
+    if verdict is None:
+        _err(f"✗ not removing '{name}': its uncommitted work couldn't be checked for or saved.")
+        _err("  --discard removes it without: anything uncommitted is lost.")
+        return False
+    kind, oid = verdict
+    if kind == "dirty":
+        _err(f"✗ not removing '{name}': it has uncommitted work. Commit it, or pass --force, which")
+        _err("  saves it on refs/fy/removed/ first.")
+        return False
+    if kind == "saved":
+        ref = f"refs/fy/removed/{name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        if _git(main, "update-ref", ref, oid, "") != 0:  # create-only
+            _err(f"✗ not removing '{name}': couldn't save its uncommitted work on {ref} (above).")
+            return False
+        worktree._say_parked(name, ref)
+    return True
+
+
+def remove(name: str, force: bool = False, discard: bool = False) -> int:
     """``fy worktree remove`` in a box, for one a box made: its checkout and its volumes. The
-    branch stays. Uncommitted work refuses, unless ``force``."""
+    branch stays. Uncommitted work refuses; ``force`` saves it first, ``discard`` doesn't look."""
     if worktree.refuse_name(name):
         return 1
     main = stack.main_repo()
     wt_dir = config.worktrees_root(main) / name
-    if not force:
-        dirty = subprocess.run(
-            ["git", "-C", str(wt_dir), "status", "--porcelain"], capture_output=True, text=True
-        )
-        if dirty.returncode != 0 or dirty.stdout.strip():
-            what = dirty.stderr.strip() if dirty.returncode else "it has uncommitted work"
-            _err(f"✗ not removing '{name}': {what}")
-            _err("  Commit it, or pass --force to lose it.")
+    if not discard:
+        if worktree._refuse_nested(name, worktree._nested_worktrees(main, wt_dir)):
             return 1
-    if worktree._refuse_nested(name, worktree._nested_worktrees(main, wt_dir)):
-        return 1
+        if not _settled(main, wt_dir, name, force=force):
+            return 1
     vols = volumes(wt_dir, name)
     here = attached(vols)
     facts = _this_box() if vols else ""

@@ -275,12 +275,13 @@ def test_a_box_makes_a_worktree_and_your_computer_registers_it(repo):
     _in_box(repo, f"cd {repo} && fy worktree add {MADE}")
     assert "installed" in _in_box(repo, f"ls {venv}").out  # the volume kept what was there
 
-    # Uncommitted work keeps it; committed, it goes, volume and all, and comes back empty.
+    # Uncommitted work keeps it; --force saves that and it goes, volume and all.
     _in_box(repo, f"touch {wt}/notes")
     kept = _in_box(repo, f"cd {repo} && fy worktree remove {MADE}", ok=False)
     assert kept.rc != 0 and "uncommitted work" in kept.out, kept.out
-    _in_box(repo, f"rm {wt}/notes")
-    _in_box(repo, f"cd {repo} && fy worktree remove {MADE}")
+    saved = _in_box(repo, f"cd {repo} && fy worktree remove {MADE} --force")
+    (ref,) = _git(repo, "for-each-ref", "--format=%(refname)", f"refs/fy/removed/{MADE}-*").split()
+    assert ref in saved.out and _git(repo, "show", "--stat", ref).count("notes") == 1
     assert not wt.exists()
     assert f"{PROJECT}-{MADE}-devbox-shadow" not in engine("volume", "ls", "-q").stdout
     _in_box(repo, f"cd {repo} && fy worktree add {MADE} && touch {venv}/installed")

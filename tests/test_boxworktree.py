@@ -15,6 +15,8 @@ from foldyard import box, boxworktree, config, crossmask, devmode, sandbox, stac
 from foldyard import worktree_registry as registry
 
 REAL_RUN = subprocess.run
+# `remove` runs foldyard's own check for uncommitted work (worktree._UNCOMMITTED_SH) for real.
+pytestmark = pytest.mark.spawns("sh")
 DIRS = ["web/node_modules", "api/.venv"]
 
 
@@ -61,6 +63,8 @@ def world(tmp_path, monkeypatch):
                 state["order"].append("hook")
             elif "worktree" in cmd and "add" in cmd:
                 state["order"].append("worktree")
+            return REAL_RUN(cmd, **kw)
+        if cmd[0] == "sh":
             return REAL_RUN(cmd, **kw)
         state["calls"].append(cmd)
         if cmd[1] == "inspect":
@@ -270,13 +274,62 @@ def test_remove_takes_the_volumes_too_and_keeps_the_branch(world):
     assert "wt/fix" in _git(world["main"], "branch", "--list", "wt/fix")
 
 
+def _parked(world):
+    return _git(world["main"], "for-each-ref", "--format=%(refname)", "refs/fy/removed/").split()
+
+
 def test_remove_refuses_uncommitted_work_and_unmounts_nothing(world, capsys):
     boxworktree.add("fix")
     (world["root"] / "fix" / "new").write_text("n")
     assert worktree.remove("fix") == 1
-    assert "uncommitted work" in capsys.readouterr().err
-    assert _runs(world, "detach") == []
+    err = capsys.readouterr().err
+    assert "uncommitted work" in err and "--force" in err
+    assert _runs(world, "detach") == [] and _parked(world) == []
+
+
+def test_remove_force_saves_uncommitted_work_first(world, capsys):
+    # What the option's help says, and what it does on your computer.
+    boxworktree.add("fix")
+    wt = world["root"] / "fix"
+    (wt / "new").write_text("n\n")
+    (wt / "web" / "x").write_text("edited\n")
     assert worktree.remove("fix", force=True) == 0
+    (ref,) = _parked(world)
+    assert ref in capsys.readouterr().out
+    assert _git(world["main"], "show", f"{ref}:new") == "n\n"
+    assert _git(world["main"], "show", f"{ref}:web/x") == "edited\n"
+    assert not wt.exists()
+
+
+def test_remove_force_with_nothing_to_save_makes_no_ref(world):
+    boxworktree.add("fix")
+    assert worktree.remove("fix", force=True) == 0
+    assert _parked(world) == []
+
+
+def test_remove_discard_saves_nothing(world):
+    boxworktree.add("fix")
+    (world["root"] / "fix" / "new").write_text("n")
+    assert worktree.remove("fix", discard=True) == 0
+    assert _parked(world) == [] and not (world["root"] / "fix").exists()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_remove_stops_where_the_work_cannot_be_checked_or_saved(world, monkeypatch, capsys, force):
+    boxworktree.add("fix")
+    (world["root"] / "fix" / "new").write_text("n")
+    monkeypatch.setattr(worktree, "_UNCOMMITTED_SH", "exit 3")
+    assert worktree.remove("fix", force=force) == 1
+    assert "--discard" in capsys.readouterr().err
+    assert (world["root"] / "fix" / "new").exists() and _runs(world, "detach") == []
+
+
+def test_remove_stops_where_the_ref_cannot_be_written(world, capsys):
+    boxworktree.add("fix")
+    (world["root"] / "fix" / "new").write_text("n")
+    (world["main"] / ".git" / "refs" / "fy").write_text("in the way")
+    assert worktree.remove("fix", force=True) == 1
+    assert (world["root"] / "fix" / "new").exists()
 
 
 def test_remove_stops_where_a_volume_cannot_be_unmounted(world, capsys):

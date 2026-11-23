@@ -264,6 +264,8 @@ fy worktree add <name> [<branch>]       # branch: wt/<name>, off the default bra
 fy worktree remove <name>               # in the box: its checkout and volumes; the branch stays
 ```
 
+Uncommitted work keeps it, as on your computer: `--force` saves that on `refs/fy/removed/` first.
+
 It is an ordinary git worktree in the worktrees root, beside those made on your computer. Your
 computer sees the files, the branch and its commits at once. Its dependency dirs
 (`[box].shadow_volumes`) are volumes in the box that made it, so an install runs at VM-disk speed
@@ -278,7 +280,8 @@ your computer. A restart of the box or the VM drops the mounts and keeps the vol
 read-only and empty, which stops npm, uv and pnpm's hoisted linker from installing onto your
 computer's disk. It is a safety net only: pnpm's isolated linker replaces the dir, and the box's
 root can. Under the gVisor posture nothing can be mounted, so it stays that way: edit and commit
-there, and to install, ask for `fy worktree add` on your computer.
+there, and to install, ask for `fy worktree add <name> --box` on your computer and install in the
+box it makes.
 
 What it doesn't have is a stack, ports, a mode or adopted config. Commands in it run in the box that
 made it, under that box's mode, and `fy up` there is refused. To give it those, run the same command

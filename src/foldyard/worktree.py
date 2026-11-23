@@ -1489,7 +1489,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
     if config.in_box() and boxworktree.is_box_made(
         stack.main_repo(), config.worktrees_root(stack.main_repo()) / name
     ):
-        return boxworktree.remove(name, force=force or discard)
+        return boxworktree.remove(name, force=force, discard=discard)
     if (rc := _host_only("remove")) is not None:
         return rc
     main = stack.main_repo()
