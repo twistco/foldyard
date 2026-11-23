@@ -2817,7 +2817,7 @@ def test_copilot_plugin_mounts_and_installs_when_enabled(monkeypatch, tmp_path):
     p = copilot.CopilotPlugin()
     args = p.box_args(env)
     assert "COPILOT_HOME=/home/vscode/.copilot" in args  # state home, set explicitly
-    assert "devbox_copilot_keyless_home:/home/vscode/.copilot" in args  # the volume
+    assert "devbox_copilot_home:/home/vscode/.copilot" in args  # the volume
     # Only session-state is bound out, inside the home — the settings stay in the volume.
     assert f"{tmp_path / 'tx'}:/home/vscode/.copilot/session-state" in args
     assert (tmp_path / "tx").is_dir()  # box_args created the host-side bind source
@@ -2886,10 +2886,10 @@ def test_copilot_keyless_one_rule_per_host_any_scheme(monkeypatch):
     # AMBIENT with the proxy substrate, never gated on the rung (a flip must not need a recreate).
     assert not any("COPILOT_GITHUB_TOKEN" in a for a in p.box_args(dict(_BOX_ENV)))
     assert "COPILOT_GITHUB_TOKEN=gho_foldyarddummy" in p.box_args({**_BOX_ENV, "FY_PROXY": "1"})
-    # A keyless box mounts its own home: no manual-login token from the shared volume is visible.
+    # Keyless is the only posture, so there is one home, not a separate keyless one.
     args = p.box_args({**_BOX_ENV, "FY_PROXY": "1"})
-    assert "devbox_copilot_keyless_home:/home/vscode/.copilot" in args
-    assert "devbox_copilot_home:/home/vscode/.copilot" not in args
+    assert "devbox_copilot_home:/home/vscode/.copilot" in args
+    assert "devbox_copilot_keyless_home:/home/vscode/.copilot" not in args
     # Keyless: the API hosts are the injector's, so they drop off the recommend offer.
     assert "api.github.com" not in [h["host"] for h in p.egress_recommend()]
     # The flag reaches the addon through the proxy's live file, not just the in-memory rule.

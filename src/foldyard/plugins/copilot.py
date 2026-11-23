@@ -190,14 +190,13 @@ class CopilotPlugin(Plugin):
         # its state under COPILOT_HOME — settings, permissions, the session index and
         # `session-state/`. One volume therefore persists everything; we set the var explicitly so
         # it never depends on HOME resolving to the same dir (root here has HOME=/home/vscode).
-        # Keyless is the only supported posture (ADR-0008, amended 2026-11-18), so the box mounts
-        # the DEDICATED keyless volume: no real token is ever stored in the box. An older
-        # manual-login volume, if one exists, is deliberately not mounted here.
+        # Keyless is the only supported posture (ADR-0008, amended 2026-11-18), so this volume
+        # only ever holds a keyless session — never a real token.
         args = [
             "-e",
             f"COPILOT_HOME={copilot_home}",
             "-v",
-            f"devbox_copilot_keyless_home:{copilot_home}",
+            f"devbox_copilot_home:{copilot_home}",
         ]
         transcripts = env.get("FY_COPILOT_TRANSCRIPTS") or ""
         if transcripts:  # never through a link the box planted in its from-box slot (ADR-0033)
@@ -208,7 +207,7 @@ class CopilotPlugin(Plugin):
         # CONFIGURED — never gated on the rung, which is a host-side decision (does the proxy
         # inject?), while box env is create-time; gating them together made `fy mode copilot=on`
         # land with nothing changed in the box. A declared [copilot] without `keyless` is refused
-        # at launch, so there is no manual-login case to leave a real token in this volume.
+        # at launch, so a real token never reaches this volume.
         if env.get("FY_PROXY") and config.copilot_keyless():
             args += keyless.dummy_box_args(_KEYLESS, config.copilot_keyless())
         return args
