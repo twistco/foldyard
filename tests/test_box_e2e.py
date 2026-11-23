@@ -263,7 +263,7 @@ def test_a_box_makes_a_quick_worktree_and_your_computer_promotes_it(repo):
     assert "FY-CLEAN" in clean.out, clean.out
     # Neither side calls it a problem, and it has no stack.
     doctor = _in_box(repo, f"cd {repo} && fy doctor", ok=False)
-    assert "lets an install land on your computer's disk" not in doctor.out, doctor.out
+    assert f"{wt}/" not in doctor.out, doctor.out  # (LINKED's link is rightly still named)
     assert "(quick)" in fy_ok(["worktree", "list"], repo, timeout=120).out
     up = _in_box(repo, f"cd {wt} && fy up", ok=False)
     assert up.rc != 0 and "is a quick worktree" in up.out, up.out

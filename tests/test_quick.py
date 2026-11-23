@@ -263,6 +263,13 @@ def test_fy_up_is_refused_there_and_nowhere_else(world, capsys):
     assert not quick.refuse_stack(world["main"], "other", "fy up")
 
 
+def test_on_your_computer_the_boxs_marker_refuses_nothing(world, monkeypatch):
+    # The shared `.git` is box-written: a marker planted in a registered worktree must not stop it.
+    quick.add("fix")
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    assert not quick.refuse_stack(world["main"], "fix", "fy up")
+
+
 def test_promoting_it_makes_it_an_ordinary_worktree(world, monkeypatch, tmp_path):
     quick.add("fix")
     wt = world["root"] / "fix"
@@ -326,7 +333,8 @@ def test_your_computer_lists_it_as_quick_and_the_doctor_does_not_warn(
     assert "(quick)" in next(ln for ln in out.splitlines() if " fix " in ln)
     assert "runs nothing for: stray." in out
     row = devmode._worktree_registry_check()
-    assert "stray" in row[2] and "fix" not in row[2]
+    assert "stray" in row[2] and "`fy worktree add fix`" not in row[2]
     _git(world["main"], "worktree", "remove", "--force", str(world["root"] / "stray"))
     row = devmode._worktree_registry_check()
-    assert "1 quick" in row[2]
+    # Named, never just counted: a box decides what is marked, and the operator should see it.
+    assert "quick (marked so by a box): fix" in row[2]

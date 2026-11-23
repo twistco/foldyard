@@ -1338,7 +1338,8 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     """Doctor row: worktree checkouts the host has NO record of (:mod:`foldyard.worktree_registry`)
     and therefore runs nothing for — no daemons, no git heal. WARN, naming each and the verb that
     registers it, so a worktree that went quiet (every one did, once, when the registry landed)
-    says why instead of looking broken."""
+    says why instead of looking broken. A quick worktree (:mod:`foldyard.quick`) is meant to be
+    unregistered: named, not warned about — by the box's own marker, so it says whose word it is."""
     main = main_repo()
     try:
         known = worktree_registry.checkouts(main)
@@ -1356,7 +1357,8 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     return _result(
         True if not stray else None,
         "worktrees",
-        f"{len(known)} registered" + (f", {len(quick_ones)} quick" if quick_ones else ""),
+        f"{len(known)} registered"
+        + (f"; quick (marked so by a box): {', '.join(quick_ones)}" if quick_ones else ""),
         f"not registered, so your computer runs nothing for them: {', '.join(stray)} — {fixes}",
     )
 

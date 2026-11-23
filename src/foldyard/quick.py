@@ -370,9 +370,11 @@ def remove(name: str, force: bool = False) -> int:
 
 
 def refuse_stack(main: Path, name: str, verb: str) -> bool:
-    """Refuse (True) a stack verb in quick worktree ``name``: it has no ports or adopted config of
-    its own, so the stack would be one nothing on your computer manages."""
-    if not name or not is_quick(main, config.worktrees_root(main) / name):
+    """Refuse (True) a stack verb in quick worktree ``name``, in a box: it has no ports or adopted
+    config of its own, so the stack would be one nothing on your computer manages. Never on your
+    computer: the marker is the box's word (planted in a registered worktree's admin dir, it would
+    stop that worktree's `fy up`), and an unregistered worktree has no adopted config to run."""
+    if not config.in_box() or not name or not is_quick(main, config.worktrees_root(main) / name):
         return False
     _err(f"✗ `{verb}`: '{name}' is a quick worktree, which has no stack of its own. Promote it on")
     _err(f"  your computer first: `fy worktree add {shlex.quote(name)} --box`.")
