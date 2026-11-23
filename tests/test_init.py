@@ -401,15 +401,21 @@ def _both(opts: init.InitOptions | None = None) -> str:
 def test_every_experimental_setting_the_scaffold_offers_says_so():
     # The register (experimental.py) is the one list; docs/configuration.md is held to it by
     # test_experimental.py, and the two scaffolds are held to it here: a line offering an
-    # experimental value must say so on that line or the comment line after it.
+    # experimental value must say so on that line or the comment line after it. Several agents
+    # share a field name (`keyless`), so only look inside the feature's own table.
     from foldyard import experimental
 
     lines = _both().splitlines()
     for feature in experimental.REGISTER:
-        field = feature.key.split(".", 1)[1]
+        table, field = feature.key.split(".", 1)
+        header = re.compile(rf"^#?\s*\[{re.escape(table)}\](?:\s|$)")
         offer = re.compile(rf'^#?\s*{re.escape(field)}\s*=\s*"{re.escape(feature.value)}"')
+        in_table = False
         for i, line in enumerate(lines):
-            if offer.search(line):
+            if re.match(r"^#?\s*\[", line):  # any table header, active or commented
+                in_table = bool(header.match(line))
+                continue
+            if in_table and offer.match(line):
                 said = " ".join(lines[i : i + 2]).lower()
                 assert "experimental" in said, f"the scaffold offers {feature.label} untagged"
 

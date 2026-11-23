@@ -1,6 +1,7 @@
 ---
 section: Added
 bump: minor
+experimental: true
 ---
 
 - **Copilot keyless auth: `[copilot] keyless = "api-key"`.** The box bakes a dummy

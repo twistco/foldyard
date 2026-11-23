@@ -66,7 +66,7 @@
 # A keyless [copilot] needs api.github.com to itself: the GitHub `[[inject]]` rows deliver a
 # credential to that same host, so turn them off while a Copilot rung is on.
 # [copilot]
-# keyless = "api-key"
+# keyless = "api-key"  # experimental
 # system_prompt = """
 # …your orientation prompt for `fy copilot`.
 # """

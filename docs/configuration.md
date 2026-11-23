@@ -1190,20 +1190,20 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
 - **`[copilot]`** — installs the GitHub Copilot CLI at box-up (its installer's static release
   tarball) and mounts its `$COPILOT_HOME` (settings, `session-state`).
 
-  - **`keyless`** — `"api-key"` (or `true`) keeps the real token out of the box: the box holds a
-    dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with `Bearer ` + your token
-    from `host.env`. Copilot validates the token on `api.github.com` before its first call and then
-    talks to a **plan-specific** API host (individual/business/enterprise), so the injection covers
-    every host that can carry it, not one. The list is fixed to github.com's hosts: keyless does not
-    yet cover GitHub Enterprise Cloud with data residency (`*.ghe.com`). Required: a `[copilot]`
-    without it is refused, by `fy box up` and `fy box recreate` on your computer and by `fy copilot`
-    in the box. A PAT must be one Copilot accepts: a fine-grained PAT, a `gh auth token` OAuth token
-    (`gho_`) or a `ghu_` token. Classic `ghp_` PATs are refused by Copilot itself, so foldyard
-    refuses to store one too. There is no in-box login: a real token in `$COPILOT_HOME/config.json`
-    (which the CLI can write with its own `storeTokenPlaintext` setting) or in
-    `COPILOT_GITHUB_TOKEN` fails `fy verify`, and `fy doctor` in the box names it. The config.json
-    **user rows** alone are not a finding — a keyless session legitimately names its user there —
-    and foldyard never edits that CLI-managed file. A keyless `[copilot]` also needs
+  - **`keyless`** *(experimental)* — `"api-key"` (or `true`) keeps the real token out of the box:
+    the box holds a dummy `COPILOT_GITHUB_TOKEN` and the proxy rewrites `Authorization` with
+    `Bearer ` + your token from `host.env`. Copilot validates the token on `api.github.com` before
+    its first call and then talks to a **plan-specific** API host (individual/business/enterprise),
+    so the injection covers every host that can carry it, not one. The list is fixed to github.com's
+    hosts: keyless does not yet cover GitHub Enterprise Cloud with data residency (`*.ghe.com`).
+    Required: a `[copilot]` without it is refused, by `fy box up` and `fy box recreate` on your
+    computer and by `fy copilot` in the box. A PAT must be one Copilot accepts: a fine-grained PAT,
+    a `gh auth token` OAuth token (`gho_`) or a `ghu_` token. Classic `ghp_` PATs are refused by
+    Copilot itself, so foldyard refuses to store one too. There is no in-box login: a real token in
+    `$COPILOT_HOME/config.json` (which the CLI can write with its own `storeTokenPlaintext` setting)
+    or in `COPILOT_GITHUB_TOKEN` fails `fy verify`, and `fy doctor` in the box names it. The
+    config.json **user rows** alone are not a finding — a keyless session legitimately names its
+    user there — and foldyard never edits that CLI-managed file. A keyless `[copilot]` also needs
     `api.github.com` to itself: the two GitHub `[[inject]]` rows deliver a credential to that same
     host, and one host takes one injection rule — turn those rows off while a Copilot rung is on
     (`fy mode` reports the conflict and the fix).

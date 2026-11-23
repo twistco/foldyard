@@ -1,6 +1,7 @@
 ---
 section: Added
 bump: minor
+experimental: true
 ---
 
 - **GitHub Copilot CLI runs in the box: `fy copilot`, plus `[copilot]` and `fy agent`.** Declaring a

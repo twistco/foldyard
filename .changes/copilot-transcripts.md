@@ -1,6 +1,7 @@
 ---
 section: Added
 bump: minor
+experimental: true
 ---
 
 - **Box Copilot sessions are archived on the host, into a Copilot home of foldyard's own.**

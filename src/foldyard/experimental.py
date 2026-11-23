@@ -139,6 +139,24 @@ REGISTER: tuple[Feature, ...] = (
         ),
         doc_mark="- **`compose`** *(experimental)*",
     ),
+    Feature(
+        key="copilot.keyless",
+        value="api-key",
+        reader="copilot_keyless",
+        kinds=(UNPROVEN,),
+        unproven=(
+            "the fixed host list has only been exercised with one CLI build and a fine-grained PAT "
+            "on github.com; it hasn't been lived with across the individual/business/enterprise "
+            "hosts, and an `oauth` kind (if one is added) would be unproven too"
+        ),
+        graduates_when=(
+            'a maintainer has run a real project with `[copilot] keyless = "api-key"` day to day '
+            "for a month, on the plan-specific hosts their seat uses, with nothing filed against "
+            "it in that time still open; an `oauth` kind would get its own register entry and "
+            "graduate separately"
+        ),
+        doc_mark="  - **`keyless`** *(experimental)*",
+    ),
 )
 
 

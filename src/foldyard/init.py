@@ -245,7 +245,7 @@ _CODEX = [
 
 _COPILOT = [
     "# [copilot]",
-    '# keyless = "api-key"    # Authorization: Bearer ← a GitHub PAT (Copilot access, read:user)',
+    '# keyless = "api-key"    # experimental: Authorization: Bearer ← a GitHub PAT (Copilot access, read:user)',
     '# system_prompt = """…"""   # same key + same job as [claude]\'s above (paste that one);',
     "#                          # written to $COPILOT_HOME/instructions/ as a personal",
     "#                          # instructions file — the CLI has no prompt flag",
@@ -653,7 +653,7 @@ def render_local(opts: InitOptions) -> str:
         "# system_prompt works here exactly as it does for [claude]; `fy copilot` writes it into",
         "# $COPILOT_HOME/instructions/, which every session in this box loads.",
         "# [copilot]",
-        '# keyless = "api-key"',
+        '# keyless = "api-key"  # experimental',
         '# system_prompt = """',
         "# …your orientation prompt for `fy copilot`.",
         '# """',
