@@ -3009,6 +3009,28 @@ def test_copilot_oauth_mints_host_side_with_no_paste_and_an_emergency_switch(mon
     assert p.proxy_rules({"copilot": "off"}) == []
 
 
+def test_copilot_oauth_pins_github_com_and_the_configured_login(monkeypatch):
+    monkeypatch.setattr(config, "copilot_keyless", lambda: "oauth")
+    monkeypatch.setattr(config, "copilot_oauth_user", lambda: "my-github-login")
+    rules = copilot.CopilotPlugin().proxy_rules({"copilot": "on"})
+    assert len(rules) == len(keyless.COPILOT_KEYLESS_HOSTS)
+    for rule in rules:
+        assert rule.minter.endswith(
+            "-m foldyard.plugins.gh_cli_token --hostname github.com --user my-github-login"
+        )
+
+
+def test_copilot_oauth_without_a_login_pins_github_com_only(monkeypatch):
+    # No `oauth_user` → the active github.com account, never gh's default GHE host.
+    monkeypatch.setattr(config, "copilot_keyless", lambda: "oauth")
+    monkeypatch.setattr(config, "copilot_oauth_user", lambda: "")
+    rules = copilot.CopilotPlugin().proxy_rules({"copilot": "on"})
+    assert rules
+    for rule in rules:
+        assert rule.minter.endswith("-m foldyard.plugins.gh_cli_token --hostname github.com")
+        assert "--user" not in rule.minter
+
+
 def test_copilot_keyless_at_rest_is_held_by_the_proxy(monkeypatch):
     monkeypatch.setattr(config, "copilot_keyless", lambda: "api-key")
     p = copilot.CopilotPlugin()

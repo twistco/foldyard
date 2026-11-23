@@ -166,7 +166,9 @@ REGISTER: tuple[Feature, ...] = (
             "the `/copilot_internal/` path limit and the emergency TTL are a bet on the CLI's "
             "current endpoints: a new api.github.com call outside that prefix gets no token, and "
             "the broad gh token still reaches Copilot's own hosts (including the MCP endpoint) "
-            "until the TTL lapses. Neither has been lived with on an org/enterprise seat."
+            "until the TTL lapses. Neither has been lived with on an org/enterprise seat, and the "
+            "optional `oauth_user` login selector hasn't been tried with several github.com "
+            "accounts on one host."
         ),
         graduates_when=(
             'a maintainer has run a real project with `[copilot] keyless = "oauth"` day to day for '

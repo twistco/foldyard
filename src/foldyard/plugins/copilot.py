@@ -111,12 +111,22 @@ _REMOVE_LOGIN = (
     "here"
 )
 
+
 # The `oauth` rung reuses the gh-cli kind's packaged minter. It returns `Bearer <token>` itself
 # (with its own short TTL), so this rule must NOT add a second `value_prefix`, and it reads no
 # host.env var — `gh` holds its own credential on your computer. Not `GhCliKind().rule()` directly:
 # that rule sets `grants_push`, which would lift the proxy's push refusal even though this rule
 # never injects on a repository-write path.
-_OAUTH_MINTER = shlex.join(selfspawn.python_m("foldyard.plugins.gh_cli_token"))
+def _oauth_minter() -> str:
+    # github.com is PINNED here, not configurable: Copilot's injection hosts are github.com's, so a
+    # token from another gh host would only produce 401s on api.github.com. `oauth_user`, when set,
+    # names which github.com account supplies it; no user means that host's active account.
+    args = ["--hostname", "github.com"]
+    if user := config.copilot_oauth_user():
+        args += ["--user", user]
+    return shlex.join(selfspawn.python_m("foldyard.plugins.gh_cli_token", *args))
+
+
 # The only api.github.com calls the Copilot CLI needed in the observed trace — token validation and
 # `copilot_internal/*`. Everything else on that host (repository reads/writes through the REST API,
 # including push) must NOT receive the operator's full-identity gh token. Copilot's own hosts keep
@@ -174,12 +184,13 @@ class CopilotPlugin(Plugin):
             return []
         spec = _KEYLESS[kind]
         out: list[InjectRule] = []
+        minter = _oauth_minter() if kind == "oauth" else ""
         for host in _KEYLESS_HOSTS:
             if kind == "oauth":
                 rule: InjectRule | None = InjectRule(
                     host=host,
                     header=spec["header"],
-                    minter=_OAUTH_MINTER,
+                    minter=minter,
                     replay_on_401=False,  # the minter re-runs on its short TTL anyway
                     env=(),  # `gh` holds its own credential; nothing from host.env
                     label=f"Copilot keyless proxy (oauth, {host})",

@@ -20,7 +20,10 @@ experimental: true
     Because that is your whole GitHub identity, `on` is an emergency level with a TTL, and its
     `api.github.com` rule injects only on `/copilot_internal/`, the calls the CLI needed in the
     observed trace. Copilot's own hosts still receive the token, including the GitHub MCP endpoint
-    that acts with your full scope; the time limit bounds that reach.
+    that acts with your full scope; the time limit bounds that reach. Optional
+    `[copilot].oauth_user = "<login>"` picks which github.com account's token is minted — the minter
+    runs `gh auth token --hostname github.com --user <login>` on your computer, so several regular
+    accounts can coexist in `gh` and each box chooses its own without a global `gh auth switch`.
 
   Copilot validates its token against `api.github.com` before its first Copilot call and then talks
   to a plan-specific host (individual/business/enterprise), so the injector covers `api.github.com`

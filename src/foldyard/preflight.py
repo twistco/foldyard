@@ -98,6 +98,23 @@ def issues() -> list[str]:
                 f"    Use one of: {allowed} (or remove the line)."
             )
 
+    # 3a. `[copilot].oauth_user` names a github.com login on the oauth rung only. A bad value would
+    # normalise to "" (silently the active account), and on api-key it would do nothing at all —
+    # refuse both rather than let a typo quietly change which account gets used.
+    raw_user = config._table("copilot").get("oauth_user")
+    if raw_user is not None and not (isinstance(raw_user, str) and not raw_user.strip()):
+        if config.copilot_keyless() != "oauth":
+            out.append(
+                '✗ [copilot].oauth_user only selects a gh login for `keyless = "oauth"`;\n'
+                "    remove the line or switch rungs."
+            )
+        elif not config.copilot_oauth_user():
+            out.append(
+                f"✗ [copilot].oauth_user = {raw_user!r} isn't a GitHub login.\n"
+                "    Use 1–39 letters, digits or inner hyphens, or remove the line to use your\n"
+                "    active github.com account."
+            )
+
     # 3b. `[plugins.github]` was REMOVED (ADR-0031) — a clean break, as `[[inject]] minter` was
     #     (ADR-0023): nothing loads the table, so letting the launch through would leave the box's
     #     GitHub access silently gone. Refuse, with the rows that replace it computed from it.

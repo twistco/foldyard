@@ -74,6 +74,7 @@
 # [copilot]
 # keyless = "api-key"  # experimental (recommended)
 # keyless = "oauth"    # experimental: gh token, timed emergency switch
+# oauth_user = "my-github-login"  # optional, oauth only: which github.com gh account to use
 # system_prompt = """
 # …your orientation prompt for `fy copilot`.
 # """

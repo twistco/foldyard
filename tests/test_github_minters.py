@@ -243,9 +243,9 @@ def test_module_runs_as_a_subprocess_and_reports_a_missing_key():
 # ── the gh-cli kind (the operator's own token, an emergency switch) ───────────────────
 
 
-def _fake_gh(monkeypatch, *, stdout="", stderr="", rc=0, missing=False):
+def _fake_gh(monkeypatch, *, stdout="", stderr="", rc=0, missing=False, expected=None):
     def fake_run(cmd, **kwargs):
-        assert cmd == ["gh", "auth", "token"]
+        assert cmd == (expected if expected is not None else ["gh", "auth", "token"])
         if missing:
             raise FileNotFoundError("gh")
         if rc:
@@ -276,6 +276,25 @@ def test_gh_cli_token_empty_output_is_a_failure_not_an_empty_injection(monkeypat
     _fake_gh(monkeypatch, stdout="  \n")
     assert gh_cli_token.main([]) == 1
     assert "gh auth login" in capsys.readouterr().err
+
+
+def test_gh_cli_token_can_mint_one_named_github_com_login(monkeypatch, capsys):
+    # Copilot's oauth rung pins github.com and names the account, so a GHE login can never win.
+    _fake_gh(
+        monkeypatch,
+        stdout="gho_namedaccount\n",
+        expected=[
+            "gh",
+            "auth",
+            "token",
+            "--hostname",
+            "github.com",
+            "--user",
+            "my-github-login",
+        ],
+    )
+    assert gh_cli_token.main(["--hostname", "github.com", "--user", "my-github-login"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"value": "Bearer gho_namedaccount", "ttl": 240}
 
 
 # ── the capability probe (can we still act as the App RIGHT NOW?) ───────────────────────

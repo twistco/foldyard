@@ -187,6 +187,27 @@ def test_unrecognised_copilot_keyless_value_blocks(monkeypatch):
     assert not any("isn't recognised" in p for p in preflight.issues())
 
 
+def test_invalid_copilot_oauth_user_blocks(monkeypatch):
+    _wire(monkeypatch, copilot_keyless="oauth", tables={"copilot": {"oauth_user": "-evil"}})
+    problems = preflight.issues()
+    assert any("[copilot].oauth_user" in p and "GitHub login" in p for p in problems)
+    _wire(
+        monkeypatch, copilot_keyless="oauth", tables={"copilot": {"oauth_user": "my-github-login"}}
+    )
+    assert not any("[copilot].oauth_user" in p for p in preflight.issues())
+
+
+def test_copilot_oauth_user_outside_the_oauth_rung_blocks(monkeypatch):
+    # The selector would be silently ignored on the PAT rung — say so instead.
+    _wire(
+        monkeypatch,
+        copilot_keyless="api-key",
+        tables={"copilot": {"oauth_user": "my-github-login"}},
+    )
+    problems = preflight.issues()
+    assert any("[copilot].oauth_user" in p and 'keyless = "oauth"' in p for p in problems)
+
+
 def test_nested_project_inside_another_git_repo_blocks(monkeypatch, tmp_path):
     # A foldyard.toml INSIDE a bigger repo (running an example in-place from the foldyard
     # checkout) would bind the ENCLOSING repo as the checkout — abort with the copy-out recipe.

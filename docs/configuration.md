@@ -1220,6 +1220,7 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
       holds. Classic `ghp_` PATs are refused by Copilot itself, and pasted `gho_`/`ghu_` values are
       refused too — they carry your whole GitHub identity, which is what the `oauth` rung contains.
       Some seats (SAML SSO, managed users) may not be able to create such a PAT; use `oauth` then.
+
     - **`"oauth"`** *(experimental)* — nothing is pasted or stored. With `fy mode copilot=on` the
       packaged `gh-cli` minter runs `gh auth token` on **your computer**, so the token never enters
       the box or `host.env`. That is your whole GitHub identity (repositories, workflows, gists,
@@ -1230,6 +1231,15 @@ system_prompt = """…"""   # written to $COPILOT_HOME/instructions/foldyard.ins
       endpoint (`/mcp/…` on `api.*.githubcopilot.com`) that acts with the token's full scope — the
       TTL is what bounds that reach without chasing the CLI's endpoints. `gh auth logout` revokes
       the source token within the minter's short TTL.
+
+      `oauth_user` (optional, oauth rung only) names which github.com account supplies the token:
+      the minter runs `gh auth token --hostname github.com --user <login>` on your computer, so
+      several regular accounts can coexist in `gh` and each box picks its own without a global
+      `gh auth switch`. With no `oauth_user`, that host's active github.com account is used. The
+      hostname is pinned to github.com, not configurable: the injection hosts are github.com's, so a
+      GHE login would only earn `401`s on `api.github.com` (the `*.ghe.com` gap above). A login is
+      1–39 letters, digits or inner hyphens; preflight refuses an invalid one and any `oauth_user`
+      on the `api-key` rung.
 
   - **`system_prompt`** — same key and job as `[claude]`'s, but a different delivery: the Copilot
     CLI has no `--append-system-prompt` and no ad-hoc config override, so `fy copilot` writes it to

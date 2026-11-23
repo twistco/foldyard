@@ -2060,6 +2060,24 @@ def copilot_keyless() -> str:
     return ""
 
 
+# GitHub logins are alphanumeric or single hyphens, 1–39 chars, never starting/ending with a hyphen.
+# Validating here keeps `--user` from being read as another `gh` flag when the minter forwards it.
+_GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+
+
+def copilot_oauth_user() -> str:
+    """``[copilot].oauth_user`` — the github.com login whose host-side ``gh`` token the Copilot
+    ``oauth`` rung mints. Optional: ``""`` (absent or empty) means the active github.com account,
+    which the minter pins explicitly so a GHE default host can never win. Ignored by ``api-key``
+    (and reported by preflight if set there). An invalid login reads as ``""`` and is reported by
+    :func:`foldyard.preflight.issues` rather than silently ignoring the typo."""
+    raw = _table("copilot").get("oauth_user")
+    if not isinstance(raw, str):
+        return ""
+    login = raw.strip()
+    return login if _GITHUB_LOGIN.fullmatch(login) else ""
+
+
 def copilot_system_prompt() -> str:
     """Box-orientation prompt for a Copilot session. From ``[copilot].system_prompt`` (""), the same
     key and the same job as :func:`claude_system_prompt` — only the delivery differs, because the

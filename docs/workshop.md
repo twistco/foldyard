@@ -184,7 +184,8 @@ manager:
   It is injected on `api.github.com`, so it must be able to do nothing else there. Classic `ghp_`
   PATs, and pasted `gho_`/`ghu_` tokens, are refused; if your seat can't use such a PAT, use
   `[copilot] keyless = "oauth"` instead — it mints `gh auth token` on your computer on a timed
-  emergency switch, with the GitHub API rule limited to `/copilot_internal/`.
+  emergency switch, with the GitHub API rule limited to `/copilot_internal/`. With `oauth`, set
+  `oauth_user = "<login>"` to pick one of several github.com accounts already logged into `gh`.
 
 ### What success looks like
 

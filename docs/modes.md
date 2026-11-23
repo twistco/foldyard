@@ -260,7 +260,9 @@ The Copilot rungs differ because of what the token can do. `api-key` is a fine-g
 `gh auth token` — your whole GitHub identity — so `fy mode copilot=on` carries a TTL and reverts by
 itself, and its `api.github.com` rule is limited to `/copilot_internal/`. Copilot's own hosts still
 get the token (including the MCP endpoint that acts on GitHub with your full scope); the time limit
-bounds that reach. See [configuration](./configuration.md#claude--codex--copilot--vscode).
+bounds that reach. Optional `[copilot] oauth_user = "<login>"` picks which github.com account's `gh`
+token is minted — the minter pins `--hostname github.com` and forwards `--user`, so no global
+`gh auth switch` is needed. See [configuration](./configuration.md#claude--codex--copilot--vscode).
 
 With the switch `off`, the box holds only the dummy and can't reach the provider at all. The proxy
 doesn't forward the dummy either: it answers the request itself with a 401 whose message names the

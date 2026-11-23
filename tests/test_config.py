@@ -1290,6 +1290,24 @@ def test_copilot_keyless_modes(fresh_config, tmp_path):
     assert config.copilot_keyless() == "" and config.copilot_enabled() is False
 
 
+def test_copilot_oauth_user_reads_one_github_login(fresh_config, tmp_path):
+    # The optional rung selector: a real GitHub login, trimmed, or "" when absent/invalid.
+    cases = {
+        'oauth_user = "my-github-login"': "my-github-login",
+        'oauth_user = "another-login"': "another-login",
+        'oauth_user = "  my-github-login  "': "my-github-login",
+        'oauth_user = ""': "",
+        'oauth_user = "a b"': "",
+        'oauth_user = "-evil"': "",
+        f'oauth_user = "{"a" * 40}"': "",  # GitHub logins are at most 39 chars
+        "": "",
+    }
+    for line, expected in cases.items():
+        (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[copilot]\n{line}\n')
+        fresh_config(FOLDYARD_REPO=tmp_path)
+        assert config.copilot_oauth_user() == expected, line
+
+
 def test_copilot_enabled_is_table_presence(fresh_config, tmp_path):
     # A BARE table (manual login) is still an opt-in: it installs the CLI and mounts its home.
     (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n[copilot]\n')
