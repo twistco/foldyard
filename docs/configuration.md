@@ -917,8 +917,10 @@ when    = { sentry = "on" }                  # mode gate, same semantics as `[[o
 - **`how`** — "where do I get this?" — **printed, never run** (a gcloud command, an `op read`, a
   URL, "ask Ops").
 - **`pattern`** — a glob (`*`, `?`, `[seq]`) the value must match, checked after decoding when
-  `base64`. A non-matching paste stores nothing. A glob, not a regex, so a crafted pattern from repo
-  config can't hang `fy box up`.
+  `base64`. A non-matching paste stores nothing. `|` separates whole-value alternatives — any may
+  match, e.g. `github_pat_*|gho_*|ghu_*` for a token a provider accepts in several shapes. These are
+  still globs, not a regex: no backtracking, so a crafted pattern from repo config can't hang
+  `fy box up`.
 - **`base64`** — store the value base64-encoded, the only way `host.env` (single-line `KEY=VALUE`)
   can hold a multi-line secret such as a PEM; a truncated paste then fails loudly. The prompt also
   takes the full path of the secret's file, which foldyard reads and encodes on your computer, so

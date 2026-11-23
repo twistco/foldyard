@@ -2193,7 +2193,8 @@ def secret_specs() -> list[dict]:
     """The ``[[secret]]`` array-of-tables — each entry declares a host-side secret a posture needs
     present in host.env: ``var`` (required), ``label``, ``how`` (the "where do I get this?" hint,
     PRINTED at the capture prompt and never executed), ``pattern`` (an fnmatch GLOB the value must
-    match — a glob, not a regex, because this field is repo-controlled: see ``keyless.secret_ok``),
+    match, with ``|``-separated whole-value alternatives allowed — still globs, not a regex, because
+    this field is repo-controlled: see ``keyless.secret_ok``),
     ``base64`` (store encoded — host.env is single-line), ``when`` (posture gate, same semantics as
     ``[[overlay]]``). Absent/malformed ⇒ ``[]``; non-dict entries are skipped, and FIELD validation
     is the registry's (loud, at merge — see ``Registry.secrets``). See

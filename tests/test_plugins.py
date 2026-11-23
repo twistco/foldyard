@@ -602,6 +602,20 @@ def test_registry_secrets_merges_plugins_with_declared_rows(fresh_config, tmp_pa
     assert secret.b64 is False and secret.pattern == ""
 
 
+def test_declared_secret_pattern_can_list_whole_value_alternatives(fresh_config, tmp_path):
+    # `|` in secret_ok is not private to the Copilot kind: a [[secret]] row in repo config gets the
+    # same grammar. Still globs (no regex, no backtracking) — see test_pattern_is_a_glob_....
+    (tmp_path / "foldyard.toml").write_text(
+        '[[secret]]\nvar = "PAY_TOKEN"\npattern = "github_pat_*|gho_*|ghu_*"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    (secret,) = Registry([]).secrets({})
+    assert secret.pattern == "github_pat_*|gho_*|ghu_*"
+    for value in ("github_pat_abc", "gho_abc", "ghu_abc"):
+        assert keyless.secret_entry(value, secret) == (value, "")
+    assert keyless.secret_entry("ghp_classic", secret)[0] is None  # not one of the alternatives
+
+
 def test_declared_secret_overrides_a_plugins_own(fresh_config, tmp_path):
     # A consumer retargets a plugin's hint (different vault, different wording) by declaring the
     # same var — never by editing plugin code.
