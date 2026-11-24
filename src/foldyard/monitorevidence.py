@@ -121,14 +121,17 @@ def _size(path: Path) -> int:
     return total
 
 
-def kept() -> list[Evidence]:
-    """Every piece of evidence, oldest boot first, then in sequence."""
+def kept(known: dict[str, Evidence | None] | None = None) -> list[Evidence]:
+    """Every piece of evidence, oldest boot first, then in sequence — ``known`` as given, the rest
+    read."""
+    known = known or {}
     try:
         names = sorted(os.listdir(root()))
     except OSError:
         return []
     paths = (root() / name for name in names if not name.startswith("."))
-    return _in_order([e for e in (_piece(p) for p in paths if p.is_dir()) if e is not None])
+    read = (known[p.name] if p.name in known else _piece(p) for p in paths if p.is_dir())
+    return _in_order([e for e in read if e is not None])
 
 
 def _piece(path: Path) -> Evidence | None:
@@ -153,16 +156,17 @@ class Held:
 
     def __init__(self) -> None:
         self._every: list[Evidence] | None = None
+        self._ones: dict[str, Evidence | None] = {}  # read by themselves, before all were
 
     @property
     def every(self) -> list[Evidence]:
         if self._every is None:
-            self._every = kept()
+            self._every = kept(self._ones)
         return self._every
 
     def put(self, e: Evidence) -> None:
-        """``e`` as it is now, in place of what was read of it (when it was: until anything is,
-        the disk says)."""
+        """``e`` as it is now, in place of what was read of it."""
+        self._ones[e.id] = e
         if self._every is not None:
             self._every = _in_order([*(x for x in self._every if x.id != e.id), e])
 
@@ -171,9 +175,11 @@ class Held:
             self._every = [x for x in self._every if x.id != e.id]
 
     def one(self, ident: str) -> Evidence | None:
-        if self._every is None:
-            return _piece(root() / ident)
-        return next((e for e in self._every if e.id == ident), None)
+        if self._every is not None:
+            return next((e for e in self._every if e.id == ident), None)
+        if ident not in self._ones:
+            self._ones[ident] = _piece(root() / ident)
+        return self._ones[ident]
 
 
 @dataclass
@@ -559,10 +565,11 @@ def _flush(
             st.save()
         shutil.rmtree(e.path, ignore_errors=True)  # one whose meta.json can't be read
         e.size = _size(new)
+        if _waits(e):  # noted before it is there, or a crash would leave it waiting for good
+            st.unsettled = [*(st.unsettled or []), e.id]
+            st.save()
         new.rename(e.path)
         held.put(e)
-        if _waits(e):
-            st.unsettled = [*(st.unsettled or []), e.id]
         st.pending.remove(p)
         if any(e.hi < q for q in seqs):  # cut short of crossings taken to be in it
             st.done[boot] = e.hi

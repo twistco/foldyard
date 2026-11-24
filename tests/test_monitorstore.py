@@ -936,6 +936,84 @@ def test_a_catalogue_that_is_locked_is_not_waited_for_once_per_candidate(state, 
 WEIRD = (None, "", "x", "²", 0, -1, 1.5, True, [], [1], {}, {"inum": None}, {"inum": "²"})
 
 
+@pytest.mark.parametrize("locked", [False, True])
+def test_nothing_is_judged_past_records_that_are_not_indexed(state, monkeypatch, locked):
+    # podman's entry is in a segment that can't be indexed, and is sealed so; the step into its
+    # namespace comes later. Judged without it, it would be none, and that would stand.
+    import sqlite3
+
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    real = ms.Catalogue.add
+
+    def add(self, sid, records, *a, **k):
+        if any(r.get("seq") == 1 for r in records):
+            if locked:
+                e = sqlite3.OperationalError("database is locked")
+                e.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                raise e
+            raise AttributeError("boom")
+        return real(self, sid, records, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "add", add)
+        ms.append([snap(0), entry(1, inode=300)])
+        ms.append([crossed(2, inode=300, host=False), snap(3)])
+        ms.append([ev(4)])
+        assert bool(ms.index_note()) is not locked  # still behind, whatever the newest segment is
+        with ms.Catalogue.open() as cat:
+            assert cat.first_crossing(BOOT) is None and _crossings(cat) == []
+    ms.append([ev(5)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(2, 1, BOX)]
+        assert not cat.unindexed(ms.segments())
+    assert ms.index_note() == ""
+
+
+def test_nor_past_records_stored_while_the_catalogue_could_not_be_opened(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "open_or_none", classmethod(lambda cls: None))
+        ms.append([snap(0), entry(1, inode=300)])
+        ms.append([ev(2)])  # sealed, unindexed
+        assert ms.index_note() == ""
+    ms.append([crossed(3, inode=300, host=False), snap(4)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(3, 1, BOX)]
+
+
+def test_a_catalogue_then_locked_does_not_hide_why_records_are_not_indexed(state, monkeypatch):
+    errors = iter((AttributeError("boom"), _sqlite("busy")))
+
+    def broken(*a, **k):
+        raise next(errors)
+
+    monkeypatch.setattr(ms.Catalogue, "add", broken)
+    for seq in (0, 1):
+        ms.append([ev(seq)])
+        assert "boom" in ms.index_note()
+    assert next(errors, None) is None  # both were met
+
+
+def test_a_segment_that_cannot_be_indexed_is_forgotten_with_it(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    real = ms.Catalogue.add
+
+    def add(self, sid, records, *a, **k):
+        if any(r.get("seq") == 1 for r in records):
+            raise AttributeError("boom")
+        return real(self, sid, records, *a, **k)
+
+    monkeypatch.setattr(ms.Catalogue, "add", add)
+    ms.append([snap(0), ev(1)])
+    ms.append([ev(2)])
+    assert ms.index_note()
+    ms.segments()[0].path.unlink()  # retention, past what it may be held back by
+    ms.append([crossed(3), snap(4)])
+    assert ms.index_note() == ""
+    with ms.Catalogue.open() as cat:
+        assert (3, 1, BOX) in _crossings(cat)
+
+
 def _sqlite(kind: str) -> Exception:
     """The error sqlite itself raises."""
     import sqlite3

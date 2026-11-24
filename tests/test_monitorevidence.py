@@ -487,6 +487,49 @@ def test_only_what_is_unsettled_is_read_again(state, monkeypatch):
     assert read == []
 
 
+def test_closing_a_copy_reads_each_piece_once(state, monkeypatch):
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap({}), s.ev(), s.cross()])
+    with monkeypatch.context() as m:
+        m.setattr(ms, "budget", lambda: 1)
+        ms.append([s.ev()])
+        ms.append([s.ev()])
+    [e] = me.kept()
+    assert e.open
+    _many(e, 5)
+    read = _reads(monkeypatch)
+    ms.append([s.snap()])
+    assert len(read) == len(set(read)) == 6
+    assert not next(x for x in me.kept() if x.id == e.id).open
+
+
+@pytest.mark.parametrize("noted", [False, True])
+def test_one_published_as_the_process_ended_is_still_settled(state, monkeypatch, noted):
+    # the crash comes right after the rename: what it waits for must still be taken
+    s = Stream()
+
+    def crash(*a):
+        monkeypatch.setattr(me.State, "save", lambda self: None)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        m.setattr(me, "_finish", lambda st, held, limit: crash() if me.kept() else None)
+        if noted:  # the state before it is there already, as it is after any window
+            me.root().mkdir(parents=True)
+            me.State(unsettled=[]).save()
+        save = me.State.save
+        with pytest.raises(KeyboardInterrupt):
+            store(s.crossing())
+    monkeypatch.setattr(me.State, "save", save)
+    [e] = me.kept()
+    assert e.unjudged
+    ms.append([s.ev()])
+    ms.append([s.ev()])
+    assert me.kept()[0].confirmed
+
+
 def test_a_lost_state_finds_what_is_unsettled_again(state, monkeypatch):
     s = Stream()
     with monkeypatch.context() as busy:

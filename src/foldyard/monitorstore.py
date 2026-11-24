@@ -464,16 +464,13 @@ def append(records: list[dict]) -> None:
     live = segs[-1] if segs and segs[-1].live else None
     cat = Catalogue.open_or_none()
     try:
+        # Indexed BEFORE it is sealed — an older foldyard's live file was never: its rows then move
+        # with it to its new id, and no reader's catalogue is left without the segment a hook's
+        # cursor is in (cabash, 2026-10-22), nor does retention take its snapshots with it unseen.
+        # In order, and nothing past what can't be: a later fact classified, or a crossing judged,
+        # without the ones before it would be wrong, and stands.
+        behind = not _caught_up(cat, segs, live)
         if live is not None and (live.id.startswith(LEGACY) or raw_size(live) > SEGMENT_BYTES):
-            if cat is not None:
-                try:
-                    # indexed BEFORE it is sealed — an older foldyard's live file was never: its
-                    # rows then move with it to its new id, and no reader's catalogue is left
-                    # without the segment a hook's cursor is in (cabash, 2026-10-22), nor does
-                    # retention take its snapshots with it unseen
-                    cat.catch_up([live])
-                except Exception:
-                    pass
             _seal(live, segs, cat)
             live = None
         lines: list[bytes] = []
@@ -484,12 +481,10 @@ def append(records: list[dict]) -> None:
         else:
             sid, size = live.id, raw_size(live)
         lines += [_dump(r) for r in records]
-        if cat is not None:
+        if cat is not None and not behind:
             try:
-                if live is not None:
-                    cat.catch_up([live])  # anything a crash left unindexed, before it moves on
                 cat.add(sid, records, indexed=size + sum(map(len, lines)), exact=True)
-                _index_failed(None)
+                _index_error().unlink(missing_ok=True)
             except Exception as e:  # whatever it was: the pull would stop at these records for good
                 _index_failed(e)
         with live_path().open("ab") as f:
@@ -518,14 +513,29 @@ def _index_error() -> Path:
 _LOCKED = (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
-def _index_failed(error: Exception | None) -> None:
-    """Note what kept records from being indexed — not a catalogue merely locked, which the next
-    append makes up for — or that nothing does any more."""
+def _caught_up(cat: Catalogue | None, segs: list[Segment], live: Segment | None) -> bool:
+    """Index what of the store isn't yet, oldest first: the live segment (a crash may have left
+    some of it) — and, while the last append left records unindexed, every segment that has some."""
     try:
-        if error is None:
-            _index_error().unlink(missing_ok=True)
-        elif getattr(error, "sqlite_errorcode", 0) & 0xFF not in _LOCKED:
-            _index_error().write_text(f"{type(error).__name__}: {error}"[:300])
+        if cat is None:
+            _index_failed(None)
+            return False
+        owed = cat.unindexed(segs) if _index_error().exists() else set()
+        cat.catch_up([s for s in segs if s is live or s.id in owed])
+        return True
+    except Exception as e:
+        _index_failed(e)
+        return False
+
+
+def _index_failed(error: Exception | None) -> None:
+    """Note that records were left unindexed, for the next append to go back to them — and why, but
+    for a catalogue that is merely locked or can't be opened, which it mostly makes up for."""
+    locked = error is None or getattr(error, "sqlite_errorcode", 0) & 0xFF in _LOCKED
+    why = "" if locked else f"{type(error).__name__}: {error}"[:300]
+    try:
+        if why or not _index_error().exists():
+            _index_error().write_text(why)
     except OSError:
         pass
 
@@ -534,9 +544,10 @@ def index_note() -> str:
     """Why the catalogue is falling behind the store, "" when it isn't: until it catches up, what
     it doesn't hold can't be joined or judged."""
     try:
-        return f"records can't be indexed ({_index_error().read_text()})"
+        why = _index_error().read_text()
     except OSError:
         return ""
+    return f"records can't be indexed ({why})" if why else ""
 
 
 def _seal(live: Segment, segs: list[Segment], cat: Catalogue | None) -> None:
