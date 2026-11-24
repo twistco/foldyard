@@ -2698,7 +2698,7 @@ def _monitor_events_check():
     its cursor (no ssh here). Stale = the supervisor isn't pulling (`fy host restart`)."""
     import time
 
-    from . import monitorlog, monitorstore
+    from . import monitorevidence, monitorlog, monitorstore
 
     cur = monitorlog.Cursor.load()
     age = time.time() - cur.pulled if cur.pulled else None
@@ -2716,7 +2716,7 @@ def _monitor_events_check():
     elif budget_note:
         why = budget_note
     else:
-        why = ""
+        why = monitorevidence.note()
     if crossed:  # what the box did, before how the pull is doing
         why = f"{crossed}; `fy monitor` shows them" + (f" — and {why}" if why else "")
     yield _result(

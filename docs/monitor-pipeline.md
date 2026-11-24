@@ -282,6 +282,115 @@ Kept forever, from what the aggregation sees, per worktree (and, where it holds,
 Each exemplar keeps a little context: the records ±N seconds around it from the same container, so a
 later review sees what led up to it.
 
+### 3.3 Crossing evidence (built, 2026-11-24)
+
+Once a crossing's segment leaves the store, what remains is its boot's first crossing: a time and a
+container. Which program it was, its arguments, what led up to it and what it did next are gone. A
+hook that was keeping up has sent them on; without one, an escape older than the budget is a line
+saying that it happened. This keeps the evidence itself: **the records from one minute before a
+crossing to one minute after it**, outside the store's budget and under a cap of their own. It is
+the first of §3.2's exemplars, and the only one here.
+
+**Copied out, not kept in place.** Sparing the segments in place would be less code (they are about
+1.2 MB each on cabash), but it leaves holes, and the store is contiguous by assumption:
+
+- A hook whose cursor was removed is proven behind only if the store doesn't hold its boot's events
+  on both sides of it (`monitorhooks._gone`). Across a hole it always does, so the hook would wait
+  for good.
+- A hook whose position is lost resumes at the oldest record, which would be old evidence.
+- `Catalogue._retain_facts` takes every fact of a removed segment to be older than anything stored.
+
+So each piece of evidence is a directory of its own, `logs/evidence/<boot>-<seq>/`, which no reader
+of the store lists:
+
+- `records.jsonl.gz`: the window's lines as the store had them, gaps and forgeries included.
+- `context.jsonl.gz`: what joining them takes from the catalogue (the snapshots before and after,
+  the namespace facts with their kinds) and the engine's claims for the containers named.
+- `meta.json`: the crossings inside with their verdicts, and what is missing.
+
+It is read by the same join (`monitorlog.attribute`) over those files alone, so it needs neither the
+catalogue nor the store, and a later foldyard's better join reads old evidence better.
+`src/foldyard/monitorevidence.py` is all of it.
+
+**When.** After each append and its judging, before retention, for every crossing not in a window
+yet: three minutes after the snapshot that settled it reached your computer (by then a snapshot past
+the window's end is stored too), or at once when its boot has ended. "Now" is when the append's
+records arrived. Written aside and renamed, so a directory is there whole or not at all, and a
+crash, a re-read, a lost catalogue or a lost state file doesn't copy one twice. A failure never
+stops the store: it is retried on the next append, and `fy doctor` says so.
+
+A crossing not judged by then is kept as **unconfirmed**. Judged later, it is marked so; judged not
+to be one, its evidence is removed and the log says it was.
+
+**Retention takes nothing uncopied.** A window still open when the budget needs its records is
+copied as far as it goes, and says its end is missing. That takes a budget that holds less than
+three minutes.
+
+It is held back only while nothing can be copied: the catalogue, which says where the crossings are,
+can't be opened, or a copy fails. The store may then pass its budget by a tenth of it (or of what is
+free on its disk, when that is less), and by more where there is room: as far as leaves 50 GB free,
+up to as much again. Past that it removes what it must. `fy monitor` and `fy doctor` say so
+meanwhile.
+
+**The window** is by the events' own time (the guest's clock), as a run of sequence numbers in one
+boot: from the first within a minute before to the last within a minute after. Windows don't
+overlap. A crossing inside one already kept is only listed there; one that comes later starts where
+the last one ended. So an escape that crosses many times a second costs the same as one.
+
+**Size.** At the 520 events/s storm of 2026-10-21, two minutes are ~62,000 events, ~5 MB at 81 B.
+Measured on a busy stretch of cabash's store: 46,129 events, 4.1 MB, copied in 2.5 s with 3 MB more
+memory, and read back with every event exactly as the store's join has it. A guest's clock can jump
+and a flood can be deliberate, so a window has a share of the cap: half for each side, filled
+outwards from the crossing, and what was left out is listed. A crossing past where a window was cut
+gets one of its own.
+
+**The cap: 256 MB per project**, beside the store's budget and not within it. Host-only, as the
+budget is: `evidence_mb` in `monitor-store.toml`, 64 MB–4 GB, or `0` to keep none. A window may take
+a sixteenth of it (16 MB) and a boot a quarter (64 MB).
+
+- **Within a boot the first crossings win.** Past the boot's share its later crossings are counted,
+  never kept: an escaped process must not be able to flush out how it got out by crossing again.
+- **Between boots, nothing makes way until it has to.** With the cap full, a new window waits: its
+  records are still in the store, the operator is told once (log and notification), and it is copied
+  as soon as there is room. Only when retention is about to remove those records does older evidence
+  go: the oldest boots' later windows, the latest of a boot first, and then their first ones, each
+  said. A boot never displaces its own. So an operator has days to decide (on cabash's busiest day 8
+  GB held about six), and one who misses the warning still has the newest escape. An escape to the
+  VM user can stop the VM (its one sudo right is `shutdown -h now`) but not start it: that takes
+  someone running foldyard, so it can't work through boots by itself to flush an older one's.
+
+**Reading it.** `fy monitor evidence` lists what is kept (crossing, container, time, size, confirmed
+or not, what is missing) and prints one piece as `fy monitor` prints a range; `--json` for either.
+`fy monitor` and `fy doctor` say how much is kept and what is wrong with it. Removing it is the
+operator's (`--remove`, which asks), and never a timer's.
+
+**Trust.** The files sit in the state dir, out of the box's reach, mode `0600`. Nothing in the box
+or `foldyard.toml` sets their size. They aren't signed: the records were verified as they were
+pulled, and whoever can write there can write the store. The signed sink (§6.1) is for evidence that
+must outlive your computer. Everything in them is the box's text, quoted when shown.
+
+**What it doesn't do.** Nothing here tells an escape that never shows as a crossing (§2.1, "What a
+skipped label costs"). It keeps no files or memory, only the monitor's records. And it isn't a
+reason to shorten the store: it holds what was near the crossing, not a slow preparation an hour
+before.
+
+**Why not a smaller store instead.** Compressing harder only moves the day a crossing is removed.
+Parquet was measured for it (2026-11-24, 16 real segments from cabash, ~250,000 records): 94–124
+B/record at zstd-3 and 77–104 at zstd-19 with an inferred schema, against 69–83 for the gzip in use.
+The standard library's xz took 37–44, which would be worth having by itself if reading it isn't much
+slower (not measured).
+
+**How it is proved.** Properties over the generated streams the hooks' own are proved with
+(`tests/test_monitor_properties.py`): evidence read by itself gives every event the same `who`,
+container and crossing as the join over every record ever stored; every crossing is in a window,
+kept or waiting, or counted past its boot's share, or said to have made way; windows never overlap;
+and the store's records are the same with it and without. The first version lost a crossing that
+fell past where its window was cut short, which the second of those found.
+
+**Open.** The shares (a sixteenth, a quarter, 256 MB) come from one storm's rate and one project's
+store. And should the notification name the program that crossed? It is the box's text, so for now
+`fy monitor evidence` is where it is read.
+
 ## 4. Filtering at source
 
 Tetragon filters its export before anything is written (`export-denylist`: binary, parent and

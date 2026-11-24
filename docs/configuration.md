@@ -355,6 +355,14 @@ disk_gib = 60
       `~/.foldyard/<project>/monitor-store.toml` on your computer, never in `foldyard.toml`, so the
       box can't shorten what is kept about it: `max_mb = 16384` (64 MB–64 GB; read every few
       seconds). `fy monitor` and `fy doctor` show how much it holds and how far back.
+    - What happened around a process stepping out of a container (a crossing, below) outlives that
+      budget: the minute either side of it is copied to `~/.foldyard/<project>/logs/evidence/`, up
+      to 256 MB in all (`evidence_mb` in the same file: 64 MB–4 GB, or `0` to keep none). In each VM
+      boot the first crossings are the ones kept. When it is full a new one waits in the store and
+      you are told; the oldest goes only when the store is about to lose the new one's records.
+      `fy monitor evidence` lists it, prints one and removes one. While it can't be copied (the
+      monitor's catalogue can't be opened, say), the store may pass its budget by a tenth, or reach
+      twice the budget where that leaves 50 GB free.
     - Each line is signed in the VM with a key the box's user can't read, so a line that was altered
       on the way is dropped and counted. One that went missing shows as a gap. `fy doctor`'s
       `monitor events` row shows both counts.

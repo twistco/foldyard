@@ -67,6 +67,7 @@ from . import config
 SEGMENT_BYTES = 32 << 20  # the live segment is sealed past this (uncompressed)
 BUDGET_MB = 8192  # default disk budget for the whole store (per project)
 BUDGET_MIN_MB, BUDGET_MAX_MB = 64, 65536
+PLENTY_FREE = 50 << 30  # on the store's disk: room to hold retention back further (held_back)
 LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) is "legacy-<inode>"
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)
 _ORPHANS_KEPT = 64  # snapshots kept from segments already gone (the newest per boot)
@@ -498,7 +499,12 @@ def append(records: list[dict]) -> None:
             except Exception:
                 pass  # never stops the store: the next reader judges it (Catalogue.catch_up)
         _compress_sealed()
-        _prune(budget(), cat)
+        limit = budget()
+        going = _over(limit)
+        now = max((float(r.get("recv") or 0.0) for r in records), default=0.0) or time.time()
+        if not _copied_out(cat, now, going):
+            going = _over(limit + held_back(limit))  # the next append tries again
+        _remove(going, cat)
     finally:
         if cat is not None:
             cat.close()
@@ -534,21 +540,64 @@ def _compress_sealed() -> None:
             tmp.unlink(missing_ok=True)
 
 
-def _prune(limit: int, cat: Catalogue | None) -> None:
-    """Remove the oldest sealed segments until the store fits ``limit`` bytes on disk. Never the
-    live segment."""
+def _copied_out(cat: Catalogue | None, now: float, going: list[Segment]) -> bool:
+    """Before retention removes ``going``: what is around a crossing in it is copied out
+    (:mod:`foldyard.monitorevidence`). ``False`` when that failed, or can't be known to have been
+    done: the catalogue, which says where the crossings are, couldn't be opened."""
+    from . import monitorevidence  # reads this store: it imports this module
+
+    try:
+        if not monitorevidence.cap():
+            return True
+        if cat is not None:
+            # stored while it couldn't be opened, or indexed by a foldyard before crossings were
+            # kept: one may be in it
+            if cat.unindexed(going) or cat.unread(going):
+                cat.catch_up()
+                cat.judge()
+            monitorevidence.keep(cat, now, frozenset(s.id for s in going))
+            return True
+        if going:
+            monitorevidence.unable("the monitor's catalogue can't be opened")
+    except Exception as e:  # never stops the store: the next append tries again
+        try:
+            monitorevidence.unable(f"{type(e).__name__}: {e}"[:300])  # …and doctor says so
+        except Exception:
+            pass
+    return False
+
+
+def held_back(limit: int) -> int:
+    """How far past its budget the store may go while a crossing can't be copied out of what would
+    be removed: a tenth of it (of what is free on the disk, when that is less), and further where
+    there is room — as far as leaves :data:`PLENTY_FREE`, up to as much again."""
+    try:
+        free = shutil.disk_usage(store_dir()).free
+    except OSError:
+        return limit // 10
+    return max(min(limit, free - PLENTY_FREE), min(limit, free) // 10)
+
+
+def _over(limit: int) -> list[Segment]:
+    """The oldest sealed segments, as many as must go for the store to fit ``limit`` bytes on disk.
+    Never the live segment."""
     segs = segments()
     total = sum(disk_size(s) for s in segs)
-    gone = []
+    going = []
     for seg in segs:
         if total <= limit or seg.live:
             break
         total -= disk_size(seg)
+        going.append(seg)
+    return going
+
+
+def _remove(going: list[Segment], cat: Catalogue | None) -> None:
+    for seg in going:
         seg.path.unlink(missing_ok=True)
-        gone.append(seg.id)
-    if gone and cat is not None:
+    if going and cat is not None:
         try:
-            cat.drop(gone)
+            cat.drop([seg.id for seg in going])
         except sqlite3.Error:
             pass
 
@@ -1599,6 +1648,18 @@ class Catalogue:
             if indexed < 0 or (not sealed and indexed < raw_size(s)):
                 out.add(s.id)
         return out
+
+    def unread(self, segs: list[Segment]) -> set[str]:
+        """Those of ``segs`` not read for crossings as far as they are indexed (an older foldyard
+        indexed them)."""
+        owed = {
+            sid
+            for (sid,) in self.conn.execute(
+                "SELECT seg.id FROM seg LEFT JOIN crossseg ON crossseg.id = seg.id "
+                "WHERE COALESCE(crossseg.done, 0) < seg.indexed"
+            )
+        }
+        return {s.id for s in segs} & owed
 
     def span(self, boot: str, segs: list[Segment]) -> tuple[int, int] | None:
         """The lowest and highest seq of ``boot`` that ``segs`` hold, as far as this catalogue

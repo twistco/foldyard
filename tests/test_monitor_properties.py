@@ -42,15 +42,17 @@ import subprocess
 import tempfile
 from dataclasses import asdict
 from datetime import UTC, datetime
+from itertools import count, pairwise
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from hypothesis import event, example, given, settings
 from hypothesis import strategies as st
 
+from foldyard import monitorevidence, monitorlog, monitorstore
 from foldyard import monitorhooks as mh
-from foldyard import monitorlog, monitorstore
 from pbt import scaled_examples
 
 A, B, C = "a" * 64, "b" * 64, "c" * 64
@@ -962,3 +964,151 @@ def test_retention_keeps_every_fact_the_join_of_what_is_still_stored_reads(case)
             f"{e.seq}: {e.who} {e.container[:1]} after the drop, {want.who} {want.container[:1]} "
             "over everything"
         )
+
+
+# ── the evidence around a crossing ──────────────────────────────────────────────────────
+#
+# docs/monitor-pipeline.md §3.3: the records around each crossing are copied out past the store's
+# budget. Over the generated streams above (crossings, restarts, gaps, quiet stretches), small
+# segments, a budget that keeps almost nothing or everything, and caps from a few windows to plenty:
+#
+# * evidence read by itself gives each of its events what the join over every record ever stored
+#   gives it (but past the last snapshot it holds, while it says it is open);
+# * every crossing is in a window — kept, waiting, or evicted for another boot's — and listed there;
+#   or it was itself counted (past its boot's share, or too large), or had nothing left: each matched
+#   to that crossing (a window cut short is no excuse: the first version lost what it left out);
+# * a boot's first kept window is never displaced by a later one of that boot;
+# * with a cap of 0 the store's records are what they are without any of it.
+# * a boot's windows don't overlap.
+# Validated red against: the context left out, the namespace facts left out of it, the segments
+# going ignored, a crossing past where its window was cut not noted again, and windows overlapping.
+# (The boot's share, and who makes way for whom, are tests/test_monitorevidence.py's.)
+
+quiet = st.tuples(st.just("wait"), st.sampled_from([5.0, 30.0, 70.0, 300.0]))
+evidence_steps = st.lists(
+    st.one_of(steps.map(lambda s: s[:6]), crossing.map(lambda c: [c]), quiet.map(lambda q: [q])),
+    min_size=3,
+    max_size=14,
+).map(lambda parts: [s for p in parts for s in p])
+
+
+class Outcomes:
+    """What became of each crossing that isn't in a window, as the module decides it."""
+
+    def __init__(self, mp: pytest.MonkeyPatch) -> None:
+        self.counted: set[tuple[str, int]] = set()  # past its boot's share, or too large for one
+        self.lost: set[tuple[str, int]] = set()  # the store had nothing of its window left
+        self.evicted: list[monitorevidence.Evidence] = []
+        count, lost = monitorevidence.State.count, monitorevidence._lost
+        evict = monitorevidence._evict
+
+        def counting(st_, boot, seqs):
+            self.counted |= {(boot, q) for q in seqs}
+            count(st_, boot, seqs)
+
+        def losing(st_, p, seqs):
+            self.lost |= {(p["boot"], q) for q in seqs}
+            lost(st_, p, seqs)
+
+        def evicting(st_, old):
+            assert old.boot != st_.making, "a boot's own evidence made way"
+            self.evicted.append(old)
+            evict(st_, old)
+
+        mp.setattr(monitorevidence.State, "count", counting)
+        mp.setattr(monitorevidence, "_lost", losing)
+        mp.setattr(monitorevidence, "_evict", evicting)
+
+
+def _store_with_evidence(
+    monkeypatch, state: Path, scenario, budget: str, cap: int
+) -> tuple[World, Outcomes]:
+    monkeypatch.setattr(monitorstore.config, "state_dir", lambda: state)
+    monkeypatch.setattr(monitorstore.config, "project_prefix", lambda: "fyex")
+    monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 1500)
+    keep = 1 if budget == "tiny" else 1 << 30
+    monkeypatch.setattr(monitorstore, "budget", lambda: keep)
+    monkeypatch.setattr(monitorevidence, "cap", lambda: cap)
+    # a segment's first line holds its id and when it was made: fixed, so that a run's segments
+    # seal where another run's do
+    ids = count()
+    monkeypatch.setattr(monitorstore, "_new_id", lambda segs: f"20270115T{next(ids):012d}Z")
+    monkeypatch.setattr(monitorstore, "time", SimpleNamespace(time=lambda: 1_800_000_000.0))
+    world, out = World(), Outcomes(monkeypatch)
+    firsts: dict[str, str] = {}  # boot -> the id of its first confirmed window
+    for s in [*scenario, ("pull",), ("wait", 400.0), ("snap", {}), ("pull",), ("wait", 400.0),
+              ("snap", {}), ("pull",)]:  # fmt: skip
+        if s[0] not in ("round", "upgrade", "behind"):
+            world.step(s)
+        have = [e for e in monitorevidence.kept() if e.confirmed]
+        for boot, first in firsts.items():
+            assert first in {e.id for e in have} | {e.id for e in out.evicted}, (
+                f"{boot}'s first window went, for nothing that may displace it"
+            )
+        for e in have:
+            firsts.setdefault(e.boot, e.id)
+    return world, out
+
+
+@settings(max_examples=scaled_examples(150), deadline=None)
+@given(
+    scenario=evidence_steps,
+    budget=st.sampled_from(["tiny", "ample"]),
+    cap=st.sampled_from([8_000, 24_000, 1 << 20]),
+)
+# a second crossing just past the first one's minute: its window reaches back into that one
+@example(
+    scenario=[("snap", {}), ("cross", 1, 200, False), ("wait", 30.0), ("ev", 1, "process_exec"),
+              ("wait", 30.0), ("wait", 5.0), ("cross", 1, 200, False), ("ev", 1, "process_exec")],
+    budget="ample", cap=1 << 20,
+)  # fmt: skip
+def test_the_evidence_around_a_crossing_reads_as_the_whole_store_or_says_why(scenario, budget, cap):
+    with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
+        world, out = _store_with_evidence(mp, Path(tmp), scenario, budget, cap)
+        truth = {(e.boot, e.seq): e for e in monitorlog.attribute(world.all, "fyex")}
+        every = monitorevidence.kept()
+        st_ = monitorevidence.State.load()
+        assert st_.error == ""
+        for e in every:
+            assert e.size <= cap // 16, "past a window's share"
+            got = list(monitorevidence.read(e))
+            assert len(got) == e.events
+            # an event's two snapshots decide it: only past the last one held may it differ, and
+            # only while the evidence says it is open
+            snaps = [int(r["seq"]) for f in ("context", "records")
+                     for r in monitorevidence._jsonl(e.path / f"{f}.jsonl.gz")
+                     if r.get("k") == "scopes"]  # fmt: skip
+            for v in got:
+                want = truth[(v.boot, v.seq)]
+                lacks = e.open and v.seq > max(snaps, default=-1)
+                assert lacks or (v.who, v.container, v.crossed) == (
+                    want.who, want.container, want.crossed
+                ), f"{v.seq}: {v.who} alone, {want.who} in the whole store"  # fmt: skip
+        for a, b in pairwise(sorted((e.boot, e.lo, e.hi) for e in every)):
+            assert a[0] != b[0] or a[2] < b[1], f"{a} overlaps {b}"
+        for boot, seq in (k for k, v in truth.items() if v.crossed):
+            spans = [(e.lo, e.hi) for e in [*every, *out.evicted] if e.boot == boot]
+            spans += [(p["lo"], p["hi"]) for p in st_.pending if p["boot"] == boot]
+            assert (
+                any(lo <= seq <= hi for lo, hi in spans) or (boot, seq) in out.counted | out.lost
+            ), f"nothing says where the crossing {boot}:{seq} went"
+        for e in every:
+            if e.boot not in {v.boot for v in out.evicted}:
+                crossed = {q for (b, q), v in truth.items() if v.crossed and b == e.boot}
+                inside = {q for q in crossed if e.lo <= q <= e.hi}
+                said = {c["seq"] for c in e.crossings} | set(e.unjudged)
+                assert e.more or inside <= said, f"{inside - said} in {e.id}, not listed"
+        event(f"kept={len(every)} pending={len(st_.pending)} counted={bool(out.counted)}")
+        event(f"evicted={bool(out.evicted)} lost={bool(out.lost)}")
+
+
+@settings(max_examples=scaled_examples(60), deadline=None)
+@given(scenario=evidence_steps, budget=st.sampled_from(["tiny", "ample"]))
+def test_keeping_evidence_changes_nothing_of_the_store(scenario, budget):
+    got = []
+    for cap in (0, 24_000):
+        with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
+            _store_with_evidence(mp, Path(tmp), scenario, budget, cap)
+            got.append([r for r, _ in monitorstore.scan(None)])
+            assert cap or not monitorevidence.root().exists()
+    assert got[0] == got[1]
