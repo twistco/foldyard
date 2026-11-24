@@ -109,8 +109,12 @@ A first step towards that, stdlib only, in `src/foldyard/monitorstore.py`:
   once a snapshot after it is stored. From then on nothing that decides it can change, so the
   verdict is kept and never re-judged. The pull judges right after each append, before retention
   runs. When a segment goes, a boot's first crossing stays (§6: from it on, hooks get the whole
-  boot), and so does a candidate not judged yet. Over cabash's whole store (4.4 M events, three
-  boots) 7 events were candidates and none was a crossing.
+  boot), and so does a candidate not judged yet, with what judging it needs: the snapshot either
+  side of it (judged by a later one it would be named after whichever container holds the freed
+  namespace number by then) and the namespace facts as of it. One still unjudged a minute after the
+  snapshot that settles it (the catalogue keeps failing) is said on your computer as a crossing that
+  may have happened, rather than nothing. Over cabash's whole store (4.4 M events, three boots) 7
+  events were candidates and none was a crossing.
 
 **Why the catalogue (2026-10-21).** The join needs the snapshot before an event and the one after
 it. Readers used to look only within a byte window — a hook 1 MB back and 4 MB on from its position,

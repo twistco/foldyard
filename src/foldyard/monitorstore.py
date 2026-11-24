@@ -70,6 +70,7 @@ BUDGET_MIN_MB, BUDGET_MAX_MB = 64, 65536
 LEGACY = "legacy"  # an older foldyard's live segment (no first line naming it) is "legacy-<inode>"
 _CLAIMS_KEPT = 10_000  # engine claims, newest first (containers ever described)
 _ORPHANS_KEPT = 64  # snapshots kept from segments already gone (the newest per boot)
+JUDGE_SECONDS = 60.0  # a crossing unjudged this long after a snapshot settled it is overdue
 _SCHEMA = 2
 # The marks (:func:`init_mark`) live in tables of their own BESIDE schema 2, never in it: an
 # editable install upgrades the CLI at once and the supervisor only at its restart, and 0.6's
@@ -1132,6 +1133,15 @@ class Catalogue:
         ).fetchone()
         return (int(row[0]), row[1]) if row else None
 
+    def overdue(self, boot: str, now: float) -> tuple[int, str] | None:
+        """:meth:`first_unjudged`, once the snapshot that settled it was stored
+        :data:`JUDGE_SECONDS` ago (your computer's clock): judging keeps failing, not merely
+        failed once — the pull and the hooks judge again every few seconds."""
+        first = self.first_unjudged(boot)
+        snap = self.after(boot, first[0]) if first else None
+        late = snap is not None and now - float(snap.get("recv") or 0.0) >= JUDGE_SECONDS
+        return first if late else None
+
     def sealed(self, sid: str) -> None:
         self.conn.execute("UPDATE seg SET sealed = 1 WHERE id = ?", (sid,))
 
@@ -1156,7 +1166,8 @@ class Catalogue:
 
     def drop(self, gone: list[str]) -> None:
         """Forget segments the store removed — but keep the newest snapshot of each boot among
-        theirs (the one before the oldest events still stored), and of their namespace facts what
+        theirs (the one before the oldest events still stored) and the two around each crossing
+        not yet judged (:meth:`_around_unjudged`), and of their namespace facts what
         a read of the events still stored depends on (:meth:`_retain_facts`: podman enters its own
         namespace at boot, a container's init once — the join must still know whose a namespace
         is, however long ago that was said)."""
@@ -1194,17 +1205,38 @@ class Catalogue:
             "AND boot IS NOT (SELECT boot FROM nsfact ORDER BY rowid DESC LIMIT 1)"
         )
         orphan = "seg NOT IN (SELECT id FROM seg)"
-        c.execute(
-            f"DELETE FROM snap WHERE {orphan} AND seq < (SELECT MAX(o.seq) FROM snap o "
+        around = self._around_unjudged()
+
+        def forget(rows: Iterable[tuple[int]]) -> None:
+            c.executemany(
+                "DELETE FROM snap WHERE rowid = ?", [r for r in rows if r[0] not in around]
+            )
+
+        older = (
+            f"SELECT rowid FROM snap WHERE {orphan} AND seq < (SELECT MAX(o.seq) FROM snap o "
             f"WHERE o.boot = snap.boot AND o.{orphan})"
         )
-        c.execute(
-            f"DELETE FROM snap WHERE {orphan} AND rowid NOT IN "
-            f"(SELECT rowid FROM snap WHERE {orphan} ORDER BY rowid DESC LIMIT ?)",
-            (_ORPHANS_KEPT,),
-        )
+        forget(c.execute(older).fetchall())
+        newest = c.execute(f"SELECT rowid FROM snap WHERE {orphan} ORDER BY rowid DESC").fetchall()
+        forget([r for r in newest if r[0] not in around][_ORPHANS_KEPT:])
         self._retain_facts()
         c.execute("COMMIT")
+
+    def _around_unjudged(self) -> set[int]:
+        """The rows of the snapshots either side of each crossing not yet judged: what names the
+        container it came from. Judged by any later one it would be named after whoever holds the
+        namespace number by then — another container — or after none. Inside :meth:`drop`'s
+        transaction, after the crossings whose boot has gone."""
+        c = self.conn
+        rows: set[int] = set()
+        for boot, seq in c.execute("SELECT boot, seq FROM crossing WHERE verdict IS NULL"):
+            for side in ("seq < ? ORDER BY seq DESC", "seq > ? ORDER BY seq"):
+                row = c.execute(
+                    f"SELECT rowid FROM snap WHERE boot = ? AND {side} LIMIT 1", (boot, seq)
+                ).fetchone()
+                if row:
+                    rows.add(row[0])
+        return rows
 
     def _retain_facts(self) -> None:
         """Of the facts from segments already gone, keep what a read of anything still stored — or
