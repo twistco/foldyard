@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import tempfile
 
 import pytest
 
@@ -932,6 +933,45 @@ def test_a_catalogue_that_is_locked_is_not_waited_for_once_per_candidate(state, 
 
 
 WEIRD = (None, "", "x", "²", 0, -1, 1.5, True, [], [1], {}, {"inum": None}, {"inum": "²"})
+
+
+def _sqlite(kind: str) -> Exception:
+    """The error sqlite itself raises."""
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/c.sqlite"
+        a = sqlite3.connect(path, isolation_level=None)
+        b = sqlite3.connect(path, isolation_level=None, timeout=0)
+        try:
+            a.execute("CREATE TABLE t (x)")
+            if kind == "busy":
+                a.execute("BEGIN EXCLUSIVE")
+                b.execute("BEGIN IMMEDIATE")
+            elif kind == "schema":
+                b.execute("SELECT nothing FROM t")
+            else:
+                with open(f"{tmp}/bad.sqlite", "wb") as f:
+                    f.write(b"not a database" * 100)
+                sqlite3.connect(f"{tmp}/bad.sqlite").execute("SELECT 1 FROM t")
+        except sqlite3.Error as e:
+            return e
+        finally:
+            a.close()
+            b.close()
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(("kind", "said"), [("busy", False), ("schema", True), ("corrupt", True)])
+def test_only_a_locked_catalogue_is_left_unsaid(state, monkeypatch, kind, said):
+    error = _sqlite(kind)
+
+    def broken(*a, **k):
+        raise error
+
+    monkeypatch.setattr(ms.Catalogue, "add", broken)
+    ms.append([snap(0)])
+    assert bool(ms.index_note()) is said
 
 
 @pytest.mark.parametrize("who", ["process", "parent"])

@@ -515,13 +515,16 @@ def _index_error() -> Path:
     return store_dir() / "monitor-index.error"
 
 
+_LOCKED = (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
 def _index_failed(error: Exception | None) -> None:
     """Note what kept records from being indexed — not a catalogue merely locked, which the next
     append makes up for — or that nothing does any more."""
     try:
         if error is None:
             _index_error().unlink(missing_ok=True)
-        elif not isinstance(error, sqlite3.Error):
+        elif getattr(error, "sqlite_errorcode", 0) & 0xFF not in _LOCKED:
             _index_error().write_text(f"{type(error).__name__}: {error}"[:300])
     except OSError:
         pass
