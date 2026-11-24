@@ -732,6 +732,35 @@ def test_a_rotation_held_back_mid_way_finishes_under_the_lines_the_file_holds_by
 
 
 @pytest.mark.usefixtures("tiny")
+def test_a_line_the_state_doesnt_record_yet_is_never_left_past_a_pieces_end(project, tmp_path):
+    # A supervisor that stopped between a line and the state: the line is re-sent, and only then is
+    # the file's end the state's.
+    path = _rotating(project, tmp_path)
+    rotating = (project / "monitor-hooks.toml").read_text()
+    (project / "monitor-hooks.toml").write_text(rotating.replace("max_mb = 16\n", ""))
+    _rounds(1)
+    behind = (project / "monitor-hooks-state.json").read_text()
+    _rounds(2)
+    (project / "monitor-hooks-state.json").write_text(behind)
+    (project / "monitor-hooks.toml").write_text(rotating)
+    mh.round_once(now=100)  # re-sends line 2
+    mh.round_once(now=110)
+    (part,) = _state(project)["sink_parts"]
+    assert part["file"].endswith("events.1-2.jsonl") and part["end"][0] == 2
+    assert mh.check(part["file"]) == 0 and mh.check(path) == 0
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_line_added_past_a_pieces_end_fails_though_it_is_signed(project, tmp_path, capsys):
+    path = _rotating(project, tmp_path)
+    _rounds(1, 2)
+    piece = tmp_path / "logs" / "events.1-1.jsonl"
+    with open(path, "rb") as f, piece.open("ab") as out:
+        out.write(f.read())  # line 2, from the current file
+    assert mh.check(str(piece)) == 1 and "ends at seq 1" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("tiny")
 def test_a_rotated_file_with_nothing_written_since_checks(project, tmp_path, capsys):
     # The next file is made by its first line, so a quiet hook has none.
     path = _rotating(project, tmp_path)

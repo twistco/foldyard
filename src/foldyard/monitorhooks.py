@@ -620,8 +620,9 @@ def check(path: str, name: str = "") -> int:
         # Rotated, and nothing written since: the next line makes the next file.
         unwritten = start[0] and chain == start and not monitorsink.exists(path)
         got = monitorsink.verify(
-            b"" if unwritten else monitorsink.lines(path), key, name, chain, start
-        )
+            b"" if unwritten else monitorsink.lines(path), key, name, chain, start,
+            ended=bool(chain) and states[name].sink_file != path,
+        )  # fmt: skip
     except (OSError, monitorsink.Refused) as e:
         print(f"✗ {e}")
         return 1
@@ -740,6 +741,7 @@ class HookState:
     sink_seq: int = 0  # a file hook: the last line written, which `fy monitor check` ends on
     sink_mac: str = ""  # …and its mac, the next line's `prev`
     sink_file: str = ""  # …in this file: a hook given another `file` starts a new chain there
+    sink_size: int = 0  # …and the file's size once it was written (see `_rotate`)
     sink_start: list = field(default_factory=lambda: [0, ""])  # (seq, mac) the file starts after
     sink_parts: list = field(default_factory=list)  # files rotated out: {file, start, end}
     sink_rotating: str = ""  # the name the file is being moved to (see `_rotate`)
@@ -1015,10 +1017,10 @@ def _to_file(
         key = monitorsink.ensure_key()
         body = batch(hook, events, gaps, passed, unfiltered)
         line, mac = monitorsink.signed_line(key, body, st.sink_seq + 1, st.sink_mac)
-        monitorsink.append(hook.file, line)
+        size = monitorsink.append(hook.file, line)
     except (OSError, monitorsink.Refused) as e:
         return str(e)[:300]
-    st.sink_seq, st.sink_mac = st.sink_seq + 1, mac
+    st.sink_seq, st.sink_mac, st.sink_size = st.sink_seq + 1, mac, size
     return ""
 
 
@@ -1223,7 +1225,9 @@ def _rotate(hook: Hook, st: HookState, save: Callable[[], None]) -> str:
     one still checks on its own and a missing one still fails. Only the supervisor does this: it
     alone writes the file and the state. The intent is saved before the file moves, so a supervisor
     that died on either side of the move finishes it here the next time. A file that can't be moved
-    stays in use: evidence past the limit is better than evidence not written."""
+    stays in use: evidence past the limit is better than evidence not written. So does one that
+    holds a line the state doesn't record (a supervisor that died between the two) until that is
+    re-sent: a piece ends exactly where its record says, or `check` fails it."""
     if not hook.file or st.sink_file != hook.file:
         return ""
     try:
@@ -1234,6 +1238,8 @@ def _rotate(hook: Hook, st: HookState, save: Callable[[], None]) -> str:
             if not (holds_lines and full):
                 return ""
         if not st.sink_rotating or monitorsink.exists(hook.file):  # not moved yet
+            if monitorsink.size(hook.file) != st.sink_size:
+                return ""  # it ends past what the state records, until the next line is written
             # Named again each time: a move refused earlier let more lines into the file.
             name = _rotated(hook.file, st.sink_start[0] + 1, st.sink_seq)
             aside = os.path.join(directory, name)

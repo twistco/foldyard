@@ -218,13 +218,14 @@ def check_path(path: str) -> None:
         os.close(parent)
 
 
-def append(path: str, line: bytes) -> None:
-    """Append ``line`` to ``path`` (created 0644 if absent). One write call, repeated only for a
-    short write. A write that fails part-way is UNDONE — the file is cut back to where it ended —
-    so the sink never leaves a torn line: any shape :func:`verify` excused, the box could write.
-    A file that doesn't end in a newline (something else wrote it) is ended first, so the sink's
-    line stays a line of its own. A path ending in ``.gz`` gets each line as a gzip member of its
-    own: the file is an ordinary gzip file, grown and undone a line at a time like any other."""
+def append(path: str, line: bytes) -> int:
+    """Append ``line`` to ``path`` (created 0644 if absent), returning the file's size then. One
+    write call, repeated only for a short write. A write that fails part-way is UNDONE — the file is
+    cut back to where it ended — so the sink never leaves a torn line: any shape :func:`verify`
+    excused, the box could write. A file that doesn't end in a newline (something else wrote it) is
+    ended first, so the sink's line stays a line of its own. A path ending in ``.gz`` gets each line
+    as a gzip member of its own: the file is an ordinary gzip file, grown and undone a line at a
+    time like any other."""
     packed = compressed(path)
     if packed:
         line = gzip.compress(line, 6, mtime=0)
@@ -246,6 +247,7 @@ def append(path: str, line: bytes) -> None:
                     f"off ({cut.strerror}) — `fy monitor check` will report that line"
                 ) from None
             raise
+        return size + len(line)
     finally:
         os.close(fd)
 
@@ -443,12 +445,14 @@ def verify(
     hook: str,
     state: tuple[int, str] | None,
     start: tuple[int, str] = (0, ""),
+    ended: bool = False,
 ) -> Check:
     """Does ``data`` (a file's bytes, or its :func:`lines`) hold exactly the lines the sink wrote
     for ``hook``? Every line's mac, the sequence with no gap, each line's ``prev`` naming the line
     before, and the end against ``state`` — the hook's last written ``(seq, mac)`` as the
     supervisor recorded it, which is what catches lines cut from the end. The chain starts after
-    ``start``: the last ``(seq, mac)`` of the file before, for one rotation started.
+    ``start``: the last ``(seq, mac)`` of the file before, for one rotation started. A file that has
+    ``ended`` (rotated out) holds nothing past ``state``.
 
     Every line must be the exact bytes :func:`signed_line` writes for its content: a line that
     parses to the same thing but reads differently (a duplicate key, which ``json.loads`` resolves
@@ -533,6 +537,12 @@ def verify(
         )
     if seq == want_seq and seq and not hmac.compare_digest(mac, want_mac):
         return fail(out.lines, f"the last line isn't the one the sink wrote last (seq {seq})")
+    if seq > want_seq and ended:
+        return fail(
+            out.lines,
+            f"the file ends at seq {seq}, but ends at seq {want_seq} in the record of when it was "
+            "moved aside — lines were added",
+        )
     if seq > want_seq:
         out.notes.append(
             f"seq {want_seq + 1}–{seq}: written, not yet recorded in the hook's state (it is at "
