@@ -639,16 +639,16 @@ def test_one_too_large_for_its_share_is_counted_and_said(state, monkeypatch):
     assert "too large" in me.State.load().say[-1]["text"]
 
 
-def test_the_verdicts_still_to_come_have_room_in_the_share(state, monkeypatch):
-    share = 5000
+@pytest.mark.parametrize("share", range(2500, 6000, 250))
+def test_the_verdicts_still_to_come_have_room_in_the_share(state, monkeypatch, share):
     caps(monkeypatch, 16 * share)
     s = Stream()
     with monkeypatch.context() as busy:
         busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
         recs = _loud(s, 400)
         at = next(i for i, r in enumerate(recs) if _crossed(r))
-        for r in recs[at + 1 : at + 4]:
-            if r["k"] == "ev":  # three more, as many verdicts to take
+        for r in recs[at - 2 : at + 3]:
+            if r["k"] == "ev":  # several, as many verdicts to take
                 r["e"]["process_exec"]["process"]["ns"]["mnt"]["inum"] = 1
                 r["e"]["process_exec"]["parent"] = {"ns": {"mnt": {"inum": 200}}}
         store(recs)
