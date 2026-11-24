@@ -6,6 +6,86 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.13.0 — 2026-11-24
+
+### Changed
+
+- **In a box, git points a plain `git worktree add` at `fy worktree add`.** Outside the checkout
+  (the worktrees root, `/tmp`) it is refused with the command to use, and so is
+  `git worktree prune`, which drops the record of every worktree the box can't see. Inside the
+  checkout, where agents' own worktree tools put theirs, it is made with a warning not to install
+  there. Only the box's own project; `FY_GIT_SHIM_OFF=1` gets past it. A script that makes a
+  worktree elsewhere in a box needs that, or `fy worktree add`.
+
+### Added
+
+- **`fy machine upgrade` moves a project's VM to a newer Fedora in place.** A VM keeps the Fedora it
+  was created with, and `fy machine recreate` would throw away its images, volumes and agent logins.
+  This upgrades the disk instead: it stops the containers, runs the upgrade as root at one boot (a
+  boot script foldyard records and drops again, as with its other root setup), restarts on the new
+  kernel, checks every volume, image and container against a snapshot taken first, and starts what
+  ran before. It never goes past the Fedora your Lima's own podman template uses, which is the check
+  that Lima is made for it; that is also the default, so with Lima 2.3.0 an existing VM goes to
+  Fedora 45. A real project's VM went from Fedora 44 to 45 in about two and a half minutes.
+- **`fy init --private`, for a project that doesn't use foldyard.** One command now does what
+  `fy docs private-config` used to list as manual steps:
+
+  - It writes `[project] private = true`.
+  - It hides foldyard's files with the clone's own `.git/info/exclude`, and leaves `.gitignore`
+    alone.
+  - It refuses a clone where git already tracks a foldyard file.
+  - On a clone set up the usual way, it converts the setup and keeps your `foldyard.toml`.
+
+  In such a setup:
+
+  - `fy worktree add` and `fy worktree init` write main's adopted config and the foldyard skill into
+    the worktree from your computer, so the `.fy/worktree-init.sh` script is no longer needed.
+  - Each agent's system prompt gets foldyard's own note saying the files are private.
+  - `fy doctor` fails if git tracks one of them.
+- **`fy worktree add <name>` works in a box: an agent makes its own worktree, with nobody asked.**
+  It used to be refused there, so agents fell back on plain `git worktree add`, where every install
+  lands on your computer's disk, about 3× slower than a volume, and (on macOS) holds a file open for
+  each file. In a box it makes the checkout in the worktrees root, with volumes over its dependency
+  dirs (`[box].shadow_volumes`), to use from that box; `fy worktree remove` there removes it. It has
+  no stack, ports or mode: the same command on your computer (`--box` for a box of its own)
+  registers it in place and keeps the dependencies already installed. `fy docs git` has the details,
+  and replaces the earlier advice to use `.claude/worktrees/`. The volumes' mounts don't survive a
+  restart of the box; it puts them back as it starts (a box made before 0.13.0 needs
+  `fy box recreate`).
+
+### Fixed
+
+- **The guest monitor runs on Fedora 45.** Lima 2.3.0's podman template is Fedora 45, whose 7.2
+  kernel Tetragon v1.7.1 couldn't read (`parsing .BTF header: header contains non-zero trailer`), so
+  it exited at every start and the monitor never observed. foldyard now installs Tetragon v1.8.0,
+  and reads its policy table's new layout (a `DOMAIN` column), so `fy up` no longer waits ten
+  minutes for a policy that had loaded.
+- **With `[machine] attribution = "record"`, builds reach the proxy again on podman 6.** Podman 6
+  gives each build step a network of its own, served by a pasta helper, and the forwarder refused
+  every pasta helper's connections, so a build step's downloads failed. A helper whose namespace
+  holds only build steps is now recorded as the build's; any other is still refused.
+- **A VM start no longer fails over Lima's half-read event.** `limactl start` reads its host agent's
+  event log and, on Lima 2.3.0, can catch an event half-written and exit with
+  `failed to unmarshal … as events.Event: unexpected end of JSON input` while the VM comes up fine.
+  When the start fails but the host agent runs on, foldyard now reads that log itself, whole events
+  only, and goes by the host agent's own verdict: running, or exiting or degraded.
+- **The VM lets go of shared files nothing is using, so your computer no longer runs out of open
+  files.** macOS keeps a file open for every file a VM remembers on a shared folder, and a VM with
+  memory to spare never forgot one: four projects' VMs once held 474,000 of the 491,520 a Mac
+  allows, mostly worktrees' `node_modules` and `.venv`, and everything else on it failed with "Too
+  many open files in system". foldyard now turns on the kernel's own expiry (`fuse.inval_wq`, 60 s):
+  in testing, 50,000 held files fell to 77 within 75 s. Files in use are kept.
+  `[machine] release_files` sets the period, `0` turns it off. It is set at boot, so each VM needs
+  one `fy machine stop && fy up` after the upgrade, and `fy up` says so.
+- **`fy init` and `fy skill install` never write through a link.** A box can plant links in the
+  checkout, and both commands followed them on your computer:
+  - A `foldyard.toml` that was a link pointing at nothing didn't count as existing, so `fy init`
+    wrote the new config wherever the link pointed. The link is now replaced instead, and counts as
+    existing, so `--force` is needed as for a file.
+  - A `.claude` or `.claude/skills` that was a link made the skill install create files wherever it
+    pointed, and with `--force` delete a `skills/<name>` directory there. The install now refuses
+    such a path, and `--force` overwrites the skill's files instead of deleting the directory first.
+
 ## 0.12.1 — 2026-11-19
 
 ### Fixed
