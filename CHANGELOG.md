@@ -6,6 +6,67 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.14.0 — 2026-11-24
+
+### Security
+
+- **`fy monitor` no longer passes the box's text to your terminal as it is.** A program's name and
+  arguments, and what the engine reports as a container's name, are chosen in the box: control
+  sequences in them reached the terminal of whoever looked, and could redraw the listing or fake a
+  line of it. They are now shown as escapes, in the crossing's log line and notification too.
+
+### Changed
+
+- **In a box, `fy worktree remove` takes any worktree your computer never registered, and says why
+  when it won't.** It took only the ones a box had made, so a plain `git worktree add` one from
+  before that was refused with "run on your computer". Your computer now publishes the names of its
+  registered worktrees in the to-box: those are refused, with the command to run there, and any
+  other in the worktrees root is removed, with the same check for uncommitted work.
+  `fy worktree list` in a box shows which is which. The supervisor publishes the list:
+  `fy host restart` after upgrading, then `fy box recreate` so the box has the new foldyard.
+
+### Added
+
+- **The guest monitor keeps what it recorded around a step out of a container, past the store's
+  budget.** Once such a crossing's records left the store, only its time and container were left:
+  which program it was, what led up to it and what it did next were gone. Now the minute either side
+  is copied aside (up to 256 MB, `evidence_mb` in the host-only `monitor-store.toml`, `0` for none).
+  Each VM boot's first crossings are the ones kept; when it is full a new one waits and you are
+  told, and the oldest goes only when the new one's records would otherwise be lost.
+  `fy monitor evidence` lists them, prints one and removes one. While they can't be copied, the
+  store is held past its budget: by a tenth, or up to twice the budget where that leaves 50 GB free
+  on the disk.
+
+### Fixed
+
+- **The egress proxy re-issues a request whose token was refused, as it always meant to.** On a 401
+  from a host it injects into, it mints a fresh token and sends the request again, through
+  `requests`, which no release installed: every re-issue failed with `ModuleNotFoundError`, the box
+  got the 401, and the request was missing from the network log. `requests` is now a dependency (on
+  your computer only, the box's install leaves it out), and a re-issue that can't run still hands
+  the 401 back and logs it.
+- **Reinstalling foldyard no longer restarts a running egress proxy.** `uv tool install --force`
+  removes the environment the proxy's `mitmdump` is in and makes it again. A supervisor that looked
+  in between took that for a changed command and stopped the proxy: every connection through it was
+  cut, boxes had no egress for a couple of seconds, and a notification said it hadn't started. The
+  running proxy is now kept. `fy host restart` is still what moves it to the new code.
+- **One record the guest monitor can't make sense of no longer stops it.** A step out of a container
+  that failed to be judged left every later one unjudged, and a record of a shape nobody writes
+  stopped the pull at it for good. Each is now judged by itself, and such a record is stored and
+  read as one that says nothing about its namespaces. Nothing is judged past records that aren't
+  indexed yet: without what they say, a step out could be judged not to be one for good. If records
+  still can't be indexed, `fy monitor` and `fy doctor` say so.
+- **Keeping the evidence of crossings costs nothing when there is nothing to keep**: every piece was
+  read several times on each pull.
+- **A running box works with a worktree registered since it was made.** With a `[ports]` pool,
+  `WORKTREE=<name> fy box exec`, `fy ps` and `fy shellenv` for one were refused in every older box
+  ("this box doesn't know its ports"), and the advice, `fy box recreate`, ends the sessions in it.
+  The box now reads its ports from the list your computer publishes in the to-box.
+- **Registering an existing worktree says what it does to the boxes using it, and offers its box.**
+  Its dependency dirs go read-only in every other box, so a session working in it there could no
+  longer install or test, with no box of its own to go on in. `fy worktree add <name>` now says so
+  before it asks, and offers to start that box.
+
 ## 0.13.1 — 2026-11-24
 
 ### Fixed
