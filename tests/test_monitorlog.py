@@ -1032,6 +1032,39 @@ def test_show_prints_attributed_events_and_the_pull_state(monkeypatch, tmp_path,
     assert "claims" in out
 
 
+HOSTILE = "\x1b]0;owned\x07\x1b[2J\x9b31m\r\n12:00:00  vm  a faked line"
+
+
+def test_show_prints_the_boxs_text_as_text(monkeypatch, tmp_path, capsys):
+    # a program's name and arguments, and a container's, are whatever the box chose: none may move
+    # the cursor, set the title or start a line of its own in the operator's terminal
+    from foldyard import devmode
+
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "in_box", lambda: False)
+    monkeypatch.setattr(monitorlog.config, "project", lambda: "fyex")
+    monkeypatch.setattr(monitorlog.config, "project_prefix", lambda: "fyex")
+    hostile = ev(200, binary=HOSTILE)
+    hostile["e"]["process_exec"]["process"]["arguments"] = HOSTILE
+    crossing = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    stream = [snap({200: [BOX]}), entered(), hostile, crossing, snap({200: [BOX]})]
+    recs = [{**r, "boot": BOOT, "seq": i} for i, r in enumerate(stream)]
+    recs += [{"k": "engine", "containers": {BOX: {"name": HOSTILE}}},
+             {"k": "gap", "boot": BOOT, "seq": 5, "why": HOSTILE, "recv": 1.0}]  # fmt: skip
+    monitorlog._append(recs)
+    monitorlog.Cursor(pulled=1.0, path=f"{DIR}/000.jsonl", error=HOSTILE).save()
+    logged: list[str] = []
+    monitorlog.tell_crossing(logged.append, lambda title, body: logged.append(title + body))
+    assert monitorlog.show(limit=10) == 0
+    assert monitorlog.show(limit=10, since="1970-01-01") == 0
+    out = capsys.readouterr().out
+    assert "\\x1b" in out  # seen for what it is, not dropped
+    [row] = list(devmode._monitor_events_check())
+    for text in (*out.splitlines(), *logged, monitorlog.crossing_note(), row[2]):
+        assert text.isprintable(), repr(text)
+        assert not text.startswith("12:00:00  vm")
+
+
 def test_show_labels_what_isnt_a_container_and_a_crossing(monkeypatch, tmp_path, capsys):
     # `fy monitor` filters nothing: every label shows, a crossing loudest
     monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
