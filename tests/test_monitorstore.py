@@ -808,6 +808,24 @@ def test_retention_keeps_a_boots_first_crossing_and_what_is_not_yet_judged(state
         assert _crossings(cat) == []
 
 
+def test_retention_keeps_what_an_unjudged_crossing_is_judged_by(state, monkeypatch):
+    # A step out into podman's namespace, then podman's next command, and the segment goes before
+    # any snapshot settles the step: the entry that says the namespace was podman's by then must
+    # stay until it is judged, though a later entry is the newest (#212, the weekly run).
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([entry(0, inode=300), snap(1), crossed(2, inode=300, host=False),
+               entry(3, inode=300)])  # fmt: skip
+    ms.append([ev(4)])
+    with ms.Catalogue.open() as cat:
+        cat.drop([ms.segments()[0].id])
+        assert _crossings(cat) == [(2, None, "")]
+    ms.append([snap(5)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(2, 1, BOX)]
+        cat.drop([s.id for s in ms.segments() if not s.live])  # judged: what it needed goes
+        assert [f[0] for f in _facts(cat)] == [2, 3]
+
+
 def test_a_failing_judge_never_stops_the_store(state, monkeypatch):
     def broken(self):
         raise RuntimeError("boom")
