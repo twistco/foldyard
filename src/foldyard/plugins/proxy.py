@@ -79,10 +79,34 @@ def mitmdump_path() -> str | None:
     Returns ``None`` in the BOX, whose install strips mitmproxy (``box.HOST_ONLY_DEPS``) since it
     never runs the proxy. Single source of truth for the daemon command (below) and the proxy doctor
     check, so they can't drift."""
-    local = Path(sys.executable).parent / "mitmdump"
+    local = _venv_mitmdump()
     if local.exists():
         return str(local)
     return shutil.which("mitmdump")
+
+
+def _venv_mitmdump() -> Path:
+    return Path(sys.executable).parent / "mitmdump"
+
+
+# What :func:`_mitmdump_cmd` last answered, in this process.
+_launched_mitmdump: str | None = None
+
+
+def _mitmdump_cmd() -> str:
+    """The executable the daemon spec launches: :func:`mitmdump_path`, but unchanged while that copy
+    is missing. A reinstall of foldyard (`just pin`, `uv tool install --force`) removes the venv and
+    makes it again under a running supervisor; a changed command restarts the proxy, which cut every
+    connection and failed to start until the venv was back. A proxy that dies meanwhile fails to
+    spawn and is retried, as before. Never the PATH copy in place of a missing venv one; a PATH copy
+    that moved is followed. Only for the spec: doctor and preflight ask the disk."""
+    global _launched_mitmdump
+    found = mitmdump_path()
+    local = str(_venv_mitmdump())
+    if found is not None and (found == local or _launched_mitmdump != local):
+        _launched_mitmdump = found
+    # The bare name keeps the supervisor's "mitmproxy installed?" nag firing when there is none.
+    return _launched_mitmdump or "mitmdump"
 
 
 # mitmproxy's own name for its CA files (``<basename>-ca-cert.pem`` and siblings in the confdir);
@@ -740,10 +764,8 @@ class ProxyPlugin(Plugin):
                 # state_dir that no git checkout can rewrite under it (see _launch_addon_path).
                 "stage": [(str(_packaged_addon()), str(_launch_addon_path()))],
                 "cmd": [
-                    # Resolved from foldyard's own venv (the proxy extra) or PATH; the bare
-                    # fallback keeps the supervisor's "mitmproxy installed?" OSError nag firing
-                    # when it's genuinely absent. basename stays "mitmdump" either way.
-                    mitmdump_path() or "mitmdump",
+                    # foldyard's own venv's copy, or PATH's: basename "mitmdump" either way.
+                    _mitmdump_cmd(),
                     "-s",
                     str(_launch_addon_path()),
                     # LOOPBACK only. The proxy authenticates no client, and injects this project's
