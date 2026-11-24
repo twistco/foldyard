@@ -526,7 +526,7 @@ fy_wt_path() { # the <path> of `worktree add <its args>`: the first that is no o
     while [ $# -gt 0 ]; do
         case $1 in
         --) printf '%s' "${2:-}" && return ;;
-        --rea | --reas | --reaso | --reason) shift ;;
+        --r | --re | --rea | --reas | --reaso | --reason) shift ;;
         --*) ;;
         # -b/-B, alone or last in a group (-qb), take the next; with more behind it, that's the value
         -*) case ${1#"${1%%[bB]*}"} in [bB]) shift ;; esac ;;

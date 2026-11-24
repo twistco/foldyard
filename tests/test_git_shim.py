@@ -1653,7 +1653,8 @@ def project(rig):
         ["add", "-qb", "side", "{out}"],  # grouped, the value next…
         ["add", "-fqBside", "{out}"],  # …or attached
         ["add", "--reason", "why", "--lock", "{out}"],
-        ["add", "--rea", "why", "--lock", "{out}"],  # git takes any unambiguous prefix
+        ["add", "--rea", "why", "--lock", "{out}"],  # git takes any unambiguous prefix…
+        ["add", "--r", "why", "--lock", "{out}"],  # …which this is before git 2.48
         ["add", "--detach", "--", "{out}"],
         ["add", "../repo-worktrees/fix"],
         ["add", "sub/../../fix"],
