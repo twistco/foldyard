@@ -1,0 +1,25 @@
+    # `observe-files`: one more selector on security_file_permission (a fragment, appended to
+    # policy.yaml). Writes (MAY_WRITE, 2) under directories that hold configuration and installed
+    # programs, by processes outside the VM's own mount namespace. A general rule, not a list of
+    # what any one experiment attacks. No /home, /var or /tmp: podman's own processes are outside
+    # the VM's namespace too, and write their storage there. Unpacking an image layer is still
+    # recorded (podman chroots into the layer, so the paths read /etc/…), labelled `podman`.
+    # It says that a path was written and by what, never the content. `sed -i` shows as a write to
+    # its temporary file beside the target, then a rename onto it (below).
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      - index: 1
+        operator: Equal
+        values:
+        - "2"
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns

@@ -455,6 +455,38 @@ class Event:
     crossed: bool = False  # additive: see the class doc
 
 
+# `observe-files`' hooks on changes that aren't writes: what each is called in ``detail``.
+_FILE_CHANGES = {
+    "security_path_unlink": "unlink",
+    "security_path_chmod": "chmod",
+    "security_path_truncate": "truncate",
+    "security_file_truncate": "truncate",
+    "security_path_rename": "rename",
+    "security_path_link": "link",
+}
+
+
+def _file_change(fn: str, body: dict) -> str:
+    """``<operation> <path>``, the path being the name that changed: for a rename or a link, the
+    new one, with the other in brackets."""
+    paths = [
+        (a.get("path_arg") or a.get("file_arg") or a.get("dentry_arg") or {}).get("path", "?")
+        for a in body.get("args") or []
+    ] or ["?"]
+    what = f"{_FILE_CHANGES[fn]} {paths[-1]}"
+    if fn == "security_path_rename" and len(paths) == 2:
+        what += f" (from {paths[0]})"
+    if fn == "security_path_link" and len(paths) == 2:
+        what += f" (to {paths[0]})"
+    return what + _refusal(body)
+
+
+def _refusal(body: dict) -> str:
+    """How a refused access ends, as the kernel said it; ``""`` when it was let through."""
+    ret = (body.get("return") or {}).get("int_arg")
+    return "" if ret in (0, None) else f" → {ret}"
+
+
 def _kind(body: dict, kind: str) -> tuple[str, str]:
     if kind == "process_exec":
         return "exec", ""
@@ -463,6 +495,8 @@ def _kind(body: dict, kind: str) -> tuple[str, str]:
     if kind == "process_kprobe":
         fn = body.get("function_name", "")
         arg = (body.get("args") or [{}])[0]
+        if fn in _FILE_CHANGES:
+            return "file", _file_change(fn, body)
         if fn == "tcp_connect":
             s = arg.get("sock_arg", {})
             return "connect", f"{s.get('daddr', '?')}:{s.get('dport', '?')}"
@@ -470,11 +504,7 @@ def _kind(body: dict, kind: str) -> tuple[str, str]:
             args = body.get("args") or []
             mask = args[1].get("int_arg") if len(args) > 1 else None
             what = {2: "write", 4: "read"}.get(mask or 0, f"mask {mask}")
-            ret = (body.get("return") or {}).get("int_arg")
-            outcome = (
-                "" if ret in (0, None) else f" → {ret}"
-            )  # a refused access, as the kernel said
-            return "file", f"{what} {arg['file_arg'].get('path', '?')}{outcome}"
+            return "file", f"{what} {arg['file_arg'].get('path', '?')}{_refusal(body)}"
         return "other", fn
     return "other", kind
 

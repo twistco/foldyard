@@ -628,7 +628,7 @@ def observe_files(monkeypatch):
 
 def _selectors(script: str) -> list[str]:
     policy = script.split("__FY_MONITOR_POLICY__")[1]
-    body = policy.split("call: security_file_permission", 1)[1]
+    body = policy.split("call: security_file_permission", 1)[1].split("\n  - call:", 1)[0]
     body = re.sub(r"^\s*#.*\n", "", body, flags=re.M)
     return [s.rstrip() for s in re.split(r"^    - (?=match)", body, flags=re.M)[1:]]
 
@@ -676,6 +676,58 @@ def test_observe_files_watches_whole_directories_and_never_container_storage(obs
 def test_observe_files_never_enforces(observe_files):
     script, _ = monitor.render(True)
     assert "matchActions" not in script and "action:" not in "".join(_selectors(script)).lower()
+
+
+# Measured 2026-11-24 (Tetragon v1.8.0, kernel 7.2): a write selector alone misses each of these.
+_HOOKS = {
+    "security_path_rename": {"1", "3"},  # the old name and the new: either in a watched directory
+    "security_path_unlink": {"1"},
+    "security_path_chmod": {"0"},
+    "security_path_truncate": {"0"},
+    "security_file_truncate": {"0"},  # ftruncate, and an open that truncates
+    "security_path_link": {"0", "2"},
+}
+
+
+def _hooks(script: str) -> dict[str, str]:
+    policy = script.split("__FY_MONITOR_POLICY_2__")[1] if "POLICY_2__" in script else ""
+    return {c.split("\n", 1)[0]: c for c in re.split(r"^  - call: ", policy, flags=re.M)[1:]}
+
+
+def test_observe_files_records_what_a_write_selector_misses(observe_files, monkeypatch):
+    assert set(_hooks(monitor.render(True)[0])) == set(_HOOKS)
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    assert _hooks(monitor.render(True)[0]) == {}
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe-files")
+    assert _hooks(monitor.render(False)[0]) == {}
+
+
+def test_no_policy_holds_more_prefix_filters_than_tetragon_does(observe_files):
+    # Nine or more in one policy and it doesn't load, which stops Tetragon ("failed to insert
+    # string_prefix_map_8: key too big for map", live 2026-11-24).
+    script, _ = monitor.render(True)
+    for policy in (script.split("__FY_MONITOR_POLICY__")[1], "".join(_hooks(script).values())):
+        assert 0 < policy.count("operator: Prefix") <= 8
+
+
+@pytest.mark.parametrize(("call", "indexes"), _HOOKS.items())
+def test_each_added_hook_is_held_to_the_watched_directories_and_to_containers(
+    observe_files, call, indexes
+):
+    # Unfiltered, they cost 27,000 events for one package install, against 3,100 without them.
+    script, _ = monitor.render(True)
+    watched = re.findall(r"- (/\S+)$", _selectors(script)[-1], re.M)
+    selectors = re.split(r"^    - (?=matchArgs)", _hooks(script)[call], flags=re.M)[1:]
+    assert {re.search(r"index: (\d)", s).group(1) for s in selectors} == indexes  # type: ignore
+    for s in selectors:
+        assert re.findall(r"- (/\S+)$", s, re.M) == watched
+        assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", s)
+
+
+@pytest.mark.parametrize("call", _HOOKS)
+def test_an_added_hook_the_kernel_lacks_never_stops_tetragon(observe_files, call):
+    # One hook that can't attach fails its whole policy, and with it every other recording.
+    assert re.search(r"ignore:\s+callNotFound: true", _hooks(monitor.render(True)[0])[call])
 
 
 def test_both_levels_want_the_monitor(monkeypatch):

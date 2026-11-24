@@ -970,6 +970,40 @@ def test_join_describes_connections_and_file_access():
     ]
 
 
+def _file_detail(function: str, *paths: str, ret: int | None = None):
+    # As Tetragon reports them: a dentry or path argument is a `path_arg`, a file a `file_arg`.
+    kind = "file_arg" if function == "security_file_truncate" else "path_arg"
+    e = ev(200, kind="process_kprobe", function_name=function,
+           args=[{kind: {"path": p}} for p in paths], ret=ret)  # fmt: skip
+    (got,) = monitorlog.attribute(_records(snap({200: [BOX]}), e), "fyex")
+    return got.kind, got.detail
+
+
+@pytest.mark.parametrize(
+    ("function", "paths", "detail"),
+    [
+        ("security_path_unlink", ("/etc/x",), "unlink /etc/x"),
+        ("security_path_chmod", ("/etc/x",), "chmod /etc/x"),
+        ("security_path_truncate", ("/etc/x",), "truncate /etc/x"),
+        ("security_file_truncate", ("/etc/x",), "truncate /etc/x"),
+        # the name that changed comes first, so `<operation> <path>` reads the same for all of them
+        ("security_path_rename", ("/tmp/a", "/etc/x"), "rename /etc/x (from /tmp/a)"),
+        ("security_path_link", ("/etc/x", "/tmp/hl"), "link /tmp/hl (to /etc/x)"),
+    ],
+)
+def test_a_file_change_that_isnt_a_write_is_a_file_event_with_its_path(function, paths, detail):
+    assert _file_detail(function, *paths) == ("file", detail)
+
+
+def test_a_refused_rename_says_so():
+    got = _file_detail("security_path_rename", "/tmp/a", "/etc/x", ret=-13)
+    assert got == ("file", "rename /etc/x (from /tmp/a) → -13")
+
+
+def test_a_file_change_with_no_path_reported_is_still_a_file_event():
+    assert _file_detail("security_path_unlink") == ("file", "unlink ?")
+
+
 # BashArena's firewall daemon reloading iptables, as Tetragon reports it: the parent hop and the
 # exec ids are what tell a container's own daemon from a command a session ran.
 _DAEMON = {"binary": "/bin/bash", "arguments": "/usr/local/bin/firewall-daemon", "pid": 41,

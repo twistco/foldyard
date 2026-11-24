@@ -336,8 +336,10 @@ disk_gib = 60
 
   - `"observe-files"` *(experimental)* records the same, plus containers' writes under `/etc/`,
     `/usr/local/`, `/opt/` and `/root/`: which path was written and by what process, never the
-    content. Renames, deletions, `chmod`, truncation and writes through `mmap` aren't recorded, and
-    unpacking an image is (labelled `podman`).
+    content. It also records renames, deletions, `chmod`, truncation and hard links there, as
+    attempts: one refused for lack of permission reads like one that worked. Writes through `mmap`,
+    or through a second name a file already has, aren't recorded, and unpacking an image is
+    (labelled `podman`).
 
   - The box's user can't stop it, change its policy or read its log.
 

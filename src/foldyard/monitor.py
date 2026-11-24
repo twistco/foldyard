@@ -95,13 +95,28 @@ def relay_key() -> str:
     return key
 
 
+def _files() -> bool:
+    return config.machine_monitor() == "observe-files"
+
+
 def _policy(on: bool) -> str:
     """The policy text for the configured level. `observe-files` appends one selector, so every
     byte of `observe`'s (and with it its recording's id) stays as it was."""
     text = _asset("policy.yaml").read_text().rstrip("\n")
-    if on and config.machine_monitor() == "observe-files":
-        text += "\n" + _asset("policy-files.yaml").read_text().rstrip("\n")
+    if on and _files():
+        text += "\n" + _asset("policy-writes.yaml").read_text().rstrip("\n")
     return text
+
+
+def _second_policy(on: bool) -> str:
+    """The shell that writes `observe-files`' second policy, or ``""`` (and not one byte more)."""
+    if not (on and _files()):
+        return ""
+    text = _asset("policy-files.yaml").read_text().rstrip("\n")
+    return (
+        "cat >/etc/tetragon/tetragon.tp.d/fy-observe-files.yaml <<'__FY_MONITOR_POLICY_2__'\n"
+        f"{text}\n__FY_MONITOR_POLICY_2__\n\n"
+    )
 
 
 def render(on: bool) -> tuple[str, str]:
@@ -115,6 +130,7 @@ def render(on: bool) -> tuple[str, str]:
         .replace("@@RELAY@@", _asset("relay.py").read_text().rstrip("\n"))
         .replace("@@RELAY_KEY@@", relay_key() if on else "")
         .replace("@@POLICY@@", _policy(on))
+        .replace("@@SECOND_POLICY@@", _second_policy(on))
         .replace("@@VERSION@@", TETRAGON_VERSION)
         .replace("@@SHA_X86_64@@", TETRAGON_SHA256["x86_64"])
         .replace("@@SHA_AARCH64@@", TETRAGON_SHA256["aarch64"])
