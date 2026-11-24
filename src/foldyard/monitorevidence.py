@@ -715,7 +715,7 @@ def note() -> str:
     st = State.load()
     if st.error:
         return (
-            f"what is around a crossing can't be copied out of the store ({st.error}): its "
+            f"what is around a crossing can't be copied out of the store ({_safe(st.error)}): its "
             "retention is held back meanwhile, as far as the disk has room"
         )
     if st.full and st.pending:

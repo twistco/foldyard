@@ -693,6 +693,11 @@ def test_segments_an_older_foldyard_indexed_are_read_for_crossings_first(state, 
     assert e.confirmed
 
 
+def test_an_error_is_said_as_text(state):
+    me.State(error="ValueError: \x1b[2J\r\nfaked").save()  # it may quote the box's records
+    assert me.note().isprintable() and "faked" in me.note()
+
+
 def test_a_catalogue_that_fails_before_anything_is_copied_is_said(state, monkeypatch):
     s, seq = _sealed_crossing(monkeypatch)
     monkeypatch.setattr(ms, "held_back", lambda limit: 1 << 30)
