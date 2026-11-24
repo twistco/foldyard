@@ -526,18 +526,36 @@ fy_wt_path() { # the <path> of `worktree add <its args>`: the first that is no o
     while [ $# -gt 0 ]; do
         case $1 in
         --) printf '%s' "${2:-}" && return ;;
-        -b | -B | --reason) shift ;;
-        -*) ;;
+        --rea | --reas | --reaso | --reason) shift ;;
+        --*) ;;
+        # -b/-B, alone or last in a group (-qb), take the next; with more behind it, that's the value
+        -*) case ${1#"${1%%[bB]*}"} in [bB]) shift ;; esac ;;
         *) printf '%s' "$1" && return ;;
         esac
         shift || return 0
     done
 }
+fy_prune_asks() { # `worktree prune <its args>` removes nothing: the last of -n/--no-dry-run wins
+    local dry=1
+    while [ $# -gt 0 ]; do
+        case $1 in
+        -h | --help) return 0 ;;
+        --e*=*) ;;
+        --e*) shift ;; # --expire's value
+        --no-d*) dry=1 ;;
+        --d*) dry=0 ;;
+        --*) ;;
+        -*n*) dry=0 ;;
+        esac
+        shift || break
+    done
+    return $dry
+}
 fy_wt_real() { # $1, through any link, `.` and `..`, whether it exists yet or not
     local p=$1 rest='' d
     case $p in /*) ;; *) p=$(fy_start_dir)/$p ;; esac
     while :; do # its deepest existing dir, then the rest of it
-        d=$(cd "$p" 2>/dev/null && pwd -P) && break
+        d=$(cd -P "$p" 2>/dev/null && pwd -P) && break # -P: link/.. is its target's parent
         rest=/${p##*/}$rest
         case $rest in /..*) return 1 ;; esac # `..` past a dir that isn't there: can't say
         p=${p%/*}
@@ -551,7 +569,7 @@ fy_worktree() { # the arguments after `worktree`; returns when git should run
     case $verb in add | prune) ;; *) return 0 ;; esac
     [ -z "${FY_WORKTREE_ADD:-}" ] && fy_own_project || return 0
     if [ "$verb" = prune ]; then
-        case " $* " in *" -n "* | *" --dry-run "* | *" -h "*) return 0 ;; esac
+        fy_prune_asks "$@" && return 0
         echo "foldyard: not pruning: it drops the record of every worktree this box can't see." >&2
         echo "  Run it on your computer. (FY_GIT_SHIM_OFF=1 git … runs it here anyway.)" >&2
         exit 1

@@ -442,3 +442,18 @@ def test_your_computer_says_a_box_made_it_and_the_doctor_does_not_warn(
     row = devmode._worktree_registry_check()
     # Named, never just counted: a box decides what is marked, and the operator should see it.
     assert "made in a box (by its own word): fix" in row[2]
+
+
+def test_only_foldyards_own_git_is_let_past_the_shim_not_the_repos_hook(world, monkeypatch):
+    # What the repo's hook runs is told about `fy worktree add` like anything else in the box.
+    seen: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        boxworktree.subprocess,
+        "run",
+        lambda cmd, env, **kw: (
+            seen.append((cmd[3], env.get("FY_WORKTREE_ADD"))) or subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
+    boxworktree._git(world["main"], "worktree", "add", "x", "hook")  # a branch may be named that
+    boxworktree._git(world["main"], "hook", "run", "post-checkout")
+    assert seen == [("worktree", "1"), ("hook", None)]

@@ -262,8 +262,10 @@ def mount_all() -> int:
 def _git(where: Path, *args: str) -> int:
     cmd = ["git", "-C", str(where), *args]
     _err("+ " + " ".join(shlex.quote(c) for c in cmd))
-    # The box's git shim sends a plain `git worktree add` here (FY_WORKTREE_ADD: this is it).
-    return subprocess.run(cmd, env={**os.environ, "FY_WORKTREE_ADD": "1"}).returncode
+    # The box's git shim sends a plain `git worktree add` here (FY_WORKTREE_ADD: this is it). Not a
+    # hook's: what the repo runs is told like anything else.
+    own = {} if args[0] == "hook" else {"FY_WORKTREE_ADD": "1"}
+    return subprocess.run(cmd, env={**os.environ, **own}).returncode
 
 
 def _add_argv(main: Path, wt_dir: Path, branch: str, base: str) -> list[str] | None:

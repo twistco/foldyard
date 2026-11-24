@@ -1650,7 +1650,10 @@ def project(rig):
         ["add", "{out}"],
         ["add", "-b", "side", "{out}"],
         ["add", "-q", "--no-track", "-B", "side", "{out}", "main"],
+        ["add", "-qb", "side", "{out}"],  # grouped, the value next…
+        ["add", "-fqBside", "{out}"],  # …or attached
         ["add", "--reason", "why", "--lock", "{out}"],
+        ["add", "--rea", "why", "--lock", "{out}"],  # git takes any unambiguous prefix
         ["add", "--detach", "--", "{out}"],
         ["add", "../repo-worktrees/fix"],
         ["add", "sub/../../fix"],
@@ -1706,6 +1709,14 @@ def test_a_link_out_of_the_checkout_is_outside_it(project, tmp_path):
     assert r.returncode != 0 and "fy worktree add fix" in r.stderr
 
 
+def test_dotdot_after_a_link_is_its_targets_parent_as_git_reads_it(project, tmp_path):
+    (tmp_path / "away" / "sub").mkdir(parents=True)
+    (project.repo / "link").symlink_to(tmp_path / "away" / "sub")
+    r = _wt(project, "add", "-b", "side", "link/../fix")
+    assert r.returncode != 0 and "fy worktree add fix" in r.stderr
+    assert not (tmp_path / "away" / "fix").exists()
+
+
 def test_foldyards_own_and_the_opt_out_go_through(project, tmp_path):
     for n, env in enumerate(({"FY_WORKTREE_ADD": "1"}, {"FY_GIT_SHIM_OFF": "1"})):
         r = _wt(project, "add", "-q", "--detach", str(tmp_path / f"w{n}"), env=env)
@@ -1725,15 +1736,22 @@ def test_another_repo_is_never_touched(project, tmp_path):
     assert r.returncode == 0
 
 
+_REAL_PRUNES = [[], ["-v"], ["-n", "--no-dry-run"], ["--dry-run", "--no-dry"], ["--expire", "-n"]]
+_DRY_RUNS = [["-n"], ["--dry-run"], ["--dry"], ["-nv"], ["--no-dry-run", "-n"], ["-v", "-n"]]
+
+
 def test_prune_is_refused_but_not_its_dry_run(project, tmp_path):
     gone = tmp_path / "gone"
     project.host("worktree", "add", "-q", "--detach", str(gone))
     shutil.rmtree(gone)  # as one your computer made where this box can't see it
-    r = _wt(project, "prune")
-    assert r.returncode != 0 and "can't see" in r.stderr
-    assert "gone" in project.host("worktree", "list").stdout
-    for flag in ("-n", "--dry-run"):
-        assert _wt(project, "prune", flag).returncode == 0
+    for args in _REAL_PRUNES:  # git's own rule: the last of -n and --no-dry-run wins
+        r = _wt(project, "prune", *args)
+        assert r.returncode != 0 and "can't see" in r.stderr, args
+        assert "gone" in project.host("worktree", "list").stdout, args
+    for args in _DRY_RUNS:
+        r = _wt(project, "prune", *args)
+        assert r.returncode == 0 and "can't see" not in r.stderr, args
+        assert "gone" in project.host("worktree", "list").stdout, args
 
 
 @pytest.mark.parametrize("args", [["list"], ["add"], ["add", "-h"], []])
