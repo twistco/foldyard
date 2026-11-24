@@ -1977,11 +1977,12 @@ def _step_line(label: str, check: str, run: str) -> str:
 
 
 # foldyard's core dependencies that only the HOST runs: mitmproxy (the egress proxy — the box routes
-# through it, never runs it) and PyJWT (the `github-app` minter, host-side beside the credentials).
+# through it, never runs it), requests (that proxy's 401 re-issue) and PyJWT (the `github-app` minter,
+# host-side beside the credentials).
 # They are core so a plain `uv tool install foldyard` on the host is complete; the box, whose install
 # foldyard drives itself, removes them with a uv override instead. pyproject's `dependencies` must
 # name each (tests/test_box.py pins it), or the override silently stops removing anything.
-HOST_ONLY_DEPS = ("mitmproxy", "pyjwt")
+HOST_ONLY_DEPS = ("mitmproxy", "requests", "pyjwt")
 
 
 def _box_overrides() -> list[str]:

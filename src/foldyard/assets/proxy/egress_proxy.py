@@ -3218,10 +3218,6 @@ class Injector:
             return
         flow.metadata["egress_proxy_retried"] = True
         ctx.log.info(f"egress_proxy: 401 from {rule.host} — re-minted + re-issuing the request")
-        # `requests` is already a host dep (the minter uses it); import lazily so the always-on
-        # unit test (stubbed transport, no network) can substitute it without installing it.
-        import requests
-
         headers = dict(flow.request.headers)
         url = flow.request.url
         value = (
@@ -3236,9 +3232,13 @@ class Injector:
         # re-route the re-issue through ANOTHER proxy the upstream may not be reachable from
         # (a dev box's Phase A′ env routes ALL egress at the host proxy: the re-issue then dials
         # a box-network upstream via the host and read-times-out — the in-box e2e failure mode).
-        session = requests.Session()
-        session.trust_env = False
         try:
+            # A core dependency (the box's install strips it, which runs no proxy). Imported here,
+            # inside the try: a proxy that can't re-issue still hands the 401 back and logs it.
+            import requests
+
+            session = requests.Session()
+            session.trust_env = False
             with session:
                 r = await asyncio.to_thread(
                     session.request,
