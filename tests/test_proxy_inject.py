@@ -1178,6 +1178,18 @@ async def test_re_mints_and_re_issues_once_on_401(injector, gh):
     assert gh.requests == []
 
 
+async def test_a_re_issue_that_cannot_run_hands_the_401_back_and_logs_it(injector, gh, monkeypatch):
+    # An install without `requests`: the import raised out of the hook, so the request was missing
+    # from the network log too.
+    inj, log = injector
+    monkeypatch.setitem(sys.modules, "requests", None)  # `import requests` raises ImportError
+    flow = _Flow("api.github.com", status=401)
+    await inj.response(flow)
+    assert flow.response is not None and flow.response.status_code == 401
+    assert _last_log(log)["status"] == 401
+    assert any(lvl == "error" and "401 re-issue failed" in msg for lvl, msg in gh.logs)
+
+
 async def test_a_401_on_a_streamed_upload_is_handed_back_not_re_issued(injector, gh):
     # Under stream_large_bodies a request body past the threshold goes upstream as it arrives and
     # mitmproxy keeps no copy (raw_content is None). Re-issuing would send an EMPTY body with a
