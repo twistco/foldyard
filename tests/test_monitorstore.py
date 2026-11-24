@@ -7,6 +7,7 @@ from __future__ import annotations
 import gzip
 import json
 import tempfile
+from contextlib import closing
 
 import pytest
 
@@ -953,7 +954,8 @@ def _sqlite(kind: str) -> Exception:
             else:
                 with open(f"{tmp}/bad.sqlite", "wb") as f:
                     f.write(b"not a database" * 100)
-                sqlite3.connect(f"{tmp}/bad.sqlite").execute("SELECT 1 FROM t")
+                with closing(sqlite3.connect(f"{tmp}/bad.sqlite")) as bad:
+                    bad.execute("SELECT 1 FROM t")
         except sqlite3.Error as e:
             return e
         finally:
