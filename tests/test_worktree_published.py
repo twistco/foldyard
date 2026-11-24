@@ -7,7 +7,15 @@ import os
 
 import pytest
 
-from foldyard import boxmounts, config, devmode, supervisor, worktree, worktree_published
+from foldyard import (
+    boxmounts,
+    config,
+    devmode,
+    stack,
+    supervisor,
+    worktree,
+    worktree_published,
+)
 from foldyard import worktree_registry as registry
 
 
@@ -158,8 +166,107 @@ def test_unregistering_publishes(main, monkeypatch):
     assert worktree_published.read(main) == frozenset()
 
 
-def test_the_file_holds_the_names_and_the_checkout_only(main):
-    _register(main, "feat")
-    worktree_published.publish(main)
-    data = json.loads(worktree_published.path(main, boxmounts.to_box_dir()).read_text())
-    assert data == {"main": str(main), "registered": ["feat"]}
+@pytest.fixture
+def pooled(main, monkeypatch):
+    monkeypatch.setattr(stack, "main_repo", lambda: main)
+    monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000, "PG_PORT": 5533})
+    monkeypatch.setattr(config, "port_pools", lambda: {"APP_PORT": range(3001, 3006)})
+    monkeypatch.setattr(stack, "_pins", lambda main: {})
+    monkeypatch.setattr(stack, "_hashed_offset", lambda name: 40)
+    for var in ("WT_OFFSET", "FY_WORKTREE_OFFSETS", "FY_WORKTREE_PORTS"):
+        monkeypatch.delenv(var, raising=False)
+    return main
+
+
+def test_the_file_holds_names_ports_and_offsets_only(pooled):
+    _register(pooled, "feat")
+    stack.claim_ports("feat")
+    worktree_published.publish(pooled)
+    data = json.loads(worktree_published.path(pooled, boxmounts.to_box_dir()).read_text())
+    assert data == {
+        "main": str(pooled),
+        "registered": ["feat"],
+        "ports": {"feat": {"APP_PORT": 3001}},
+        "offsets": {"feat": 40},
+    }
+
+
+def _in_a_box(monkeypatch, ports="{}", offsets="{}"):
+    """A box made before any worktree, which is what it was given at create."""
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv("FY_WORKTREE_PORTS", ports)
+    monkeypatch.setenv("FY_WORKTREE_OFFSETS", offsets)
+
+
+def test_a_running_box_knows_the_ports_of_a_worktree_registered_since(pooled, monkeypatch):
+    # `WORKTREE=feat fy box exec …` and `fy ps` were refused, with `fy box recreate` as the advice,
+    # which ends every session in the box.
+    _register(pooled, "feat")
+    stack.claim_ports("feat")
+    monkeypatch.setattr(stack, "_recorded_offsets", lambda main, pins: {"feat": 17})
+    worktree_published.publish(pooled)
+    _in_a_box(monkeypatch)
+    assert stack._published_ports("feat") == {"APP_PORT": "3001", "PG_PORT": str(5533 + 17)}
+
+
+def test_what_the_box_was_given_at_create_still_comes_first(pooled, monkeypatch):
+    # A port that moved since needs the box recreated (`fy box up` says so): it doesn't half follow.
+    _register(pooled, "feat")
+    stack.claim_ports("feat")
+    worktree_published.publish(pooled)
+    _in_a_box(monkeypatch, ports='{"feat": {"APP_PORT": 3004}}', offsets='{"feat": 9}')
+    assert stack._published_ports("feat") == {"APP_PORT": "3004", "PG_PORT": str(5533 + 9)}
+
+
+def test_one_the_list_says_is_not_registered_is_told_so(pooled, monkeypatch, capsys):
+    worktree_published.publish(pooled)
+    _in_a_box(monkeypatch)
+    monkeypatch.setattr(config, "worktrees_root", lambda m: pooled.parent / "wts")
+    with pytest.raises(SystemExit):
+        stack._published_ports("plain")
+    err = capsys.readouterr().err
+    assert "isn't registered on your computer" in err and "fy worktree add plain" in err
+    assert "fy box recreate" not in err  # it can't help
+    assert "Just registered" in err  # the list takes about a second to reach a box on vz
+
+
+def test_with_no_list_both_ways_out_are_named(pooled, monkeypatch, capsys):
+    _in_a_box(monkeypatch)
+    monkeypatch.setattr(config, "worktrees_root", lambda m: pooled.parent / "wts")
+    with pytest.raises(SystemExit):
+        stack._published_ports("later")
+    err = capsys.readouterr().err
+    assert "fy box recreate" in err and "fy worktree add later" in err
+
+
+def test_ports_that_cannot_be_worked_out_leave_the_names(pooled, monkeypatch):
+    _register(pooled, "feat")
+    monkeypatch.setattr(stack, "worktree_ports", lambda: 1 / 0)
+    worktree_published.publish(pooled)
+    assert worktree_published.read(pooled) == {"feat"}
+    _in_a_box(monkeypatch)
+    with pytest.raises(stack.PortsUnknown):
+        stack.worktree_port("APP_PORT", "feat")
+
+
+# The last: your computer runs an adopted config from before the checkout's pool.
+_BAD_PORTS = [
+    '"x"',
+    "[1]",
+    '{"feat": {"APP_PORT": "3001"}}',
+    '{"feat": 3}',
+    '{"feat": {"APP_PORT": 0}}',
+    '{"feat": {"APP_PORT": 65536}}',
+    '{"feat": {}}',
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_PORTS)
+def test_ports_that_are_not_ports_are_unknown(pooled, monkeypatch, bad):
+    _register(pooled, "feat")
+    worktree_published.publish(pooled)
+    file = worktree_published.path(pooled, boxmounts.to_box_dir())
+    file.write_text(json.dumps({**json.loads(file.read_text()), "ports": json.loads(bad)}))
+    _in_a_box(monkeypatch)
+    with pytest.raises(stack.PortsUnknown):
+        stack.worktree_port("APP_PORT", "feat")

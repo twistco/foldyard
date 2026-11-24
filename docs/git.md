@@ -293,10 +293,14 @@ box it makes.
 
 What it doesn't have is a stack, ports, a mode or adopted config. Commands in it run in the box that
 made it, under that box's mode, and `fy up` there is refused. To give it those, run the same command
-on your computer, which registers it: `fy worktree add <name> --box`. Its new box finds the
-dependency volumes as they are, and the box that made it then sees them read-only, like any other
-registered worktree's. Registering doesn't run `[project].worktree_init`: `fy worktree init <name>`
-does.
+on your computer, which registers it: `fy worktree add <name> --box`. Do it with `--box`, or say yes
+when it offers to start its box: once it's registered, its dependency dirs are read-only in every
+other box, so a session that was using it there can edit and commit but not install or run its tools
+(a git hook that needs them is skipped or fails). It goes on in the worktree's own box:
+`WORKTREE=<name> fy box exec '<command>'` from any box, or `WORKTREE=<name> fy box shell`. Its new
+box finds the dependency volumes as they are, and the box that made it then sees them read-only,
+like any other registered worktree's. Registering doesn't run `[project].worktree_init`:
+`fy worktree init <name>` does.
 
 The box's git (foldyard's shim) says so if you reach for plain git instead. `git worktree add`
 outside the checkout, and `git worktree prune`, are refused with the command to use; one inside the

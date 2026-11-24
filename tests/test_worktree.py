@@ -291,6 +291,94 @@ def test_add_on_an_existing_worktree_with_yes_skips_the_prompt(fake_main, monkey
     assert worktree_registry.checkouts(fake_main["main"]) == {"old": wt.resolve()}
 
 
+def _answers(monkeypatch, *answers):
+    given = list(answers)
+    asked: list[str] = []
+
+    def answer(prompt=""):
+        asked.append(prompt)
+        return given.pop(0)
+
+    monkeypatch.setattr("builtins.input", answer)
+    return asked
+
+
+@pytest.fixture
+def shadowed(fake_main, monkeypatch):
+    monkeypatch.setattr(config, "box_shadow_volumes", lambda: ["web/node_modules"])
+    monkeypatch.setattr(worktree, "_say_unmasked", lambda *a, **k: None)
+    return fake_main
+
+
+def test_registering_says_first_that_other_boxes_lose_its_dependencies(
+    shadowed, monkeypatch, capsys
+):
+    # An agent in main's box was working in one when it was registered: its installs and tests
+    # stopped, with no box of its own to go on in (Tangible, 2026-11-24).
+    _existing_git_worktree(shadowed)
+    said: list[str] = []
+
+    def decline(prompt=""):
+        said.append(capsys.readouterr().out)
+        return ""
+
+    monkeypatch.setattr("builtins.input", decline)
+    assert worktree.add("old") == 1
+    assert "read-only in every other box" in said[0]  # before the answer, not after
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_the_list_a_box_reads_has_the_ports_just_claimed(fake_main, monkeypatch, existing):
+    # Published when it's registered, and again with its ports: a box may ask in between.
+    seen: list[str] = []
+    monkeypatch.setattr(worktree_published, "publish", lambda main: seen.append("published"))
+    monkeypatch.setattr(worktree, "_claim_ports", lambda *a, **k: seen.append("claimed") or True)
+    if existing:
+        _existing_git_worktree(fake_main)
+    assert worktree.add("old", assume_yes=True) == 0
+    assert seen == ["published", "claimed", "published"]
+
+
+def test_registering_offers_its_box_and_starts_it(shadowed, monkeypatch):
+    _existing_git_worktree(shadowed)
+    runs = _box_runs(monkeypatch)
+    asked = _answers(monkeypatch, "y", "")
+    assert worktree.add("old") == 0
+    assert "Start its box" in asked[1]
+    assert len(runs) == 1 and runs[0]["env"]["WORKTREE"] == "old"
+
+
+def test_registering_takes_no_for_its_box_and_says_how(shadowed, monkeypatch, capsys):
+    _existing_git_worktree(shadowed)
+    runs = _box_runs(monkeypatch)
+    _answers(monkeypatch, "y", "n")
+    assert worktree.add("old") == 0
+    assert not runs and "WORKTREE=old fy box up" in capsys.readouterr().out
+
+
+def test_registering_with_box_asks_nothing_more(shadowed, monkeypatch):
+    _existing_git_worktree(shadowed)
+    runs = _box_runs(monkeypatch)
+    asked = _answers(monkeypatch, "y")
+    assert worktree.add("old", box_up=True) == 0
+    assert len(asked) == 1 and len(runs) == 1
+
+
+def test_registering_with_yes_starts_no_box_unasked(shadowed, monkeypatch, capsys):
+    _existing_git_worktree(shadowed)
+    runs = _box_runs(monkeypatch)
+    assert worktree.add("old", assume_yes=True) == 0
+    out = capsys.readouterr().out
+    assert not runs and "read-only in every other box" in out and "WORKTREE=old fy box up" in out
+
+
+def test_registering_a_project_with_no_dependency_dirs_offers_nothing(fake_main, monkeypatch):
+    _existing_git_worktree(fake_main)
+    monkeypatch.setattr(config, "box_shadow_volumes", lambda: [])
+    asked = _answers(monkeypatch, "y")
+    assert worktree.add("old") == 0 and len(asked) == 1
+
+
 def test_add_refuses_to_register_a_dir_git_does_not_track(fake_main):
     # A checkout-looking dir the box planted: git has no worktree metadata for it.
     wt = fake_main["wt_root"] / "planted"

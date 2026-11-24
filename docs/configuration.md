@@ -209,9 +209,9 @@ them, one per direction ([ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-t
   stay invisible to the box. On vz, a write reaches the box after about a second, and a file your
   computer replaces reads as missing for that second (measured 2026-10-22; the Freshness note under
   [ADR-0033's read-only enforcement](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md#read-only-enforcement-by-backend)).
-  Every box of the project can read it, so it never holds a secret. It holds the names of your
-  registered worktrees, which `fy worktree remove` in a box
-  [goes by](./git.md#worktrees-a-box-makes), and the monitor's file sink, if you add one
+  Every box of the project can read it, so it never holds a secret. It holds your registered
+  worktrees' names, which `fy worktree remove` in a box [goes by](./git.md#worktrees-a-box-makes),
+  and their ports, and the monitor's file sink, if you add one
   (`fy monitor hook add NAME --to-box`).
 - **`from-box`** (`~/.foldyard/<project>/from-box/`) — the box writes it: one slot per checkout
   (`main/`, `worktrees/<name>/`), where the agents' transcripts are bound out (see
@@ -646,8 +646,9 @@ PG_PORT = 5544                                        # every other key keeps th
 - **A worktree registered before the pool** keeps publishing on its offset port. `fy doctor`'s
   `ports pool` row names it. `fy worktree add <name>` again gives it a pool port; recreate its box
   and run `fy up` for it to publish there.
-- **A box** is given its worktrees' pool ports when it's made. Asked about a worktree added since,
-  it refuses rather than guess: `fy box recreate`, or run it from that worktree's own box. One made
+- **A box** is given its worktrees' pool ports when it's made, and reads those of one added since
+  from the list your computer publishes in the [to-box](#what-the-vm-mounts). Where it can't, it
+  refuses rather than guess: `fy box recreate`, or run it from that worktree's own box. One made
   with plain `git worktree add` is refused until `fy worktree add <name>` on your computer registers
   it. A worktree [a box made](./git.md#worktrees-a-box-makes) isn't refused: it has no stack, so
   `fy shellenv` there gives it the offset ports.
