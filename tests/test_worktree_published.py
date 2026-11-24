@@ -249,7 +249,19 @@ def test_ports_that_cannot_be_worked_out_leave_the_names(pooled, monkeypatch):
         stack.worktree_port("APP_PORT", "feat")
 
 
-@pytest.mark.parametrize("bad", ['"x"', "[1]", '{"feat": {"APP_PORT": "3001"}}', '{"feat": 3}'])
+# The last: your computer runs an adopted config from before the checkout's pool.
+_BAD_PORTS = [
+    '"x"',
+    "[1]",
+    '{"feat": {"APP_PORT": "3001"}}',
+    '{"feat": 3}',
+    '{"feat": {"APP_PORT": 0}}',
+    '{"feat": {"APP_PORT": 65536}}',
+    '{"feat": {}}',
+]
+
+
+@pytest.mark.parametrize("bad", _BAD_PORTS)
 def test_ports_that_are_not_ports_are_unknown(pooled, monkeypatch, bad):
     _register(pooled, "feat")
     worktree_published.publish(pooled)

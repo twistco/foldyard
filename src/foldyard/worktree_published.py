@@ -130,7 +130,8 @@ def _parsed(data: object, main: Path) -> Facts | None:
     raw = data.get("ports")
     for name, entry in (raw if isinstance(raw, dict) else {}).items():
         # One with any value that isn't a port is unknown, never on its band.
-        if isinstance(name, str) and (got := _ints(entry)) is not None:
+        got = _ints(entry)
+        if isinstance(name, str) and got is not None and all(0 < p < 65536 for p in got.values()):
             ports[name] = got
     return Facts(names, ports, _ints(data.get("offsets")) or {})
 

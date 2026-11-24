@@ -300,8 +300,9 @@ def _pooled(name: str) -> dict[str, int]:
 
         main = main_repo()
         known = worktree_published.facts(main)  # one registered since this box was made
-        if known is not None and name in known.ports:
-            return known.ports[name]
+        ports = known.ports.get(name) if known is not None else None
+        if ports is not None and all(key in ports for key in config.port_pools()):
+            return ports
         registered = known is not None and name in known.names
         if not registered and boxworktree.is_box_made(main, config.worktrees_root(main) / name):
             return {}
