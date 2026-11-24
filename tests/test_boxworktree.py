@@ -636,11 +636,20 @@ def test_a_worktree_no_box_made_is_still_refused_with_a_pool(pooled, capsys):
     assert "fy worktree add other" in err  # recreating helps only a registered one
 
 
-def test_once_registered_it_is_refused_until_the_box_knows_its_pool_port(pooled, monkeypatch):
+def test_once_registered_it_is_refused_where_the_box_knows_no_pool_port(pooled, monkeypatch):
     boxworktree.add("fix")
     monkeypatch.setattr(config, "in_box", lambda: False)
     boxworktree.promoted(pooled["main"], pooled["root"] / "fix")
     monkeypatch.setattr(config, "in_box", lambda: True)
+    with pytest.raises(stack.PortsUnknown):
+        stack.worktree_port("APP_PORT", "fix")
+
+
+def test_one_registered_with_its_marker_left_behind_is_not_put_on_its_band(pooled, monkeypatch):
+    # Registering clears the box's marker, best-effort: the list decides, and its port isn't there.
+    boxworktree.add("fix")
+    known = worktree_published.Facts(frozenset({"fix"}))
+    monkeypatch.setattr(worktree_published, "facts", lambda main: known)
     with pytest.raises(stack.PortsUnknown):
         stack.worktree_port("APP_PORT", "fix")
 

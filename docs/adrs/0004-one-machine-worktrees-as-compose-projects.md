@@ -83,8 +83,10 @@ the registered NAMES in the to-box (ADR-0033), and a box removes any other workt
 repository in the worktrees root, with the same check for uncommitted work. No list to read is
 *unknown*, so a plain one is refused, and where the list can't be written the old one is taken away.
 It is a guard rail: a box can delete the files either way, and nothing on your computer is decided
-from it. Not chosen: asking the engine for mounts over the worktree's dependency dirs (none without
-`shadow_volumes`, or under gVisor).
+from it. The same list carries each worktree's pooled ports and offset: a running box refused every
+command on a worktree registered since it was made, `fy box exec` into that worktree's own box
+included, and recreating it ends the sessions in it. Not chosen: asking the engine for mounts over
+the worktree's dependency dirs (none without `shadow_volumes`, or under gVisor).
 
 **Escape hatch:** for a genuinely untrusted worktree — reviewing unknown code — spin a *throwaway
 dedicated machine* for just that one. Isolation is a spectrum, light by default; the heavy shape is

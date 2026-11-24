@@ -252,10 +252,12 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   handed out; the box gets every offset baked in (`FY_WORKTREE_OFFSETS`). Should two daemons still
   want one port (a pin, `WT_OFFSET`), the supervisor runs one and blocks the other
   (`supervisor._port_sharers`) — never reaps its own.
-- `worktree_published.py` — the registered worktrees' NAMES in the to-box, one file per main
-  checkout, so `fy worktree remove` in a box can tell a plain worktree from a registered one
-  (`boxworktree.owner`). Written by `fy worktree add`/`remove` and each supervisor tick, only when
-  it changed. No list is unknown, never "none registered"; one that can't be written is taken away.
+- `worktree_published.py` — the registered worktrees' names, pooled ports and offsets in the to-box,
+  one file per main checkout: `fy worktree remove` in a box tells a plain worktree from a registered
+  one (`boxworktree.owner`), and a box knows the ports of one registered since it was made
+  (`stack._pooled`, `_offset`; what it was given at create comes first). Written by
+  `fy worktree add`/`remove` and each supervisor tick, only when it changed. No list is unknown,
+  never "none registered"; one that can't be written is taken away.
 - `agents.py` — `fy agent start|resume|ls|attach|stop|clean` (docs/agents.md):
   `fy claude`/`fy codex` in a detached tmux session in the box, on foldyard's own server
   (`tmux -L fy -f /dev/null`, its options set by argv on every start — `allow-passthrough off` and

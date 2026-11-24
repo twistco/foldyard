@@ -1188,8 +1188,7 @@ def add(
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
     if wt_dir.exists() or wt_dir.is_symlink():
-        rc = _register_existing(main, name, wt_dir, assume_yes)
-        return _box_up(name) if box_up and rc == 0 else rc
+        return _register_existing(main, name, wt_dir, assume_yes, box_up)
     if _no_pooled_port(name):
         return 1
     wt_root.mkdir(parents=True, exist_ok=True)
@@ -1246,6 +1245,7 @@ def add(
     worktree_registry.register(main, name, wt_dir)
     worktree_published.publish(main)
     _claim_ports(name)
+    worktree_published.publish(main)  # with the ports it was just given
 
     # Both before the adoption: they bring the config that is adopted.
     _private_copy(main, wt_dir)  # a private setup's untracked files, from main's adopted copy
@@ -1346,11 +1346,22 @@ def _claim_ports(name: str, *, moving: bool = False) -> bool:
     return True
 
 
-def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) -> int:
+def _asked(question: str, default: bool) -> bool:
+    try:
+        answer = input(question).strip().lower()
+    except EOFError:
+        return False
+    return answer in ("y", "yes") or (default and not answer)
+
+
+def _register_existing(
+    main: Path, name: str, wt_dir: Path, assume_yes: bool, box_up: bool = False
+) -> int:
     """``add`` on a checkout that already exists: record it, after the operator has seen what it
-    really is. Only a real directory that git tracks as a worktree of ``main`` qualifies — a dir
-    the box planted has no worktree metadata, and a symlink would register someone else's
-    checkout."""
+    really is and what registering does to the boxes using it. ``box_up`` starts its box; without
+    it the operator is asked, where its dependency dirs are about to go read-only elsewhere. Only a
+    real directory that git tracks as a worktree of ``main`` qualifies — a dir the box planted has
+    no worktree metadata, and a symlink would register someone else's checkout."""
     if wt_dir.is_symlink() or not (wt_dir / ".git").exists():
         _err(f"✗ already exists, and is not a worktree checkout: {wt_dir}")
         return 1
@@ -1361,20 +1372,27 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
         print(f"✓ worktree '{name}' is already registered ({wt_dir})")
         if _no_pooled_port(name):
             return 1
-        return 0 if _claim_ports(name, moving=True) else 1
+        if not _claim_ports(name, moving=True):
+            return 1
+        worktree_published.publish(main)
+        return _box_up(name) if box_up else 0
     if _no_pooled_port(name):
         return 1
     print(f"'{name}' already exists: {os.path.realpath(wt_dir)} (branch {_branch_of(wt_dir)}).")
     print("  Registering it lets your computer act on it: run its daemons, heal its git index,")
     print("  and reconcile it once its foldyard.toml is adopted.")
-    if not assume_yes:
-        try:
-            answer = input("Register it? (y/N): ").strip()
-        except EOFError:
-            answer = ""
-        if answer not in ("y", "Y"):
-            print("Not registered.")
-            return 1
+    masked = bool(config.box_shadow_volumes())
+    if masked:
+        print("  Its dependency dirs ([box].shadow_volumes) go read-only in every other box, so a")
+        print(
+            "  session using it there can't install or run its tools any more, only edit: it needs"
+        )
+        print("  a box of its own from then on.")
+    if not assume_yes and not _asked("Register it? (y/N): ", default=False):
+        print("Not registered.")
+        return 1
+    if masked and not box_up and not assume_yes:
+        box_up = _asked("Start its box too? (Y/n): ", default=True)
     try:
         worktree_registry.register(main, name, wt_dir)
     except ValueError as e:
@@ -1385,6 +1403,7 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
 
     boxworktree.promoted(main, wt_dir)
     _claim_ports(name)
+    worktree_published.publish(main)  # with the ports it was just given
     if os.path.lexists(wt_dir / "foldyard.toml"):  # never over a config already there
         from . import privatecfg
 
@@ -1396,6 +1415,10 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
         _private_copy(main, wt_dir)
     print(f"✓ worktree '{name}' registered.  Bring its stack up:  WORKTREE={name} fy up")
     _say_unmasked(main, name, fresh=False)
+    if box_up:
+        return _box_up(name)
+    if masked:
+        print(f"  Its own box, to install and run things in:  WORKTREE={name} fy box up")
     return 0
 
 

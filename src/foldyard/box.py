@@ -212,8 +212,8 @@ def _warn_stale_pooled_ports(engine: str, box: str, env: dict) -> None:
     """A running box publishes each worktree it knows on the pooled port baked at create
     (``FY_WORKTREE_PORTS``), else on its band. `fy worktree add <name>` again moves a worktree onto
     the pool, and this box's `WORKTREE=<name> fy up` would still publish the old port. Name each
-    worktree whose port moved since. One added since isn't stale: the box refuses it by name
-    (``stack.PortsUnknown``). Best-effort: silent if anything can't be read."""
+    worktree whose port moved since. One added since isn't stale: the box reads it
+    from the to-box, or refuses it by name (``stack.PortsUnknown``). Best-effort: silent if anything can't be read."""
     try:
         raw = _baked_env(engine, box, env, "FY_WORKTREE_PORTS")
         if raw is None:

@@ -200,6 +200,11 @@ def _offset(name: str) -> int:
     if name in pins:
         return pins[name]
     known = _baked_offsets() if config.in_box() else _recorded_offsets(main, pins)
+    if name not in known and config.in_box():  # registered since this box was made, perhaps
+        from . import worktree_published
+
+        if (published := worktree_published.facts(main)) is not None:
+            known = published.offsets
     return known[name] if name in known else _hashed_offset(name)
 
 
@@ -232,6 +237,13 @@ def _published_ports(name: str) -> dict[str, str]:
     try:
         return {key: str(worktree_port(key, name)) for key in config.port_bases()}
     except PortsUnknown as e:
+        from . import worktree_published
+
+        published = worktree_published.read(main_repo())
+        if published is not None and name not in published:
+            _err(f"✗ '{name}' isn't registered on your computer, and no box made it: it has no")
+            _err(f"  ports. Register it there: `fy worktree add {shlex.quote(name)}`.")
+            raise SystemExit(1)
         _err(f"✗ {e}")
         _err("  Run it from its own box, or recreate this one so it knows them:")
         _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
@@ -273,8 +285,9 @@ def _pooled(name: str) -> dict[str, int]:
     """The pooled ports recorded for worktree ``name``: the host's record, or in a box what the
     host baked at create (:func:`worktree_ports`, baked with or without a pool). A box made by a
     foldyard without pools has nothing baked, and its worktrees keep their band. A box that doesn't
-    know ``name`` at all — a worktree added since — raises :class:`PortsUnknown`: its band port is
-    outside the pool, the failure the pool exists for. Not for one a box made: it takes no pool port
+    know ``name`` — a worktree added since, and not in the list your computer publishes
+    (:mod:`foldyard.worktree_published`) — raises :class:`PortsUnknown`: its band port is outside
+    the pool, the failure the pool exists for. Not for one a box made: it takes no pool port
     and has no stack to publish one (:func:`up` refuses it), so it stays on its band."""
     if not config.in_box():
         return recorded_pool_ports().get(name, {})
@@ -282,10 +295,14 @@ def _pooled(name: str) -> dict[str, int]:
     if baked is None:
         return {}
     if name not in baked:
-        from . import boxworktree  # lazy: only a worktree the box wasn't told of
+        from . import boxworktree, worktree_published  # lazy: only one the box wasn't told of
 
         main = main_repo()
-        if boxworktree.is_box_made(main, config.worktrees_root(main) / name):
+        known = worktree_published.facts(main)  # one registered since this box was made
+        if known is not None and name in known.ports:
+            return known.ports[name]
+        registered = known is not None and name in known.names
+        if not registered and boxworktree.is_box_made(main, config.worktrees_root(main) / name):
             return {}
         raise PortsUnknown(
             f"this box doesn't know '{name}''s ports: it was added after the box was made."
