@@ -235,10 +235,9 @@ def _published_ports(name: str) -> dict[str, str]:
         _err(f"✗ {e}")
         _err("  Run it from its own box, or recreate this one so it knows them:")
         _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
-        _err(
-            "  Only a registered one (`fy worktree list` on your computer). One that isn't, first:"
-        )
-        _err(f"    fy worktree add {shlex.quote(name)}   (on your computer)")
+        _err("  That helps only a registered worktree. If `fy worktree list` on your computer says")
+        _err("  this one isn't, register it there first:")
+        _err(f"    fy worktree add {shlex.quote(name)}")
         raise SystemExit(1)
 
 
