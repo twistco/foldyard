@@ -127,21 +127,50 @@ def kept() -> list[Evidence]:
         names = sorted(os.listdir(root()))
     except OSError:
         return []
-    out = []
-    for name in names:
-        path = root() / name
-        if name.startswith(".") or not path.is_dir():
-            continue
-        try:
-            doc = json.loads((path / "meta.json").read_text())
-            known = {k: v for k, v in doc.items() if k in _FIELDS}
-            out.append(Evidence(id=name, **known, size=_size(path)))
-        except (OSError, ValueError, TypeError, AttributeError):
-            continue
+    paths = (root() / name for name in names if not name.startswith("."))
+    return _in_order([e for e in (_piece(p) for p in paths if p.is_dir()) if e is not None])
+
+
+def _piece(path: Path) -> Evidence | None:
+    try:
+        doc = json.loads((path / "meta.json").read_text())
+        known = {k: v for k, v in doc.items() if k in _FIELDS}
+        return Evidence(id=path.name, **known, size=_size(path))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _in_order(every: list[Evidence]) -> list[Evidence]:
     first: dict[str, float] = {}
-    for e in out:
+    for e in every:
         first[e.boot] = min(first.get(e.boot, float("inf")), e.recv)
-    return sorted(out, key=lambda e: (first[e.boot], e.boot, e.seq))
+    return sorted(every, key=lambda e: (first[e.boot], e.boot, e.seq))
+
+
+class Held:
+    """What is kept, read at most once in a :func:`keep` — not at all when there is nothing to do —
+    and followed through what that changes."""
+
+    def __init__(self) -> None:
+        self._every: list[Evidence] | None = None
+
+    @property
+    def every(self) -> list[Evidence]:
+        if self._every is None:
+            self._every = kept()
+        return self._every
+
+    def add(self, e: Evidence) -> None:
+        self._every = _in_order([*self.every, e])
+
+    def drop(self, e: Evidence) -> None:
+        if self._every is not None:
+            self._every = [x for x in self._every if x.id != e.id]
+
+    def one(self, ident: str) -> Evidence | None:
+        if self._every is None:
+            return _piece(root() / ident)
+        return next((e for e in self._every if e.id == ident), None)
 
 
 @dataclass
@@ -152,6 +181,7 @@ class State:
     say: list[dict] = field(default_factory=list)  # for the supervisor to log ({text, notify})
     full: bool = False  # said to be full
     making: str = ""  # the boot whose window others are making way for
+    unsettled: list[str] | None = None  # ids still waiting for a snapshot or a verdict (None: any)
     error: str = ""
 
     @classmethod
@@ -201,15 +231,16 @@ def keep(cat: monitorstore.Catalogue, now: float, going: frozenset[str] = frozen
     st = State.load()
     before = asdict(st)
     try:
-        for stale in root().glob(".new-*"):  # a crash while writing one
+        held = Held()
+        for stale in (root() / ".new").glob("*"):  # a crash while writing one
             shutil.rmtree(stale, ignore_errors=True)
-        _confirm(cat, st, limit)
-        _finish(st, limit)
+        _confirm(cat, st, held, limit)
+        _finish(st, held, limit)
         boots.sort(key=lambda b: _age(cat, b))
         while True:  # one window of a boot at a time: what it takes decides what the next may
             for boot in boots:
-                _note(cat, st, boot, now, limit, going)
-            if not _flush(cat, st, limit, going):
+                _note(cat, st, held, boot, now, limit, going)
+            if not _flush(cat, st, held, limit, going):
                 break
         st.error = ""
     except Exception as e:
@@ -239,12 +270,15 @@ def _ended(cat: monitorstore.Catalogue, boot: str) -> bool:
     return row is not None and row[0] != boot
 
 
-def _confirm(cat: monitorstore.Catalogue, st: State, limit: int) -> None:
+def _confirm(cat: monitorstore.Catalogue, st: State, held: Held, limit: int) -> None:
     """Take what has come since for what was kept without it: the snapshot after a window, and the
     verdicts on what may have been a crossing — evidence that turns out to hold none goes."""
-    every = kept()
-    for e in every:
-        if not (e.open or e.unjudged):
+    if st.unsettled is None:
+        st.unsettled = [e.id for e in held.every if _waits(e)]
+    for ident in list(st.unsettled):
+        e = held.one(ident)
+        if e is None or not _waits(e) or _forgotten(cat, e.boot):
+            st.unsettled.remove(ident)
             continue
         before = _meta(e)
         rows = {r["seq"]: r for r in _crossings(cat, e.boot, e.lo, e.hi)}
@@ -255,18 +289,36 @@ def _confirm(cat: monitorstore.Catalogue, st: State, limit: int) -> None:
         try:
             if not e.crossings and not e.unjudged:
                 shutil.rmtree(e.path)
+                held.drop(e)
                 st.tell(
                     f"the evidence kept at {_at(e.time)} was removed: judged not to be a crossing"
                 )
                 continue
             if e.open and _NO_ROOM not in e.missing and cat.after(e.boot, e.hi) is not None:
+                every = held.every
                 mine = sum(x.size for x in every if x.boot == e.boot)
                 _close(cat, e, min(limit // _WINDOW - e.size, limit // _BOOT - mine,
                                    limit - sum(x.size for x in every)))  # fmt: skip
             if _meta(e) != before:
                 _write(e.path / "meta.json", _meta(e))
+                e.size = _size(e.path)
         except FileNotFoundError:
-            continue  # the operator removed it meanwhile
+            held.drop(e)  # the operator removed it meanwhile
+            continue
+        if not _waits(e):
+            st.unsettled.remove(ident)
+
+
+def _waits(e: Evidence) -> bool:
+    return bool(e.unjudged) or (e.open and _NO_ROOM not in e.missing)
+
+
+def _forgotten(cat: monitorstore.Catalogue, boot: str) -> bool:
+    """Whether the store holds nothing of ``boot`` any more: nothing about it will come."""
+    for table in ("span", "crossing"):
+        if cat.conn.execute(f"SELECT 1 FROM {table} WHERE boot = ? LIMIT 1", (boot,)).fetchone():
+            return False
+    return True
 
 
 def _list(e: Evidence, rows: list[dict]) -> None:
@@ -313,6 +365,7 @@ def _jsonl(path: Path) -> Iterator[dict]:
 def _note(
     cat: monitorstore.Catalogue,
     st: State,
+    held: Held,
     boot: str,
     now: float,
     limit: int,
@@ -321,10 +374,9 @@ def _note(
     """Make a pending window of ``boot``'s next crossing not yet in one, if that window is whole —
     one at a time, once the ones before it have been measured: what they take of the boot's share
     decides whether there is any left for it."""
-    mine = [e for e in kept() if e.boot == boot]
     done = st.done.get(boot)
     if done is None:  # the state was lost: nothing kept is kept again
-        done = max((e.hi for e in mine), default=-1)
+        done = max((e.hi for e in held.every if e.boot == boot), default=-1)
     ended = _ended(cat, boot)
     rows = cat.conn.execute(
         # one not judged by then is kept unconfirmed
@@ -332,6 +384,10 @@ def _note(
         "(verdict IS NULL OR verdict = 1) ORDER BY seq",
         (boot, done),
     ).fetchall()
+    if not rows:
+        st.done.setdefault(boot, done)
+        return
+    mine = [e for e in held.every if e.boot == boot]
     for seq, when in rows:
         seq, t = int(seq), monitorstore.stamp_ns(when)
         waiting = [p for p in st.pending if p["boot"] == boot]
@@ -348,8 +404,8 @@ def _note(
             return
         if any("size" not in p for p in waiting):
             return
-        held = sum(e.size for e in mine) + sum(p["size"] for p in waiting)
-        if limit // _BOOT - held < limit // _LEAST:
+        taken = sum(e.size for e in mine) + sum(p["size"] for p in waiting)
+        if limit // _BOOT - taken < limit // _LEAST:
             st.count(boot, [seq])
             st.done[boot] = seq
             continue
@@ -444,14 +500,16 @@ def _near(cat: monitorstore.Catalogue, boot: str, seq: int, t: int) -> set[str]:
 # ── the copy ──────────────────────────────────────────────────────────────────────────
 
 
-def _flush(cat: monitorstore.Catalogue, st: State, limit: int, going: frozenset[str]) -> bool:
+def _flush(
+    cat: monitorstore.Catalogue, st: State, held: Held, limit: int, going: frozenset[str]
+) -> bool:
     """Copy the pending windows there is room for, oldest first — and those ``going`` would take
     from, making room. Whether there is more to note: a window was dealt with, or measured."""
     blocked = again = False
     for p in list(st.pending):
         boot = p["boot"]
         forced = bool(going & _segs_of(cat, boot, p["lo"], p["hi"]))
-        every = kept()
+        every = held.every
         if any(e.id == _id(boot, p["seq"]) for e in every):
             st.pending.remove(p)  # copied, and a crash before that was noted
             again = True
@@ -468,7 +526,7 @@ def _flush(cat: monitorstore.Catalogue, st: State, limit: int, going: frozenset[
         seqs = [r["seq"] for r in rows if r["verdict"] != 0] or [p["seq"]]
         room = limit // _BOOT - sum(e.size for e in every if e.boot == boot)
         most = min(limit // _WINDOW, room)
-        new = root() / f".new-{_id(boot, p['seq'])}"
+        new = root() / ".new" / _id(boot, p["seq"])
         e = _copy(cat, p, rows, new, most) if room >= limit // _LEAST else None
         if e is None:
             st.pending.remove(p)
@@ -495,11 +553,16 @@ def _flush(cat: monitorstore.Catalogue, st: State, limit: int, going: frozenset[
             st.making = boot
             st.save()
         shutil.rmtree(e.path, ignore_errors=True)  # one whose meta.json can't be read
+        e.size = _size(new)
         new.rename(e.path)
+        held.drop(e)
+        held.add(e)
+        if _waits(e):
+            st.unsettled = [*(st.unsettled or []), e.id]
         st.pending.remove(p)
         if any(e.hi < q for q in seqs):  # cut short of crossings taken to be in it
             st.done[boot] = e.hi
-        _finish(st, limit)
+        _finish(st, held, limit)
     if blocked and not st.full:
         st.tell(
             f"the evidence of crossings is full ({limit >> 20} MB): a new one waits in the store, "
@@ -510,17 +573,17 @@ def _flush(cat: monitorstore.Catalogue, st: State, limit: int, going: frozenset[
     return again
 
 
-def _finish(st: State, limit: int) -> None:
+def _finish(st: State, held: Held, limit: int) -> None:
     """Make the room a new window has been published without (``st.making``): only once it is
     there, and after a crash between the two. Never for a cap merely lowered."""
     if not st.making:
         return
-    every = kept()
-    used = sum(e.size for e in every)
-    for old in _victims(every, st.making):
+    used = sum(e.size for e in held.every)
+    for old in _victims(held.every, st.making):
         if used <= limit:
             break
         _evict(st, old)
+        held.drop(old)
         used -= old.size
     st.making = ""
 
@@ -575,7 +638,8 @@ def _copy(
              if "seq" in r and lo <= int(r["seq"]) <= hi]  # fmt: skip
     if not sizes:
         return None
-    root().mkdir(mode=0o700, parents=True, exist_ok=True)
+    for d in (root(), new.parent):
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
     new.mkdir(mode=0o700)
     raw, e = most * _RATIO, None
     listed = [r for r in rows if r["verdict"] != 0]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import stat
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -248,6 +249,23 @@ def test_the_oldest_makes_way_only_when_the_store_would_lose_the_new_one(state, 
     assert len(list(me.read(left[-1]))) == left[-1].events
 
 
+def test_no_more_makes_way_than_has_to_when_several_come_at_once(state, monkeypatch):
+    old, limit = _fill(monkeypatch)
+    s = _new()
+    for _ in range(2):
+        store(_loud(s))
+        s.t += 600
+    assert me.kept() == old
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([s.ev()])
+    monkeypatch.setattr(ms, "budget", lambda: 1)  # both waiting windows are about to go
+    ms.append([s.ev()])
+    every = me.kept()
+    assert [e.boot for e in every] == ["old-0", "old-1", "new", "new"]
+    assert len([x for x in me.State.load().say if "made way" in x["text"]]) == 2
+    assert sum(e.size for e in every) <= limit
+
+
 def test_the_first_ones_go_last_and_a_boot_never_evicts_its_own():
     def e(boot: str, seq: int) -> me.Evidence:
         return me.Evidence(id=f"{boot}-{seq}", boot=boot, seq=seq, time="", lo=seq, hi=seq)
@@ -414,15 +432,91 @@ def test_nothing_is_held_back_with_a_cap_of_0(state, monkeypatch):
     assert not any(r.get("seq") == seq for r, _ in ms.scan(None))
 
 
+def _reads(monkeypatch) -> list[str]:
+    real, read = me._piece, []
+    monkeypatch.setattr(me, "_piece", lambda path: (read.append(path.name), real(path))[1])
+    return read
+
+
+def _many(e: me.Evidence, n: int) -> None:
+    for i in range(n):
+        old = me.root() / f"old-{i}"
+        shutil.copytree(e.path, old)
+        meta = json.loads((old / "meta.json").read_text()) | {"boot": f"old-{i % 5}", "seq": i}
+        (old / "meta.json").write_text(json.dumps(meta))
+
+
+def test_an_append_with_nothing_to_keep_reads_no_evidence(state, monkeypatch):
+    s = Stream()
+    store(s.crossing())
+    _many(me.kept()[0], 20)
+    read = _reads(monkeypatch)
+    for _ in range(3):
+        ms.append([s.ev()])
+    assert read == []
+    # one that has reads it once, however many windows it settles
+    recs = [r for _ in range(4) for r in s.crossing()]
+    for r in recs:
+        r["recv"] = T0 + s.t
+    ms.append(recs)
+    s.t += 400
+    del read[:]
+    ms.append([s.ev()])
+    assert len(read) == len(set(read)) == 21
+    assert len(me.kept()) == 25
+
+
+def test_only_what_is_unsettled_is_read_again(state, monkeypatch):
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        store(s.crossing())
+        [e] = me.kept()
+        _many(e, 20)
+        assert e.unjudged
+        read = _reads(monkeypatch)
+        ms.append([s.ev()])
+        assert set(read) == {e.id}
+    del read[:]
+    ms.append([s.ev()])  # judged: settled, and not read after that
+    assert set(read) == {e.id} and me.kept()[0].confirmed
+    del read[:]
+    ms.append([s.ev()])
+    assert read == []
+
+
+def test_a_lost_state_finds_what_is_unsettled_again(state, monkeypatch):
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        store(s.crossing())
+    me._state_file().unlink()
+    ms.append([s.ev()])
+    assert me.kept()[0].confirmed
+
+
+def test_one_whose_boot_the_store_has_forgotten_is_settled(state, monkeypatch):
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap(), s.ev(), s.cross(), s.ev()])  # no snapshot after it ever comes
+    other = Stream("boot-2")
+    ms.append([other.snap()])
+    assert me.State.load().unsettled == [me.kept()[0].id]
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    for _ in range(3):
+        ms.append([other.ev(parent=7)])
+    assert me.State.load().unsettled == [] and me.kept()[0].open
+
+
 def test_a_crash_at_any_point_keeps_it_once(state, monkeypatch):
     s = Stream()
     with monkeypatch.context() as crash:
         crash.setattr(me.State, "save", lambda self: None)  # copied; the note of it never written
         store(s.crossing())
     [e] = me.kept()
-    (me.root() / ".new-half").mkdir()
+    (me.root() / ".new" / "half").mkdir(parents=True, exist_ok=True)
     ms.append([s.ev()])
-    assert me.kept() == [e] and not list(me.root().glob(".new-*"))
+    assert me.kept() == [e]
     for p in (state / "logs").glob("monitor-index.sqlite*"):
         p.unlink()  # the catalogue lost, and the state with it
     me._state_file().unlink(missing_ok=True)

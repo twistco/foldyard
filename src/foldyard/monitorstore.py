@@ -472,7 +472,7 @@ def append(records: list[dict]) -> None:
                     # without the segment a hook's cursor is in (cabash, 2026-10-22), nor does
                     # retention take its snapshots with it unseen
                     cat.catch_up([live])
-                except sqlite3.Error:
+                except Exception:
                     pass
             _seal(live, segs, cat)
             live = None
@@ -489,8 +489,8 @@ def append(records: list[dict]) -> None:
                 if live is not None:
                     cat.catch_up([live])  # anything a crash left unindexed, before it moves on
                 cat.add(sid, records, indexed=size + sum(map(len, lines)), exact=True)
-            except sqlite3.Error:
-                pass
+            except Exception:
+                pass  # whatever it was: the pull would stop at these records for good
         with live_path().open("ab") as f:
             f.write(b"".join(lines))
         if cat is not None:
@@ -629,15 +629,18 @@ def init_mark(rec: dict) -> dict | None:
     proc, parent = body.get("process") or {}, body.get("parent") or {}
     if proc.get("in_init_tree") is not True:
         return None
-    inode = ((proc.get("ns") or {}).get("mnt") or {}).get("inum")
-    outside = ((parent.get("ns") or {}).get("mnt") or {}).get("inum")
+    inode, outside = ns_of(proc, "mnt").get("inum"), ns_of(parent, "mnt").get("inum")
     if not inode or not outside or outside == inode:
         return None
     return {"inode": str(inode), "what": what[kind], "start": str(proc.get("start_time") or "")}
 
 
-def _ns(obj: dict, kind: str) -> dict:
-    got = (obj.get("ns") or {}).get(kind)
+def ns_of(obj: dict, kind: str) -> dict:
+    """The ``kind`` namespace of an event's process or parent — ``{}`` for any shape that isn't
+    one: a record the readers can't make sense of is one they know nothing about, never an error
+    that stops them at it."""
+    got = obj.get("ns")
+    got = got.get(kind) if isinstance(got, dict) else None
     return got if isinstance(got, dict) else {}
 
 
@@ -671,7 +674,7 @@ def ns_fact(rec: dict) -> dict | None:
     if kind is None or not isinstance(e[kind], dict):
         return None
     proc, parent = e[kind].get("process") or {}, e[kind].get("parent") or {}
-    mnt, pmnt = _ns(proc, "mnt"), _ns(parent, "mnt")
+    mnt, pmnt = ns_of(proc, "mnt"), ns_of(parent, "mnt")
     inode, outside = mnt.get("inum"), pmnt.get("inum")
     if not inode or not outside or outside == inode:
         return None
@@ -683,12 +686,12 @@ def ns_fact(rec: dict) -> dict | None:
     mark = init_mark(rec)
     if mark is not None:
         by = posixpath.basename(str(parent.get("binary") or ""))
-        pidns = str(_ns(proc, "pid").get("inum") or "")
+        pidns = str(ns_of(proc, "pid").get("inum") or "")
         return {**fact, "what": mark["what"], "by": by, "pidns": pidns}
     if (
         pmnt.get("is_host") is True
         and mnt.get("is_host") is not True
-        and (_ns(proc, "user").get("is_host") is not True)
+        and (ns_of(proc, "user").get("is_host") is not True)
     ):
         return {**fact, "what": "entry", "by": "", "pidns": ""}
     if pmnt.get("is_host") is not True and mnt.get("is_host") is not True:
@@ -869,16 +872,16 @@ def cross_candidate(rec: dict) -> dict | None:
     if kind is None or not isinstance(e[kind], dict):
         return None
     proc, parent = e[kind].get("process") or {}, e[kind].get("parent") or {}
-    mnt, pmnt = _ns(proc, "mnt"), _ns(parent, "mnt")
+    mnt, pmnt = ns_of(proc, "mnt"), ns_of(parent, "mnt")
     inode, outside = mnt.get("inum"), pmnt.get("inum")
     if not inode or not outside or outside == inode:
         return None
-    if pmnt.get("is_host") is True or _ns(parent, "user").get("is_host") is True:
+    if pmnt.get("is_host") is True or ns_of(parent, "user").get("is_host") is True:
         return None
     slim = {"k": "ev", "boot": rec["boot"], "seq": rec["seq"],
             "e": {kind: {"process": _slim(proc), "parent": _slim(parent)},
                   "time": str(e.get("time") or "")}}  # fmt: skip
-    host = mnt.get("is_host") is True or _ns(proc, "user").get("is_host") is True
+    host = mnt.get("is_host") is True or ns_of(proc, "user").get("is_host") is True
     return {"inode": str(inode), "host": host, "rec": slim}
 
 
@@ -1133,7 +1136,8 @@ class Catalogue:
         until a snapshot after it is stored, a later record can still change what it is; from then
         on nothing can (records arrive in sequence), so the verdict is kept and never judged again —
         the same for every reader, and for a re-read. The pull judges right after each append,
-        before retention runs."""
+        before retention runs. One the join fails on is left as it is, and the rest judged: the
+        first such failure is raised at the end."""
         from . import monitorlog  # the join; monitorlog imports this module
 
         c = self.conn
@@ -1141,14 +1145,23 @@ class Catalogue:
             "SELECT boot, seq, rec FROM crossing WHERE verdict IS NULL AND EXISTS (SELECT 1 FROM "
             "snap WHERE snap.boot = crossing.boot AND snap.seq > crossing.seq) ORDER BY boot, seq"
         ).fetchall()
+        failed: Exception | None = None
         for boot, seq, rec in pending:
-            got = [e for e in monitorlog.join([json.loads(rec)], self, "") if e.seq == seq]
+            try:
+                got = [e for e in monitorlog.join([json.loads(rec)], self, "") if e.seq == seq]
+            except sqlite3.Error:
+                raise  # the catalogue's, not this candidate's: each would wait for it in turn
+            except Exception as e:
+                failed = failed or e  # this one's: the others are judged
+                continue
             crossed = bool(got) and got[0].crossed
             c.execute(
                 "UPDATE crossing SET verdict = ?, container = ?, rec = '' WHERE boot = ? AND "
                 "seq = ? AND verdict IS NULL",
                 (int(crossed), got[0].container if crossed else "", boot, seq),
             )
+        if failed is not None:
+            raise failed
 
     def crossings(self, boot: str) -> list[tuple[int, str, str]]:
         """``boot``'s judged crossings, ``(seq, time, container)``, oldest first: every one the
@@ -1305,7 +1318,7 @@ class Catalogue:
         ):
             body = next(v for k, v in json.loads(rec)["e"].items() if k.startswith("process_"))
             for obj in (body["process"], body["parent"]):
-                unjudged.setdefault((boot, str(_ns(obj, "mnt").get("inum"))), []).append(int(seq))
+                unjudged.setdefault((boot, str(ns_of(obj, "mnt").get("inum"))), []).append(int(seq))
         rows: dict[tuple[str, str], list[tuple]] = {}
         for row in c.execute(
             "SELECT boot, inode, seq, kind, taken FROM nsfact "

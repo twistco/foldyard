@@ -652,11 +652,11 @@ def _taken(snap: dict) -> int | None:
 
 
 def _is_host(obj: dict, kind: str) -> bool:
-    return ((obj.get("ns") or {}).get(kind) or {}).get("is_host") is True
+    return monitorstore.ns_of(obj, kind).get("is_host") is True
 
 
 def _mnt(obj: dict) -> str:
-    return str(((obj.get("ns") or {}).get("mnt") or {}).get("inum") or "")
+    return str(monitorstore.ns_of(obj, "mnt").get("inum") or "")
 
 
 def _one(
@@ -705,7 +705,7 @@ def _one(
     if ids and len(ids) == 1:
         if known.podman(inode, seq):
             return "ambiguous", "", False  # a container's scope in podman's namespace
-        pidns = str(((proc.get("ns") or {}).get("pid") or {}).get("inum") or "")
+        pidns = str(monitorstore.ns_of(proc, "pid").get("inum") or "")
         window = (lo, hi)
         started = _ns(proc.get("start_time"))
         if _lifetime(
@@ -809,7 +809,7 @@ def attribute(records: Iterable[dict], prefix: str) -> list[Event]:
                     parent_args=parent.get("arguments") or "",
                     exec_id=proc.get("exec_id") or "",
                     parent_exec_id=proc.get("parent_exec_id") or parent.get("exec_id") or "",
-                    mnt=int(inode) if inode.isdigit() else None,
+                    mnt=int(inode) if inode.isdecimal() else None,
                     crossed=crossed,
                 )
             )

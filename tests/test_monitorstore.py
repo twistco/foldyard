@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from foldyard import monitorlog
 from foldyard import monitorstore as ms
 
 BOOT = "boot-1"
@@ -891,6 +892,81 @@ def test_a_crossing_is_overdue_a_while_after_the_snapshot_that_settles_it(state,
         assert cat.overdue(BOOT, 1000.0 + ms.JUDGE_SECONDS - 1) is None
         assert cat.overdue(BOOT, 1000.0 + ms.JUDGE_SECONDS) == (1, "2026-10-21T20:00:01Z")
         assert cat.overdue("boot-2", 1e9) is None
+
+
+def _unjudgeable(monkeypatch, *seqs: int, error: Exception | None = None) -> list[int]:
+    """Judging ``seqs`` fails; every one it was tried on."""
+    real, tried = monitorlog.join, []
+
+    def join(records, cat, prefix):
+        tried.extend(r["seq"] for r in records)
+        if any(r["seq"] in seqs for r in records):
+            raise error or ValueError("a record the join can't read")
+        return real(records, cat, prefix)
+
+    monkeypatch.setattr(monitorlog, "join", join)
+    return tried
+
+
+def test_one_that_cannot_be_judged_leaves_the_others_judged(state, monkeypatch):
+    with monkeypatch.context() as bad:
+        _unjudgeable(bad, 1)
+        ms.append([snap(0), crossed(1), crossed(2), crossed(3), snap(4)])
+        with ms.Catalogue.open() as cat:
+            assert _crossings(cat) == [(1, None, ""), (2, 1, BOX), (3, 1, BOX)]
+            # said to whoever asks, and every hook still counts from the first that may be one
+            assert cat.first_unjudged(BOOT) == (1, "2026-10-21T20:00:01Z")
+            with pytest.raises(ValueError, match="can't read"):
+                cat.judge()
+    with ms.Catalogue.open() as cat:
+        cat.judge()
+        assert _crossings(cat) == [(1, 1, BOX), (2, 1, BOX), (3, 1, BOX)]
+
+
+def test_a_catalogue_that_is_locked_is_not_waited_for_once_per_candidate(state, monkeypatch):
+    import sqlite3
+
+    tried = _unjudgeable(monkeypatch, 1, 2, 3, error=sqlite3.OperationalError("locked"))
+    ms.append([snap(0), crossed(1), crossed(2), crossed(3), snap(4)])
+    assert tried == [1]
+
+
+WEIRD = (None, "", "x", "²", 0, -1, 1.5, True, [], [1], {}, {"inum": None}, {"inum": "²"})
+
+
+@pytest.mark.parametrize("who", ["process", "parent"])
+@pytest.mark.parametrize("path", [("ns",), ("ns", "mnt"), ("ns", "user"), ("ns", "pid"),
+                                  ("ns", "mnt", "inum"), ("ns", "pid", "inum")])  # fmt: skip
+def test_a_record_of_a_shape_nobody_writes_stops_nothing(state, who, path):
+    recs = [snap(0)]
+    for i, weird in enumerate(WEIRD, 1):
+        r = crossed(i)
+        at = r["e"]["process_exec"][who]
+        for k in path[:-1]:
+            at = at.setdefault(k, {})
+        at[path[-1]] = weird
+        recs.append(r)
+    last = len(recs)
+    recs += [crossed(last), snap(last + 1)]
+    ms.append(recs)  # stored, indexed and judged, the one after them too
+    assert len(_seqs(ms.read(None, 1 << 20)[0])) == len(recs)
+    with ms.Catalogue.open() as cat:
+        assert (last, 1, BOX) in _crossings(cat) and cat.first_unjudged(BOOT) is None
+    assert len(monitorlog.attribute(recs, "fyex")) == last
+
+
+def test_indexing_that_fails_never_stops_the_store(state, monkeypatch):
+    def broken(*a, **k):
+        raise AttributeError("boom")
+
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "add", broken)
+        ms.append([snap(0), crossed(1), snap(2)])
+        ms.append([ev(3)])
+    assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2, 3]
+    ms.append([ev(4)])  # and is made up for by the next one that doesn't
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 1, BOX)]
 
 
 def test_a_failing_judge_never_stops_the_store(state, monkeypatch):
