@@ -312,7 +312,7 @@ def tell_crossing(
     if cur.told == key:
         return
     # the id is the kernel's (its scope); the name only the engine's claim, which the box chooses
-    claimed = ((claims.get(cid) or {}).get("name") or "") if cid else ""
+    claimed = printable((claims.get(cid) or {}).get("name") or "") if cid else ""
     name = (
         (f"container {cid[:12]}" + (f" (named {claimed})" if claimed else ""))
         if cid
@@ -966,6 +966,13 @@ def between(since: str, until: str, prefix: str, notes: list[str]) -> Iterator[E
 # ── `fy monitor` ──────────────────────────────────────────────────────────────────────
 
 
+def printable(text: str) -> str:
+    """``text`` as text: whatever could move a terminal's cursor or start a line of its own is
+    shown as its escape. A program's name and arguments, and a container's, are the box's choice,
+    and escapes are kept visible rather than dropped: they are part of what it did."""
+    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
+
+
 def _who(e: Event) -> str:
     label = e.who
     if e.who == "container":
@@ -1028,7 +1035,7 @@ def crossing_note(boot: str | None = None, now: float | None = None) -> str:
         return ""
     _, t, cid = found[0]
     meta = claims.get(cid) or {}
-    source = f" from {meta.get('name') or cid[:12]}" if cid else ""
+    source = f" from {printable(meta.get('name') or cid[:12])}" if cid else ""
     n = len(found)
     return (
         f"{n} process{'es' if n > 1 else ''} crossed out of a container in this VM boot (of "
@@ -1077,18 +1084,19 @@ def show(
         if as_json:
             print(json.dumps(asdict(e)))
         else:
-            what = e.detail or e.args
-            stamp = e.time[:19].replace("T", " ") if ranged else e.time[11:19]
-            print(f"{stamp}  {_who(e):<28.28}  {e.kind:<7}  {e.binary:<28.28}  {what[:80]}")
+            what = printable((e.detail or e.args)[:80])
+            stamp = printable(e.time[:19].replace("T", " ") if ranged else e.time[11:19])
+            who, kind, binary = printable(_who(e)), printable(e.kind), printable(e.binary)
+            print(f"{stamp}  {who:<28.28}  {kind:<7}  {binary:<28.28}  {what[:80]}")
     if as_json:
         for note in notes:
-            print(f"⚠ {note}", file=sys.stderr)
+            print(f"⚠ {printable(note)}", file=sys.stderr)
         return 0
     if not shown:
         where = f" for worktree '{worktree}'" if worktree else ""
         print(("no monitor events in that range" if ranged else "no monitor events yet") + where)
     for note in notes:
-        print(f"⚠ {note}")
+        print(f"⚠ {printable(note)}")
     cur = Cursor.load()
     age = f"{time.time() - cur.pulled:.0f}s ago" if cur.pulled else "never"
     print(
@@ -1104,5 +1112,5 @@ def show(
     if note:
         print(f"⚠ {note}")
     if cur.error:
-        print(f"⚠ the last pull failed: {cur.error}")
+        print(f"⚠ the last pull failed: {printable(cur.error)}")
     return 0

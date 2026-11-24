@@ -2708,7 +2708,7 @@ def _monitor_events_check():
     if cur.forged:
         why = f"{cur.forged} spool lines failed their signature — something altered them in transit"
     elif cur.error:
-        why = f"the last pull failed: {cur.error}"
+        why = f"the last pull failed: {monitorlog.printable(cur.error)}"
     elif age is None:
         why = "nothing pulled yet — is the supervisor running? `fy host`"
     elif age > 60:
