@@ -66,7 +66,7 @@ def _err(*a: object) -> None:
 
 
 def wanted() -> bool:
-    return config.machine_monitor() == "observe"
+    return config.machine_monitor() != "off"
 
 
 def _asset(name: str) -> Path:
@@ -95,6 +95,15 @@ def relay_key() -> str:
     return key
 
 
+def _policy(on: bool) -> str:
+    """The policy text for the configured level. `observe-files` appends one selector, so every
+    byte of `observe`'s (and with it its recording's id) stays as it was."""
+    text = _asset("policy.yaml").read_text().rstrip("\n")
+    if on and config.machine_monitor() == "observe-files":
+        text += "\n" + _asset("policy-files.yaml").read_text().rstrip("\n")
+    return text
+
+
 def render(on: bool) -> tuple[str, str]:
     """The boot script for ``on`` (observe) or off, and its id — a hash of the rendered content,
     so a new release, policy or script reads as a different recording."""
@@ -105,7 +114,7 @@ def render(on: bool) -> tuple[str, str]:
         .replace("@@HELPER@@", _asset("fy-monitor.sh").read_text().rstrip("\n"))
         .replace("@@RELAY@@", _asset("relay.py").read_text().rstrip("\n"))
         .replace("@@RELAY_KEY@@", relay_key() if on else "")
-        .replace("@@POLICY@@", _asset("policy.yaml").read_text().rstrip("\n"))
+        .replace("@@POLICY@@", _policy(on))
         .replace("@@VERSION@@", TETRAGON_VERSION)
         .replace("@@SHA_X86_64@@", TETRAGON_SHA256["x86_64"])
         .replace("@@SHA_AARCH64@@", TETRAGON_SHA256["aarch64"])

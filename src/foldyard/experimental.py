@@ -83,6 +83,20 @@ REGISTER: tuple[Feature, ...] = (
     ),
     Feature(
         key="machine.monitor",
+        value="observe-files",
+        reader="machine_monitor",
+        kinds=(MAY_CHANGE, UNPROVEN),
+        unproven=(
+            "its event volume is measured on one kernel and a few installs only, and no guest has "
+            "loaded its policy in CI yet"
+        ),
+        graduates_when=(
+            "the pilot has measured its volume, and the host-tier e2e loads it and sees a write"
+        ),
+        doc_mark='`"observe-files"` *(experimental)*',
+    ),
+    Feature(
+        key="machine.monitor",
         value="observe",
         reader="machine_monitor",
         kinds=(MAY_CHANGE, UNPROVEN),

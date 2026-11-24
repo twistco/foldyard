@@ -334,6 +334,11 @@ disk_gib = 60
     VM; the VM checks the checksum again as root before installing it. Nothing comes from the
     checkout.
 
+  - `"observe-files"` *(experimental)* records the same, plus containers' writes under `/etc/`,
+    `/usr/local/`, `/opt/` and `/root/`: which path was written and by what process, never the
+    content. Renames, deletions, `chmod`, truncation and writes through `mmap` aren't recorded, and
+    unpacking an image is (labelled `podman`).
+
   - The box's user can't stop it, change its policy or read its log.
 
   - `fy doctor` shows whether it is running, and why not if it isn't. If the monitor fails, `fy up`

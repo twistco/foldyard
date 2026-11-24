@@ -651,6 +651,8 @@ def test_machine_monitor_defaults_off_and_env_wins(fresh_config, tmp_path):
     assert config.machine_monitor() == "observe"
     fresh_config(MACHINE_MONITOR="off")
     assert config.machine_monitor() == "off"
+    fresh_config(MACHINE_MONITOR="observe-files")
+    assert config.machine_monitor() == "observe-files"
 
 
 def test_machine_monitor_rejects_anything_but_the_known_levels(fresh_config, tmp_path):

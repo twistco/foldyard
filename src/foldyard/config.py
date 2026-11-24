@@ -1427,13 +1427,14 @@ def machine_runtime() -> str:
     return name
 
 
-_MACHINE_MONITORS = ("off", "observe")
+_MACHINE_MONITORS = ("off", "observe", "observe-files")
 
 
 def machine_monitor() -> str:
     """``[machine].monitor`` — the guest monitor (:mod:`foldyard.monitor`, ADR-0032): ``"off"``
     (the default) or ``"observe"``, a root eBPF collector (Tetragon) provisioned into the lima VM
-    at boot that RECORDS process, connection and selected file activity and enforces nothing.
+    at boot that RECORDS process, connection and selected file activity and enforces nothing
+    (``"observe-files"``: the same, and containers' writes under a few system directories).
     Only the levels foldyard knows how to provision are accepted — never a collector, policy or
     command from config (ADR-0023). Changing it re-provisions at boot (``fy machine stop && fy
     up``). ``MACHINE_MONITOR`` env wins."""
@@ -1443,7 +1444,8 @@ def machine_monitor() -> str:
     level = str(raw or "off").strip().lower()
     if level not in _MACHINE_MONITORS:
         raise SystemExit(
-            f'✗ [machine].monitor must be "observe" or "off" (the default), not {level!r} — it '
+            '✗ [machine].monitor must be "observe", "observe-files" or "off" (the default), '
+            f"not {level!r} — it "
             "names a monitoring level foldyard provisions, never a collector or a policy."
         )
     return level

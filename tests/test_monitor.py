@@ -616,3 +616,69 @@ def test_doctor_hooks_rows_report_each_hooks_health(doctor_env, tmp_path):
         and "3 events delivered" in rows["monitor hook score"][2]
     )
     assert rows["monitor hook ca"][0] == "warn" and "4 events skipped" in rows["monitor hook ca"][2]
+
+
+# ── the `observe-files` level: writes under a general set of directories, container processes only
+
+
+@pytest.fixture
+def observe_files(monkeypatch):
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe-files")
+
+
+def _selectors(script: str) -> list[str]:
+    policy = script.split("__FY_MONITOR_POLICY__")[1]
+    body = policy.split("call: security_file_permission", 1)[1]
+    body = re.sub(r"^\s*#.*\n", "", body, flags=re.M)
+    return [s.rstrip() for s in re.split(r"^    - (?=match)", body, flags=re.M)[1:]]
+
+
+def test_observe_renders_exactly_the_packaged_policy(monkeypatch):
+    # A changed byte is a changed id, and refuses every running observed VM as stale: a level
+    # nobody asked for must not do that to the one they run.
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    script, _ = monitor.render(True)
+    assert script.split("__FY_MONITOR_POLICY__")[1].strip("'\n") == monitor._asset(
+        "policy.yaml"
+    ).read_text().rstrip("\n")
+
+
+def test_observe_files_adds_one_selector_to_observes_own(observe_files, monkeypatch):
+    wide, wide_id = monitor.render(True)
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    plain, plain_id = monitor.render(True)
+    assert wide_id != plain_id
+    assert _selectors(wide)[: len(_selectors(plain))] == _selectors(plain)
+    assert len(_selectors(wide)) == len(_selectors(plain)) + 1
+    assert len(_selectors(wide)) <= 5  # Tetragon's limit for one hook
+
+
+def test_observe_files_keeps_only_writes_by_processes_outside_the_vms_mount_namespace(
+    observe_files,
+):
+    added = _selectors(monitor.render(True)[0])[-1]
+    assert re.search(r"index: 1\s+operator: Equal\s+values:\s+- \"2\"", added)  # MAY_WRITE
+    assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", added)
+
+
+def test_observe_files_watches_whole_directories_and_never_container_storage(observe_files):
+    # `/etc` would match `/etcetera`. And podman's own processes are outside the VM's mount
+    # namespace too: a watched /home or /var would record every image layer they unpack.
+    added = _selectors(monitor.render(True)[0])[-1]
+    paths = re.findall(r"- (/\S+)$", added, re.M)
+    assert paths and all(p.endswith("/") for p in paths)
+    storage = "/home/user.guest/.local/share/containers/storage/overlay/x"
+    for own in (storage, "/var/lib/containers/storage/overlay/x",
+                "/var/lib/fy-monitor/spool/1", "/var/log/tetragon/tetragon.log"):  # fmt: skip
+        assert not any(own.startswith(p) for p in paths), own
+
+
+def test_observe_files_never_enforces(observe_files):
+    script, _ = monitor.render(True)
+    assert "matchActions" not in script and "action:" not in "".join(_selectors(script)).lower()
+
+
+def test_both_levels_want_the_monitor(monkeypatch):
+    for level, on in (("off", False), ("observe", True), ("observe-files", True)):
+        monkeypatch.setattr(monitor.config, "machine_monitor", lambda level=level: level)
+        assert monitor.wanted() is on
