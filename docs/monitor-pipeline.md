@@ -329,12 +329,7 @@ three minutes.
 It is held back only while nothing can be copied: the catalogue, which says where the crossings are,
 can't be opened, or a copy fails. The store may then pass its budget by as much again where that
 leaves 50 GB free on its disk, and otherwise by a tenth of the budget, or of what is free when that
-is less. Past that the oldest go. `fy monitor` and `fy doctor` say so meanwhile.
-
-It is held back only while nothing can be copied: the catalogue, which says where the crossings are,
-can't be opened, or a copy fails. The store may then go past its budget by a tenth; by as much again
-where that leaves 50 GB free on its disk; and never by more than a tenth of what is free otherwise.
-Past that it removes what it must. `fy monitor` and `fy doctor` say so meanwhile.
+is less. Past that it removes what it must. `fy monitor` and `fy doctor` say so meanwhile.
 
 **The window** is by the events' own time (the guest's clock), as a run of sequence numbers in one
 boot: from the first within a minute before to the last within a minute after. Windows don't
