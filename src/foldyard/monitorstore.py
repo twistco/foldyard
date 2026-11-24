@@ -1212,8 +1212,19 @@ class Catalogue:
         history behind it): per namespace the newest holder, the newest fact, and the newest entry
         or fact that took the number; and every fact after the snapshot kept from before the
         boot's oldest stored record, where a read's window starts (a life's start matters to the
-        join only inside the window). Inside :meth:`drop`'s transaction."""
+        join only inside the window). A crossing not yet judged is read too, though its segment is
+        gone: of the two namespaces it steps between, the same newest facts as of its own seq (a
+        later podman entry, say, must not displace the one that says it stepped out), until it is
+        judged. Inside :meth:`drop`'s transaction."""
         c = self.conn
+        unjudged: dict[tuple[str, str], list[int]] = {}  # (boot, inode) -> the candidates' seqs
+        for boot, seq, rec in c.execute(
+            "SELECT boot, seq, rec FROM crossing WHERE verdict IS NULL "
+            "AND seg NOT IN (SELECT id FROM seg)"
+        ):
+            body = next(v for k, v in json.loads(rec)["e"].items() if k.startswith("process_"))
+            for obj in (body["process"], body["parent"]):
+                unjudged.setdefault((boot, str(_ns(obj, "mnt").get("inum"))), []).append(int(seq))
         rows: dict[tuple[str, str], list[tuple]] = {}
         for row in c.execute(
             "SELECT boot, inode, seq, kind, taken FROM nsfact "
@@ -1222,7 +1233,7 @@ class Catalogue:
             rows.setdefault((row[0], row[1]), []).append(row[2:])
         windows: dict[str, int] = {}
         drop = []
-        for (boot, _), facts in rows.items():
+        for (boot, inode), facts in rows.items():
             if boot not in windows:
                 (lo,) = c.execute("SELECT MIN(lo) FROM span WHERE boot = ?", (boot,)).fetchone()
                 (snap,) = c.execute(
@@ -1232,15 +1243,17 @@ class Catalogue:
                 windows[boot] = -1 if snap is None else int(snap)
             keep = {seq for seq, *_ in facts if seq > windows[boot]}
 
-            def newest(test, rows=facts) -> tuple | None:
-                return next((r for r in reversed(rows) if test(r)), None)
+            def newest(test, upto: int, rows=facts) -> tuple | None:
+                return next((r for r in reversed(rows) if r[0] <= upto and test(r)), None)
 
-            picks = [
-                newest(lambda r: r[1] in HELD),
-                facts[-1],
-                newest(lambda r: r[1] == "entry" or r[2]),  # (seq, kind, taken)
-            ]
-            keep |= {r[0] for r in picks if r}
+            # as of the newest, and as of each crossing still to be judged
+            for upto in {facts[-1][0], *unjudged.get((boot, inode), ())}:
+                picks = [
+                    newest(lambda r: r[1] in HELD, upto),
+                    newest(lambda r: True, upto),
+                    newest(lambda r: r[1] == "entry" or r[2], upto),  # (seq, kind, taken)
+                ]
+                keep |= {r[0] for r in picks if r}
             drop += [(boot, seq) for seq, *_ in facts if seq not in keep]
         c.executemany("DELETE FROM nsfact WHERE boot = ? AND seq = ?", drop)
 

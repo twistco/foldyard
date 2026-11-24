@@ -527,6 +527,14 @@ crossing_hooks = st.lists(
               ("ev", 1, "process_exec"), ("snap", {200: [A]}), ("pull",)],
     filters=[([], [], [], False), (["container"], [], [], True)], budget="ample",
 )  # fmt: skip
+# a crossing whose segment retention removed before any snapshot settled it: what it is judged by
+# (podman's entry, under a later one) must outlive the segment too (#212, the weekly run)
+@example(
+    scenario=[("cross", 1, 200, False), ("cross", 1, 200, False), ("boot",), ("entry", 300),
+              ("snap", {}), ("init", 300, "process_exec"), ("entry", 300), ("pull",),
+              ("ev", 1, "process_exec"), ("pull",), ("snap", {})],
+    filters=[([], [], [], False)], budget="tiny",
+)  # fmt: skip
 def test_after_a_crossing_nothing_of_its_boot_is_skipped_and_before_it_nothing_changes(
     monkeypatch, scenario, filters, budget
 ):
