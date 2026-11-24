@@ -88,18 +88,13 @@ box isn't running, `fy box up` for it runs only on their computer: ask them.
 
 ## A worktree of your own
 
-Run `fy worktree add <name>` in your box for a worktree that needs no stack: a checkout on its own
-branch, in the worktrees root, whose dependency dirs are volumes, so installs there are fast and
-stay off the human's disk. Commands in it run in your box, under its mode.
-`fy worktree remove <name>` removes it. `fy up` there is refused. If the change turns out to need a
-stack, ports or a box of its own, ask the human to run `fy worktree add <name> --box` on their
-computer, which registers it in place.
-
-If its dependency dirs are read-only and empty, the box was restarted and hasn't put them back yet:
-`fy worktree add <name>` mounts them again. Under gVisor it can't, and says so: if you need to
-install, ask the human for `fy worktree add <name> --box` and install in the box it makes. Don't
-make one with plain `git worktree add` (an install in it lands on the human's disk), and never run
-`git worktree prune`. `fy docs git` has the details.
+Run `fy worktree add <name>` in your box for a worktree that needs no stack; it prints what you got.
+Its dependency dirs are volumes, so install in it freely; if they are read-only and empty, the box
+was restarted and hasn't put them back yet: the same command mounts them again (not under gVisor,
+where it says so: install in a box of its own, below). If the change turns out to need a stack,
+ports or a box of its own, ask the human to run `fy worktree add <name> --box` on their computer,
+which registers it in place. With `[box] git_index_split = false` nothing stops a plain
+`git worktree add` or `git worktree prune` here: run neither. `fy docs git` has the details.
 
 ## When you need something you don't have
 

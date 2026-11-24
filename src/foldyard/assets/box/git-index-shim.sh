@@ -498,6 +498,104 @@ while ((i < n)); do
 done
 subix=$i
 
+fy_start_dir() { # where git starts looking: $PWD, then each -C in turn
+    local d=$PWD k n
+    for ((k = 0; k < ${#pre[@]}; k++)); do
+        [ "${pre[k]}" = -C ] || continue
+        n=${pre[k + 1]:-}
+        case $n in /*) d=$n ;; "") ;; *) d=$d/$n ;; esac
+    done
+    printf '%s' "$d"
+}
+# `git worktree` in the box's OWN project (FOLDYARD_CHECKOUT's repo): what `fy worktree add` is for.
+# A plain worktree's installs land on your computer's disk through the share; one your computer
+# can't see loses its record to a prune there; and a prune HERE drops the record of every worktree
+# this box can't see. Guidance at the moment it's needed, not a wall: FY_GIT_SHIM_OFF=1, or the real
+# git, gets past it. Inside a checkout is allowed, with a warning: agents' own worktree tools put
+# theirs in `.claude/worktrees/`, which is fine for edits. FY_WORKTREE_ADD is foldyard's own call.
+fy_own_project() {
+    local here own
+    [ -n "${FOLDYARD_CHECKOUT:-}" ] || return 1
+    own=$("$real" -C "$FOLDYARD_CHECKOUT" rev-parse --git-common-dir 2>/dev/null) || return 1
+    here=$(pregit rev-parse --git-common-dir 2>/dev/null) || return 1
+    own=$(cd "$FOLDYARD_CHECKOUT" 2>/dev/null && cd "$own" 2>/dev/null && pwd -P) || return 1
+    here=$(cd "$(fy_start_dir)" 2>/dev/null && cd "$here" 2>/dev/null && pwd -P) || return 1
+    [ "$own" = "$here" ]
+}
+fy_wt_path() { # the <path> of `worktree add <its args>`: the first that is no option or its value
+    while [ $# -gt 0 ]; do
+        case $1 in
+        --) printf '%s' "${2:-}" && return ;;
+        --r | --re | --rea | --reas | --reaso | --reason) shift ;;
+        --*) ;;
+        # -b/-B, alone or last in a group (-qb), take the next; with more behind it, that's the value
+        -*) case ${1#"${1%%[bB]*}"} in [bB]) shift ;; esac ;;
+        *) printf '%s' "$1" && return ;;
+        esac
+        shift || return 0
+    done
+}
+fy_prune_asks() { # `worktree prune <its args>` removes nothing: the last of -n/--no-dry-run wins
+    local dry=1
+    while [ $# -gt 0 ]; do
+        case $1 in
+        -h | --help) return 0 ;;
+        --e*=*) ;;
+        --e*) shift ;; # --expire's value
+        --no-d*) dry=1 ;;
+        --d*) dry=0 ;;
+        --*) ;;
+        -*n*) dry=0 ;;
+        esac
+        shift || break
+    done
+    return $dry
+}
+fy_wt_real() { # $1, through any link, `.` and `..`, whether it exists yet or not
+    local p=$1 rest='' d
+    case $p in /*) ;; *) p=$(fy_start_dir)/$p ;; esac
+    while :; do # its deepest existing dir, then the rest of it
+        d=$(cd -P "$p" 2>/dev/null && pwd -P) && break # -P: link/.. is its target's parent
+        rest=/${p##*/}$rest
+        case $rest in /..*) return 1 ;; esac # `..` past a dir that isn't there: can't say
+        p=${p%/*}
+        [ -n "$p" ] || p=/
+    done
+    printf '%s%s' "${d%/}" "$rest"
+}
+fy_worktree() { # the arguments after `worktree`; returns when git should run
+    local verb=${1:-} path target root name
+    [ $# -gt 0 ] && shift
+    case $verb in add | prune) ;; *) return 0 ;; esac
+    [ -z "${FY_WORKTREE_ADD:-}" ] && fy_own_project || return 0
+    if [ "$verb" = prune ]; then
+        fy_prune_asks "$@" && return 0
+        echo "foldyard: not pruning: it drops the record of every worktree this box can't see." >&2
+        echo "  Run it on your computer. (FY_GIT_SHIM_OFF=1 git … runs it here anyway.)" >&2
+        exit 1
+    fi
+    path=$(fy_wt_path "$@")
+    [ -n "$path" ] || return 0 # git's own usage message
+    name=${path%/} name=${name##*/}
+    target=$(fy_wt_real "$path") || target=
+    for root in "$(pregit rev-parse --show-toplevel 2>/dev/null)" \
+        "$(pregit worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')"; do
+        [ -n "$root" ] && root=$(cd "$root" 2>/dev/null && pwd -P) || continue
+        case "$target/" in "$root"/?*)
+            echo "foldyard: a plain worktree: edit in it, but don't install: that lands on your" >&2
+            echo "  computer's disk. \`fy worktree add <name>\` makes one with volumes for that." >&2
+            return 0
+            ;;
+        esac
+    done
+    echo "foldyard: not a plain worktree out there: an install in it would land on your computer's" >&2
+    echo "  disk, or your computer can't see it and prunes it. Make one with volumes instead:" >&2
+    echo "      fy worktree add $name [<branch>]" >&2
+    echo "  (\`fy worktree remove $name\` removes it. FY_GIT_SHIM_OFF=1 git … makes this one anyway.)" >&2
+    exit 1
+}
+if [ "$sub" = worktree ]; then fy_worktree ${args[@]+"${args[@]:subix+1}"}; fi
+
 case "$sub" in
 # Repo-creating commands write the NEW repo's checkout through an inherited GIT_INDEX_FILE
 # (verified: clone hijacks it, leaving the fresh clone looking broken) — never inject here.
@@ -943,15 +1041,6 @@ fy_arm_hooks() {
 # here, and git then says "not a git repository" (16 agent retries in one 30-s workflow run). This
 # runs before any refresh, so on a failure: refresh `.git` and `.git/HEAD` up the tree from where
 # git starts (the -C chain; a linked worktree's `.git` file names its own HEAD), and ask again.
-fy_start_dir() { # where git starts looking: $PWD, then each -C in turn
-    local d=$PWD k n
-    for ((k = 0; k < ${#pre[@]}; k++)); do
-        [ "${pre[k]}" = -C ] || continue
-        n=${pre[k + 1]:-}
-        case $n in /*) d=$n ;; "") ;; *) d=$d/$n ;; esac
-    done
-    printf '%s' "$d"
-}
 fy_rediscover() {
     local d gd
     d=$(fy_start_dir)

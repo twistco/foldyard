@@ -313,3 +313,16 @@ def test_a_box_makes_a_worktree_and_your_computer_registers_it(repo):
         "run", "--rm", "-v", f"{PROJECT}-{MADE}-devbox-shadow-api--venv:/v:ro", ALPINE, "ls", "/v"
     )
     assert "installed" in held.stdout, held.stdout + held.stderr
+
+
+def test_the_boxs_git_points_a_plain_worktree_at_the_verb(repo):
+    out, inside = _other(repo, "plain"), f"{repo}/.claude/worktrees/plain"
+    for path in (out, "/tmp/plain"):
+        r = _in_box(repo, f"cd {repo} && git worktree add -b plain {path}", ok=False)
+        assert r.rc != 0 and "fy worktree add plain" in r.out, r.out
+    assert not out.exists()
+    r = _in_box(repo, f"cd {repo} && git worktree prune", ok=False)
+    assert r.rc != 0 and "can't see" in r.out, r.out
+    made = _in_box(repo, f"cd {repo} && git worktree add -b plain {inside}")
+    assert "don't install" in made.out, made.out
+    _in_box(repo, f"cd {repo} && git worktree remove {inside} && git branch -D plain")
