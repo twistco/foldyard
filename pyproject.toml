@@ -46,9 +46,12 @@ dependencies = [
     # foldyard never IMPORTS mitmproxy, so the recipe hot path pays nothing for it. Core rather
     # than an extra because the HOST is where a bare `uv tool install foldyard` happens, and a
     # host without it connection-refuses every box request; the BOX, which only routes through
-    # the proxy, is installed programmatically and strips it (and PyJWT) with a uv override —
-    # `box.HOST_ONLY_DEPS`, which must name each of these two.
+    # the proxy, is installed programmatically and strips it (and the two below) with a uv
+    # override — `box.HOST_ONLY_DEPS`, which must name each of the three.
     "mitmproxy",
+    # The egress proxy's 401 re-issue (`Injector._reissue_401`), imported there only. The proxy runs
+    # from this venv, and mitmproxy doesn't bring it.
+    "requests",
     # PyJWT signs the GitHub App JWT in `plugins/github_app_token.py` (the `github-app` minter
     # kind), in the supervisor's process tree on the host. The `[crypto]` extra makes the
     # cryptography dependency EXPLICIT rather than inherited from mitmproxy. It replaces a

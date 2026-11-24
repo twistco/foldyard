@@ -660,6 +660,7 @@ dependencies = [
     { name = "mitmproxy", version = "12.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "podman-compose" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "requests" },
     { name = "textual" },
     { name = "typer" },
 ]
@@ -686,6 +687,7 @@ requires-dist = [
     { name = "mitmproxy" },
     { name = "podman-compose", specifier = ">=1.6.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
+    { name = "requests" },
     { name = "textual", specifier = ">=8.2.7" },
     { name = "typer", specifier = ">=0.26.7" },
 ]
