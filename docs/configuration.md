@@ -439,7 +439,9 @@ disk_gib = 60
       boot has had a crossing, and `fy monitor` always shows everything. The first crossing of each
       VM boot is also told on your computer, once: a line in `fy host logs` and, with
       `[host] notifications` on, a desktop notification naming the container it came from (its id,
-      and the name the engine reports).
+      and the name the engine reports). One that can't be judged for a minute (the monitor's
+      catalogue keeps failing) is told as a crossing that may have happened, and again if it turns
+      out to be one.
 
     - `fy monitor hook add` writes this file for you, checking each hook the way the supervisor
       will. Your own edits and comments are kept. For example, to give the box a file of its

@@ -826,6 +826,73 @@ def test_retention_keeps_what_an_unjudged_crossing_is_judged_by(state, monkeypat
         assert [f[0] for f in _facts(cat)] == [2, 3]
 
 
+@pytest.mark.parametrize("later", [{"200": ["b" * 64]}, {}], ids=["reused", "freed"])
+def test_a_crossing_judged_late_is_named_by_the_snapshots_around_it(state, monkeypatch, later):
+    # Judging failed (a busy catalogue) until retention had removed the segment with the crossing
+    # and the snapshots around it. The number has since gone to another container, or to none: the
+    # crossing is still its own container's, never the one a later snapshot names there.
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        ms.append([snap(0), crossed(1), snap(2)])
+        ms.append([snap(3, mapping=later)])
+        ms.append([ev(4)])
+        with ms.Catalogue.open() as cat:
+            cat.drop([s.id for s in ms.segments() if not s.live])
+            assert cat.first_unjudged(BOOT) == (1, "2026-10-21T20:00:01Z")
+    with ms.Catalogue.open() as cat:
+        cat.judge()
+        assert _crossings(cat) == [(1, 1, BOX)]
+
+
+def _snaps(cat) -> list[int]:
+    return [q for (q,) in cat.conn.execute("SELECT seq FROM snap ORDER BY seq")]
+
+
+def test_the_snapshots_around_an_unjudged_crossing_go_once_it_is_judged(state, monkeypatch):
+    # only those either side of it, past the cap on snapshots kept too, and only until then
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    monkeypatch.setattr(ms, "_ORPHANS_KEPT", 1)
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        ms.append([snap(0), snap(1), crossed(2), snap(3), snap(4), snap(5)])
+        ms.append([ev(6)])
+        with ms.Catalogue.open() as cat:
+            cat.drop([ms.segments()[0].id])
+            assert _snaps(cat) == [1, 3, 5]  # 5: the newest of its boot, as ever
+            cat.drop([])
+            assert _snaps(cat) == [1, 3, 5]
+    with ms.Catalogue.open() as cat:
+        cat.judge()
+        cat.drop([])
+        assert _snaps(cat) == [5]
+
+
+def test_the_snapshots_around_an_unjudged_crossing_go_with_its_boot(state, monkeypatch):
+    # judging never recovered: they don't outlive the boot in the store
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    monkeypatch.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+    ms.append([snap(0), crossed(1), snap(2), snap(3)])
+    ms.append([snap(0, boot="boot-2"), {**entry(1), "boot": "boot-2"}])
+    with ms.Catalogue.open() as cat:
+        cat.drop([s.id for s in ms.segments() if not s.live])
+        assert _crossings(cat) == []
+        got = cat.conn.execute("SELECT boot, seq FROM snap ORDER BY boot, seq").fetchall()
+        assert got == [(BOOT, 3), ("boot-2", 0)]
+
+
+def test_a_crossing_is_overdue_a_while_after_the_snapshot_that_settles_it(state, monkeypatch):
+    monkeypatch.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+    ms.append([snap(0), crossed(1)])
+    with ms.Catalogue.open() as cat:
+        assert cat.overdue(BOOT, 1e9) is None  # nothing settles it yet: not late
+    ms.append([{**snap(2), "recv": 1000.0}])
+    with ms.Catalogue.open() as cat:
+        assert cat.overdue(BOOT, 1000.0 + ms.JUDGE_SECONDS - 1) is None
+        assert cat.overdue(BOOT, 1000.0 + ms.JUDGE_SECONDS) == (1, "2026-10-21T20:00:01Z")
+        assert cat.overdue("boot-2", 1e9) is None
+
+
 def test_a_failing_judge_never_stops_the_store(state, monkeypatch):
     def broken(self):
         raise RuntimeError("boom")

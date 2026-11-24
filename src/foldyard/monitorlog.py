@@ -279,13 +279,17 @@ def pull_once(
 
 
 def tell_crossing(
-    log: Callable[[str], None], notify: Callable[[str, str], None] | None = None
+    log: Callable[[str], None],
+    notify: Callable[[str, str], None] | None = None,
+    now: Callable[[], float] = time.time,
 ) -> None:
     """Say, once, that something crossed out of a container in the boot the pull is reading: its
     first crossing, as the pull judged it (:meth:`monitorstore.Catalogue.first_crossing`) — a log
     line and a desktop notification. ``fy monitor`` and doctor say it too, but only to someone
     looking, and a crossing should be rare. Told once per crossing (the cursor keeps which), so a
-    supervisor restart doesn't tell it again; a new boot's first crossing is told anew."""
+    supervisor restart doesn't tell it again; a new boot's first crossing is told anew. With none
+    judged, a candidate judging keeps failing on (:meth:`monitorstore.Catalogue.overdue`) is told
+    as one that may have crossed — hooks already count it as one — and again if it is judged to."""
     boot = current_boot()
     cat = monitorstore.Catalogue.open_or_none() if boot and monitorstore.segments() else None
     if cat is None:
@@ -293,10 +297,13 @@ def tell_crossing(
     try:
         first = cat.first_crossing(boot)
         claims = cat.claims() if first else {}
+        overdue = None if first else cat.overdue(boot, now())
     except Exception:
         return  # a busy catalogue: the next pull asks again
     finally:
         cat.close()
+    if overdue is not None:
+        _tell_overdue(boot, overdue, log, notify)
     if first is None:
         return
     seq, when, cid = first
@@ -324,6 +331,35 @@ def tell_crossing(
         )
     cur.told = key
     cur.save()
+
+
+def _tell_overdue(
+    boot: str,
+    overdue: tuple[int, str],
+    log: Callable[[str], None],
+    notify: Callable[[str, str], None] | None,
+) -> None:
+    """:func:`tell_crossing` for one that couldn't be judged."""
+    seq, when = overdue
+    cur = Cursor.load()
+    key = f"{boot}:{seq}:unjudged"
+    if cur.told == key:
+        return
+    at = when[11:19] if len(when) >= 19 else "?"
+    log(
+        f"⚠ guest monitor: a process may have crossed out of a container at {at} UTC — "
+        f"{_UNJUDGED}; hooks treat it as one (`fy monitor` shows what it did)"
+    )
+    if notify is not None:
+        notify(
+            f"fy {config.project()}: a process may have crossed out of a container",
+            f"At {at} UTC; {_UNJUDGED}. Hooks treat it as one; `fy monitor` shows what it did.",
+        )
+    cur.told = key
+    cur.save()
+
+
+_UNJUDGED = "it couldn't be judged (the monitor's catalogue keeps failing), so this is unconfirmed"
 
 
 def run(
@@ -962,11 +998,12 @@ def current_boot() -> str:
     return path.split("/", 1)[0].split("-", 1)[-1] if path else ""
 
 
-def crossing_note(boot: str | None = None) -> str:
+def crossing_note(boot: str | None = None, now: float | None = None) -> str:
     """One line when something crossed out of a container in ``boot`` (default: the current one),
     else "": how many the store holds and the first — from which every hook's ``who`` stops
     filtering that boot (:mod:`foldyard.monitorhooks`). Read from the catalogue as the pull left it
-    (the pull judges a crossing within a pull of the snapshot after it)."""
+    (the pull judges a crossing within a pull of the snapshot after it) — or, with none judged,
+    that one may have happened which judging keeps failing on."""
     boot = current_boot() if boot is None else boot
     if not boot:
         return ""
@@ -976,10 +1013,17 @@ def crossing_note(boot: str | None = None) -> str:
     try:
         found = cat.crossings(boot)
         claims = cat.claims() if found else {}
+        overdue = None if found else cat.overdue(boot, time.time() if now is None else now)
     except Exception:
         return ""
     finally:
         cat.close()
+    if overdue is not None:
+        at = overdue[1][:19].replace("T", " ")
+        return (
+            f"a process may have crossed out of a container at {at} UTC in this VM boot: "
+            f"{_UNJUDGED} — hooks treat it as a crossing until it is judged"
+        )
     if not found:
         return ""
     _, t, cid = found[0]

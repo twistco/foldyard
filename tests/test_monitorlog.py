@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import monitorlog
+from foldyard import monitorlog, monitorstore
 
 _PATH = Path(__file__).resolve().parents[1] / "src/foldyard/assets/monitor/relay.py"
 _spec = importlib.util.spec_from_file_location("fy_monitor_relay_for_log", _PATH)
@@ -1108,6 +1108,41 @@ def test_a_crossing_is_told_once_on_your_computer_and_again_for_a_new_boot(monke
                                                snap({200: [BOX]})])])  # fmt: skip
     tell()
     assert len(told) == 2
+
+
+def test_a_crossing_that_cannot_be_judged_is_told_too_and_again_once_it_is(monkeypatch, tmp_path):
+    # judging it keeps failing (a busy catalogue): silence would read as nothing happened
+    monkeypatch.setattr(monitorlog.config, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(monitorlog.config, "project", lambda: "fyex")
+    told, logged = [], []
+
+    def tell(now: float):
+        monitorlog.tell_crossing(
+            logged.append, lambda title, body: told.append((title, body)), now=lambda: now
+        )
+
+    monitorlog.Cursor(path=f"{DIR}/000.jsonl").save()
+    crossing = ev(PODMAN_NS, binary="/bin/sh", parent={"ns": {"mnt": {"inum": 200}}})
+    stream = [snap({200: [BOX]}), entered(), crossing, ev(200), snap({200: [BOX]})]
+    late = 1000.0 + monitorstore.JUDGE_SECONDS
+    with monkeypatch.context() as busy:
+        busy.setattr(monitorstore.Catalogue, "judge", lambda self: 1 / 0)
+        monitorlog._append([{**r, "boot": BOOT, "seq": i, "recv": 1000.0}
+                            for i, r in enumerate(stream)])  # fmt: skip
+        tell(late - 1)  # the next pull usually judges it: not said yet
+        assert told == [] and monitorlog.crossing_note(now=late - 1) == ""
+        tell(late)
+        tell(late + 60)  # once
+        [(title, body)] = told
+        assert "may have crossed out of a container" in title and "couldn't be judged" in body
+        assert len(logged) == 1 and "may have crossed" in logged[0]
+        note = monitorlog.crossing_note(now=late)
+        assert "may have crossed out of a container" in note and "couldn't be judged" in note
+    with monitorstore.Catalogue.open() as cat:
+        cat.judge()
+    tell(late + 120)  # judged after all: told as what it is, named
+    assert len(told) == 2 and f"container {BOX[:12]}" in told[1][1]
+    assert "1 process crossed out" in monitorlog.crossing_note(now=late + 120)
 
 
 def test_the_pull_loop_tells_a_crossing_after_each_pull(monkeypatch):
