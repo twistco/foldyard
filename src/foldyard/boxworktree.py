@@ -489,11 +489,9 @@ def _refuse_removal(name: str, whose: str) -> None:
         _err(f"✗ '{name}' is registered on your computer, which has its box, stack and adopted")
         _err(f"  config. Remove it there: {there}.")
     elif whose == "unknown":
-        _err(
-            f"✗ no box made '{name}', and this box can't tell whether your computer registered it:"
-        )
-        _err("  there is no list in the to-box (no to-box, or an older foldyard there; `fy up` and")
-        _err(f"  `fy host restart` publish it). On your computer: {there}.")
+        _err(f"✗ no box made '{name}', and this box can't tell if your computer registered it:")
+        _err("  there is no list in the to-box (no to-box, or an older foldyard there). The")
+        _err(f"  supervisor publishes it: `fy host restart`. On your computer: {there}.")
     else:
         _err(f"✗ no worktree '{name}' of this repository in the worktrees root")
 
@@ -515,6 +513,9 @@ def remove(name: str, force: bool = False, discard: bool = False) -> int:
             return 1
         if not _settled(main, wt_dir, name, force=force):
             return 1
+    if whose == "plain" and (now := owner(main, name, worktree_published.read(main))) != whose:
+        _refuse_removal(name, now)  # registered while its work was checked
+        return 1
     vols = volumes(wt_dir, name) if whose == "box" else {}  # a plain one has none
     here = attached(vols)
     facts = _this_box() if vols else ""

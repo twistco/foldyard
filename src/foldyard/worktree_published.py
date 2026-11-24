@@ -12,10 +12,13 @@ computer is decided from it."""
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from . import boxmounts, config, worktree_registry
@@ -38,21 +41,40 @@ def publish(main: Path) -> None:
     if config.in_box() or not to_box.is_dir():
         return
     file = path(main, to_box)
-    data = {"main": str(main), "registered": worktree_registry.names(main)}
-    text = json.dumps(data, indent=2) + "\n"
     tmp = file.with_suffix(f".{os.getpid()}.tmp")
     try:
-        if file.is_file() and file.read_text() == text:
-            return
-        file.parent.mkdir(exist_ok=True)
-        tmp.write_text(text)
-        os.replace(tmp, file)
+        with _lock(main):
+            _write(main, file, tmp)
     except OSError:
         for stale in (tmp, file):
             try:
                 stale.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+@contextlib.contextmanager
+def _lock(main: Path) -> Iterator[None]:
+    """One publisher at a time, from reading the registry to replacing the file: the supervisor's
+    older list must not land on the one a `fy worktree add` just wrote. Beside the registry, which
+    no box sees."""
+    store = worktree_registry.store_file(main)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with open(store.with_name(f"{store.stem}.published.lock"), "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def _write(main: Path, file: Path, tmp: Path) -> None:
+    if not worktree_registry.readable(main):
+        raise OSError("the registry can't be read")  # unknown, so no list
+    data = {"main": str(main), "registered": worktree_registry.names(main)}
+    text = json.dumps(data, indent=2) + "\n"
+    if file.is_file() and file.read_text() == text:
+        return
+    file.parent.mkdir(exist_ok=True)
+    tmp.write_text(text)
+    os.replace(tmp, file)
 
 
 def read(main: Path) -> frozenset[str] | None:
