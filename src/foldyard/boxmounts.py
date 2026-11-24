@@ -4,9 +4,10 @@
   and, from there, into every box at :data:`TO_BOX_IN_BOX`. Read-only is worth something only where
   it is enforced OUTSIDE the guest — root in the guest can remount a guest-side ``ro`` — which on
   Lima means ``vz`` + virtiofs or ``qemu`` + 9p (:data:`ENFORCING_MOUNT_TYPE`); foldyard pins that
-  ``mountType`` with the vmType and mounts no to-box on any other pair. Its first tenant is the
-  guest monitor's signed file sink (``fy monitor hook add NAME --to-box``). It must never hold a
-  secret: every box of the project can read it.
+  ``mountType`` with the vmType and mounts no to-box on any other pair. It holds
+  the registered worktrees' names (:mod:`foldyard.worktree_published`) and the guest monitor's
+  signed file sink (``fy monitor hook add NAME --to-box``). It must never hold a secret: every box
+  of the project can read it.
 * **from-box** (``<state dir>/from-box``): box-writable, one slot per checkout — ``main/`` and
   ``worktrees/<name>/``, like the posture dirs, so a worktree named ``main`` can't collide. The box
   binds its agents' transcript dirs out into its own slot; the host reads them as untrusted input

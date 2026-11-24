@@ -13,7 +13,16 @@ from typing import Any
 import pytest
 
 import yard_stub
-from foldyard import box, config, crossmask, machine, stack, worktree, worktree_registry
+from foldyard import (
+    box,
+    config,
+    crossmask,
+    machine,
+    stack,
+    worktree,
+    worktree_published,
+    worktree_registry,
+)
 
 BRANCH_OID = "1" * 40  # what every refs/heads/<branch> resolves to here
 
@@ -1423,9 +1432,10 @@ def test_remove_refuses_in_box(fake_main, monkeypatch, capsys):
     # registration and adopted config — all your computer's.
     _make_wt(fake_main)
     monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setattr(worktree_published, "read", lambda main: frozenset({"feat"}))
     assert worktree.remove("feat", force=True) == 1
     assert fake_main["teardown"] == []  # nothing torn down
-    assert "run on your computer" in capsys.readouterr().err
+    assert "registered on your computer" in capsys.readouterr().err
 
 
 def test_remove_orphaned_checkout_requires_force(fake_main, capsys):

@@ -12,7 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from foldyard import box, boxworktree, config, crossmask, devmode, sandbox, stack, worktree
+from foldyard import (
+    box,
+    boxworktree,
+    config,
+    crossmask,
+    devmode,
+    sandbox,
+    stack,
+    worktree,
+    worktree_published,
+)
 from foldyard import worktree_registry as registry
 
 REAL_RUN = subprocess.run
@@ -432,10 +442,131 @@ def test_remove_stops_where_a_volume_cannot_be_unmounted(world, capsys):
     assert (world["root"] / "fix" / "web" / "x").exists()
 
 
-def test_remove_of_any_other_worktree_is_still_your_computers(world, capsys):
-    _git(world["main"], "worktree", "add", "-q", "-b", "o", str(world["root"] / "other"))
+def _plain(world, name="other"):
+    _git(world["main"], "worktree", "add", "-q", "-b", f"b-{name}", str(world["root"] / name))
+    return world["root"] / name
+
+
+def _published(monkeypatch, names):
+    monkeypatch.setattr(worktree_published, "read", lambda main: names)
+
+
+def test_remove_takes_a_plain_worktree_your_computer_never_registered(world, monkeypatch, capsys):
+    wt = _plain(world)
+    _published(monkeypatch, frozenset({"registered"}))
+    assert worktree.remove("other") == 0
+    assert not wt.exists() and world["calls"] == []  # no volumes of its own to look for
+    assert _git(world["main"], "branch", "--list", "b-other").strip() == "b-other"
+    assert "its branch stays" in capsys.readouterr().out
+
+
+def test_remove_of_a_plain_worktree_checks_for_uncommitted_work(world, monkeypatch, capsys):
+    wt = _plain(world)
+    (wt / "new").write_text("n\n")
+    _published(monkeypatch, frozenset())
     assert worktree.remove("other") == 1
-    assert "run on your computer" in capsys.readouterr().err
+    assert "uncommitted work" in capsys.readouterr().err and wt.exists()
+    assert worktree.remove("other", force=True) == 0
+    (ref,) = _parked(world)
+    assert _git(world["main"], "show", f"{ref}:new") == "n\n"
+
+
+def test_remove_of_a_plain_worktree_with_one_inside_it_is_refused(world, monkeypatch, capsys):
+    wt = _plain(world)
+    _git(world["main"], "worktree", "add", "-q", "-b", "in", str(wt / "web" / "inner"))
+    _published(monkeypatch, frozenset())
+    assert worktree.remove("other") == 1
+    assert "sit inside it" in capsys.readouterr().err and wt.exists()
+
+
+def test_remove_of_a_registered_worktree_is_your_computers(world, monkeypatch, capsys):
+    wt = _plain(world)
+    _published(monkeypatch, frozenset({"other"}))
+    assert worktree.remove("other", force=True, discard=True) == 1
+    err = capsys.readouterr().err
+    assert "registered on your computer" in err and "`fy worktree remove other`" in err
+    assert wt.exists()
+
+
+def test_without_a_list_remove_goes_by_what_the_box_was_created_with(world, monkeypatch, capsys):
+    _plain(world, "registered")
+    _published(monkeypatch, None)
+    assert worktree.remove("registered") == 1
+    assert "registered on your computer" in capsys.readouterr().err
+    _published(monkeypatch, frozenset())  # removed on your computer since, and made again plain
+    assert worktree.remove("registered") == 0
+
+
+def test_remove_with_no_list_to_go_by_says_so(world, monkeypatch, capsys):
+    wt = _plain(world)
+    _published(monkeypatch, None)
+    assert worktree.remove("other") == 1
+    err = capsys.readouterr().err
+    assert "can't tell" in err and "`fy worktree remove other`" in err
+    assert wt.exists()
+
+
+def test_one_this_box_made_needs_no_list(world, monkeypatch):
+    boxworktree.add("fix")
+    _published(monkeypatch, None)
+    assert worktree.remove("fix") == 0
+
+
+def test_one_a_box_made_and_your_computer_registered_is_your_computers(world, monkeypatch, capsys):
+    # Registering clears the box's marker; where it couldn't, the list decides.
+    boxworktree.add("fix")
+    _published(monkeypatch, frozenset({"fix"}))
+    assert worktree.remove("fix") == 1
+    assert "registered on your computer" in capsys.readouterr().err
+    assert (world["root"] / "fix").exists()
+
+
+def test_remove_takes_only_a_worktree_of_this_repository(world, monkeypatch, capsys, tmp_path):
+    (world["root"] / "dir").mkdir()
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    _git(other, "init", "-q")
+    (world["root"] / "clone").mkdir()
+    (world["root"] / "clone" / ".git").write_text(f"gitdir: {other}/.git\n")
+    _published(monkeypatch, frozenset())
+    for name in ("dir", "clone", "missing"):
+        assert worktree.remove(name, discard=True) == 1
+        assert "no worktree" in capsys.readouterr().err
+    assert (world["root"] / "clone" / ".git").exists()
+
+
+def test_remove_takes_no_registered_worktree_by_another_name(world, monkeypatch, capsys):
+    wt = _plain(world, "registered")
+    (world["root"] / "alias").symlink_to(wt)  # git resolves it, and would remove what it points at
+    (world["root"] / "planted").mkdir()
+    (world["root"] / "planted" / ".git").write_text((wt / ".git").read_text())
+    _published(monkeypatch, frozenset({"registered"}))
+    for name in ("alias", "planted"):
+        assert worktree.remove(name, discard=True) != 0
+        assert (wt / "web" / "x").exists()
+    assert "no worktree 'alias'" in capsys.readouterr().err
+
+
+def test_the_list_says_in_the_box_which_are_whose(world, monkeypatch, capsys):
+    boxworktree.add("fix")
+    _plain(world)
+    _plain(world, "registered")
+    _published(monkeypatch, frozenset({"registered"}))
+    capsys.readouterr()
+    worktree.list_()
+    lines = {ln.split()[0]: ln for ln in capsys.readouterr().out.splitlines() if ln.strip()}
+    assert "(made in a box)" in lines["fix"]
+    assert "(registered on your computer)" in lines["registered"]
+    assert "(not registered)" in lines["other"]
+
+
+def test_the_list_claims_nothing_where_the_box_cannot_know(world, monkeypatch, capsys):
+    _plain(world)
+    _published(monkeypatch, None)
+    capsys.readouterr()
+    worktree.list_()
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if " other " in ln)
+    assert "registered" not in line
 
 
 def test_fy_up_is_refused_there_and_nowhere_else(world, capsys):

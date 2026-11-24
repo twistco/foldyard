@@ -254,6 +254,8 @@ One VM restart on Lima and one box recreate; on the podman backend, the box recr
   reader re-verifies once a copy has left it. The no-follow writes stay (cheap, and on a backend
   with no to-box the sink is back in the checkout, where they matter). A sink path the operator
   points at a box-writable tree (the checkout, the worktrees root, the from-box) gets a warning.
+- **Registered worktrees (added 2026-11-24):** `to-box/registered-worktrees/<hash>.json`, one per
+  main checkout: the names only, for `fy worktree remove` in a box (ADR-0004).
 - **Later to-box tenants, each its own change:** the posture mirror, the staged proxy CA, the staged
   wheel and `server.py`. Each removes a `mountwrite` call site and a file the box can swap.
 

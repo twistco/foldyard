@@ -29,24 +29,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import boxmounts, config, machine, selfspawn, stack, worktree_registry
+from . import (
+    boxmounts,
+    config,
+    machine,
+    selfspawn,
+    stack,
+    worktree_published,
+    worktree_registry,
+)
 
 
 def _err(*a: object) -> None:
     print(*a, file=sys.stderr, flush=True)
-
-
-def _host_only(verb: str) -> int | None:
-    """Removing a worktree your computer registered is your computer's: its registry, adopted
-    config, box and stack are there. (In a box, ``add`` and ``remove`` work on the box's own:
-    :mod:`foldyard.boxworktree`.) None when OK to proceed."""
-    if config.in_box():
-        _err(
-            f"✗ run on your computer — `fy worktree {verb}` of a worktree registered there, or of a"
-        )
-        _err("  plain git one, acts on what a box can't reach. (A box removes the ones it made.)")
-        return 1
-    return None
 
 
 # ── foldyard's own git on your computer runs none of the repo's code ──────────────────
@@ -954,6 +949,7 @@ def _remove_local_state(name: str) -> bool:
 
     main = stack.main_repo()
     worktree_registry.unregister(main, name)
+    worktree_published.publish(main)
     roots = _local_state_roots()
     ok = True
     try:
@@ -1248,6 +1244,7 @@ def add(
     if (rc := _checkout_in_yard(main, wt_dir, branch, yard, again, made="-b" in argv)) != 0:
         return rc
     worktree_registry.register(main, name, wt_dir)
+    worktree_published.publish(main)
     _claim_ports(name)
 
     # Both before the adoption: they bring the config that is adopted.
@@ -1383,6 +1380,7 @@ def _register_existing(main: Path, name: str, wt_dir: Path, assume_yes: bool) ->
     except ValueError as e:
         _err(f"✗ {e}")
         return 1
+    worktree_published.publish(main)
     from . import boxworktree
 
     boxworktree.promoted(main, wt_dir)
@@ -1514,12 +1512,8 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
     tracks. Git has nothing there to check or park, so no yard is needed."""
     from . import box, boxworktree, transcripts
 
-    if config.in_box() and boxworktree.is_box_made(
-        stack.main_repo(), config.worktrees_root(stack.main_repo()) / name
-    ):
+    if config.in_box():
         return boxworktree.remove(name, force=force, discard=discard)
-    if (rc := _host_only("remove")) is not None:
-        return rc
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
     wt_dir = wt_root / name
@@ -1680,25 +1674,37 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
     return 0
 
 
+# In a box: whose each worktree is, so which `fy worktree remove` takes there (all but the first).
+_OWNER_NOTES = {
+    "registered": "  (registered on your computer)",
+    "box": "  (made in a box)",
+    "plain": "  (not registered)",
+}
+
+
 def list_() -> int:
     """List main + each worktree with its branch (lightweight; no engine needed). On your
-    computer, a checkout the host has no record of is marked, with the verb that registers it."""
+    computer, a checkout the host has no record of is marked, with the verb that registers it. In a
+    box, each says whose it is, where the box can tell."""
     main = stack.main_repo()
     wt_root = config.worktrees_root(main)
     known = set() if config.in_box() else set(worktree_registry.checkouts(main))
     from . import boxworktree
 
     made_here = set(boxworktree.names(main)) - known
+    published = worktree_published.read(main) if config.in_box() else None
     print(f"  {'main':<18} {_branch_of(main):<28} {main}")
     if wt_root.is_dir():
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
-                if d.name in known:
+                if config.in_box():
+                    note = _OWNER_NOTES.get(boxworktree.owner(main, d.name, published), "")
+                elif d.name in known:
                     note = ""
                 elif d.name in made_here:
                     note = "  (made in a box)"
                 else:
-                    note = "" if config.in_box() else "  (not registered)"
+                    note = "  (not registered)"
                 print(f"  {d.name:<18} {_branch_of(d):<28} {d}{note}")
     stray = [] if config.in_box() else worktree_registry.unregistered(main, wt_root)
     if stray := [n for n in stray if n not in made_here]:

@@ -1320,6 +1320,14 @@ _unregistered_seen: list[str] = []
 _engine_refusals_seen: dict[str, str] = {}  # worktree → the refusal last said
 
 
+def _publish_registered() -> None:
+    """Keep the to-box's list of registered worktrees current (:mod:`foldyard.worktree_published`):
+    one registered by an older foldyard, or before the to-box was there."""
+    from . import worktree_published
+
+    worktree_published.publish(devmode.main_repo())
+
+
 def _report_unregistered() -> None:
     """Log — once per change — the worktree checkouts this host has no record of and therefore
     serves nothing for (:mod:`foldyard.worktree_registry`). Reporting only: that list is exactly
@@ -1669,6 +1677,7 @@ def reconcile_once(children: dict[str, Child], nagged: dict[str, float]) -> None
     # after the machine itself was deleted. Daemons keep the main fallback (`active_worktrees`)
     # so a box coming up always finds a live proxy + CA.
     up = devmode.up_worktrees()
+    _publish_registered()
     _report_unregistered()
     active = devmode.active_worktrees(up)  # + any worktree a launch is bringing up, and main
     desired: dict[str, dict] = {}

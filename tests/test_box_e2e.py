@@ -314,6 +314,26 @@ def test_a_box_makes_a_worktree_and_your_computer_registers_it(repo):
     )
     assert "installed" in held.stdout, held.stdout + held.stderr
 
+    # Registered since this box was made, and it knows: the list in the to-box says so.
+    refused = _in_box(repo, f"cd {repo} && fy worktree remove {MADE}", ok=False)
+    assert refused.rc != 0 and "registered on your computer" in refused.out, refused.out
+    assert wt.exists()
+
+
+def test_a_box_removes_a_plain_worktree_your_computer_never_registered(repo):
+    wt = _other(repo, "plain-one")
+    _in_box(repo, f"cd {repo} && FY_GIT_SHIM_OFF=1 git worktree add -b plain-one {wt}")
+    listed = _in_box(repo, f"cd {repo} && fy worktree list").out
+    assert "(not registered)" in next(ln for ln in listed.splitlines() if "plain-one" in ln), listed
+    # Committed in the box, which leaves the index your computer sees behind: not uncommitted work.
+    _in_box(
+        repo,
+        f"cd {wt} && echo x > f && git add f && "
+        "git -c user.name=t -c user.email=t@t commit -qm x && fy worktree remove plain-one",
+    )
+    assert not wt.exists()
+    assert _git(repo, "show", "plain-one:f") == "x\n"  # its branch stays
+
 
 def test_the_boxs_git_points_a_plain_worktree_at_the_verb(repo):
     out, inside = _other(repo, "plain"), f"{repo}/.claude/worktrees/plain"

@@ -94,7 +94,10 @@ was restarted and hasn't put them back yet: the same command mounts them again (
 where it says so: install in a box of its own, below). If the change turns out to need a stack,
 ports or a box of its own, ask the human to run `fy worktree add <name> --box` on their computer,
 which registers it in place. With `[box] git_index_split = false` nothing stops a plain
-`git worktree add` or `git worktree prune` here: run neither. `fy docs git` has the details.
+`git worktree add` or `git worktree prune` here: run neither. When you're done with one, remove it
+with `fy worktree remove <name>`; that takes an old plain `git worktree add` one too, and one that
+is registered on the human's computer is theirs to remove (`fy worktree list` says which is which).
+`fy docs git` has the details.
 
 ## When you need something you don't have
 

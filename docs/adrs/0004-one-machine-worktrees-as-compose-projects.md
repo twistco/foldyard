@@ -3,7 +3,8 @@
 - **Status:** Accepted (2026-06-08, with the spike) — implemented; default-branch forking fixed
   2026-07-06 (`de962868`), pinned offsets added with PR #21
 - **Amended 2026-11-23:** a box can make a worktree itself, with no stack of its own
-  (`fy worktree add`, in a box; *Worktrees a box makes* below).
+  (`fy worktree add`, in a box; *Worktrees a box makes* below). **Amended 2026-11-24:** a box can
+  remove any worktree your computer never registered (same section).
 - **Sources:** SPIKE.md ("Worktrees — one machine, namespaced projects"), PLAN.md §4.1,
   `src/foldyard/worktree.py`, `src/foldyard/stack.py`, `src/foldyard/machine.py`
 
@@ -73,6 +74,17 @@ and no new channel to the host. Rejected:
   same worktree with the same names, and what differs follows from where the verb runs.
 - *A stack for them*: not now. It needs ports that can't collide with registered ones and a way to
   find and end such stacks; it would run under main's mode.
+
+**A box removes what your computer never registered (amended 2026-11-24).** At first
+`fy worktree remove` in a box took only a worktree a box had made. Plain `git worktree add` ones
+from before that were refused with "run on your computer", because the box couldn't tell them from
+registered ones: it knows only what was registered when it was created. Your computer now publishes
+the registered NAMES in the to-box (ADR-0033), and a box removes any other worktree of the
+repository in the worktrees root, with the same check for uncommitted work. No list to read is
+*unknown*, so a plain one is refused, and where the list can't be written the old one is taken away.
+It is a guard rail: a box can delete the files either way, and nothing on your computer is decided
+from it. Not chosen: asking the engine for mounts over the worktree's dependency dirs (none without
+`shadow_volumes`, or under gVisor).
 
 **Escape hatch:** for a genuinely untrusted worktree — reviewing unknown code — spin a *throwaway
 dedicated machine* for just that one. Isolation is a spectrum, light by default; the heavy shape is
