@@ -50,6 +50,7 @@ def world(tmp_path, monkeypatch):
         (config, "active_worktree", lambda: ""),
         (box, "engine_env", lambda: ("podman", {"CONTAINER_HOST": "unix:///nonexistent/fy"})),
         (boxworktree, "_OWN_MOUNTINFO", table),
+        (boxworktree, "_LOCK", str(tmp_path / "lock")),
         (boxworktree.os.path, "ismount", lambda p: True),
     ):
         monkeypatch.setattr(mod, name, value)
@@ -210,6 +211,69 @@ def test_again_after_a_restart_mounts_the_volumes_again(world):
     world["table"].write_text("")
     assert boxworktree.mount_all() == 0
     assert len(_runs(world, "attach")) == 3
+
+
+def test_a_restart_mounts_this_boxs_own_worktrees_and_no_other_boxs(world, monkeypatch):
+    boxworktree.add("fix")
+    monkeypatch.setattr(config, "active_worktree", lambda: "other")  # another box of the project
+    world["table"].write_text("")
+    assert boxworktree.mount_all() == 0
+    assert len(_runs(world, "attach")) == 1
+    monkeypatch.setattr(config, "active_worktree", lambda: "")
+    boxworktree.mount_all()
+    assert len(_runs(world, "attach")) == 2
+
+
+def test_at_a_boxs_start_it_tries_again_until_the_engine_answers(world, monkeypatch):
+    # The box starts it as it comes up, when the engine may not call the box running yet.
+    boxworktree.add("fix")
+    world["table"].write_text("")
+    world["answer"] = {"refused": "container not running", "results": {}}
+    waits = []
+
+    def sleep(s):
+        waits.append(s)
+        if len(waits) == 2:
+            world["answer"] = None
+
+    monkeypatch.setattr(boxworktree.time, "sleep", sleep)
+    assert boxworktree.mount_all(wait=True) == 0
+    assert len(waits) == 2 and len(_runs(world, "attach")) == 4
+    world["table"].write_text("")
+    world["answer"] = {"refused": "no", "results": {}}
+    waits.clear()
+    monkeypatch.setattr(boxworktree.time, "sleep", waits.append)
+    boxworktree.mount_all(wait=True)
+    assert 2 < len(waits) < 20  # it gives up
+
+
+def test_at_a_start_under_gvisor_there_is_nothing_to_wait_for(world, monkeypatch):
+    boxworktree.add("fix")
+    world["table"].write_text("")
+    monkeypatch.setenv(sandbox.BAKED_ENV, "gvisor")
+    monkeypatch.setattr(boxworktree.time, "sleep", lambda s: pytest.fail("waited"))
+    assert boxworktree.mount_all(wait=True) == 0
+
+
+@pytest.mark.spawns("sh")
+def test_the_boxs_start_command_never_holds_the_box_up(tmp_path):
+    # No foldyard yet (the first start), and one that hangs or fails: PID 1's sleep runs at once.
+    home = tmp_path / "home"
+    for body in (None, "sleep 30", "exit 1"):
+        if body:
+            fy = home / ".local" / "bin" / "foldyard"
+            fy.parent.mkdir(parents=True, exist_ok=True)
+            fy.write_text(f'#!/bin/sh\necho "$@" > {tmp_path}/ran\n{body}\n')
+            fy.chmod(0o755)
+        env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
+        out = REAL_RUN(
+            boxworktree.start_argv("echo", "up", "again"),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert out.stdout.split() == ["up", "again"]  # every word of it
 
 
 def test_a_planted_link_is_never_followed(world, tmp_path, capsys):

@@ -10,4 +10,6 @@ bump: minor
   dirs (`[box].shadow_volumes`), to use from that box; `fy worktree remove` there removes it. It has
   no stack, ports or mode: the same command on your computer (`--box` for a box of its own)
   registers it in place and keeps the dependencies already installed. `fy docs git` has the details,
-  and replaces the earlier advice to use `.claude/worktrees/`.
+  and replaces the earlier advice to use `.claude/worktrees/`. The volumes' mounts don't survive a
+  restart of the box; it puts them back as it starts (a box made before 0.13.0 needs
+  `fy box recreate`).

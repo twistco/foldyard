@@ -95,11 +95,11 @@ stay off the human's disk. Commands in it run in your box, under its mode.
 stack, ports or a box of its own, ask the human to run `fy worktree add <name> --box` on their
 computer, which registers it in place.
 
-If its dependency dirs are read-only and empty, the box was restarted: `fy worktree add <name>`
-mounts them again. Under gVisor it can't, and says so: if you need to install, ask the human for
-`fy worktree add <name> --box` and install in the box it makes. Don't make one with plain
-`git worktree add` (an install in it lands on the human's disk), and never run `git worktree prune`.
-`fy docs git` has the details.
+If its dependency dirs are read-only and empty, the box was restarted and hasn't put them back yet:
+`fy worktree add <name>` mounts them again. Under gVisor it can't, and says so: if you need to
+install, ask the human for `fy worktree add <name> --box` and install in the box it makes. Don't
+make one with plain `git worktree add` (an install in it lands on the human's disk), and never run
+`git worktree prune`. `fy docs git` has the details.
 
 ## When you need something you don't have
 

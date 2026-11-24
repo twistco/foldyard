@@ -268,12 +268,27 @@ def test_a_box_makes_a_worktree_and_your_computer_registers_it(repo):
     up = _in_box(repo, f"cd {wt} && fy up", ok=False)
     assert up.rc != 0 and f"a box made '{MADE}'" in up.out, up.out
 
-    # A restart drops the mount: the box's root can't install onto your computer's disk meanwhile.
-    assert engine("restart", "-t", "1", BOX, timeout=120).returncode == 0
-    blocked = _in_box(repo, f"touch {venv}/x", ok=False)
+    # The dir under a volume is read-only, and the share holds the box's root to that: a net for
+    # while a restart has the mount off…
+    net = f"mkdir -m 555 {wt}/net && touch {wt}/net/x"
+    blocked = _in_box(repo, net, ok=False)
     assert blocked.rc != 0 and "Permission denied" in blocked.out, blocked.out
-    _in_box(repo, f"cd {repo} && fy worktree add {MADE}")
-    assert "installed" in _in_box(repo, f"ls {venv}").out  # the volume kept what was there
+    _in_box(repo, f"rmdir {wt}/net")
+    # …which is short: the box's own start puts it back, what was in it and all.
+    assert engine("restart", "-t", "1", BOX, timeout=120).returncode == 0
+    back = fy(
+        [
+            "box",
+            "exec",
+            f"for i in $(seq 40); do ls {venv} | grep -q installed && exit 0; sleep 1; done; "
+            "cat /tmp/fy-remount.log; exit 1",
+        ],
+        repo,
+        timeout=300,
+    )
+    assert back.rc == 0, back.out
+    again = _in_box(repo, f"cd {repo} && fy worktree add {MADE}")  # already there: nothing to do
+    assert "is on a volume" not in again.out, again.out
 
     # Uncommitted work keeps it; --force saves that and it goes, volume and all.
     _in_box(repo, f"touch {wt}/notes")

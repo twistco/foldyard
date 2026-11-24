@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import foldyard
-from foldyard import box, boximage, config, crossinject, crossmask, stack, supervisor
+from foldyard import box, boximage, boxworktree, config, crossinject, crossmask, stack, supervisor
 
 
 class _Proc:
@@ -380,7 +380,17 @@ def test_up_assembles_run(fake):
     assert "--name" in run and "tangible-podman-devbox" in run
     assert "--network" in run and "tangible-podman_default" in run
     assert run[run.index("-w") + 1] == str(fake["main"])
-    assert run[-4:] == ["--init", "img:tag", "sleep", "infinity"]  # PID 1 reaps orphans
+    # PID 1 reaps orphans; the start remounts box-made worktrees' volumes, beside the sleep
+    assert run[-8:] == [
+        "--init",
+        "img:tag",
+        "sh",
+        "-c",
+        boxworktree.START,
+        "sh",
+        "sleep",
+        "infinity",
+    ]
     # config-driven [box] bits
     assert any("shadow-data--venv" in tok for tok in run)  # shadow vol (tr '/.' '--')
     assert "tangible-podman-shared-pnpm:/home/vscode/.local/share/pnpm/store" in run  # cache
@@ -695,7 +705,7 @@ def test_up_bakes_packages_into_a_layer_and_runs_it(fake, monkeypatch):
     assert dockerfile.startswith("FROM img:tag\n")
     assert "USER" not in dockerfile  # the image runs as root already: nothing to restore
     (run,) = _find(fake["calls"], has=["run", "-d"])
-    assert run[run.index("sleep") - 1] == _LAYER  # the box runs the layer, not the bare base
+    assert run[run.index("sh") - 1] == _LAYER  # the box runs the layer, not the bare base
 
 
 def test_up_reuses_a_current_packages_layer(fake, monkeypatch):
