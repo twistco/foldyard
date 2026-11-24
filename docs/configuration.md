@@ -637,7 +637,10 @@ PG_PORT = 5544                                        # every other key keeps th
   `ports pool` row names it. `fy worktree add <name>` again gives it a pool port; recreate its box
   and run `fy up` for it to publish there.
 - **A box** is given its worktrees' pool ports when it's made. Asked about a worktree added since,
-  it refuses rather than guess: `fy box recreate`, or run it from that worktree's own box.
+  it refuses rather than guess: `fy box recreate`, or run it from that worktree's own box. One made
+  with plain `git worktree add` is refused until `fy worktree add <name>` on your computer registers
+  it. A worktree [a box made](./git.md#worktrees-a-box-makes) isn't refused: it has no stack, so
+  `fy shellenv` there gives it the offset ports.
 - **The pool may sit in the key's own offset range** (`3001-3005` above), but not in another key's
   ports (its base to base + 89) or another pool. `fy worktree add` refuses, and `fy doctor` fails,
   until it doesn't.
