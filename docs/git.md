@@ -275,9 +275,9 @@ covered too.
 
 The volumes go into the running box through a one-off container that shares only the box's own
 processes and has three capabilities and no network; foldyard prints the command. Nothing runs on
-your computer. A restart of the box or the VM drops the mounts and keeps the volumes:
-`fy worktree add <name>` mounts them again, and so does creating the box. Until then each dir is
-read-only and empty, which stops npm, uv and pnpm's hoisted linker from installing onto your
+your computer. A restart of the box or the VM drops the mounts and keeps the volumes: the box mounts
+its own again as it starts, and so do `fy box up` and `fy worktree add <name>`. Until then each dir
+is read-only and empty, which stops npm, uv and pnpm's hoisted linker from installing onto your
 computer's disk. It is a safety net only: pnpm's isolated linker replaces the dir, and the box's
 root can. Under the gVisor posture nothing can be mounted, so it stays that way: edit and commit
 there, and to install, ask for `fy worktree add <name> --box` on your computer and install in the

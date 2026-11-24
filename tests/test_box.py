@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import foldyard
-from foldyard import box, boximage, config, crossinject, crossmask, stack, supervisor
+from foldyard import box, boximage, boxworktree, config, crossinject, crossmask, stack, supervisor
 
 
 class _Proc:
@@ -380,7 +380,17 @@ def test_up_assembles_run(fake):
     assert "--name" in run and "tangible-podman-devbox" in run
     assert "--network" in run and "tangible-podman_default" in run
     assert run[run.index("-w") + 1] == str(fake["main"])
-    assert run[-4:] == ["--init", "img:tag", "sleep", "infinity"]  # PID 1 reaps orphans
+    # PID 1 reaps orphans; the start remounts box-made worktrees' volumes, beside the sleep
+    assert run[-8:] == [
+        "--init",
+        "img:tag",
+        "sh",
+        "-c",
+        boxworktree.START,
+        "sh",
+        "sleep",
+        "infinity",
+    ]
     # config-driven [box] bits
     assert any("shadow-data--venv" in tok for tok in run)  # shadow vol (tr '/.' '--')
     assert "tangible-podman-shared-pnpm:/home/vscode/.local/share/pnpm/store" in run  # cache
@@ -695,7 +705,7 @@ def test_up_bakes_packages_into_a_layer_and_runs_it(fake, monkeypatch):
     assert dockerfile.startswith("FROM img:tag\n")
     assert "USER" not in dockerfile  # the image runs as root already: nothing to restore
     (run,) = _find(fake["calls"], has=["run", "-d"])
-    assert run[run.index("sleep") - 1] == _LAYER  # the box runs the layer, not the bare base
+    assert run[run.index("sh") - 1] == _LAYER  # the box runs the layer, not the bare base
 
 
 def test_up_reuses_a_current_packages_layer(fake, monkeypatch):
@@ -978,6 +988,39 @@ def test_up_creates_network_for_external_network_consumer(fake, monkeypatch):
     fake["state"]["net_exists"] = False
     assert box.main("up") == 0
     assert _find(fake["calls"], has=["network", "create", "tangible-podman_default"])
+
+
+def _remount(monkeypatch, tmp_path, names, stdout):
+    calls = []
+    monkeypatch.setattr(box.boxworktree, "names", lambda main: names)
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return _Proc(0, stdout.decode(kw.get("encoding") or "utf-8", kw.get("errors") or "strict"))
+
+    monkeypatch.setattr(box.subprocess, "run", run)
+    box._remount_box_made("podman", "b", {}, "/co", tmp_path)
+    return calls
+
+
+def test_an_already_up_box_is_asked_to_mount_its_own_worktrees(monkeypatch, tmp_path, capsys):
+    calls = _remount(monkeypatch, tmp_path, ["fix"], b"hm\n\xe2\x9c\x93 web is on a volume\n")
+    assert calls == [
+        ["podman", "exec", "-w", "/co", "b", "bash", "-lc", "foldyard worktree remount"]
+    ]
+    assert capsys.readouterr().out == "  in the box: ✓ web is on a volume\n"
+    assert _remount(monkeypatch, tmp_path, [], b"") == []  # none made: nothing is run there
+
+
+def test_what_the_box_answers_is_printed_as_its_word_and_as_text(monkeypatch, tmp_path, capsys):
+    # Its own foldyard, off its own PATH: whatever it likes, on the operator's terminal.
+    tick = "✓ ".encode()
+    said = tick + b"a\x1b]52;c;eA==\x07\r\xff" + b"z" * 5000 + b"\n" + (tick + b"x\n") * 500
+    _remount(monkeypatch, tmp_path, ["fix"], said)
+    lines = capsys.readouterr().out.split("\n")[:-1]
+    assert len(lines) <= 50
+    assert all(ln.startswith("  in the box: ✓") and len(ln) <= 250 for ln in lines)
+    assert all(ln.isprintable() for ln in lines)
 
 
 def test_up_idempotent_when_running(fake, capsys):

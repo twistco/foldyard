@@ -17,8 +17,9 @@ registers it, like any existing worktree, and gives it the rest.
 * **The dir underneath is read-only** (0555), for when the volume isn't mounted: the box was
   restarted, or it runs under gVisor. A safety net, not a wall: it stops the installs that write
   into the dir (npm, uv, pnpm's hoisted linker; measured 2026-11-23), and the box's root can
-  ``chmod`` it, or replace it, as pnpm's isolated linker does. Run the verb again to mount the
-  volume; ``fy box up`` does it too, when it makes the box.
+  ``chmod`` it, or replace it, as pnpm's isolated linker does. The window is short: a box
+  mounts its own worktrees' volumes again as it starts (:data:`START`), and ``fy box up`` and the
+  verb do too.
 * **The volume is named as that worktree's own box would name it**, so promoting the worktree
   (``fy worktree add <name>`` on your computer) moves nothing: its box finds them as they are, and
   ``fy worktree remove`` sweeps them. Registering it also masks those dirs in this box, read-only
@@ -29,12 +30,14 @@ writes: reporting, and the in-box refusals below. Your computer decides nothing 
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import config, crossmask, stack, worktree
@@ -43,6 +46,7 @@ MARKER = "fy-box-made"
 HELPER = Path(__file__).resolve().parent / "assets" / "boxworktree" / "attach.py"
 CAPS = ("sys_admin", "sys_chroot", "sys_ptrace")  # setns + mount, its chroot, reading /proc/1/ns
 TIMEOUT_S = 60.0
+_LOCK = "/tmp/fy-worktree-mount.lock"  # the box's own /tmp
 _OWN_MOUNTINFO = Path("/proc/self/mountinfo")
 _NULL_OID = "0" * 40
 _STATUSES = {
@@ -81,6 +85,16 @@ def is_box_made(main: Path, wt_dir: Path) -> bool:
         return marker is not None and stat.S_ISREG(marker.lstat().st_mode)
     except OSError:
         return False
+
+
+def _maker(main: Path, wt_dir: Path) -> str:
+    """The name of the box that made ``wt_dir``, by its marker; ``""`` when there is none."""
+    marker = _marker(main, wt_dir)
+    try:
+        text = marker.read_text() if marker is not None else ""
+    except (OSError, ValueError):
+        return ""
+    return next((ln.removeprefix(_MAKER) for ln in text.splitlines() if ln.startswith(_MAKER)), "")
 
 
 def names(main: Path) -> list[str]:
@@ -206,6 +220,14 @@ def _why(status: str) -> str:
 
 
 def mount(wt_dir: Path, name: str) -> bool:
+    """:func:`_mount`, one at a time in this box: its start and its bootstrap may both be at it, and
+    two would put the same volume on a dir twice."""
+    with open(_LOCK, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return _mount(wt_dir, name)
+
+
+def _mount(wt_dir: Path, name: str) -> bool:
     """Put worktree ``name``'s volumes on its dependency dirs in this box, saying what happened.
     True when every one is there. Where one isn't, its dir stays read-only (the net above)."""
     vols = volumes(wt_dir, name)
@@ -245,14 +267,44 @@ def mount(wt_dir: Path, name: str) -> bool:
     return not left
 
 
-def mount_all() -> int:
-    """Every box-made worktree's volumes again, after a restart of the box dropped them (the box's
-    bootstrap runs it, as the hidden ``fy worktree remount``). Best-effort: a report, never a
-    failed bootstrap."""
+# What a box runs instead of a bare `sleep infinity` (its arguments): the remount, beside it. A box
+# restarted outside foldyard (Podman Desktop, `podman restart`) else waits for someone to notice.
+# Nothing here may hold the box up: no foldyard in it yet (the first start), or one that hangs. The
+# PATH is the bootstrap's (box._PATH_PREPEND_SNIPPET, bash's): its foldyard, or the image's own.
+START = (
+    '{ PATH="$HOME/.local/bin:/opt/fy-tools/bin:$PATH"; '
+    "command -v foldyard && foldyard worktree remount --wait; } "
+    "</dev/null >/tmp/fy-remount.log 2>&1 & "
+    'exec "$@"'
+)
+
+
+def start_argv(*command: str) -> list[str]:
+    """``command`` as a box's main process, with :data:`START` beside it."""
+    return ["sh", "-c", START, "sh", *command]  # the second `sh` is its $0: "$@" starts after it
+
+
+_TRIES, _PAUSE_S = 8, 2.0  # --wait: the engine may not call a box running as it starts
+
+
+def mount_all(wait: bool = False) -> int:
+    """The volumes of every worktree THIS box made, after a restart dropped them: the box's start
+    (``wait``, :data:`START`), its bootstrap and ``fy box up`` run it, as the hidden ``fy worktree
+    remount``. Best-effort: a report, never a failure."""
+    from . import agents, sandbox
+
     main = stack.main_repo()
     root = config.worktrees_root(main)
-    for name in names(main):
-        mount(root / name, name)
+    mine = agents.this_box().name
+    # A marker that names no box was made before markers did: any box's.
+    todo = [n for n in names(main) if _maker(main, root / n) in (mine, "")]
+    if os.environ.get(sandbox.BAKED_ENV) == "gvisor":
+        wait = False  # nothing to wait for
+    for left in range(_TRIES if wait else 1, 0, -1):
+        todo = [n for n in todo if not mount(root / n, n)]
+        if not todo or left == 1:
+            break
+        time.sleep(_PAUSE_S)
     return 0
 
 
@@ -284,7 +336,14 @@ def _add_argv(main: Path, wt_dir: Path, branch: str, base: str) -> list[str] | N
 
 
 _MADE = "made by `fy worktree add` in a box; the same on your computer registers it\n"
+_MAKER = "box: "
 _HOOK_PENDING = "post-checkout hook: not run yet\n"
+
+
+def _marker_text() -> str:
+    from . import agents
+
+    return f"{_MADE}{_MAKER}{agents.this_box().name}\n"
 
 
 def _hook_is_pending(main: Path, wt_dir: Path) -> bool:
@@ -299,7 +358,7 @@ def _run_hook(main: Path, wt_dir: Path) -> None:
     if _git(wt_dir, *hook, _NULL_OID, head.strip(), "1") != 0:
         _err("⚠ the repo's post-checkout hook failed (above); the worktree is fine")
     if (marker := _marker(main, wt_dir)) is not None:
-        marker.write_text(_MADE)
+        marker.write_text(_marker_text())
 
 
 def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> int:
@@ -342,7 +401,7 @@ def add(name: str, branch: str = "", base: str = "", box_up: bool = False) -> in
         _err("✗ git worktree add failed")
         return rc
     if (marker := _marker(main, wt_dir)) is not None:
-        marker.write_text(_MADE + _HOOK_PENDING)
+        marker.write_text(_marker_text() + _HOOK_PENDING)
     if mount(wt_dir, name):
         _run_hook(main, wt_dir)
     else:

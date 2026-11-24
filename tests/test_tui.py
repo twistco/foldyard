@@ -1597,7 +1597,12 @@ async def test_copy_takes_a_request_or_a_hosts_rows_as_json(monkeypatch):
 
 def _footer(app) -> dict[str, str]:
     """What the footer SHOWS right now, key → its label: the rendered keys, so a cursor move
-    that changed the bindings but never repainted the footer fails too."""
+    that changed the bindings but never repainted the footer fails too. Empty while it repaints:
+    Textual removes the old keys before it adds the new ones (under the footer's lock), and a key
+    missing only for that moment isn't one the row doesn't have (the flake of 2026-11-23). So wait
+    for a key that should be THERE."""
+    if app.query_one(tui.Footer).lock.is_locked:
+        return {}
     return {str(k.key): str(k.description) for k in app.query("FooterKey")}
 
 
@@ -1621,7 +1626,7 @@ async def test_the_footer_names_what_each_key_does_on_the_row_under_the_cursor(m
             footer = _footer(app)
             assert footer["a"] == a and footer["l"] == "copy log row", line
         tree.cursor_line = 3  # the "… earlier" note: nothing to copy, its host still to allow
-        await _until(pilot, lambda: "l" not in _footer(app))
+        await _until(pilot, lambda: (f := _footer(app)).get("a") == "allow host" and "l" not in f)
         footer = _footer(app)
         assert footer["a"] == "allow host" and "l" not in footer
 

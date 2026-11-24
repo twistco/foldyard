@@ -1814,11 +1814,13 @@ def worktree_add(
 
 
 @worktree_app.command("remount", hidden=True)
-def worktree_remount() -> None:
-    """Mount the volumes of every worktree a box made (the box's bootstrap runs this)."""
+def worktree_remount(
+    wait: bool = typer.Option(False, "--wait", help="try again until the engine answers"),
+) -> None:
+    """Mount the volumes of the worktrees this box made (its start and its bootstrap run this)."""
     from . import boxworktree, config
 
-    raise typer.Exit(boxworktree.mount_all() if config.in_box() else 1)
+    raise typer.Exit(boxworktree.mount_all(wait) if config.in_box() else 1)
 
 
 @worktree_app.command("init")

@@ -50,6 +50,7 @@ from typing import IO, NamedTuple
 from . import (
     boximage,
     boxmounts,
+    boxworktree,
     config,
     crossinject,
     crossmask,
@@ -2239,6 +2240,30 @@ fy_doctor_report || true
 """
 
 
+_REMOUNT_LINES = 50
+
+
+def _remount_box_made(engine: str, box: str, env: dict, checkout: str, main: Path) -> None:
+    """A running box's own worktrees' volumes, which a restart outside foldyard drops: asked of the
+    box (:func:`boxworktree.mount_all`), only where there are such worktrees. Best-effort. What it
+    answers is the box's word (its own foldyard, off its own PATH), so it is printed as that, and
+    with nothing a terminal would act on."""
+    from . import agents
+
+    if not boxworktree.names(main):
+        return
+    cmd = [engine, "exec", "-w", checkout, box, "bash", "-lc", "foldyard worktree remount"]
+    try:
+        got = subprocess.run(
+            cmd, env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=60
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    said = [ln for ln in got.stdout.splitlines() if ln.startswith("✓")]
+    for line in said[:_REMOUNT_LINES]:
+        print(f"  in the box: {agents._printable(line, 200)}")
+
+
 def _remount_worktrees() -> str:
     """The bootstrap's last step before the doctor: a new box starts with none of the box-made
     worktrees' volumes (:mod:`foldyard.boxworktree`). Best-effort, and quiet where there are none."""
@@ -2518,6 +2543,7 @@ def _up(
             )
         _warn_env_drift(engine, box, ctx, quiet)  # every other create-time name
         _warn_mask_gaps(engine, box, ctx)  # and its mounts: shadows + other checkouts' masks
+        _remount_box_made(engine, box, env, checkout, main)
         _warn_predates_box_dirs(engine, box, env)
         _warn_stale_foldyard(engine, box, env)
         if not ensure_harden(engine, box, env):  # a box from before the hygiene gets it here
@@ -2757,8 +2783,7 @@ def _up(
         # until the box hit podman's 2048-pid limit and thread creation aborted its agents.
         "--init",
         img,
-        "sleep",
-        "infinity",
+        *boxworktree.start_argv("sleep", "infinity"),
     ]
     _echo(run)
     # ONLY the create goes through the runsc socket (the runtime is decided by the SOCKET a
