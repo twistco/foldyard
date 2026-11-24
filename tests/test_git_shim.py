@@ -1620,3 +1620,143 @@ def test_a_racing_first_call_never_replaces_an_index_box_seeded_meanwhile(tmp_pa
     _, err = waiter.communicate(timeout=15)
     assert waiter.returncode == 0, err
     assert _status(rig) == "A  fileF\n?? fileE\n"  # the other call's staging, not the shared one
+
+
+# ── `git worktree` in the project's own repo: what a box should use `fy worktree add` for ─────
+#
+# Guidance, said where the mistake is made (FY_GIT_SHIM_OFF=1 and any other git get past it). Only
+# for the box's own project: FOLDYARD_CHECKOUT names it, and a scratch repo is never touched.
+
+
+def _wt(rig, *args: str, cwd=None, project=None, env=None):
+    extra = {"FOLDYARD_CHECKOUT": str(project or rig.repo), **(env or {})}
+    cmd = [str(rig.shim), *(["-C", str(cwd)] if cwd else []), "worktree", *args]
+    return subprocess.run(
+        cmd, cwd=rig.repo, env={**rig.env, **extra}, capture_output=True, text=True
+    )
+
+
+@pytest.fixture
+def project(rig):
+    rig.write("f", "1\n")
+    rig.host("add", "-A")
+    rig.host("commit", "-qm", "x")
+    return rig
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["add", "{out}"],
+        ["add", "-b", "side", "{out}"],
+        ["add", "-q", "--no-track", "-B", "side", "{out}", "main"],
+        ["add", "-qb", "side", "{out}"],  # grouped, the value next…
+        ["add", "-fqBside", "{out}"],  # …or attached
+        ["add", "--reason", "why", "--lock", "{out}"],
+        ["add", "--rea", "why", "--lock", "{out}"],  # git takes any unambiguous prefix…
+        ["add", "--r", "why", "--lock", "{out}"],  # …which this is before git 2.48
+        ["add", "--detach", "--", "{out}"],
+        ["add", "../repo-worktrees/fix"],
+        ["add", "sub/../../fix"],
+    ],
+)
+def test_a_worktree_outside_the_checkout_is_refused_with_the_verb(project, tmp_path, args):
+    out = tmp_path / "elsewhere" / "fix"
+    r = _wt(project, *[a.format(out=out) for a in args])
+    assert r.returncode != 0
+    assert "fy worktree add fix" in r.stderr
+    assert "FY_GIT_SHIM_OFF=1" in r.stderr  # what to do when it's meant
+    assert not out.exists() and not (tmp_path / "repo-worktrees").exists()
+    assert "fix" not in project.host("worktree", "list").stdout
+
+
+@pytest.mark.parametrize("name", [".claude/worktrees/fix", "./fix", "{repo}/.claude/worktrees/fix"])
+def test_one_inside_the_checkout_is_made_with_a_warning(project, name):
+    path = name.format(repo=project.repo)
+    r = _wt(project, "add", "-q", "-b", "side", path)
+    assert r.returncode == 0, r.stderr
+    assert (project.repo / path / "f").exists()
+    assert "don't install" in r.stderr and "fy worktree add" in r.stderr
+
+
+def test_one_inside_a_linked_worktree_is_made_from_there(project, tmp_path):
+    # A worktree's own box: an agent's tool puts its worktrees inside that checkout.
+    wt = tmp_path / "wts" / "feat"
+    project.host("worktree", "add", "-q", "-b", "feat", str(wt))
+    r = _wt(project, "add", "-q", "-b", "side", ".claude/worktrees/x", cwd=wt, project=wt)
+    assert r.returncode == 0, r.stderr
+    assert (wt / ".claude" / "worktrees" / "x" / "f").exists()
+
+
+def test_from_a_worktree_one_inside_main_is_made(project, tmp_path):
+    wt = tmp_path / "wts" / "feat"
+    project.host("worktree", "add", "-q", "-b", "feat", str(wt))
+    path = project.repo / ".claude" / "worktrees" / "x"
+    r = _wt(project, "add", "-q", "-b", "side", str(path), cwd=wt, project=wt)
+    assert r.returncode == 0, r.stderr
+    assert (path / "f").exists()
+
+
+def test_a_path_after_the_double_dash_may_look_like_an_option(project):
+    r = _wt(project, "add", "-q", "--detach", "--", "-fix")
+    assert r.returncode == 0, r.stderr
+    assert "don't install" in r.stderr and (project.repo / "-fix" / "f").exists()
+
+
+def test_a_link_out_of_the_checkout_is_outside_it(project, tmp_path):
+    (tmp_path / "away").mkdir()
+    (project.repo / "link").symlink_to(tmp_path / "away")
+    r = _wt(project, "add", "-b", "side", "link/fix")
+    assert r.returncode != 0 and "fy worktree add fix" in r.stderr
+
+
+def test_dotdot_after_a_link_is_its_targets_parent_as_git_reads_it(project, tmp_path):
+    (tmp_path / "away" / "sub").mkdir(parents=True)
+    (project.repo / "link").symlink_to(tmp_path / "away" / "sub")
+    r = _wt(project, "add", "-b", "side", "link/../fix")
+    assert r.returncode != 0 and "fy worktree add fix" in r.stderr
+    assert not (tmp_path / "away" / "fix").exists()
+
+
+def test_foldyards_own_and_the_opt_out_go_through(project, tmp_path):
+    for n, env in enumerate(({"FY_WORKTREE_ADD": "1"}, {"FY_GIT_SHIM_OFF": "1"})):
+        r = _wt(project, "add", "-q", "--detach", str(tmp_path / f"w{n}"), env=env)
+        assert r.returncode == 0 and r.stderr == ""
+
+
+def test_another_repo_is_never_touched(project, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    project.host("init", "-q", str(other))
+    r = _wt(project, "add", "-q", "--detach", str(tmp_path / "w"), project=other)
+    assert r.returncode == 0 and r.stderr == ""
+    assert _wt(project, "prune", project=other).returncode == 0
+    r = subprocess.run(  # and none at all where the box names no checkout
+        [str(project.shim), "worktree", "prune"], cwd=project.repo, env=project.env
+    )
+    assert r.returncode == 0
+
+
+_REAL_PRUNES = [[], ["-v"], ["-n", "--no-dry-run"], ["--dry-run", "--no-dry"], ["--expire", "-n"]]
+_DRY_RUNS = [["-n"], ["--dry-run"], ["--dry"], ["-nv"], ["--no-dry-run", "-n"], ["-v", "-n"]]
+
+
+def test_prune_is_refused_but_not_its_dry_run(project, tmp_path):
+    gone = tmp_path / "gone"
+    project.host("worktree", "add", "-q", "--detach", str(gone))
+    shutil.rmtree(gone)  # as one your computer made where this box can't see it
+    for args in _REAL_PRUNES:  # git's own rule: the last of -n and --no-dry-run wins
+        r = _wt(project, "prune", *args)
+        assert r.returncode != 0 and "can't see" in r.stderr, args
+        assert "gone" in project.host("worktree", "list").stdout, args
+    for args in _DRY_RUNS:
+        r = _wt(project, "prune", *args)
+        assert r.returncode == 0 and "can't see" not in r.stderr, args
+        assert "gone" in project.host("worktree", "list").stdout, args
+
+
+@pytest.mark.parametrize("args", [["list"], ["add"], ["add", "-h"], []])
+def test_everything_else_is_gits_own(project, args):
+    ours = _wt(project, *args)
+    theirs = project._run(project.real, "worktree", *args)
+    assert (ours.returncode, ours.stdout) == (theirs.returncode, theirs.stdout)

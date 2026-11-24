@@ -290,13 +290,11 @@ dependency volumes as they are, and the box that made it then sees them read-onl
 registered worktree's. Registering doesn't run `[project].worktree_init`: `fy worktree init <name>`
 does.
 
-Don't use a plain `git worktree add` in a box instead: an install in one lands on your computer's
-disk, with paths only the box can run, and macOS keeps a file open for each file of it the VM reads.
-Claude Code's own worktree tool makes plain ones under `.claude/worktrees/` (`fy init` adds it to
-the `.gitignore` block it manages), which is fine for edits; don't install there. Never make one
-where your computer can't see it (`/tmp`, your home in the box): a `git worktree prune` there
-deletes its record. And don't run `git worktree prune` in a box, which does the same to any worktree
-the box can't see.
+The box's git (foldyard's shim) says so if you reach for plain git instead. `git worktree add`
+outside the checkout, and `git worktree prune`, are refused with the command to use; one inside the
+checkout, where Claude Code's own worktree tool puts its (`.claude/worktrees/`, which `fy init`
+ignores), is made with a warning not to install there. That is a nudge, not a boundary:
+`FY_GIT_SHIM_OFF=1 git …` runs it anyway, and `[box] git_index_split = false` has no shim.
 
 ## What `fy doctor` checks
 
