@@ -1882,7 +1882,10 @@ def worktree_remove(
 
     Uncommitted work is looked for in a container from the box image, never on your computer (git
     there would run the filter drivers the shared .git names), so this needs the box image and the
-    VM — or --discard."""
+    VM — or --discard.
+
+    In a box it removes a worktree a box made, or a plain `git worktree add` one your computer never
+    registered: the checkout and any volumes of its own, with the same check."""
     from . import worktree
 
     raise typer.Exit(worktree.remove(name, force, assume_yes=yes, discard=discard))

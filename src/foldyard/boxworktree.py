@@ -25,6 +25,9 @@ registers it, like any existing worktree, and gives it the rest.
   ``fy worktree remove`` sweeps them. Registering it also masks those dirs in this box, read-only
   on top of the volume, like any registered worktree's (:mod:`foldyard.crossmask`).
 
+``fy worktree remove`` in a box takes those, and a plain ``git worktree add`` one your computer
+never registered (:func:`owner`).
+
 What makes one box-made is :data:`MARKER` in its git admin dir, inside the shared ``.git`` the box
 writes: reporting, and the in-box refusals below. Your computer decides nothing from it."""
 
@@ -40,7 +43,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, crossmask, stack, worktree
+from . import config, crossmask, stack, worktree, worktree_published
 
 MARKER = "fy-box-made"
 HELPER = Path(__file__).resolve().parent / "assets" / "boxworktree" / "attach.py"
@@ -461,19 +464,59 @@ def _settled(main: Path, wt_dir: Path, name: str, *, force: bool) -> bool:
     return True
 
 
+def owner(main: Path, name: str, published: frozenset[str] | None) -> str:
+    """In a box, whose worktree ``name`` is: ``registered`` (your computer's), ``box`` (a box made
+    it), ``plain`` (``git worktree add``, and your computer has no record of it), ``unknown``
+    (plain, with no list to tell by) or ``none`` (no worktree of this repository). By ``published``,
+    the list your computer publishes (:func:`worktree_published.read`), else by what the box was
+    created with, which misses one registered since. It guides this box's verbs; a box's word
+    decides nothing on your computer."""
+    if name in (published if published is not None else crossmask.baked_names() or ()):
+        return "registered"
+    wt_dir = config.worktrees_root(main) / name
+    if wt_dir.is_symlink() or (marker := _marker(main, wt_dir)) is None:
+        return "none"
+    if not marker.parent.is_dir():
+        return "none"
+    if is_box_made(main, wt_dir):
+        return "box"
+    return "unknown" if published is None else "plain"
+
+
+def _refuse_removal(name: str, whose: str) -> None:
+    there = f"`fy worktree remove {shlex.quote(name)}`"
+    if whose == "registered":
+        _err(f"✗ '{name}' is registered on your computer, which has its box, stack and adopted")
+        _err(f"  config. Remove it there: {there}.")
+    elif whose == "unknown":
+        _err(f"✗ no box made '{name}', and this box can't tell if your computer registered it:")
+        _err("  there is no list in the to-box (no to-box, or an older foldyard there). The")
+        _err(f"  supervisor publishes it: `fy host restart`. On your computer: {there}.")
+    else:
+        _err(f"✗ no worktree '{name}' of this repository in the worktrees root")
+
+
 def remove(name: str, force: bool = False, discard: bool = False) -> int:
-    """``fy worktree remove`` in a box, for one a box made: its checkout and its volumes. The
-    branch stays. Uncommitted work refuses; ``force`` saves it first, ``discard`` doesn't look."""
+    """``fy worktree remove`` in a box, for one a box made (its checkout and its volumes) or a plain
+    ``git worktree add`` one your computer never registered (its checkout). The branch stays.
+    Uncommitted work refuses; ``force`` saves it first, ``discard`` doesn't look."""
     if worktree.refuse_name(name):
         return 1
     main = stack.main_repo()
     wt_dir = config.worktrees_root(main) / name
+    whose = owner(main, name, worktree_published.read(main))
+    if whose not in ("box", "plain"):
+        _refuse_removal(name, whose)
+        return 1
     if not discard:
         if worktree._refuse_nested(name, worktree._nested_worktrees(main, wt_dir)):
             return 1
         if not _settled(main, wt_dir, name, force=force):
             return 1
-    vols = volumes(wt_dir, name)
+    if whose == "plain" and (now := owner(main, name, worktree_published.read(main))) != whose:
+        _refuse_removal(name, now)  # registered while its work was checked
+        return 1
+    vols = volumes(wt_dir, name) if whose == "box" else {}  # a plain one has none
     here = attached(vols)
     facts = _this_box() if vols else ""
     if here and isinstance(facts, str):
@@ -489,7 +532,8 @@ def remove(name: str, force: bool = False, discard: bool = False) -> int:
     # --force either way: git's own check reads the worktree's SHARED index, which a commit made in
     # a box leaves behind (the shim's index is the box's), and the check above read the right one.
     if (rc := _git(main, "worktree", "remove", "--force", str(wt_dir))) != 0:
-        mount(wt_dir, name)
+        if whose == "box":
+            mount(wt_dir, name)
         return rc
     if vols and not isinstance(facts, str):
         engine, env, _, _ = facts

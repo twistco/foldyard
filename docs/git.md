@@ -266,6 +266,14 @@ fy worktree remove <name>               # in the box: its checkout and volumes; 
 
 Uncommitted work keeps it, as on your computer: `--force` saves that on `refs/fy/removed/` first.
 
+In a box, `fy worktree remove` takes one that a box made, and also one made with plain
+`git worktree add` (before boxes could make their own, say), as long as it's in the worktrees root
+and your computer never registered it. It refuses a registered one, which has a box, a stack and
+adopted config on your computer, and says to run the command there. The box knows which is which
+from a list your computer publishes in the [to-box](./configuration.md#what-the-vm-mounts); with no
+list to read, it refuses a plain one too and says so. `fy worktree list` in the box shows each:
+`(made in a box)`, `(not registered)` or `(registered on your computer)`.
+
 It is an ordinary git worktree in the worktrees root, beside those made on your computer. Your
 computer sees the files, the branch and its commits at once. Its dependency dirs
 (`[box].shadow_volumes`) are volumes in the box that made it, so an install runs at VM-disk speed
