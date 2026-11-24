@@ -990,6 +990,39 @@ def test_up_creates_network_for_external_network_consumer(fake, monkeypatch):
     assert _find(fake["calls"], has=["network", "create", "tangible-podman_default"])
 
 
+def _remount(monkeypatch, tmp_path, names, stdout):
+    calls = []
+    monkeypatch.setattr(box.boxworktree, "names", lambda main: names)
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return _Proc(0, stdout.decode(kw.get("encoding") or "utf-8", kw.get("errors") or "strict"))
+
+    monkeypatch.setattr(box.subprocess, "run", run)
+    box._remount_box_made("podman", "b", {}, "/co", tmp_path)
+    return calls
+
+
+def test_an_already_up_box_is_asked_to_mount_its_own_worktrees(monkeypatch, tmp_path, capsys):
+    calls = _remount(monkeypatch, tmp_path, ["fix"], b"hm\n\xe2\x9c\x93 web is on a volume\n")
+    assert calls == [
+        ["podman", "exec", "-w", "/co", "b", "bash", "-lc", "foldyard worktree remount"]
+    ]
+    assert capsys.readouterr().out == "  in the box: ✓ web is on a volume\n"
+    assert _remount(monkeypatch, tmp_path, [], b"") == []  # none made: nothing is run there
+
+
+def test_what_the_box_answers_is_printed_as_its_word_and_as_text(monkeypatch, tmp_path, capsys):
+    # Its own foldyard, off its own PATH: whatever it likes, on the operator's terminal.
+    tick = "✓ ".encode()
+    said = tick + b"a\x1b]52;c;eA==\x07\r\xff" + b"z" * 5000 + b"\n" + (tick + b"x\n") * 500
+    _remount(monkeypatch, tmp_path, ["fix"], said)
+    lines = capsys.readouterr().out.split("\n")[:-1]
+    assert len(lines) <= 50
+    assert all(ln.startswith("  in the box: ✓") and len(ln) <= 250 for ln in lines)
+    assert all(ln.isprintable() for ln in lines)
+
+
 def test_up_idempotent_when_running(fake, capsys):
     fake["state"]["running"] = True
     assert box.main("up") == 0

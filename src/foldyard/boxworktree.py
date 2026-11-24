@@ -269,10 +269,12 @@ def _mount(wt_dir: Path, name: str) -> bool:
 
 # What a box runs instead of a bare `sleep infinity` (its arguments): the remount, beside it. A box
 # restarted outside foldyard (Podman Desktop, `podman restart`) else waits for someone to notice.
-# Nothing here may hold the box up: no foldyard in it yet (the first start), or one that hangs.
+# Nothing here may hold the box up: no foldyard in it yet (the first start), or one that hangs. The
+# PATH is the bootstrap's (box._PATH_PREPEND_SNIPPET, bash's): its foldyard, or the image's own.
 START = (
-    '{ [ -x "$HOME/.local/bin/foldyard" ] && '
-    '"$HOME/.local/bin/foldyard" worktree remount --wait; } </dev/null >/tmp/fy-remount.log 2>&1 & '
+    '{ PATH="$HOME/.local/bin:/opt/fy-tools/bin:$PATH"; '
+    "command -v foldyard && foldyard worktree remount --wait; } "
+    "</dev/null >/tmp/fy-remount.log 2>&1 & "
     'exec "$@"'
 )
 
@@ -294,7 +296,8 @@ def mount_all(wait: bool = False) -> int:
     main = stack.main_repo()
     root = config.worktrees_root(main)
     mine = agents.this_box().name
-    todo = [n for n in names(main) if _maker(main, root / n) == mine]
+    # A marker that names no box was made before markers did: any box's.
+    todo = [n for n in names(main) if _maker(main, root / n) in (mine, "")]
     if os.environ.get(sandbox.BAKED_ENV) == "gvisor":
         wait = False  # nothing to wait for
     for left in range(_TRIES if wait else 1, 0, -1):

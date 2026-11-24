@@ -2240,19 +2240,28 @@ fy_doctor_report || true
 """
 
 
+_REMOUNT_LINES = 50
+
+
 def _remount_box_made(engine: str, box: str, env: dict, checkout: str, main: Path) -> None:
     """A running box's own worktrees' volumes, which a restart outside foldyard drops: asked of the
-    box (:func:`boxworktree.mount_all`), only where there are such worktrees. Best-effort."""
+    box (:func:`boxworktree.mount_all`), only where there are such worktrees. Best-effort. What it
+    answers is the box's word (its own foldyard, off its own PATH), so it is printed as that, and
+    with nothing a terminal would act on."""
+    from . import agents
+
     if not boxworktree.names(main):
         return
     cmd = [engine, "exec", "-w", checkout, box, "bash", "-lc", "foldyard worktree remount"]
     try:
-        got = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
+        got = subprocess.run(
+            cmd, env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=60
+        )
     except (OSError, subprocess.SubprocessError):
         return
-    for line in got.stdout.splitlines():
-        if line.startswith("✓"):
-            print(line)
+    said = [ln for ln in got.stdout.splitlines() if ln.startswith("✓")]
+    for line in said[:_REMOUNT_LINES]:
+        print(f"  in the box: {agents._printable(line, 200)}")
 
 
 def _remount_worktrees() -> str:
