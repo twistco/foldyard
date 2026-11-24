@@ -471,6 +471,14 @@ def test_remove_of_a_plain_worktree_checks_for_uncommitted_work(world, monkeypat
     assert _git(world["main"], "show", f"{ref}:new") == "n\n"
 
 
+def test_one_registered_while_its_work_was_checked_is_kept(world, monkeypatch, capsys):
+    wt = _plain(world)
+    lists = [frozenset(), frozenset({"other"})]
+    monkeypatch.setattr(worktree_published, "read", lambda main: lists.pop(0))
+    assert worktree.remove("other") == 1
+    assert "registered on your computer" in capsys.readouterr().err and wt.exists()
+
+
 def test_remove_of_a_plain_worktree_with_one_inside_it_is_refused(world, monkeypatch, capsys):
     wt = _plain(world)
     _git(world["main"], "worktree", "add", "-q", "-b", "in", str(wt / "web" / "inner"))

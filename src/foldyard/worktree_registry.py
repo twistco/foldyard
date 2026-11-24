@@ -60,6 +60,18 @@ def _load(main: Path) -> dict[str, str]:
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
 
+def readable(main: Path) -> bool:
+    """Whether the registry says who is registered: there is none yet, or it reads whole. Where it
+    doesn't, :func:`names` is empty, which must not be told as "nothing is registered"."""
+    try:
+        data = json.loads(store_file(main).read_text())
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and all(isinstance(v, str) for v in data.values())
+
+
 def _save(main: Path, entries: dict[str, str]) -> None:
     path = store_file(main)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -94,6 +94,39 @@ def test_a_list_that_cannot_be_written_is_taken_away(main, monkeypatch):
     assert worktree_published.read(main) is None
 
 
+@pytest.mark.parametrize("text", ["", "{", "[]", '{"feat": 3}'])
+def test_a_registry_that_cannot_be_read_is_unknown_not_empty(main, text):
+    worktree_published.publish(main)
+    registry.store_file(main).parent.mkdir(exist_ok=True)
+    registry.store_file(main).write_text(text)
+    worktree_published.publish(main)
+    assert worktree_published.read(main) is None
+
+
+def test_two_publishers_cannot_leave_the_older_list(main, monkeypatch):
+    # The supervisor reads the registry, `fy worktree add` registers and publishes, and then the
+    # supervisor's older list would land on top.
+    import threading
+
+    real, first = registry.names, threading.Event()
+    other: list[threading.Thread] = []
+
+    def names(m):
+        got = real(m)
+        if not first.is_set():
+            first.set()
+            _register(main, "feat")
+            other.append(threading.Thread(target=worktree_published.publish, args=(main,)))
+            other[0].start()
+            other[0].join(0.5)  # it waits for this one
+        return got
+
+    monkeypatch.setattr(registry, "names", names)
+    worktree_published.publish(main)
+    other[0].join(5)
+    assert worktree_published.read(main) == {"feat"}
+
+
 def test_no_to_box_is_not_made(main):
     boxmounts.to_box_dir().rmdir()
     worktree_published.publish(main)
