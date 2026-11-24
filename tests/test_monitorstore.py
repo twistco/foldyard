@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import gzip
 import json
+import tempfile
+from contextlib import closing
 
 import pytest
 
+from foldyard import monitorlog
 from foldyard import monitorstore as ms
 
 BOOT = "boot-1"
@@ -891,6 +894,210 @@ def test_a_crossing_is_overdue_a_while_after_the_snapshot_that_settles_it(state,
         assert cat.overdue(BOOT, 1000.0 + ms.JUDGE_SECONDS - 1) is None
         assert cat.overdue(BOOT, 1000.0 + ms.JUDGE_SECONDS) == (1, "2026-10-21T20:00:01Z")
         assert cat.overdue("boot-2", 1e9) is None
+
+
+def _unjudgeable(monkeypatch, *seqs: int, error: Exception | None = None) -> list[int]:
+    """Judging ``seqs`` fails; every one it was tried on."""
+    real, tried = monitorlog.join, []
+
+    def join(records, cat, prefix):
+        tried.extend(r["seq"] for r in records)
+        if any(r["seq"] in seqs for r in records):
+            raise error or ValueError("a record the join can't read")
+        return real(records, cat, prefix)
+
+    monkeypatch.setattr(monitorlog, "join", join)
+    return tried
+
+
+def test_one_that_cannot_be_judged_leaves_the_others_judged(state, monkeypatch):
+    with monkeypatch.context() as bad:
+        _unjudgeable(bad, 1)
+        ms.append([snap(0), crossed(1), crossed(2), crossed(3), snap(4)])
+        with ms.Catalogue.open() as cat:
+            assert _crossings(cat) == [(1, None, ""), (2, 1, BOX), (3, 1, BOX)]
+            # said to whoever asks, and every hook still counts from the first that may be one
+            assert cat.first_unjudged(BOOT) == (1, "2026-10-21T20:00:01Z")
+            with pytest.raises(ValueError, match="can't read"):
+                cat.judge()
+    with ms.Catalogue.open() as cat:
+        cat.judge()
+        assert _crossings(cat) == [(1, 1, BOX), (2, 1, BOX), (3, 1, BOX)]
+
+
+def test_a_catalogue_that_is_locked_is_not_waited_for_once_per_candidate(state, monkeypatch):
+    import sqlite3
+
+    tried = _unjudgeable(monkeypatch, 1, 2, 3, error=sqlite3.OperationalError("locked"))
+    ms.append([snap(0), crossed(1), crossed(2), crossed(3), snap(4)])
+    assert tried == [1]
+
+
+WEIRD = (None, "", "x", "²", 0, -1, 1.5, True, [], [1], {}, {"inum": None}, {"inum": "²"})
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_nothing_is_judged_past_records_that_are_not_indexed(state, monkeypatch, locked):
+    # podman's entry is in a segment that can't be indexed, and is sealed so; the step into its
+    # namespace comes later. Judged without it, it would be none, and that would stand.
+    import sqlite3
+
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    real = ms.Catalogue.add
+
+    def add(self, sid, records, *a, **k):
+        if any(r.get("seq") == 1 for r in records):
+            if locked:
+                e = sqlite3.OperationalError("database is locked")
+                e.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                raise e
+            raise AttributeError("boom")
+        return real(self, sid, records, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "add", add)
+        ms.append([snap(0), entry(1, inode=300)])
+        ms.append([crossed(2, inode=300, host=False), snap(3)])
+        ms.append([ev(4)])
+        assert bool(ms.index_note()) is not locked  # still behind, whatever the newest segment is
+        with ms.Catalogue.open() as cat:
+            assert cat.first_crossing(BOOT) is None and _crossings(cat) == []
+    ms.append([ev(5)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(2, 1, BOX)]
+        assert not cat.unindexed(ms.segments())
+    assert ms.index_note() == ""
+
+
+def test_nor_past_records_stored_while_the_catalogue_could_not_be_opened(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "open_or_none", classmethod(lambda cls: None))
+        ms.append([snap(0), entry(1, inode=300)])
+        ms.append([ev(2)])  # sealed, unindexed
+        assert ms.index_note() == ""
+    ms.append([crossed(3, inode=300, host=False), snap(4)])
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(3, 1, BOX)]
+
+
+def test_a_catalogue_then_locked_does_not_hide_why_records_are_not_indexed(state, monkeypatch):
+    errors = iter((AttributeError("boom"), _sqlite("busy")))
+
+    def broken(*a, **k):
+        raise next(errors)
+
+    monkeypatch.setattr(ms.Catalogue, "add", broken)
+    for seq in (0, 1):
+        ms.append([ev(seq)])
+        assert "boom" in ms.index_note()
+    assert next(errors, None) is None  # both were met
+
+
+def test_a_segment_that_cannot_be_indexed_is_forgotten_with_it(state, monkeypatch):
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    real = ms.Catalogue.add
+
+    def add(self, sid, records, *a, **k):
+        if any(r.get("seq") == 1 for r in records):
+            raise AttributeError("boom")
+        return real(self, sid, records, *a, **k)
+
+    monkeypatch.setattr(ms.Catalogue, "add", add)
+    ms.append([snap(0), ev(1)])
+    ms.append([ev(2)])
+    assert ms.index_note()
+    ms.segments()[0].path.unlink()  # retention, past what it may be held back by
+    ms.append([crossed(3), snap(4)])
+    assert ms.index_note() == ""
+    with ms.Catalogue.open() as cat:
+        assert (3, 1, BOX) in _crossings(cat)
+
+
+def _sqlite(kind: str) -> Exception:
+    """The error sqlite itself raises."""
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/c.sqlite"
+        a = sqlite3.connect(path, isolation_level=None)
+        b = sqlite3.connect(path, isolation_level=None, timeout=0)
+        try:
+            a.execute("CREATE TABLE t (x)")
+            if kind == "busy":
+                a.execute("BEGIN EXCLUSIVE")
+                b.execute("BEGIN IMMEDIATE")
+            elif kind == "schema":
+                b.execute("SELECT nothing FROM t")
+            else:
+                with open(f"{tmp}/bad.sqlite", "wb") as f:
+                    f.write(b"not a database" * 100)
+                with closing(sqlite3.connect(f"{tmp}/bad.sqlite")) as bad:
+                    bad.execute("SELECT 1 FROM t")
+        except sqlite3.Error as e:
+            return e
+        finally:
+            a.close()
+            b.close()
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(("kind", "said"), [("busy", False), ("schema", True), ("corrupt", True)])
+def test_only_a_locked_catalogue_is_left_unsaid(state, monkeypatch, kind, said):
+    error = _sqlite(kind)
+
+    def broken(*a, **k):
+        raise error
+
+    monkeypatch.setattr(ms.Catalogue, "add", broken)
+    ms.append([snap(0)])
+    assert bool(ms.index_note()) is said
+
+
+@pytest.mark.parametrize("who", ["process", "parent"])
+@pytest.mark.parametrize("path", [("ns",), ("ns", "mnt"), ("ns", "user"), ("ns", "pid"),
+                                  ("ns", "mnt", "inum"), ("ns", "pid", "inum")])  # fmt: skip
+def test_a_record_of_a_shape_nobody_writes_stops_nothing(state, who, path):
+    recs = [snap(0)]
+    for i, weird in enumerate(WEIRD, 1):
+        r = crossed(i)
+        at = r["e"]["process_exec"][who]
+        for k in path[:-1]:
+            at = at.setdefault(k, {})
+        at[path[-1]] = weird
+        recs.append(r)
+    last = len(recs)
+    recs += [crossed(last), snap(last + 1)]
+    ms.append(recs)  # stored, indexed and judged, the one after them too
+    assert len(_seqs(ms.read(None, 1 << 20)[0])) == len(recs)
+    with ms.Catalogue.open() as cat:
+        assert (last, 1, BOX) in _crossings(cat) and cat.first_unjudged(BOOT) is None
+    assert len(monitorlog.attribute(recs, "fyex")) == last
+
+
+def test_indexing_that_fails_never_stops_the_store(state, monkeypatch):
+    import time
+
+    from foldyard import devmode
+
+    def broken(*a, **k):
+        raise AttributeError("boom")
+
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "add", broken)
+        ms.append([snap(0), crossed(1), snap(2)])
+        ms.append([ev(3)])
+        # said, where it would otherwise only show as a catalogue falling behind
+        assert "AttributeError: boom" in ms.index_note()
+        assert "boom" in monitorlog.store_summary()
+        monitorlog.Cursor(pulled=time.time()).save()
+        [row] = list(devmode._monitor_events_check())
+        assert row[0] == "warn" and "boom" in row[2]
+    assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2, 3]
+    ms.append([ev(4)])  # and is made up for by the next one that doesn't
+    assert ms.index_note() == ""
+    with ms.Catalogue.open() as cat:
+        assert _crossings(cat) == [(1, 1, BOX)]
 
 
 def test_a_failing_judge_never_stops_the_store(state, monkeypatch):

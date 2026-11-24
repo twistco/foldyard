@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import stat
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -248,6 +251,23 @@ def test_the_oldest_makes_way_only_when_the_store_would_lose_the_new_one(state, 
     assert len(list(me.read(left[-1]))) == left[-1].events
 
 
+def test_no_more_makes_way_than_has_to_when_several_come_at_once(state, monkeypatch):
+    old, limit = _fill(monkeypatch)
+    s = _new()
+    for _ in range(2):
+        store(_loud(s))
+        s.t += 600
+    assert me.kept() == old
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([s.ev()])
+    monkeypatch.setattr(ms, "budget", lambda: 1)  # both waiting windows are about to go
+    ms.append([s.ev()])
+    every = me.kept()
+    assert [e.boot for e in every] == ["old-0", "old-1", "new", "new"]
+    assert len([x for x in me.State.load().say if "made way" in x["text"]]) == 2
+    assert sum(e.size for e in every) <= limit
+
+
 def test_the_first_ones_go_last_and_a_boot_never_evicts_its_own():
     def e(boot: str, seq: int) -> me.Evidence:
         return me.Evidence(id=f"{boot}-{seq}", boot=boot, seq=seq, time="", lo=seq, hi=seq)
@@ -414,15 +434,134 @@ def test_nothing_is_held_back_with_a_cap_of_0(state, monkeypatch):
     assert not any(r.get("seq") == seq for r, _ in ms.scan(None))
 
 
+def _reads(monkeypatch) -> list[str]:
+    real, read = me._piece, []
+    monkeypatch.setattr(me, "_piece", lambda path: (read.append(path.name), real(path))[1])
+    return read
+
+
+def _many(e: me.Evidence, n: int) -> None:
+    for i in range(n):
+        old = me.root() / f"old-{i}"
+        shutil.copytree(e.path, old)
+        meta = json.loads((old / "meta.json").read_text()) | {"boot": f"old-{i % 5}", "seq": i}
+        (old / "meta.json").write_text(json.dumps(meta))
+
+
+def test_an_append_with_nothing_to_keep_reads_no_evidence(state, monkeypatch):
+    s = Stream()
+    store(s.crossing())
+    _many(me.kept()[0], 20)
+    read = _reads(monkeypatch)
+    for _ in range(3):
+        ms.append([s.ev()])
+    assert read == []
+    # one that has reads it once, however many windows it settles
+    recs = [r for _ in range(4) for r in s.crossing()]
+    for r in recs:
+        r["recv"] = T0 + s.t
+    ms.append(recs)
+    s.t += 400
+    del read[:]
+    ms.append([s.ev()])
+    assert len(read) == len(set(read)) == 21
+    assert len(me.kept()) == 25
+
+
+def test_only_what_is_unsettled_is_read_again(state, monkeypatch):
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        store(s.crossing())
+        [e] = me.kept()
+        _many(e, 20)
+        assert e.unjudged
+        read = _reads(monkeypatch)
+        ms.append([s.ev()])
+        assert set(read) == {e.id}
+    del read[:]
+    ms.append([s.ev()])  # judged: settled, and not read after that
+    assert set(read) == {e.id} and me.kept()[0].confirmed
+    del read[:]
+    ms.append([s.ev()])
+    assert read == []
+
+
+def test_closing_a_copy_reads_each_piece_once(state, monkeypatch):
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap({}), s.ev(), s.cross()])
+    with monkeypatch.context() as m:
+        m.setattr(ms, "budget", lambda: 1)
+        ms.append([s.ev()])
+        ms.append([s.ev()])
+    [e] = me.kept()
+    assert e.open
+    _many(e, 5)
+    read = _reads(monkeypatch)
+    ms.append([s.snap()])
+    assert len(read) == len(set(read)) == 6
+    assert not next(x for x in me.kept() if x.id == e.id).open
+
+
+@pytest.mark.parametrize("noted", [False, True])
+def test_one_published_as_the_process_ended_is_still_settled(state, monkeypatch, noted):
+    # the crash comes right after the rename: what it waits for must still be taken
+    s = Stream()
+
+    def crash(*a):
+        monkeypatch.setattr(me.State, "save", lambda self: None)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        m.setattr(me, "_finish", lambda st, held, limit: crash() if me.kept() else None)
+        if noted:  # the state before it is there already, as it is after any window
+            me.root().mkdir(parents=True)
+            me.State(unsettled=[]).save()
+        save = me.State.save
+        with pytest.raises(KeyboardInterrupt):
+            store(s.crossing())
+    monkeypatch.setattr(me.State, "save", save)
+    [e] = me.kept()
+    assert e.unjudged
+    ms.append([s.ev()])
+    ms.append([s.ev()])
+    assert me.kept()[0].confirmed
+
+
+def test_a_lost_state_finds_what_is_unsettled_again(state, monkeypatch):
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        store(s.crossing())
+    me._state_file().unlink()
+    ms.append([s.ev()])
+    assert me.kept()[0].confirmed
+
+
+def test_one_whose_boot_the_store_has_forgotten_is_settled(state, monkeypatch):
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap(), s.ev(), s.cross(), s.ev()])  # no snapshot after it ever comes
+    other = Stream("boot-2")
+    ms.append([other.snap()])
+    assert me.State.load().unsettled == [me.kept()[0].id]
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    for _ in range(3):
+        ms.append([other.ev(parent=7)])
+    assert me.State.load().unsettled == [] and me.kept()[0].open
+
+
 def test_a_crash_at_any_point_keeps_it_once(state, monkeypatch):
     s = Stream()
     with monkeypatch.context() as crash:
         crash.setattr(me.State, "save", lambda self: None)  # copied; the note of it never written
         store(s.crossing())
     [e] = me.kept()
-    (me.root() / ".new-half").mkdir()
+    (me.root() / ".new" / "half").mkdir(parents=True, exist_ok=True)
     ms.append([s.ev()])
-    assert me.kept() == [e] and not list(me.root().glob(".new-*"))
+    assert me.kept() == [e]
     for p in (state / "logs").glob("monitor-index.sqlite*"):
         p.unlink()  # the catalogue lost, and the state with it
     me._state_file().unlink(missing_ok=True)
@@ -567,6 +706,44 @@ def test_what_a_copy_is_closed_with_says_where_a_namespace_changed_hands(state, 
         assert (v.who, v.container) == (truth[v.seq].who, truth[v.seq].container)
 
 
+def test_what_closing_a_copy_takes_is_counted_in_the_same_pass(state, monkeypatch):
+    # the copy grows as its snapshot is stored, in the append that also has a window to copy: there
+    # is room for that one only as the first one was
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap({}), s.ev(), s.cross()])
+    with monkeypatch.context() as m:
+        m.setattr(ms, "budget", lambda: 1)
+        ms.append([s.ev()])
+        ms.append([s.ev()])
+    [e] = me.kept()
+    assert e.open and me.State.load().unsettled == [e.id]
+    monkeypatch.setattr(me, "_BOOT", 1)
+    monkeypatch.setattr(me, "_WINDOW", 1)
+    big = {"200": [BOX]} | {str(i): [_noise(i)[:64]] for i in range(300, 340)}
+    other = Stream("boot-2")
+    other.t = s.t + 5
+    late = _loud(other, 60)
+    for r in late:
+        r["recv"] = T0 + s.t + 400
+    snap = s.snap(big)
+    with tempfile.TemporaryDirectory() as tmp, monkeypatch.context() as m:  # what both take
+        shutil.copytree(state, tmp, dirs_exist_ok=True)
+        m.setattr(ms.config, "state_dir", lambda: Path(tmp))
+        _close_and_copy(snap, late)
+        first, second = me.kept()
+        assert not first.open
+        both = first.size + second.size
+    caps(monkeypatch, both - 1)
+    _close_and_copy(snap, late)
+    assert [x.id for x in me.kept()] == [first.id] and len(me.State.load().pending) == 1
+
+
+def _close_and_copy(snap: dict, late: list[dict]) -> None:
+    """One append with the snapshot that closes a copy and a later boot's whole window."""
+    ms.append([snap, *late, Stream("boot-3").snap()])
+
+
 def test_a_copy_with_no_room_to_be_closed_stays_open_and_says_so(state, monkeypatch):
     s = Stream()
     monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
@@ -707,6 +884,16 @@ def test_a_catalogue_that_fails_before_anything_is_copied_is_said(state, monkeyp
     monkeypatch.setattr(me.State, "save", lambda self: 1 / 0)  # nor does failing to say it matter
     ms.append([s.ev()])
     assert any(r.get("seq") == seq for r, _ in ms.scan(None))
+
+
+def test_a_half_written_one_of_the_version_before_is_swept(state):
+    s = Stream()
+    store(s.crossing())
+    (me.root() / ".new-boot-1-9").mkdir()
+    doc = json.loads(me._state_file().read_text())  # as that version's state was: no `unsettled`
+    me._state_file().write_text(json.dumps({k: v for k, v in doc.items() if k != "unsettled"}))
+    ms.append([s.ev()])
+    assert not (me.root() / ".new-boot-1-9").exists()
 
 
 def test_a_boots_name_never_names_a_path(state):
