@@ -463,22 +463,52 @@ _FILE_CHANGES = {
     "security_file_truncate": "truncate",
     "security_path_rename": "rename",
     "security_path_link": "link",
+    "security_path_chroot": "chroot",
 }
 
 
 def _file_change(fn: str, body: dict) -> str:
     """``<operation> <path>``, the path being the name that changed: for a rename or a link, the
-    new one, with the other in brackets."""
+    new one, with the other in brackets. A name that reads differently in its own filesystem (it is
+    in a mount, or its process changed its root) is followed by that too: the two disagreeing is
+    what tells a volume's file, or a chroot's, from the container's own."""
     paths = [
         (a.get("path_arg") or a.get("file_arg") or a.get("dentry_arg") or {}).get("path", "?")
         for a in body.get("args") or []
-    ] or ["?"]
-    what = f"{_FILE_CHANGES[fn]} {paths[-1]}"
-    if fn == "security_path_rename" and len(paths) == 2:
-        what += f" (from {paths[0]})"
-    if fn == "security_path_link" and len(paths) == 2:
-        what += f" (to {paths[0]})"
+    ]
+    what, inner = _FILE_CHANGES[fn], ""
+    if fn == "security_path_unlink" and len(paths) == 2:
+        directory, inner = paths
+        what += f" {(path := _in(directory, inner))}"
+    elif fn == "security_path_rename" and len(paths) == 4:
+        from_dir, old, directory, inner = paths
+        what += f" {(path := _in(directory, inner))} (from {_in(from_dir, old)})"
+    elif fn == "security_path_link" and len(paths) == 3:
+        old, directory, inner = paths
+        what += f" {(path := _in(directory, inner))} (to {_beside(old, directory, inner)})"
+    else:
+        return f"{what} {paths[-1] if paths else '?'}" + _refusal(body)
+    if path != inner:
+        what += f" [{inner} in its filesystem]"
     return what + _refusal(body)
+
+
+def _in(directory: str, name: str) -> str:
+    """A name's path as its process sees it: in ``directory``, whatever its own filesystem says."""
+    return f"{directory.rstrip('/')}/{name.rsplit('/', 1)[-1]}"
+
+
+def _beside(old: str, directory: str, new: str) -> str:
+    """A link's old name, which is on the new one's mount: what its filesystem calls it, with the
+    mount placed by the new name's directory, known both ways."""
+    seen = directory.rstrip("/").split("/")
+    inner = new.split("/")[:-1]
+    while len(seen) > 1 and len(inner) > 1 and seen[-1] == inner[-1]:
+        seen.pop()
+        inner.pop()
+    if old.split("/")[: len(inner)] != inner:
+        return f"{old} in its filesystem"
+    return "/".join([*seen, *old.split("/")[len(inner) :]])
 
 
 def _refusal(body: dict) -> str:

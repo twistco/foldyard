@@ -680,13 +680,16 @@ def test_observe_files_never_enforces(observe_files):
 
 # Measured 2026-11-24 (Tetragon v1.8.0, kernel 7.2): a write selector alone misses each of these.
 _HOOKS = {
-    "security_path_rename": {"1", "3"},  # the old name and the new: either in a watched directory
-    "security_path_unlink": {"1"},
+    # A name's DIRECTORY, resolved through mounts, not the name: that reads as `/etc/x` for
+    # `/dev/shm/etc/x`, and as `/x` in a volume at `/opt` (measured 2026-11-24).
+    "security_path_rename": {"0", "2"},  # the old directory and the new: either a watched one
+    "security_path_unlink": {"0"},
     "security_path_chmod": {"0"},
     "security_path_truncate": {"0"},
     "security_file_truncate": {"0"},  # ftruncate, and an open that truncates
-    "security_path_link": {"0", "2"},
+    "security_path_link": {"0", "1"},  # the old name (its directory isn't given), the new directory
 }
+_NAMES = {"security_path_rename": "0 1 2 3", "security_path_unlink": "0 1", "security_path_link": "0 1 2"}  # fmt: skip
 
 
 def _hooks(script: str) -> dict[str, str]:
@@ -695,7 +698,7 @@ def _hooks(script: str) -> dict[str, str]:
 
 
 def test_observe_files_records_what_a_write_selector_misses(observe_files, monkeypatch):
-    assert set(_hooks(monitor.render(True)[0])) == set(_HOOKS)
+    assert set(_hooks(monitor.render(True)[0])) == {*_HOOKS, "security_path_chroot"}
     monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
     assert _hooks(monitor.render(True)[0]) == {}
     monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe-files")
@@ -719,12 +722,32 @@ def test_each_added_hook_is_held_to_the_watched_directories_and_to_containers(
     watched = re.findall(r"- (/\S+)$", _selectors(script)[-1], re.M)
     selectors = re.split(r"^    - (?=matchArgs)", _hooks(script)[call], flags=re.M)[1:]
     assert {re.search(r"index: (\d)", s).group(1) for s in selectors} == indexes  # type: ignore
+    assert len(selectors) <= 5  # Tetragon's limit for one hook
     for s in selectors:
-        assert re.findall(r"- (/\S+)$", s, re.M) == watched
+        exact = "operator: Equal" in s  # the directory itself: `/etc`, and not `/etcetera`
+        assert re.findall(r"- (/\S+)$", s, re.M) == [w.rstrip("/") if exact else w for w in watched]
         assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", s)
 
 
-@pytest.mark.parametrize("call", _HOOKS)
+@pytest.mark.parametrize(("call", "indexes"), _NAMES.items())
+def test_a_hook_on_names_takes_their_directories_too(observe_files, call, indexes):
+    hook = _hooks(monitor.render(True)[0])[call]
+    args = hook.split("returnArg")[0]
+    assert re.findall(r"index: (\d)", args) == indexes.split()
+    for i in re.findall(
+        r"index: (\d)\s+operator: Equal", hook
+    ):  # a directory, as its process sees it
+        assert re.search(rf"index: {i}\s+type: path", args)
+
+
+def test_observe_files_records_a_container_that_changes_its_root(observe_files):
+    # After it, every path the process uses is another file's than it says.
+    hook = _hooks(monitor.render(True)[0])["security_path_chroot"]
+    assert re.search(r"index: 0\s+type: path", hook) and "matchArgs" not in hook
+    assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", hook)
+
+
+@pytest.mark.parametrize("call", [*_HOOKS, "security_path_chroot"])
 def test_an_added_hook_the_kernel_lacks_never_stops_tetragon(observe_files, call):
     # One hook that can't attach fails its whole policy, and with it every other recording.
     assert re.search(r"ignore:\s+callNotFound: true", _hooks(monitor.render(True)[0])[call])

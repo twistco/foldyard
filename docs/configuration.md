@@ -339,7 +339,9 @@ disk_gib = 60
     content. It also records renames, deletions, `chmod`, truncation and hard links there, as
     attempts: one refused for lack of permission reads like one that worked. Writes through `mmap`,
     or through a second name a file already has, aren't recorded, and unpacking an image is
-    (labelled `podman`).
+    (labelled `podman`). A name in a volume or another mount is the path its process used, followed
+    by what its own filesystem calls it. A `chroot` by a container is recorded too: after one, every
+    path that process uses is another file's than it says.
 
   - The box's user can't stop it, change its policy or read its log.
 

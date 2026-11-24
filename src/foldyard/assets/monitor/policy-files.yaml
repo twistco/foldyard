@@ -15,14 +15,23 @@ spec:
   # attempt the kernel then refused for lack of permission is recorded like one that worked (only a
   # refusal by an LSM carries a code). `callNotFound`: a hook the kernel lacks mustn't take the rest
   # of the policy down with it.
+  # A name (a dentry) is resolved only up to the root of its own filesystem: `/dev/shm/etc/x`, which
+  # any container can write, reads `/etc/x`, and `/opt/x` in a volume at `/opt` reads `/x`. So it is
+  # the name's DIRECTORY that is matched, resolved through mounts as its process sees it, exactly or
+  # by prefix (`/etc` alone would match `/etcetera`), and both are recorded. A link's old name comes
+  # without its directory: it has to be on the new one's mount, which is how the parser places it.
   - call: security_path_rename
     syscall: false
     return: true
     ignore:
       callNotFound: true
     args:
+    - index: 0
+      type: path
     - index: 1
       type: dentry
+    - index: 2
+      type: path
     - index: 3
       type: dentry
     returnArg:
@@ -30,7 +39,7 @@ spec:
       type: int
     selectors:
     - matchArgs:
-      - index: 1
+      - index: 0
         operator: Prefix
         values:
         - /etc/
@@ -43,13 +52,39 @@ spec:
         values:
         - host_ns
     - matchArgs:
-      - index: 3
+      - index: 0
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
         operator: Prefix
         values:
         - /etc/
         - /usr/local/
         - /opt/
         - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
       matchNamespaces:
       - namespace: Mnt
         operator: NotIn
@@ -61,6 +96,8 @@ spec:
     ignore:
       callNotFound: true
     args:
+    - index: 0
+      type: path
     - index: 1
       type: dentry
     returnArg:
@@ -68,13 +105,26 @@ spec:
       type: int
     selectors:
     - matchArgs:
-      - index: 1
+      - index: 0
         operator: Prefix
         values:
         - /etc/
         - /usr/local/
         - /opt/
         - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
       matchNamespaces:
       - namespace: Mnt
         operator: NotIn
@@ -163,6 +213,8 @@ spec:
     args:
     - index: 0
       type: dentry
+    - index: 1
+      type: path
     - index: 2
       type: dentry
     returnArg:
@@ -183,7 +235,7 @@ spec:
         values:
         - host_ns
     - matchArgs:
-      - index: 2
+      - index: 1
         operator: Prefix
         values:
         - /etc/
@@ -191,6 +243,39 @@ spec:
         - /opt/
         - /root/
       matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  # After a chroot, every path the process uses is another file's than it says: recorded, so a write
+  # to /etc/… that follows one reads as such. Only what the kernel would allow (it checks the
+  # capability first). Podman does it to unpack an image: some ten events, labelled `podman`.
+  - call: security_path_chroot
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: path
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchNamespaces:
       - namespace: Mnt
         operator: NotIn
         values:
