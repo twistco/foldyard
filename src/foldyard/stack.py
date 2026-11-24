@@ -235,6 +235,9 @@ def _published_ports(name: str) -> dict[str, str]:
         _err(f"✗ {e}")
         _err("  Run it from its own box, or recreate this one so it knows them:")
         _err("    fy box recreate   (prefixed WORKTREE=<its name> for a worktree's box)")
+        _err("  That helps only a registered worktree. If `fy worktree list` on your computer says")
+        _err("  this one isn't, register it there first:")
+        _err(f"    fy worktree add {shlex.quote(name)}")
         raise SystemExit(1)
 
 
@@ -271,13 +274,19 @@ def _pooled(name: str) -> dict[str, int]:
     host baked at create (:func:`worktree_ports`, baked with or without a pool). A box made by a
     foldyard without pools has nothing baked, and its worktrees keep their band. A box that doesn't
     know ``name`` at all — a worktree added since — raises :class:`PortsUnknown`: its band port is
-    outside the pool, the failure the pool exists for."""
+    outside the pool, the failure the pool exists for. Not for one a box made: it takes no pool port
+    and has no stack to publish one (:func:`up` refuses it), so it stays on its band."""
     if not config.in_box():
         return recorded_pool_ports().get(name, {})
     baked = _baked_ports()
     if baked is None:
         return {}
     if name not in baked:
+        from . import boxworktree  # lazy: only a worktree the box wasn't told of
+
+        main = main_repo()
+        if boxworktree.is_box_made(main, config.worktrees_root(main) / name):
+            return {}
         raise PortsUnknown(
             f"this box doesn't know '{name}''s ports: it was added after the box was made."
         )
@@ -1368,7 +1377,7 @@ def up() -> int:
     from . import preflight
 
     preflight.check_or_abort("fy up")
-    if config.in_box():  # before resolve(): the ports of a worktree made in a box aren't known
+    if config.in_box():  # before resolve(): a worktree made in a box has no stack to resolve
         from . import boxworktree
 
         main = main_repo()

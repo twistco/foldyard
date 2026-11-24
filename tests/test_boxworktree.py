@@ -459,6 +459,68 @@ def test_fy_up_says_so_before_it_resolves_the_stack(world, monkeypatch, capsys):
     assert "fy worktree add fix --box" in capsys.readouterr().err
 
 
+@pytest.fixture
+def pooled(world, monkeypatch):
+    """A project whose worktrees take APP_PORT from a pool, in a box made before any of them."""
+    monkeypatch.setattr(config, "port_bases", lambda: {"APP_PORT": 3000, "PG_PORT": 5533})
+    monkeypatch.setattr(config, "port_pools", lambda: {"APP_PORT": range(3001, 3006)})
+    monkeypatch.setattr(stack, "_offset", lambda name: 40)
+    monkeypatch.setenv("FY_WORKTREE_PORTS", "{}")
+    return world
+
+
+def test_a_pool_stops_no_command_there(pooled):
+    # It has no stack, so no pool port either: `fy shellenv` (and every recipe that evals it) used
+    # to be refused, with advice (`fy box recreate`) that can't help an unregistered worktree.
+    boxworktree.add("fix")
+    assert stack._published_ports("fix") == {"APP_PORT": "3040", "PG_PORT": "5573"}
+
+
+def test_shellenv_works_there_with_a_pool(pooled, monkeypatch, capsys):
+    boxworktree.add("fix")
+    capsys.readouterr()
+    for name, value in (
+        ("_active_worktree", lambda root: "fix"),
+        ("_docker_host", lambda *a: "unix:///nonexistent/fy"),
+        ("pin_filemode", lambda main: None),
+        ("_missing_declared_compose", lambda: False),
+        ("ensure_network", lambda *a: None),
+    ):
+        monkeypatch.setattr(stack, name, value)
+    monkeypatch.setattr(config, "unadopted_notice", lambda: None)
+    monkeypatch.setattr(devmode, "read", lambda **k: {"mode": {}, "expires": {}})
+    assert stack.shellenv() == 0
+    out = capsys.readouterr().out
+    assert "exit 1" not in out
+    assert "export PODMAN_PROJECT=acme-fix" in out
+
+
+def test_a_worktree_no_box_made_is_still_refused_with_a_pool(pooled, capsys):
+    # Registered since the box was made, or plain `git worktree add`: the box can't tell which.
+    _git(pooled["main"], "worktree", "add", "-q", "-b", "o", str(pooled["root"] / "other"))
+    with pytest.raises(SystemExit):
+        stack._published_ports("other")
+    err = capsys.readouterr().err
+    assert "fy box recreate" in err
+    assert "fy worktree add other" in err  # recreating helps only a registered one
+
+
+def test_once_registered_it_is_refused_until_the_box_knows_its_pool_port(pooled, monkeypatch):
+    boxworktree.add("fix")
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    boxworktree.promoted(pooled["main"], pooled["root"] / "fix")
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    with pytest.raises(stack.PortsUnknown):
+        stack.worktree_port("APP_PORT", "fix")
+
+
+def test_on_your_computer_the_boxs_marker_changes_no_port(pooled, monkeypatch):
+    boxworktree.add("fix")
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "recorded_pool_ports", lambda: {"fix": {"APP_PORT": 3002}})
+    assert stack.worktree_port("APP_PORT", "fix") == 3002
+
+
 def test_on_your_computer_the_boxs_marker_refuses_nothing(world, monkeypatch):
     # The shared `.git` is box-written: a marker planted in a registered worktree must not stop it.
     boxworktree.add("fix")
