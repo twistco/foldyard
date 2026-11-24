@@ -26,7 +26,7 @@ prefix = "foldyard"
 # `[box].packages`, and 0.7.0 is a security release. When the recommendation moves past it,
 # raise the floor to meet it once everyone has moved.
 min_foldyard_version = "0.7.0"
-recommended_foldyard_version = "0.13.0"
+recommended_foldyard_version = "0.13.1"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -50,6 +50,7 @@ recommended_foldyard_version = "0.13.0"
 "0.12.0" = "security release: the box's foldyard wheel is no longer staged through a symlink the box planted; Claude and Codex run keyless only (a `[claude]`/`[codex]` without `keyless` is refused) and the podman backend is gone; `[ports]` pools give worktrees a port from a fixed list (an OAuth callback allowlist), `[box] git_hooks` runs the checkout's hooks in the box, follow grants read where a trusted path redirects, and adopting a config that asks for a newer foldyard no longer locks every `fy` out — add `keyless` to your `foldyard.local.toml` where `fy box up` asks"
 "0.12.1" = "a worktree on a branch from before a `[ports]` pool gets its pooled port wherever `fy` runs (0.12.0 gave it its offset port when run from inside it); `fy up` refuses a key that would land on a worktree's pooled port"
 "0.13.0" = "the VM lets go of shared files nothing is using, so your computer no longer runs out of open files; `fy worktree add` works in a box (dependency dirs on volumes) and a plain `git worktree add` outside the checkout is refused there; `fy init --private`, `fy machine upgrade` (Fedora 45 in place), and `fy init`/`fy skill install` never write through a link the box planted — `fy machine stop && fy up` for each VM, then `fy box recreate`"
+"0.13.1" = "with a `[ports]` pool, `fy shellenv` (and recipes that eval it) works in a worktree a box made; the guest monitor no longer misses, misnames or stays silent about a step out of a container that it judged late — `fy host restart`, then `fy box recreate` so the box has the new foldyard"
 
 [machine]
 # A rootless Lima VM that mounts ONLY this repo, with an in-VM egress FIREWALL: fail-closed,

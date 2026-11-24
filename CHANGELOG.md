@@ -6,6 +6,28 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.13.1 — 2026-11-24
+
+### Fixed
+
+- **The guest monitor no longer loses a step out of a container when the store removes its records
+  early.** If the disk budget removed the segment holding a process stepping into podman's namespace
+  before the relay's next snapshot, and podman had run a command since, the catalogue had dropped
+  what showed the namespace was podman's: the step was judged not to be one, so hooks kept filtering
+  the rest of that boot by `who`. It takes a stalled relay or a very small budget to reach.
+- **The guest monitor never names the wrong container for a crossing it judged late, and says when
+  it can't judge one.** If judging kept failing until the store had removed the records around a
+  step out of a container, the step was named after whichever container held the reused namespace
+  number later, or after none. And while judging failed nothing was said on your computer (hooks
+  were told): now the log, the notification, `fy monitor` and `fy doctor` say a process may have
+  crossed, after a minute.
+- **With a `[ports]` pool, commands work in a worktree a box made.** `fy shellenv`, and so every
+  recipe that starts with it, was refused there ("this box doesn't know its ports"), and the advice,
+  `fy box recreate`, couldn't help: only a registered worktree has a pool port. One a box made has
+  no stack, so its ports now come from its offset, and `fy up` there is still refused. For any other
+  worktree the box doesn't know, the refusal now also says to register it on your computer if it
+  isn't.
+
 ## 0.13.0 — 2026-11-24
 
 ### Changed
