@@ -243,6 +243,7 @@ def _published_ports(name: str) -> dict[str, str]:
         if published is not None and name not in published:
             _err(f"✗ '{name}' isn't registered on your computer, and no box made it: it has no")
             _err(f"  ports. Register it there: `fy worktree add {shlex.quote(name)}`.")
+            _err("  Just registered? This box may not see it for a second: try again.")
             raise SystemExit(1)
         _err(f"✗ {e}")
         _err("  Run it from its own box, or recreate this one so it knows them:")

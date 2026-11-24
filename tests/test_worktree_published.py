@@ -227,6 +227,7 @@ def test_one_the_list_says_is_not_registered_is_told_so(pooled, monkeypatch, cap
     err = capsys.readouterr().err
     assert "isn't registered on your computer" in err and "fy worktree add plain" in err
     assert "fy box recreate" not in err  # it can't help
+    assert "Just registered" in err  # the list takes about a second to reach a box on vz
 
 
 def test_with_no_list_both_ways_out_are_named(pooled, monkeypatch, capsys):
