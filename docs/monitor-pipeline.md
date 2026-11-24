@@ -327,9 +327,10 @@ copied as far as it goes, and says its end is missing. That takes a budget that 
 three minutes.
 
 It is held back only while nothing can be copied: the catalogue, which says where the crossings are,
-can't be opened, or a copy fails. The store may then pass its budget by as much again where that
-leaves 50 GB free on its disk, and otherwise by a tenth of the budget, or of what is free when that
-is less. Past that it removes what it must. `fy monitor` and `fy doctor` say so meanwhile.
+can't be opened, or a copy fails. The store may then pass its budget by a tenth of it (or of what is
+free on its disk, when that is less), and by more where there is room: as far as leaves 50 GB free,
+up to as much again. Past that it removes what it must. `fy monitor` and `fy doctor` say so
+meanwhile.
 
 **The window** is by the events' own time (the guest's clock), as a run of sequence numbers in one
 boot: from the first within a minute before to the last within a minute after. Windows don't

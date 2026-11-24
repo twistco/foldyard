@@ -187,7 +187,7 @@ def test_a_boots_first_crossings_win_and_the_rest_are_counted(state, monkeypatch
         store(_loud(s))
     every = me.kept()
     assert every[0].seq == min(e.seq for e in every)
-    assert sum(e.size for e in every) <= 4 * (size + size // 2) // 4 + 2000  # its context beside it
+    assert sum(e.size for e in every) <= size + size // 2
     assert me.State.load().past[BOOT] >= 1
 
 
@@ -274,7 +274,7 @@ def test_a_window_past_its_share_keeps_what_is_nearest_the_crossing(state, monke
     s = Stream()
     store(_loud(s, 400))
     [e] = me.kept()
-    assert e.lo < e.seq < e.hi and e.size < 4000 + 3000
+    assert e.lo < e.seq < e.hi and e.size <= 4000
     assert len([m for m in e.missing if "past a window's share" in m]) == 2
     assert len(list(me.read(e))) == e.events
 
@@ -438,6 +438,270 @@ def test_one_removed_by_the_operator_does_not_come_back(state):
     assert me.remove(me.kept()[0].id) == 0
     ms.append([s.ev()])
     assert me.kept() == []
+
+
+def test_a_copy_made_before_its_snapshot_takes_it_once_it_is_stored(state, monkeypatch):
+    # retention forced the copy before any snapshot named the container: the one that comes names
+    # it, in the evidence too, not only in the verdict
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap({}), s.ev(), s.cross()])
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    ms.append([s.ev()])
+    ms.append([s.ev()])
+    [e] = me.kept()
+    assert e.open and not e.confirmed and next(v for v in me.read(e) if v.crossed).container == ""
+    s.t += 20
+    ms.append([s.snap()])
+    [e] = me.kept()
+    assert e.confirmed and not e.open and e.crossings[0]["container"] == BOX
+    assert next(v for v in me.read(e) if v.crossed).container == BOX
+
+
+def test_one_removed_while_it_is_being_confirmed_stays_removed(state, monkeypatch):
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        store(s.crossing())
+    [e] = me.kept()
+    real = me._meta
+    monkeypatch.setattr(me, "_meta", lambda x: (me.remove(e.id), real(x))[1])
+    ms.append([s.ev()])
+    assert me.kept() == [] and not e.path.exists()
+
+
+def test_a_boots_share_is_what_its_windows_take_not_what_they_might(state, monkeypatch):
+    # several small windows settled in one pass: none is past a share they come nowhere near
+    s = Stream()
+    recs = [r for _ in range(6) for r in s.crossing()]
+    for r in recs:
+        r["recv"] = T0 + s.t
+    ms.append(recs)
+    ms.append([s.snap()])
+    s.t += 400
+    ms.append([s.ev()])
+    assert len(me.kept()) == 6 and me.State.load().past == {}
+
+
+def test_a_segments_time_bounds_are_read_as_loosely_as_they_are_kept(state, monkeypatch):
+    # Tetragon trims trailing zeros, so a segment's first and last times are compared as text:
+    # "…:30Z" sorts after "…:30.1Z"
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    s = Stream()
+    s.t = 1.0
+    first = [s.snap(), s.ev(), s.ev()]
+    whole = _time(T0 + s.t)[:19]
+    first[1]["e"]["time"], first[2]["e"]["time"] = f"{whole}.1Z", f"{whole}Z"
+    s.t += 60
+    cross = s.cross()
+    cross["e"]["time"] = _time(T0 + s.t)[:19] + ".050Z"
+    ms.append(first)
+    ms.append([cross, s.snap()])
+    s.t += 400
+    ms.append([s.ev(), s.snap()])
+    [e] = me.kept()
+    assert e.lo <= first[1]["seq"]
+
+
+def test_an_eviction_a_crash_interrupted_is_finished(state, monkeypatch):
+    old, limit = _fill(monkeypatch)
+    s = _new()
+    store(_loud(s))
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    ms.append([s.ev()])
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+
+    with monkeypatch.context() as m:
+
+        def crash(*a):
+            m.setattr(me.State, "save", lambda self: None)  # nothing more is written
+            raise KeyboardInterrupt
+
+        m.setattr(me, "_evict", crash)
+        with pytest.raises(KeyboardInterrupt):
+            ms.append([s.ev()])
+    assert len(me.kept()) == len(old) + 1  # the new one is there, nothing has made way
+    ms.append([s.ev()])
+    every = me.kept()
+    assert sum(e.size for e in every) <= limit and every[-1].boot == "new"
+
+
+def test_what_a_copy_is_closed_with_says_where_a_namespace_changed_hands(state, monkeypatch):
+    # after the copy, its container ended and another took the number, before the next snapshot:
+    # with that snapshot alone the copy's last events would read as either's
+    def init(end: bool = False) -> dict:
+        r = s.ev(in_init_tree=True, start_time=_time(T0 + s.t - 30 * end))
+        body = r["e"].pop("process_exec")
+        body["process"]["ns"]["pid"] = {"inum": 900 + (not end)}
+        body["parent"] = {"binary": "/usr/bin/conmon", "ns": {"mnt": {"inum": 7}}}
+        r["e"]["process_exit" if end else "process_exec"] = body
+        return r
+
+    def entry() -> dict:  # podman entering its own namespace from the VM's
+        r = s.ev(inode=7)
+        r["e"]["process_exec"]["process"]["ns"]["user"] = {"inum": 4026532575}
+        r["e"]["process_exec"]["parent"] = {"ns": {"mnt": {"inum": 1, "is_host": True}}}
+        return r
+
+    s = Stream()
+    s.t = 100.0
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    recs = [entry(), s.snap(), s.cross(), s.ev()]
+    ms.append(recs)
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    for tail in ([s.ev()], [s.ev()]):
+        ms.append(tail)
+        recs += tail
+    [e] = me.kept()
+    assert e.open
+    s.t += 1
+    tail = [init(end=True), init(), s.snap({"200": ["b" * 64]})]
+    ms.append(tail)
+    recs += tail
+    truth = {v.seq: v for v in monitorlog.attribute(recs, "fyex")}
+    [e] = me.kept()
+    assert not e.open
+    got = list(me.read(e))
+    assert any(v.who == "container" for v in got)
+    for v in got:
+        assert (v.who, v.container) == (truth[v.seq].who, truth[v.seq].container)
+
+
+def test_a_copy_with_no_room_to_be_closed_stays_open_and_says_so(state, monkeypatch):
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap({}), s.ev(), s.cross()])
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    ms.append([s.ev()])
+    ms.append([s.ev()])
+    [e] = me.kept()
+    caps(monkeypatch, 16 * (e.size + me._LISTING + 10))
+    ms.append([s.snap({"200": [BOX]} | {str(i): [_noise(i)[:64]] for i in range(300, 400)})])
+    [e] = me.kept()
+    assert e.open and me._NO_ROOM in e.missing and e.confirmed
+    ms.append([s.ev()])
+    assert me.kept()[0].missing.count(me._NO_ROOM) == 1
+
+
+def test_a_copy_that_failed_before_it_was_measured_holds_nothing_up(state, monkeypatch):
+    s = Stream()
+    with monkeypatch.context() as broken:
+        broken.setattr(me, "_copy", lambda *a: 1 / 0)
+        store(s.crossing())
+        s.t += 600
+        store(s.crossing())
+    ms.append([s.ev()])
+    assert len(me.kept()) == 2 and me.note() == ""
+
+
+def test_a_crossing_past_the_cut_of_a_window_that_waited_gets_its_own(state, monkeypatch):
+    # taken to be in the waiting window, and cut off when that was copied
+    _, limit = _fill(monkeypatch)
+    monkeypatch.setattr(me, "_WINDOW", limit // 4000)
+    s = _new()
+    recs = _loud(s, 400)
+    at = next(i for i, r in enumerate(recs) if _crossed(r))
+    late = next(r for r in recs[at + 5 :] if r["k"] == "ev")
+    late["e"]["process_exec"]["process"]["ns"]["mnt"]["inum"] = 1
+    late["e"]["process_exec"]["parent"] = {"ns": {"mnt": {"inum": 200}}}
+    store(recs)
+    assert me.State.load().pending
+    for e in me.kept():
+        me.remove(e.id)
+    ms.append([s.ev()])
+    assert any(e.boot == "new" and e.lo <= late["seq"] <= e.hi for e in me.kept())
+
+
+def test_a_lowered_cap_removes_nothing_by_itself(state, monkeypatch):
+    old, limit = _fill(monkeypatch)
+    caps(monkeypatch, limit // 2)
+    ms.append([Stream("later").ev()])
+    assert me.kept() == old
+
+
+def test_the_context_is_within_the_share_too(state, monkeypatch):
+    caps(monkeypatch, 16 * 3000)
+    s = Stream()
+    recs = _loud(s, 200)
+    for r in recs:  # snapshots that don't compress, and are most of the context
+        if r["k"] == "scopes":
+            r["map"] |= {str(1000 + i): [_noise(r["seq"] * 100 + i)[:64]] for i in range(20)}
+    store(recs)
+    every = me.kept()
+    assert all(e.size <= 3000 for e in every)
+    assert every or me.State.load().past  # kept within it, or counted
+
+
+def test_one_too_large_for_its_share_is_counted_and_said(state, monkeypatch):
+    caps(monkeypatch, 16 * 300)
+    store(_loud(Stream()))
+    assert me.kept() == [] and me.State.load().past[BOOT] == 1
+    assert "too large" in me.State.load().say[-1]["text"]
+
+
+def test_the_verdicts_still_to_come_have_room_in_the_share(state, monkeypatch):
+    share = 5000
+    caps(monkeypatch, 16 * share)
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        recs = _loud(s, 400)
+        at = next(i for i, r in enumerate(recs) if _crossed(r))
+        for r in recs[at + 1 : at + 4]:
+            if r["k"] == "ev":  # three more, as many verdicts to take
+                r["e"]["process_exec"]["process"]["ns"]["mnt"]["inum"] = 1
+                r["e"]["process_exec"]["parent"] = {"ns": {"mnt": {"inum": 200}}}
+        store(recs)
+        assert me.kept()[0].unjudged
+    ms.append([s.ev()])
+    every = me.kept()
+    assert any(len(e.crossings) > 1 for e in every)
+    assert all(e.size <= share and not e.unjudged for e in every)
+
+
+@pytest.mark.parametrize("verdict", [0, 1])
+def test_every_candidate_is_followed_past_those_listed(state, monkeypatch, verdict):
+    monkeypatch.setattr(me, "_LISTED", 3)
+    s = Stream()
+    with monkeypatch.context() as busy:
+        busy.setattr(ms.Catalogue, "judge", lambda self: 1 / 0)
+        store(s.crossing(n=8))
+        [e] = me.kept()
+        assert len(e.unjudged) == 8
+        with ms.Catalogue.open() as cat:  # all judged, the last of them by itself
+            cat.conn.execute("UPDATE crossing SET verdict = 0")
+            cat.conn.execute("UPDATE crossing SET verdict = ? WHERE seq = (SELECT MAX(seq) FROM "
+                             "crossing)", (verdict,))  # fmt: skip
+        ms.append([s.ev()])
+    left = me.kept()
+    assert [len(e.crossings) for e in left] == ([1] if verdict else [])
+
+
+def test_segments_an_older_foldyard_indexed_are_read_for_crossings_first(state, monkeypatch):
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    with monkeypatch.context() as older:
+        older.setattr(me, "keep", lambda *a: None)
+        recs = s.crossing()
+        store(recs)
+    with ms.Catalogue.open() as cat:  # #138's: every byte indexed, no crossings read
+        cat.conn.execute("DELETE FROM crossing")
+        cat.conn.execute("DELETE FROM crossseg")
+    monkeypatch.setattr(ms, "budget", lambda: 1)
+    ms.append([s.ev()])
+    [e] = me.kept()
+    assert e.confirmed
+
+
+def test_a_catalogue_that_fails_before_anything_is_copied_is_said(state, monkeypatch):
+    s, seq = _sealed_crossing(monkeypatch)
+    monkeypatch.setattr(ms, "held_back", lambda limit: 1 << 30)
+    monkeypatch.setattr(ms.Catalogue, "unindexed", lambda self, segs: 1 / 0)
+    ms.append([s.ev()])
+    assert "ZeroDivisionError" in me.note()
+    monkeypatch.setattr(me.State, "save", lambda self: 1 / 0)  # nor does failing to say it matter
+    ms.append([s.ev()])
+    assert any(r.get("seq") == seq for r, _ in ms.scan(None))
 
 
 def test_a_boots_name_never_names_a_path(state):

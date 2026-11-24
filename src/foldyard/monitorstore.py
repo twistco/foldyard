@@ -550,22 +550,27 @@ def _copied_out(cat: Catalogue | None, now: float, going: list[Segment]) -> bool
         if not monitorevidence.cap():
             return True
         if cat is not None:
-            if cat.unindexed(going):  # stored while it couldn't be opened: a crossing may be in it
+            # stored while it couldn't be opened, or indexed by a foldyard before crossings were
+            # kept: one may be in it
+            if cat.unindexed(going) or cat.unread(going):
                 cat.catch_up()
                 cat.judge()
             monitorevidence.keep(cat, now, frozenset(s.id for s in going))
             return True
         if going:
             monitorevidence.unable("the monitor's catalogue can't be opened")
-    except Exception:
-        pass  # never stops the store: the next append tries again, and doctor says so
+    except Exception as e:  # never stops the store: the next append tries again
+        try:
+            monitorevidence.unable(f"{type(e).__name__}: {e}"[:300])  # …and doctor says so
+        except Exception:
+            pass
     return False
 
 
 def held_back(limit: int) -> int:
     """How far past its budget the store may go while a crossing can't be copied out of what would
-    be removed: as much again where that leaves :data:`PLENTY_FREE` on the disk, else a tenth — of
-    the budget, or of what is free when that is less."""
+    be removed: a tenth of it (of what is free on the disk, when that is less), and further where
+    there is room — as far as leaves :data:`PLENTY_FREE`, up to as much again."""
     try:
         free = shutil.disk_usage(store_dir()).free
     except OSError:
@@ -1643,6 +1648,18 @@ class Catalogue:
             if indexed < 0 or (not sealed and indexed < raw_size(s)):
                 out.add(s.id)
         return out
+
+    def unread(self, segs: list[Segment]) -> set[str]:
+        """Those of ``segs`` not read for crossings as far as they are indexed (an older foldyard
+        indexed them)."""
+        owed = {
+            sid
+            for (sid,) in self.conn.execute(
+                "SELECT seg.id FROM seg LEFT JOIN crossseg ON crossseg.id = seg.id "
+                "WHERE COALESCE(crossseg.done, 0) < seg.indexed"
+            )
+        }
+        return {s.id for s in segs} & owed
 
     def span(self, boot: str, segs: list[Segment]) -> tuple[int, int] | None:
         """The lowest and highest seq of ``boot`` that ``segs`` hold, as far as this catalogue

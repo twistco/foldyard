@@ -973,10 +973,10 @@ def test_retention_keeps_every_fact_the_join_of_what_is_still_stored_reads(case)
 # segments, a budget that keeps almost nothing or everything, and caps from a few windows to plenty:
 #
 # * evidence read by itself gives each of its events what the join over every record ever stored
-#   gives it (but past a window's last snapshot, which it says it lacks);
-# * every crossing is in a window, kept or waiting; or counted past its boot's share; or said to
-#   have made way, or to have nothing left (a window cut short by its share is no excuse: what it
-#   left out is noted again — the first version lost those);
+#   gives it (but past the last snapshot it holds, while it says it is open);
+# * every crossing is in a window — kept, waiting, or evicted for another boot's — and listed there;
+#   or it was itself counted (past its boot's share, or too large), or had nothing left: each matched
+#   to that crossing (a window cut short is no excuse: the first version lost what it left out);
 # * a boot's first kept window is never displaced by a later one of that boot;
 # * with a cap of 0 the store's records are what they are without any of it.
 # * a boot's windows don't overlap.
@@ -992,7 +992,37 @@ evidence_steps = st.lists(
 ).map(lambda parts: [s for p in parts for s in p])
 
 
-def _store_with_evidence(monkeypatch, state: Path, scenario, budget: str, cap: int) -> World:
+class Outcomes:
+    """What became of each crossing that isn't in a window, as the module decides it."""
+
+    def __init__(self, mp: pytest.MonkeyPatch) -> None:
+        self.counted: set[tuple[str, int]] = set()  # past its boot's share, or too large for one
+        self.lost: set[tuple[str, int]] = set()  # the store had nothing of its window left
+        self.evicted: list[monitorevidence.Evidence] = []
+        count, lost = monitorevidence.State.count, monitorevidence._lost
+        evict = monitorevidence._evict
+
+        def counting(st_, boot, seqs):
+            self.counted |= {(boot, q) for q in seqs}
+            count(st_, boot, seqs)
+
+        def losing(st_, p, seqs):
+            self.lost |= {(p["boot"], q) for q in seqs}
+            lost(st_, p, seqs)
+
+        def evicting(st_, old):
+            assert old.boot != st_.making, "a boot's own evidence made way"
+            self.evicted.append(old)
+            evict(st_, old)
+
+        mp.setattr(monitorevidence.State, "count", counting)
+        mp.setattr(monitorevidence, "_lost", losing)
+        mp.setattr(monitorevidence, "_evict", evicting)
+
+
+def _store_with_evidence(
+    monkeypatch, state: Path, scenario, budget: str, cap: int
+) -> tuple[World, Outcomes]:
     monkeypatch.setattr(monitorstore.config, "state_dir", lambda: state)
     monkeypatch.setattr(monitorstore.config, "project_prefix", lambda: "fyex")
     monkeypatch.setattr(monitorstore, "SEGMENT_BYTES", 1500)
@@ -1004,28 +1034,27 @@ def _store_with_evidence(monkeypatch, state: Path, scenario, budget: str, cap: i
     ids = count()
     monkeypatch.setattr(monitorstore, "_new_id", lambda segs: f"20270115T{next(ids):012d}Z")
     monkeypatch.setattr(monitorstore, "time", SimpleNamespace(time=lambda: 1_800_000_000.0))
-    world = World()
-    firsts: dict[str, int] = {}
+    world, out = World(), Outcomes(monkeypatch)
+    firsts: dict[str, str] = {}  # boot -> the id of its first confirmed window
     for s in [*scenario, ("pull",), ("wait", 400.0), ("snap", {}), ("pull",), ("wait", 400.0),
               ("snap", {}), ("pull",)]:  # fmt: skip
         if s[0] not in ("round", "upgrade", "behind"):
             world.step(s)
-        have: dict[str, list[int]] = {}
-        for e in monitorevidence.kept():
-            if e.confirmed:  # an unconfirmed one judged to be none goes, as it should
-                have.setdefault(e.boot, []).append(e.seq)
-        for boot, seqs in have.items():
-            if len(seqs) > 1 or boot not in firsts:  # alone, it may have made way for another boot
-                assert min(seqs) <= firsts.get(boot, min(seqs)), "a later one displaced the first"
-            firsts.setdefault(boot, min(seqs))
-    return world
+        have = [e for e in monitorevidence.kept() if e.confirmed]
+        for boot, first in firsts.items():
+            assert first in {e.id for e in have} | {e.id for e in out.evicted}, (
+                f"{boot}'s first window went, for nothing that may displace it"
+            )
+        for e in have:
+            firsts.setdefault(e.boot, e.id)
+    return world, out
 
 
 @settings(max_examples=scaled_examples(150), deadline=None)
 @given(
     scenario=evidence_steps,
     budget=st.sampled_from(["tiny", "ample"]),
-    cap=st.sampled_from([6_000, 20_000, 1 << 20]),
+    cap=st.sampled_from([8_000, 24_000, 1 << 20]),
 )
 # a second crossing just past the first one's minute: its window reaches back into that one
 @example(
@@ -1035,43 +1064,49 @@ def _store_with_evidence(monkeypatch, state: Path, scenario, budget: str, cap: i
 )  # fmt: skip
 def test_the_evidence_around_a_crossing_reads_as_the_whole_store_or_says_why(scenario, budget, cap):
     with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
-        world = _store_with_evidence(mp, Path(tmp), scenario, budget, cap)
+        world, out = _store_with_evidence(mp, Path(tmp), scenario, budget, cap)
         truth = {(e.boot, e.seq): e for e in monitorlog.attribute(world.all, "fyex")}
         every = monitorevidence.kept()
         st_ = monitorevidence.State.load()
         assert st_.error == ""
         for e in every:
-            lacks = any("a snapshot after it" in m for m in e.missing)
+            assert e.size <= cap // 16, "past a window's share"
             got = list(monitorevidence.read(e))
             assert len(got) == e.events
+            # an event's two snapshots decide it: only past the last one held may it differ, and
+            # only while the evidence says it is open
+            snaps = [int(r["seq"]) for f in ("context", "records")
+                     for r in monitorevidence._jsonl(e.path / f"{f}.jsonl.gz")
+                     if r.get("k") == "scopes"]  # fmt: skip
             for v in got:
                 want = truth[(v.boot, v.seq)]
+                lacks = e.open and v.seq > max(snaps, default=-1)
                 assert lacks or (v.who, v.container, v.crossed) == (
                     want.who, want.container, want.crossed
                 ), f"{v.seq}: {v.who} alone, {want.who} in the whole store"  # fmt: skip
         for a, b in pairwise(sorted((e.boot, e.lo, e.hi) for e in every)):
             assert a[0] != b[0] or a[2] < b[1], f"{a} overlaps {b}"
-        said = " ".join(s["text"] for s in st_.say)
-        for (boot, seq), v in truth.items():
-            if not v.crossed:
-                continue
-            spans = [(e.lo, e.hi) for e in every if e.boot == boot]
+        for boot, seq in (k for k, v in truth.items() if v.crossed):
+            spans = [(e.lo, e.hi) for e in [*every, *out.evicted] if e.boot == boot]
             spans += [(p["lo"], p["hi"]) for p in st_.pending if p["boot"] == boot]
             assert (
-                any(lo <= seq <= hi for lo, hi in spans)
-                or st_.past.get(boot)
-                or "made way" in said
-                or "nothing is left" in said
+                any(lo <= seq <= hi for lo, hi in spans) or (boot, seq) in out.counted | out.lost
             ), f"nothing says where the crossing {boot}:{seq} went"
-        event(f"kept={len(every)} pending={len(st_.pending)} past={sum(st_.past.values())}")
-        event(f"made way={'made way' in said}")
+        for e in every:
+            if e.boot not in {v.boot for v in out.evicted}:
+                crossed = {q for (b, q), v in truth.items() if v.crossed and b == e.boot}
+                inside = {q for q in crossed if e.lo <= q <= e.hi}
+                said = {c["seq"] for c in e.crossings} | set(e.unjudged)
+                assert e.more or inside <= said, f"{inside - said} in {e.id}, not listed"
+        event(f"kept={len(every)} pending={len(st_.pending)} counted={bool(out.counted)}")
+        event(f"evicted={bool(out.evicted)} lost={bool(out.lost)}")
 
 
 @settings(max_examples=scaled_examples(60), deadline=None)
 @given(scenario=evidence_steps, budget=st.sampled_from(["tiny", "ample"]))
 def test_keeping_evidence_changes_nothing_of_the_store(scenario, budget):
     got = []
-    for cap in (0, 20_000):
+    for cap in (0, 24_000):
         with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
             _store_with_evidence(mp, Path(tmp), scenario, budget, cap)
             got.append([r for r, _ in monitorstore.scan(None)])
