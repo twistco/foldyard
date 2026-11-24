@@ -581,6 +581,171 @@ def test_round_once_records_the_sinks_sequence(project, tmp_path):
     assert state["ca"]["sink_seq"] == 1 and len(state["ca"]["sink_mac"]) == 64
 
 
+# ── a file hook's size: compressed, and rotated ─────────────────────────────────────────
+
+
+def _rotating(project, tmp_path, name="events.jsonl"):
+    """A configured hook that rotates at every round (its file is always over the limit)."""
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    path = str(tmp_path / "logs" / name)
+    (project / "monitor-hooks.toml").write_text(
+        f'[[hook]]\nname = "ca"\nfile = "{path}"\nmax_mb = 16\n'
+    )
+    return path
+
+
+@pytest.fixture
+def tiny(monkeypatch):
+    monkeypatch.setattr(mh, "_MIB", 1)  # `max_mb = 16` is 16 bytes: every line is over it
+
+
+def _rounds(*seqs):
+    """One round per event, each in a file of its own once rotation is on."""
+    for n, seq in enumerate(seqs):
+        monitorlog._append([snap(seq * 10), ev(seq * 10 + 1), snap(seq * 10 + 2)])
+        mh.round_once(now=50 + n * 10)
+
+
+def _state(project):
+    return json.loads((project / "monitor-hooks-state.json").read_text())["ca"]
+
+
+def test_max_mb_is_read_rendered_and_held_to_a_file_hook():
+    hooks, errors = mh.parse('[[hook]]\nname = "x"\nfile = "/e"\nmax_mb = 512\n')
+    assert errors == [] and hooks[0].max_mb == 512
+    assert "max_mb = 512" in mh.render(hooks[0]) and mh.parse(mh.render(hooks[0]))[0] == hooks
+    for bad in ("max_mb = 0", "max_mb = 1.5", "max_mb = true", "max_mb = 15"):
+        assert "max_mb" in mh.parse(f'[[hook]]\nname = "x"\nfile = "/e"\n{bad}\n')[1][0]
+    assert "max_mb" in mh.parse('[[hook]]\nname = "x"\nurl = "http://e"\nmax_mb = 512\n')[1][0]
+
+
+def test_a_gz_file_hook_delivers_compressed_lines_that_check(project, tmp_path, capsys):
+    (tmp_path / "logs").mkdir()
+    path = str(tmp_path / "logs" / "events.jsonl.gz")
+    (project / "monitor-hooks.toml").write_text(f'[[hook]]\nname = "ca"\nfile = "{path}"\n')
+    _rounds(1, 2)
+    assert open(path, "rb").read(2) == b"\x1f\x8b"
+    assert mh.check(path) == 0
+    assert "2 lines, seq 1–2" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_full_file_is_moved_aside_and_every_piece_checks(project, tmp_path, capsys):
+    path = _rotating(project, tmp_path)
+    _rounds(1, 2, 3)
+    logs = tmp_path / "logs"
+    assert sorted(p.name for p in logs.glob("events*")) == [
+        "events.1-1.jsonl", "events.2-2.jsonl", "events.jsonl"]  # fmt: skip
+    for piece, seqs in (("events.1-1.jsonl", "1–1"), ("events.2-2.jsonl", "2–2"), ("events.jsonl", "3–3")):  # fmt: skip
+        assert mh.check(str(logs / piece)) == 0, capsys.readouterr().out
+        assert f"seq {seqs}" in capsys.readouterr().out
+    assert path == _state(project)["sink_file"]
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_rotated_gz_keeps_its_suffix(project, tmp_path):
+    _rotating(project, tmp_path, "events.jsonl.gz")
+    _rounds(1, 2)
+    piece = tmp_path / "logs" / "events.1-1.jsonl.gz"
+    assert piece.exists() and mh.check(str(piece)) == 0
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_deleted_piece_and_a_deleted_current_file_both_fail(project, tmp_path, capsys):
+    path = _rotating(project, tmp_path)
+    _rounds(1, 2)
+    os.unlink(tmp_path / "logs" / "events.1-1.jsonl")
+    assert mh.check(str(tmp_path / "logs" / "events.1-1.jsonl")) == 1
+    os.unlink(path)
+    (tmp_path / "logs" / "events.jsonl").touch()
+    assert mh.check(path) == 1 and "cut from the end" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("tiny")
+def test_an_edited_piece_fails(project, tmp_path, capsys):
+    _rotating(project, tmp_path)
+    _rounds(1, 2)
+    piece = tmp_path / "logs" / "events.1-1.jsonl"
+    piece.write_bytes(piece.read_bytes().replace(b"events", b"evemts", 1))
+    assert mh.check(str(piece)) == 1 and "signature" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_file_is_never_rotated_without_max_mb_or_before_it_holds_a_line(project, tmp_path):
+    path = _rotating(project, tmp_path)
+    mh.round_once(now=50)  # nothing delivered yet
+    assert list((tmp_path / "logs").glob("events*")) == []
+    (project / "monitor-hooks.toml").write_text(f'[[hook]]\nname = "ca"\nfile = "{path}"\n')
+    _rounds(1, 2, 3)
+    assert [p.name for p in (tmp_path / "logs").glob("events*")] == ["events.jsonl"]
+
+
+@pytest.mark.usefixtures("tiny")
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_rotation_the_supervisor_died_in_is_finished(project, tmp_path, moved):
+    # The intent is recorded before the file moves, so either side of the move can be picked up.
+    path = _rotating(project, tmp_path)
+    _rounds(1)
+    raw = json.loads((project / "monitor-hooks-state.json").read_text())
+    raw["ca"]["sink_rotating"] = "events.1-1.jsonl"
+    (project / "monitor-hooks-state.json").write_text(json.dumps(raw))
+    if moved:
+        os.rename(path, tmp_path / "logs" / "events.1-1.jsonl")
+    _rounds(2)
+    assert mh.check(str(tmp_path / "logs" / "events.1-1.jsonl")) == 0
+    assert mh.check(path) == 0
+    assert _state(project)["sink_rotating"] == "" and len(_state(project)["sink_parts"]) == 1
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_file_planted_under_the_name_mid_rotation_isnt_taken_for_the_moved_one(project, tmp_path):
+    path = _rotating(project, tmp_path)
+    _rounds(1)
+    raw = json.loads((project / "monitor-hooks-state.json").read_text())
+    raw["ca"]["sink_rotating"] = "events.1-1.jsonl"
+    (project / "monitor-hooks-state.json").write_text(json.dumps(raw))
+    (tmp_path / "logs" / "events.1-1.jsonl").write_text("theirs")
+    said = []
+    monitorlog._append([snap(20), ev(21), snap(22)])
+    mh.round_once(now=70, log=said.append)
+    assert any("already exists" in m for m in said) and _state(project)["sink_parts"] == []
+    assert (tmp_path / "logs" / "events.1-1.jsonl").read_text() == "theirs"
+    assert mh.check(path) == 0  # still the hook's one file, with every line
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_name_already_taken_holds_rotation_back_not_delivery(project, tmp_path):
+    path = _rotating(project, tmp_path)
+    (tmp_path / "logs" / "events.1-1.jsonl").write_text("theirs")
+    said = []
+    _rounds(1)
+    monitorlog._append([snap(20), ev(21), snap(22)])
+    mh.round_once(now=70, log=said.append)
+    assert (tmp_path / "logs" / "events.1-1.jsonl").read_text() == "theirs"
+    assert any("already exists" in m for m in said)
+    assert _state(project)["sink_seq"] == 2 and mh.check(path) == 0
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_rotation_held_back_is_said_once_not_every_round(project, tmp_path):
+    # a round is every five seconds
+    _rotating(project, tmp_path)
+    (tmp_path / "logs" / "events.1-1.jsonl").write_text("theirs")
+    _rounds(1)
+    said = []
+    for now in (70, 80, 90):
+        mh.round_once(now=now, log=said.append)
+    assert len([m for m in said if "not rotated" in m]) == 1
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_piece_named_with_its_hook_gone_from_the_config_still_checks(project, tmp_path):
+    _rotating(project, tmp_path)
+    _rounds(1, 2)
+    mh.remove("ca")
+    assert mh.check(str(tmp_path / "logs" / "events.1-1.jsonl"), "ca") == 0
+
+
 def test_state_from_a_newer_foldyard_keeps_what_it_knows(project):
     # an unknown field must not throw every hook's cursor away (HookState(**v) would)
     (project / "monitor-hooks-state.json").write_text(
@@ -708,6 +873,18 @@ def test_add_to_box_puts_the_signed_sink_in_the_to_box(project, to_box, capsys):
     out = capsys.readouterr().out
     assert "/run/foldyard/to-box/monitor/experiment.jsonl" in out  # where the box reads it
     assert "fy monitor check" in out
+
+
+def test_add_to_box_compressed_and_rotated(project, to_box):
+    assert mh.cli_add("ca", to_box=True, gzip=True, max_mb=512) == 0
+    (hook,), errors = mh.load()
+    assert errors == [] and hook.file.endswith("/monitor/ca.jsonl.gz") and hook.max_mb == 512
+
+
+@pytest.mark.parametrize("kw", [{"gzip": True}, {"max_mb": 512}])
+def test_add_refuses_a_file_option_on_another_kind(project, capsys, kw):
+    assert mh.cli_add("ca", url="http://e", **kw) == 1
+    assert "file" in capsys.readouterr().out
 
 
 def test_add_to_box_without_one_says_why_and_points_at_file(project, to_box, capsys):

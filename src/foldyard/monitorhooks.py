@@ -61,7 +61,7 @@ import threading
 import time
 import tomllib
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -71,6 +71,8 @@ SCHEMA = "fy.monitor.events/1"
 STAGES = ("events",)  # later: scored, decided, reviewed (docs/monitor-pipeline.md §5)
 SETTLE_SECONDS = 120.0
 BATCH_MAX = 500
+MIN_MAX_MB = 16  # the smallest `max_mb`: below it a busy hour is hundreds of files
+_MIB = 1 << 20
 MAX_ATTEMPTS = 5
 ROUND_EVERY = 5.0
 READ_BYTES = 4 << 20  # how far past its position a hook reads at a time
@@ -111,6 +113,7 @@ class Hook:
     who: tuple[str, ...] = ()
     worktrees: tuple[str, ...] = ()
     timeout: float = 15.0
+    max_mb: int = 0  # a file hook: past this, the file is moved aside and a new one begun; 0: never
     # its `who` (or the default skip) still filters after a crossing in the boot (:func:`crossings`)
     keep_who_after_crossing: bool = False
     # what it gets only when its `who` names it — the file's `skip_unless_asked`, not the hook's
@@ -221,6 +224,12 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
             timeout = float(raw.get("timeout", 15))
             if not 1 <= timeout <= 300:
                 raise ValueError("`timeout` must be 1–300 seconds")
+            max_mb = raw.get("max_mb", 0)
+            if "max_mb" in raw:
+                if type(max_mb) is not int or max_mb < MIN_MAX_MB:
+                    raise ValueError(f"`max_mb` must be a whole number, {MIN_MAX_MB} or more")
+                if not file:
+                    raise ValueError("`max_mb` only applies to a `file` hook")
             keep = raw.get("keep_who_after_crossing", False)
             if not isinstance(keep, bool):
                 raise ValueError("`keep_who_after_crossing` must be true or false")
@@ -236,6 +245,7 @@ def parse(text: str) -> tuple[list[Hook], list[str]]:
                     who=_strings(raw.get("who"), "`who`"),
                     worktrees=_strings(raw.get("worktrees"), "`worktrees`"),
                     timeout=timeout,
+                    max_mb=max_mb,
                     keep_who_after_crossing=keep,
                     unless_asked=unless_asked,
                 )
@@ -307,6 +317,8 @@ def render(hook: Hook) -> str:
             lines.append(f"{key} = {_arr(getattr(hook, key))}")
     if hook.timeout != Hook.timeout:
         lines.append(f"timeout = {hook.timeout:g}")
+    if hook.max_mb:
+        lines.append(f"max_mb = {hook.max_mb}")
     if hook.keep_who_after_crossing:
         lines.append("keep_who_after_crossing = true")
     return "\n".join(lines) + "\n"
@@ -407,9 +419,9 @@ def _values(values: tuple[str, ...]) -> tuple[str, ...]:
 _TO_BOX_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def to_box_file(name: str) -> Path:
+def to_box_file(name: str, gzip: bool = False) -> Path:
     """Where ``fy monitor hook add NAME --to-box`` puts the sink: the to-box's ``monitor/``."""
-    return boxmounts.to_box_dir() / "monitor" / f"{name}.jsonl"
+    return boxmounts.to_box_dir() / "monitor" / f"{name}.jsonl{'.gz' if gzip else ''}"
 
 
 def _box_writable_roots() -> list[tuple[Path, str]]:
@@ -436,6 +448,8 @@ def cli_add(
     who: tuple[str, ...] = (),
     kinds: tuple[str, ...] = (),
     worktrees: tuple[str, ...] = (),
+    gzip: bool = False,
+    max_mb: int = 0,
 ) -> int:
     """`fy monitor hook add`. Refuses — writing nothing — what the supervisor would skip, a filter
     value that can never match (a typo would silently send nothing), and a file the sink would
@@ -446,6 +460,11 @@ def cli_add(
             "✗ give exactly one of `--to-box`, `--file PATH`, `--url URL`, or a program after `--`"
         )
         return 1
+    if (gzip or max_mb) and not (file or to_box):
+        print("✗ `--gzip` and `--max-mb` are for a file hook (`--to-box` or `--file`)")
+        return 1
+    if gzip and file and not monitorsink.compressed(file):
+        file += ".gz"
     if to_box:
         from . import machine  # lazy: binds the machine name from the adopted config
 
@@ -460,7 +479,7 @@ def cli_add(
         if not _TO_BOX_NAME.fullmatch(name):
             print(f"✗ '{name}' can't name a file in the to-box: letters, digits, `.`, `_`, `-`")
             return 1
-        file = str(to_box_file(name))
+        file = str(to_box_file(name, gzip))
         Path(file).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     who, kinds, worktrees = _values(who), _values(kinds), _values(worktrees)
     bad = [w for w in who if w not in WHO] + [k for k in kinds if k not in KINDS]
@@ -478,7 +497,14 @@ def cli_add(
             print(f"✗ {e}")
             return 1
     hook = Hook(
-        name=name, command=command, url=url, file=file, who=who, kinds=kinds, worktrees=worktrees
+        name=name,
+        command=command,
+        url=url,
+        file=file,
+        who=who,
+        kinds=kinds,
+        worktrees=worktrees,
+        max_mb=max_mb,
     )
     try:
         add(hook)
@@ -492,7 +518,7 @@ def cli_add(
         "ones on; `fy monitor hook` shows how its deliveries are going."
     )
     if to_box:
-        in_box = f"{boxmounts.TO_BOX_IN_BOX}/monitor/{name}.jsonl"
+        in_box = f"{boxmounts.TO_BOX_IN_BOX}/monitor/{os.path.basename(file)}"
         print(f"  In every box it is {in_box} — read-only there and in the VM.")
         print(
             "  Each batch is one signed JSON line; `fy monitor check "
@@ -536,8 +562,8 @@ def cli_remove(name: str) -> int:
     return 0
 
 
-def _first_hook(data: bytes) -> str:
-    for raw in data.split(b"\n"):
+def _first_hook(lines: Iterable[bytes]) -> str:
+    for raw in lines:
         try:
             doc = json.loads(raw)
         except (ValueError, RecursionError):
@@ -545,6 +571,17 @@ def _first_hook(data: bytes) -> str:
         if isinstance(doc, dict) and isinstance(doc.get("hook"), str):
             return doc["hook"]
     return ""
+
+
+def _chain(st: HookState | None, path: str) -> tuple[tuple[int, str], tuple[int, str] | None]:
+    """The ``(seq, mac)`` the hook's file at ``path`` starts after and ends on, as the supervisor
+    recorded them: its current file, or one rotated out. No end when it recorded neither."""
+    if st and st.sink_file == path:
+        return (st.sink_start[0], st.sink_start[1]), (st.sink_seq, st.sink_mac)
+    for part in st.sink_parts if st else []:
+        if part["file"] == path:
+            return (part["start"][0], part["start"][1]), (part["end"][0], part["end"][1])
+    return (0, ""), None
 
 
 def check(path: str, name: str = "") -> int:
@@ -558,32 +595,41 @@ def check(path: str, name: str = "") -> int:
             f"✗ no sink key ({monitorsink.key_file()}) — no file hook has written on this computer"
         )
         return 1
+    states = _load_state()
     try:
-        data = monitorsink.read(path)
+        monitorsink.size(path)  # a path the sink would refuse says so before anything is read
+        name = name or next((h.name for h in load()[0] if h.file == path), "")
+        name = name or next(
+            (n for n, s in states.items() if any(p["file"] == path for p in s.sink_parts)), ""
+        )
+        if not name:
+            try:
+                name = _first_hook(monitorsink.lines(path))
+            except monitorsink.Unreadable:
+                name = ""
+            if name:
+                print(
+                    f"ℹ hook '{name}' is taken from the file's first line, which whatever can "
+                    "write the file controls — no configured hook writes this path; "
+                    "`--hook NAME` names it yourself"
+                )
+        if not name:
+            print(f"✗ {path}: no hook names it — say which with `--hook NAME`")
+            return 1
+        start, chain = _chain(states.get(name), path)
+        got = monitorsink.verify(monitorsink.lines(path), key, name, chain, start)
     except (OSError, monitorsink.Refused) as e:
         print(f"✗ {e}")
         return 1
-    name = name or next((h.name for h in load()[0] if h.file == path), "")
-    if not name and (name := _first_hook(data)):
-        print(
-            f"ℹ hook '{name}' is taken from the file's first line, which whatever can write the "
-            "file controls — no configured hook writes this path; `--hook NAME` names it yourself"
-        )
-    if not name:
-        print(f"✗ {path}: no hook names it — say which with `--hook NAME`")
-        return 1
-    st = _load_state().get(name)
-    chain = (st.sink_seq, st.sink_mac) if st and st.sink_file == path else None
-    got = monitorsink.verify(data, key, name, chain)
     for note in got.notes:
         print(f"ℹ {note}")
     if got.problem:
         print(f"✗ {path}:{got.line}: {got.problem}")
         return 1
     print(
-        f"✓ {path}: {got.lines} lines, seq 1–{got.last_seq}, {got.events} events — each signed by "
-        f"this computer's sink for hook '{name}', none missing, moved or added, and the file "
-        "ends where the sink last wrote"
+        f"✓ {path}: {got.lines} lines, seq {got.first_seq}–{got.last_seq}, {got.events} events — "
+        f"each signed by this computer's sink for hook '{name}', none missing, moved or added, "
+        "and the file ends where the sink last wrote"
     )
     return 0
 
@@ -687,6 +733,10 @@ class HookState:
     sink_seq: int = 0  # a file hook: the last line written, which `fy monitor check` ends on
     sink_mac: str = ""  # …and its mac, the next line's `prev`
     sink_file: str = ""  # …in this file: a hook given another `file` starts a new chain there
+    sink_start: list = field(default_factory=lambda: [0, ""])  # (seq, mac) the file starts after
+    sink_parts: list = field(default_factory=list)  # files rotated out: {file, start, end}
+    sink_rotating: str = ""  # the name the file is being moved to (see `_rotate`)
+    sink_note: str = ""  # why the file isn't rotated, as last logged
     gaps: list = field(default_factory=list)  # gaps owed to the hook's next batch (see `gaps`)
     passed: dict = field(default_factory=dict)  # who -> events passed over, owed to the next batch
     last_time: str = ""  # the time of the event at `last`
@@ -953,6 +1003,7 @@ def _to_file(
     check)."""
     if st.sink_file != hook.file:
         st.sink_seq, st.sink_mac, st.sink_file = 0, "", hook.file
+        st.sink_start, st.sink_rotating = [0, ""], ""
     try:
         key = monitorsink.ensure_key()
         body = batch(hook, events, gaps, passed, unfiltered)
@@ -1151,6 +1202,47 @@ def deliver(
     return f"monitor hook '{hook.name}': delivery failed, retrying ({why})"
 
 
+def _rotated(file: str, first: int, last: int) -> str:
+    """The name a full file is moved to, beside itself: ``events.1-72.jsonl.gz``."""
+    name = os.path.basename(file)
+    suffix = next((s for s in (".jsonl.gz", ".jsonl", ".gz") if name.endswith(s)), "")
+    return f"{name.removesuffix(suffix)}.{first}-{last}{suffix}"
+
+
+def _rotate(hook: Hook, st: HookState, save: Callable[[], None]) -> str:
+    """Move a file hook's full file aside, so its next line begins a new one; ``""`` or why not.
+
+    The chain runs on across the files, and the state records where each starts and ends, so every
+    one still checks on its own and a missing one still fails. Only the supervisor does this: it
+    alone writes the file and the state. The intent is saved before the file moves, so a supervisor
+    that died on either side of the move finishes it here the next time. A file that can't be moved
+    stays in use: evidence past the limit is better than evidence not written."""
+    if not hook.file or st.sink_file != hook.file:
+        return ""
+    try:
+        if not st.sink_rotating:
+            holds_lines = st.sink_seq > st.sink_start[0]
+            full = hook.max_mb and monitorsink.size(hook.file) >= hook.max_mb * _MIB
+            if not (holds_lines and full):
+                return ""
+            name = _rotated(hook.file, st.sink_start[0] + 1, st.sink_seq)
+            aside = os.path.join(os.path.dirname(hook.file), name)
+            if monitorsink.exists(aside):
+                return f"monitor hook '{hook.name}': not rotated, {aside} already exists"
+            st.sink_rotating = name
+            save()
+        aside = os.path.join(os.path.dirname(hook.file), st.sink_rotating)
+        if monitorsink.exists(hook.file):  # not moved yet: never over, or taken for, another file
+            monitorsink.move(hook.file, st.sink_rotating)
+    except (OSError, monitorsink.Refused) as e:
+        return f"monitor hook '{hook.name}': not rotated ({str(e)[:200]})"
+    end = [st.sink_seq, st.sink_mac]
+    st.sink_parts.append({"file": aside, "start": st.sink_start, "end": end})
+    st.sink_start, st.sink_rotating = list(end), ""
+    save()
+    return ""
+
+
 def round_once(now: float | None = None, log: Callable[[str], None] = lambda m: None) -> None:
     """Every configured hook: batches until it is caught up (at most :data:`ROUND_BATCHES`, for
     about :data:`ROUND_SECONDS`) or a delivery fails. Never raises for a hook's failure."""
@@ -1165,6 +1257,10 @@ def round_once(now: float | None = None, log: Callable[[str], None] = lambda m: 
     try:
         for hook in hooks:
             st = states.setdefault(hook.name, HookState())
+            note = _rotate(hook, st, lambda: _save_state(states))
+            if note and note != st.sink_note:
+                log(note)
+            st.sink_note = note
             started = time.monotonic()
             for _ in range(ROUND_BATCHES):
                 mark = (list(st.last), list(st.pos), len(st.gaps), st.attempts, st.dropped)

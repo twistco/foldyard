@@ -765,6 +765,12 @@ def hook_add(
     worktrees: list[str] | None = typer.Option(
         None, "--worktree", "-w", help="only these worktrees"
     ),
+    gzip: bool = typer.Option(
+        False, "--gzip", help="a file hook: compress each line (the file's name ends in .gz)"
+    ),
+    max_mb: int = typer.Option(
+        0, "--max-mb", help="a file hook: past this size, move the file aside and begin a new one"
+    ),
 ) -> None:
     """Add a hook: `--to-box`, `--file PATH`, `--url URL`, or `-- /abs/program args…` — one.
 
@@ -787,6 +793,8 @@ def hook_add(
             who=tuple(who or ()),
             kinds=tuple(kinds or ()),
             worktrees=tuple(worktrees or ()),
+            gzip=gzip,
+            max_mb=max_mb,
         )
     )
 

@@ -6,6 +6,7 @@ no subprocess."""
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import stat
@@ -407,3 +408,190 @@ def test_a_line_written_but_not_yet_recorded_is_a_note():
 def test_an_empty_file_matches_a_hook_that_wrote_nothing():
     assert ms.verify(b"", KEY, "ca", (0, "")).problem == ""
     _fails(b"", 0, "end", (1, "x"))
+
+
+# ── reading a line at a time ───────────────────────────────────────────────────────────
+
+
+def _write(tmp_path, data: bytes, name: str = "events.jsonl") -> str:
+    path = tmp_path / name
+    path.write_bytes(data)
+    return str(path)
+
+
+def test_lines_reads_one_line_at_a_time(tmp_path, monkeypatch):
+    # `check` on a 25 GB file once took some 50 GB of memory: all of it read, then all of it split.
+    # Reading the first line must not read the rest.
+    reads = []
+    real = os.read
+    monkeypatch.setattr(ms.os, "read", lambda fd, n: reads.append(n) or real(fd, n))
+    path = _write(tmp_path, b"a\n" + b"b" * (ms.CHUNK * 4) + b"\n")
+    assert next(ms.lines(path)) == b"a\n"
+    assert len(reads) == 1 and reads[0] <= ms.CHUNK
+
+
+def test_lines_yields_an_unterminated_fragment_without_a_newline(tmp_path):
+    assert list(ms.lines(_write(tmp_path, b"a\nbc"))) == [b"a\n", b"bc"]
+    assert list(ms.lines(_write(tmp_path, b""))) == []
+    assert list(ms.lines(_write(tmp_path, b"\n\n"))) == [b"\n", b"\n"]
+
+
+def test_verify_takes_lines_as_well_as_bytes(tmp_path):
+    lines, macs = _file(3)
+    path = _write(tmp_path, b"".join(lines))
+    got = ms.verify(ms.lines(path), KEY, "ca", (3, macs[-1]))
+    assert got == ms.verify(b"".join(lines), KEY, "ca", (3, macs[-1])) and got.problem == ""
+
+
+def test_a_line_too_long_is_a_problem_not_a_full_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(ms, "MAX_LINE", 4096)
+    path = _write(tmp_path, b"x" * 10_000)
+    got = ms.verify(ms.lines(path), KEY, "ca", (0, ""))
+    assert got.line == 1 and "longer than" in got.problem
+
+
+def test_lines_refuses_a_symlink(tmp_path):
+    (tmp_path / "real").write_bytes(b"a\n")
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    with pytest.raises(ms.Refused, match="symlink"):
+        next(ms.lines(str(tmp_path / "link")))
+
+
+# ── a compressed file: each line a gzip member of its own ──────────────────────────────
+
+
+def _gz(tmp_path, n: int = 3) -> tuple[str, list[str]]:
+    lines, macs = _file(n)
+    path = str(tmp_path / "events.jsonl.gz")
+    for line in lines:
+        ms.append(path, line)
+    return path, macs
+
+
+def _gz_check(path: str, macs: list[str]) -> ms.Check:
+    return ms.verify(ms.lines(path), KEY, "ca", (len(macs), macs[-1]))
+
+
+def test_a_gz_file_holds_the_same_lines_and_any_gzip_reader_reads_it(tmp_path):
+    path, macs = _gz(tmp_path)
+    with gzip.open(path, "rb") as f:
+        assert f.read() == b"".join(_file(3)[0])
+    assert list(ms.lines(path)) == _file(3)[0]
+    assert _gz_check(path, macs).problem == ""
+
+
+def test_a_batch_compresses(tmp_path):
+    body = {**_body(), "events": [{**_body()["events"][0], "seq": i} for i in range(500)]}
+    line, _ = ms.signed_line(KEY, body, 1, "")
+    ms.append(str(tmp_path / "e.jsonl.gz"), line)
+    assert (tmp_path / "e.jsonl.gz").stat().st_size * 5 < len(line)
+
+
+def test_a_gz_write_that_fails_part_way_is_undone(tmp_path, monkeypatch):
+    path, macs = _gz(tmp_path, 2)
+    before = open(path, "rb").read()
+    real = ms.os.write
+
+    def tear(fd, data):
+        real(fd, bytes(data[:10]))
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ms.os, "write", tear)
+    with pytest.raises(OSError, match="No space"):
+        ms.append(path, _file(3)[0][2])
+    assert open(path, "rb").read() == before
+    assert _gz_check(path, macs).problem == ""
+
+
+@pytest.mark.parametrize(
+    ("damage", "line", "why"),
+    [
+        (lambda d: d[:-5], 3, "cut off"),  # the last member's tail
+        (lambda d: d + b"junk", 4, "not gzip"),
+        (lambda d: d + bytes(512), 4, "not gzip"),  # zero padding, which gzip readers skip
+        (lambda d: d + gzip.compress(b""), 4, "one line"),  # an empty member
+        (lambda d: d + gzip.compress(b"a\nb\n"), 4, "one line"),
+        (lambda d: gzip.compress(gzip.decompress(d)), 1, "one line"),  # recompressed whole
+        (lambda d: b"not gzip at all\n", 1, "not gzip"),
+    ],
+)
+def test_a_gz_file_that_isnt_the_sinks_own_fails(tmp_path, damage, line, why):
+    path, macs = _gz(tmp_path)
+    with open(path, "rb") as f:
+        data = damage(f.read())
+    _write(tmp_path, data, "events.jsonl.gz")
+    got = _gz_check(path, macs)
+    assert got.line == line and why in got.problem, got.problem
+
+
+def test_a_gz_bomb_is_a_problem_not_a_full_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(ms, "MAX_LINE", 4096)
+    path = _write(tmp_path, gzip.compress(b"x" * 10_000_000 + b"\n"), "events.jsonl.gz")
+    got = ms.verify(ms.lines(path), KEY, "ca", (0, ""))
+    assert got.line == 1 and "longer than" in got.problem
+
+
+def test_a_gz_member_split_over_many_reads_is_read_whole(tmp_path, monkeypatch):
+    path, macs = _gz(tmp_path)
+    monkeypatch.setattr(ms, "CHUNK", 7)
+    assert _gz_check(path, macs).problem == ""
+
+
+# ── a chain that starts part-way: what rotation leaves ─────────────────────────────────
+
+
+def test_a_file_that_starts_where_the_last_ended_passes_from_there():
+    lines, macs = _file(5)
+    got = ms.verify(b"".join(lines[2:]), KEY, "ca", (5, macs[4]), (2, macs[1]))
+    assert got.problem == "" and (got.first_seq, got.last_seq) == (3, 5)
+
+
+def test_a_file_that_starts_elsewhere_fails():
+    lines, macs = _file(5)
+    late = ms.verify(b"".join(lines[3:]), KEY, "ca", (5, macs[4]), (2, macs[1]))
+    assert late.line == 1 and "seq 4 where 3 was due" in late.problem
+    other = ms.verify(b"".join(lines[2:]), KEY, "ca", (5, macs[4]), (2, "0" * 64))
+    assert other.line == 1 and "chain" in other.problem
+
+
+def test_a_re_sent_first_line_after_a_rotation_passes_with_a_note():
+    lines, macs = _file(4)
+    again, mac = ms.signed_line(KEY, _body(n=9), 3, macs[1])
+    got = ms.verify(lines[2] + again, KEY, "ca", (3, mac), (2, macs[1]))
+    assert got.problem == "" and "re-sent" in got.notes[0]
+
+
+def test_an_empty_file_after_a_rotation_passes():
+    _, macs = _file(2)
+    got = ms.verify(b"", KEY, "ca", (2, macs[1]), (2, macs[1]))
+    assert got.problem == "" and got.lines == 0
+
+
+# ── moving a file aside ────────────────────────────────────────────────────────────────
+
+
+def test_move_renames_beside_itself_and_never_over_a_file(tmp_path):
+    path = _write(tmp_path, b"a\n")
+    ms.move(path, "events.1-3.jsonl")
+    assert (tmp_path / "events.1-3.jsonl").read_bytes() == b"a\n" and not os.path.exists(path)
+    _write(tmp_path, b"b\n")
+    with pytest.raises(ms.Refused, match="already exists"):
+        ms.move(path, "events.1-3.jsonl")
+    assert (tmp_path / "events.1-3.jsonl").read_bytes() == b"a\n"
+
+
+def test_move_refuses_a_symlink_and_a_name_that_leaves_the_directory(tmp_path):
+    (tmp_path / "victim").write_text("keep")
+    (tmp_path / "events.jsonl").symlink_to(tmp_path / "victim")
+    with pytest.raises(ms.Refused):
+        ms.move(str(tmp_path / "events.jsonl"), "x.jsonl")
+    with pytest.raises(ms.Refused):
+        ms.move(str(tmp_path / "victim"), "../x.jsonl")
+
+
+def test_size_is_zero_for_a_missing_file_and_never_follows_a_link(tmp_path):
+    assert ms.size(str(tmp_path / "none")) == 0
+    assert ms.size(_write(tmp_path, b"abc")) == 3
+    (tmp_path / "link").symlink_to(tmp_path / "events.jsonl")
+    with pytest.raises(ms.Refused):
+        ms.size(str(tmp_path / "link"))
