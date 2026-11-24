@@ -730,6 +730,44 @@ def test_an_added_hook_the_kernel_lacks_never_stops_tetragon(observe_files, call
     assert re.search(r"ignore:\s+callNotFound: true", _hooks(monitor.render(True)[0])[call])
 
 
+def _reported(script: str, *rows: str) -> str:
+    """What the rendered helper's report says of a tetra that lists ``rows``."""
+    if shutil.which("bash") is None:
+        pytest.skip("no bash on this host")
+    names = ("policy_enabled", "verb_report")
+    fns = [re.search(rf"^{n}\(\) \{{.*?^\}}", script, re.S | re.M) for n in names]
+    body = "\n".join(f.group(0) for f in fns if f).replace("/usr/local/bin/tetra", "tetra")
+    table = "ID NAME DOMAIN STATE\n" + "".join(f"{i} {r}\n" for i, r in enumerate(rows, 1))
+    stubs = 'systemctl() { :; }; sleep() { :; }; seq() { echo 1 2; }; put() { echo "$1: $2"; }\n'
+    stubs += f"tetra() {{ printf '%s' '{table}'; }}\n"
+    res = subprocess.run(
+        ["bash", "-c", f"set -uo pipefail\nPOLICY=fy-observe\n{stubs}{body}\nverb_report"],
+        text=True, capture_output=True, check=True,
+    )  # fmt: skip
+    return res.stdout.strip()
+
+
+@pytest.mark.spawns("bash")
+@pytest.mark.parametrize("state", ["", "load_error", "disabled"])
+def test_observe_files_isnt_loaded_until_both_its_policies_are(observe_files, state):
+    # Tetragon runs on with the second one refused, and records none of what it's for.
+    script, _ = monitor.render(True)
+    first, second = "fy-observe static enabled", "fy-observe-files static "
+    said = _reported(script, first, *([second + state] if state else []))
+    assert said == "policy: failed: fy-observe or fy-observe-files not loaded after 600s"
+    assert _reported(script, second + "enabled") == said
+    assert _reported(script, second + "enabled", first) == "policy: loaded fy-observe"
+
+
+@pytest.mark.spawns("bash")
+def test_observe_waits_for_its_one_policy(monkeypatch):
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    script, _ = monitor.render(True)
+    assert _reported(script, "fy-observe static enabled") == "policy: loaded fy-observe"
+    assert _reported(script) == "policy: failed: fy-observe not loaded after 600s"
+    assert "fy-observe-files" not in script
+
+
 def test_both_levels_want_the_monitor(monkeypatch):
     for level, on in (("off", False), ("observe", True), ("observe-files", True)):
         monkeypatch.setattr(monitor.config, "machine_monitor", lambda level=level: level)
