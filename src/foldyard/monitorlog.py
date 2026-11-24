@@ -370,7 +370,7 @@ def run(
     """The supervisor's pull loop (a daemon thread): every :data:`PULL_EVERY` seconds while the
     monitor is wanted and the VM runs. Logs a failure once per distinct message, never raises;
     tells a crossing once (:func:`tell_crossing`)."""
-    from . import machine, monitor
+    from . import machine, monitor, monitorevidence
 
     said = ""
     while not stopping():
@@ -381,6 +381,7 @@ def run(
                 pull_once(machine.BACKEND, machine.MACHINE, monitor.relay_key())
                 behind = Cursor.load().behind
                 tell_crossing(log, notify)
+                monitorevidence.tell(log, notify)
         except Exception as e:
             msg = f"guest monitor: pulling events failed: {e}"
         if msg and msg != said:
@@ -819,6 +820,32 @@ READ_BYTES = 8 << 20  # how much of the store's tail `recent` reads
 CHUNK = 5_000  # records joined at a time when reading a range (tens of MB parsed, at most)
 
 
+def touched(rec: dict) -> set[str]:
+    """The mount namespaces an event's process and parent are in."""
+    if rec.get("k") != "ev":
+        return set()
+    body = next((v for k, v in (rec.get("e") or {}).items() if k.startswith("process_")), {}) or {}
+    return {i for i in (_mnt(body.get("process") or {}), _mnt(body.get("parent") or {})) if i}
+
+
+def around(
+    cat: monitorstore.Catalogue, boot: str, lo: int, hi: int, inodes: set[str]
+) -> list[dict]:
+    """What joining ``boot``'s events ``lo``–``hi``, which touch ``inodes``, takes from the
+    catalogue: the snapshot before them and the one after, and the namespace facts."""
+    before, after = cat.before(boot, lo), cat.after(boot, hi)
+    # the facts from the snapshot before to the one after (a container's init entering its
+    # namespace may sit in an earlier read than its first command)…
+    blo = before["seq"] if before else -1
+    window = cat.facts(boot, blo, after["seq"] if after else 1 << 62)
+    # …and, before that, what the join asks about every namespace the events touch: each fact
+    # carries its kind, so the newest few of some kinds (Catalogue.prior: podman entered its
+    # own at boot; a container's init may have entered hours ago) — what retention keeps
+    inodes = inodes | {str(f["inode"]) for f in window} | {str(f["outside"]) for f in window}
+    prior = [f for i in sorted(inodes) for f in cat.prior(boot, i, blo)]
+    return [s for s in (before, after) if s] + prior + window
+
+
 def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -> list[Event]:
     """:func:`attribute` over ``records`` — one contiguous stretch of the store — giving what
     joining the WHOLE store would: with the catalogue's snapshot before and after each boot's
@@ -834,26 +861,11 @@ def join(records: list[dict], cat: monitorstore.Catalogue | None, prefix: str) -
             span[r["boot"]] = (min(lo, seq), max(hi, seq))
     near = []
     for boot, (lo, hi) in span.items():
-        before, after = cat.before(boot, lo), cat.after(boot, hi)
-        near += [s for s in (before, after) if s]
-        # the facts from the snapshot before to the one after (a container's init entering its
-        # namespace may sit in an earlier read than its first command)…
-        blo = before["seq"] if before else -1
-        window = cat.facts(boot, blo, after["seq"] if after else 1 << 62)
-        # …and, before that, what the join asks about every namespace the events touch: each fact
-        # carries its kind, so the newest few of some kinds (Catalogue.prior: podman entered its
-        # own at boot; a container's init may have entered hours ago) — what retention keeps
-        inodes = {str(f["inode"]) for f in window} | {str(f["outside"]) for f in window}
+        inodes: set[str] = set()
         for r in records:
-            if r.get("k") == "ev" and r.get("boot") == boot:
-                body = next((v for k, v in (r.get("e") or {}).items() if k.startswith("process_")),
-                            {}) or {}  # fmt: skip
-                for obj in (body.get("process") or {}, body.get("parent") or {}):
-                    inum = ((obj.get("ns") or {}).get("mnt") or {}).get("inum")
-                    if inum:
-                        inodes.add(str(inum))
-        prior = [f for i in sorted(inodes) for f in cat.prior(boot, i, blo)]
-        near += prior + window
+            if r.get("boot") == boot:
+                inodes |= touched(r)
+        near += around(cat, boot, lo, hi, inodes)
     # the snapshots after the records: attribute() orders boots by first appearance, and the
     # events must come out in store order (a hook's cursor moves by them)
     return attribute([*records, *near, {"k": "engine", "containers": cat.claims()}], prefix)
@@ -975,6 +987,8 @@ def _who(e: Event) -> str:
 
 def store_summary() -> str:
     """How much the store holds on your computer, against its budget, and how far back."""
+    from . import monitorevidence
+
     segs = monitorstore.segments()
     used = sum(monitorstore.disk_size(s) for s in segs)
     cap, note = monitorstore.budget_setting()
@@ -989,7 +1003,10 @@ def store_summary() -> str:
             cat.close()
     since = f", events from {oldest[:19].replace('T', ' ')} UTC" if oldest else ""
     warn = f" ⚠ {note}" if note else ""
-    return f"store: {used / 2**20:.0f} of {cap >> 20} MB{since}{warn}"
+    evidence = monitorevidence.summary()
+    return f"store: {used / 2**20:.0f} of {cap >> 20} MB{since}{warn}" + (
+        f"; {evidence} (`fy monitor evidence`)" if evidence else ""
+    )
 
 
 def current_boot() -> str:
@@ -1100,8 +1117,9 @@ def show(
         "VM's or podman's namespace. Times are UTC."
     )
     print(f"— {store_summary()}")
-    note = crossing_note()
-    if note:
+    from . import monitorevidence
+
+    for note in filter(None, (crossing_note(), monitorevidence.note())):
         print(f"⚠ {note}")
     if cur.error:
         print(f"⚠ the last pull failed: {cur.error}")

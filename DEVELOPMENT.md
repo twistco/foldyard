@@ -167,6 +167,13 @@ Core (stdlib-only on the hot path; heavy imports lazy):
   (or on the marks alone) after an editable upgrade would drop a catalogue whose schema it doesn't
   know, and fail every write to a table with a column it doesn't know. The pull indexes a record
   before writing it; every reader catches the catalogue up first.
+- `monitorevidence.py` — the minute either side of each crossing, copied out of that store before
+  retention removes it (`<state dir>/logs/evidence/`, a directory each; docs/monitor-pipeline.md
+  §3.3). COPIED, never segments spared in place: the hooks and retention take the store to be
+  contiguous, and a hook whose position fell in a hole would wait for good. Read by the join over
+  its own files alone, so it carries its context. Host-only cap (`evidence_mb`); a boot's FIRST
+  crossings win, and a full cap makes a new window wait in the store until retention is about to
+  take it.
 - `monitorhooks.py` — the operator's hooks over those events: host-only config
   (`<state dir>/monitor-hooks.toml`, NEVER `foldyard.toml` — a command there is host code execution
   for the box, a url an exfiltration channel), settled events only (a later snapshot ANYWHERE in the

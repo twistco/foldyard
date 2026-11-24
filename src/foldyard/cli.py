@@ -660,7 +660,8 @@ monitor_app = typer.Typer(
     name="monitor",
     help="What the guest monitor recorded: processes, connections, selected files (your "
     "computer).\n\nBare `fy monitor` shows the recent events, `--since`/`--until` any stretch the "
-    "store still holds; `fy monitor hook` sends them on to a file, a program or a URL, and "
+    "store still holds; `fy monitor evidence` what was kept around a step out of a container; "
+    "`fy monitor hook` sends them on to a file, a program or a URL, and "
     "`fy monitor check` verifies a file a hook wrote.",
     invoke_without_command=True,
 )
@@ -801,6 +802,29 @@ def hook_remove(name: str = typer.Argument(..., help="the hook to remove")) -> N
     from . import monitorhooks
 
     raise typer.Exit(monitorhooks.cli_remove(name))
+
+
+@monitor_app.command("evidence")
+def monitor_evidence(
+    ident: str = typer.Argument("", metavar="[ID]", help="one of those listed, or its start"),
+    as_json: bool = typer.Option(False, "--json", help="one JSON object per line"),
+    remove: bool = typer.Option(False, "--remove", help="remove ID, to make room (asks first)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="don't ask"),
+) -> None:
+    """What was recorded around each step out of a container, kept past the store's budget.
+
+    Bare, it lists them; with ID it prints that one's events, as `fy monitor` does."""
+    _monitor_host_only()
+    from . import monitorevidence
+
+    if remove:
+        if not ident:
+            typer.echo("✗ --remove takes the ID of what to remove — `fy monitor evidence`")
+            raise typer.Exit(1)
+        if not yes:
+            typer.confirm(f"Remove the evidence {ident}? It can't be brought back", abort=True)
+        raise typer.Exit(monitorevidence.remove(ident))
+    raise typer.Exit(monitorevidence.show(ident, as_json))
 
 
 @monitor_app.command("check")
