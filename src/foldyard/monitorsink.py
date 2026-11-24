@@ -318,7 +318,10 @@ def _members(chunks: Iterable[bytes]) -> Iterator[bytes]:
         size = 0
         while not member.eof:
             if not data and not (data := next(source, b"")):
-                raise Unreadable("cut off part-way through a gzip member")
+                raise Unreadable(
+                    "cut off part-way through a gzip member — if the supervisor was writing just "
+                    "then, check again"
+                )
             try:
                 piece = member.decompress(data, MAX_LINE + 1 - size)
             except zlib.error:

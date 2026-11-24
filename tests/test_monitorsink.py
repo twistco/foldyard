@@ -506,7 +506,7 @@ def test_a_gz_write_that_fails_part_way_is_undone(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("damage", "line", "why"),
     [
-        (lambda d: d[:-5], 3, "cut off"),  # the last member's tail
+        (lambda d: d[:-5], 3, "check again"),  # the last member's tail
         (lambda d: d + b"junk", 4, "not gzip"),
         (lambda d: d + bytes(512), 4, "not gzip"),  # zero padding, which gzip readers skip
         (lambda d: d + gzip.compress(b""), 4, "one line"),  # an empty member

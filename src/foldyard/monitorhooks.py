@@ -617,7 +617,11 @@ def check(path: str, name: str = "") -> int:
             print(f"✗ {path}: no hook names it — say which with `--hook NAME`")
             return 1
         start, chain = _chain(states.get(name), path)
-        got = monitorsink.verify(monitorsink.lines(path), key, name, chain, start)
+        # Rotated, and nothing written since: the next line makes the next file.
+        unwritten = start[0] and chain == start and not monitorsink.exists(path)
+        got = monitorsink.verify(
+            b"" if unwritten else monitorsink.lines(path), key, name, chain, start
+        )
     except (OSError, monitorsink.Refused) as e:
         print(f"✗ {e}")
         return 1
@@ -626,6 +630,9 @@ def check(path: str, name: str = "") -> int:
     if got.problem:
         print(f"✗ {path}:{got.line}: {got.problem}")
         return 1
+    if start[0] and not got.lines:
+        print(f"✓ {path}: nothing written since seq {start[0]}, where the file before it ends")
+        return 0
     print(
         f"✓ {path}: {got.lines} lines, seq {got.first_seq}–{got.last_seq}, {got.events} events — "
         f"each signed by this computer's sink for hook '{name}', none missing, moved or added, "
@@ -1220,20 +1227,23 @@ def _rotate(hook: Hook, st: HookState, save: Callable[[], None]) -> str:
     if not hook.file or st.sink_file != hook.file:
         return ""
     try:
+        directory = os.path.dirname(hook.file)
         if not st.sink_rotating:
             holds_lines = st.sink_seq > st.sink_start[0]
             full = hook.max_mb and monitorsink.size(hook.file) >= hook.max_mb * _MIB
             if not (holds_lines and full):
                 return ""
+        if not st.sink_rotating or monitorsink.exists(hook.file):  # not moved yet
+            # Named again each time: a move refused earlier let more lines into the file.
             name = _rotated(hook.file, st.sink_start[0] + 1, st.sink_seq)
-            aside = os.path.join(os.path.dirname(hook.file), name)
-            if monitorsink.exists(aside):
+            aside = os.path.join(directory, name)
+            if monitorsink.exists(aside):  # never over, or taken for, another file
                 return f"monitor hook '{hook.name}': not rotated, {aside} already exists"
-            st.sink_rotating = name
-            save()
-        aside = os.path.join(os.path.dirname(hook.file), st.sink_rotating)
-        if monitorsink.exists(hook.file):  # not moved yet: never over, or taken for, another file
-            monitorsink.move(hook.file, st.sink_rotating)
+            if name != st.sink_rotating:
+                st.sink_rotating = name
+                save()
+            monitorsink.move(hook.file, name)
+        aside = os.path.join(directory, st.sink_rotating)
     except (OSError, monitorsink.Refused) as e:
         return f"monitor hook '{hook.name}': not rotated ({str(e)[:200]})"
     end = [st.sink_seq, st.sink_mac]

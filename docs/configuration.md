@@ -472,7 +472,8 @@ disk_gib = 60
         ending in `.gz`, compresses each line, some 15–20 times smaller; any gzip reader reads it.
         `--max-mb 512` (`max_mb = 512`) moves a full file aside and begins a new one:
         `events.1-72.jsonl`, named by its lines' numbers. The numbering runs on, and each file
-        checks on its own at its own path. Moving one elsewhere or deleting it is yours to do.
+        checks on its own at its own path. Moving one elsewhere or deleting it is yours to do, and
+        one moved elsewhere no longer checks.
       - Each line is signed with a key only your computer holds
         (`~/.foldyard/<project>/monitor-sink.key`), numbered, and linked to the line before it. The
         box can still edit the file, but `fy monitor check <path>` finds any line edited, removed,

@@ -542,7 +542,10 @@ and the next line begins a new one. The chain runs on: the state records the `(s
 starts after and ends on, so `check` verifies any of them, and one that is deleted or edited still
 fails. The intent is saved before the file moves and the result after, so a supervisor that died in
 between finishes the move in its next round. A name already taken holds rotation back, and says so,
-never delivery. Only the supervisor rotates: it alone writes the file and the state.
+never delivery; a file held back is named by the lines it has when it does move. `check` finds a
+file's record by its path, so one moved elsewhere no longer checks. The next file is made by its
+first line: until then there is none, and `check` says nothing was written since. Only the
+supervisor rotates: it alone writes the file and the state.
 
 **`check` reads a line at a time** (a member, in a `.gz`), and stops at one over 256 MiB, so its
 memory is a line's and not the file's. It once read the file whole and then split it, some 50 GB for

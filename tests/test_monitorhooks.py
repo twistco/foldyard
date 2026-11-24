@@ -714,6 +714,55 @@ def test_a_file_planted_under_the_name_mid_rotation_isnt_taken_for_the_moved_one
 
 
 @pytest.mark.usefixtures("tiny")
+def test_a_rotation_held_back_mid_way_finishes_under_the_lines_the_file_holds_by_then(
+    project, tmp_path
+):
+    path = _rotating(project, tmp_path)
+    _rounds(1)
+    raw = json.loads((project / "monitor-hooks-state.json").read_text())
+    raw["ca"]["sink_rotating"] = "events.1-1.jsonl"
+    (project / "monitor-hooks-state.json").write_text(json.dumps(raw))
+    (tmp_path / "logs" / "events.1-1.jsonl").write_text("theirs")
+    _rounds(2)  # refused, and line 2 goes on in the same file
+    mh.round_once(now=200)
+    piece = tmp_path / "logs" / "events.1-2.jsonl"
+    assert [p["file"] for p in _state(project)["sink_parts"]] == [str(piece)]
+    assert mh.check(str(piece)) == 0 and not os.path.exists(path)
+    assert (tmp_path / "logs" / "events.1-1.jsonl").read_text() == "theirs"
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_rotated_file_with_nothing_written_since_checks(project, tmp_path, capsys):
+    # The next file is made by its first line, so a quiet hook has none.
+    path = _rotating(project, tmp_path)
+    _rounds(1)
+    mh.round_once(now=100)
+    assert not os.path.exists(path)
+    assert mh.check(path) == 0, capsys.readouterr().out
+    assert "nothing written since seq 1" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("tiny")
+def test_a_missing_file_the_sink_wrote_to_fails(project, tmp_path, capsys):
+    path = _rotating(project, tmp_path)
+    _rounds(1, 2)
+    os.unlink(path)  # holds line 2
+    assert mh.check(path) == 1 and "No such file" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("tiny")
+def test_what_is_planted_where_the_next_file_goes_fails(project, tmp_path, capsys):
+    path = _rotating(project, tmp_path)
+    _rounds(1)
+    mh.round_once(now=100)
+    (tmp_path / "logs" / "events.jsonl").write_text("theirs\n")
+    assert mh.check(path) == 1 and "not a line the sink wrote" in capsys.readouterr().out
+    os.unlink(path)
+    os.symlink(tmp_path / "nowhere", path)
+    assert mh.check(path) == 1
+
+
+@pytest.mark.usefixtures("tiny")
 def test_a_name_already_taken_holds_rotation_back_not_delivery(project, tmp_path):
     path = _rotating(project, tmp_path)
     (tmp_path / "logs" / "events.1-1.jsonl").write_text("theirs")
