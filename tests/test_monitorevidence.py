@@ -7,7 +7,9 @@ import json
 import random
 import shutil
 import stat
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -661,6 +663,44 @@ def test_what_a_copy_is_closed_with_says_where_a_namespace_changed_hands(state, 
         assert (v.who, v.container) == (truth[v.seq].who, truth[v.seq].container)
 
 
+def test_what_closing_a_copy_takes_is_counted_in_the_same_pass(state, monkeypatch):
+    # the copy grows as its snapshot is stored, in the append that also has a window to copy: there
+    # is room for that one only as the first one was
+    s = Stream()
+    monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
+    store([s.snap({}), s.ev(), s.cross()])
+    with monkeypatch.context() as m:
+        m.setattr(ms, "budget", lambda: 1)
+        ms.append([s.ev()])
+        ms.append([s.ev()])
+    [e] = me.kept()
+    assert e.open and me.State.load().unsettled == [e.id]
+    monkeypatch.setattr(me, "_BOOT", 1)
+    monkeypatch.setattr(me, "_WINDOW", 1)
+    big = {"200": [BOX]} | {str(i): [_noise(i)[:64]] for i in range(300, 340)}
+    other = Stream("boot-2")
+    other.t = s.t + 5
+    late = _loud(other, 60)
+    for r in late:
+        r["recv"] = T0 + s.t + 400
+    snap = s.snap(big)
+    with tempfile.TemporaryDirectory() as tmp, monkeypatch.context() as m:  # what both take
+        shutil.copytree(state, tmp, dirs_exist_ok=True)
+        m.setattr(ms.config, "state_dir", lambda: Path(tmp))
+        _close_and_copy(snap, late)
+        first, second = me.kept()
+        assert not first.open
+        both = first.size + second.size
+    caps(monkeypatch, both - 1)
+    _close_and_copy(snap, late)
+    assert [x.id for x in me.kept()] == [first.id] and len(me.State.load().pending) == 1
+
+
+def _close_and_copy(snap: dict, late: list[dict]) -> None:
+    """One append with the snapshot that closes a copy and a later boot's whole window."""
+    ms.append([snap, *late, Stream("boot-3").snap()])
+
+
 def test_a_copy_with_no_room_to_be_closed_stays_open_and_says_so(state, monkeypatch):
     s = Stream()
     monkeypatch.setattr(ms, "SEGMENT_BYTES", 10)
@@ -801,6 +841,16 @@ def test_a_catalogue_that_fails_before_anything_is_copied_is_said(state, monkeyp
     monkeypatch.setattr(me.State, "save", lambda self: 1 / 0)  # nor does failing to say it matter
     ms.append([s.ev()])
     assert any(r.get("seq") == seq for r, _ in ms.scan(None))
+
+
+def test_a_half_written_one_of_the_version_before_is_swept(state):
+    s = Stream()
+    store(s.crossing())
+    (me.root() / ".new-boot-1-9").mkdir()
+    doc = json.loads(me._state_file().read_text())  # as that version's state was: no `unsettled`
+    me._state_file().write_text(json.dumps({k: v for k, v in doc.items() if k != "unsettled"}))
+    ms.append([s.ev()])
+    assert not (me.root() / ".new-boot-1-9").exists()
 
 
 def test_a_boots_name_never_names_a_path(state):

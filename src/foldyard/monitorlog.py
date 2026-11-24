@@ -1009,7 +1009,7 @@ def store_summary() -> str:
         finally:
             cat.close()
     since = f", events from {oldest[:19].replace('T', ' ')} UTC" if oldest else ""
-    warn = f" ⚠ {note}" if note else ""
+    warn = "".join(f" ⚠ {printable(n)}" for n in (note, monitorstore.index_note()) if n)
     evidence = monitorevidence.summary()
     return f"store: {used / 2**20:.0f} of {cap >> 20} MB{since}{warn}" + (
         f"; {evidence} (`fy monitor evidence`)" if evidence else ""

@@ -489,8 +489,9 @@ def append(records: list[dict]) -> None:
                 if live is not None:
                     cat.catch_up([live])  # anything a crash left unindexed, before it moves on
                 cat.add(sid, records, indexed=size + sum(map(len, lines)), exact=True)
-            except Exception:
-                pass  # whatever it was: the pull would stop at these records for good
+                _index_failed(None)
+            except Exception as e:  # whatever it was: the pull would stop at these records for good
+                _index_failed(e)
         with live_path().open("ab") as f:
             f.write(b"".join(lines))
         if cat is not None:
@@ -508,6 +509,31 @@ def append(records: list[dict]) -> None:
     finally:
         if cat is not None:
             cat.close()
+
+
+def _index_error() -> Path:
+    return store_dir() / "monitor-index.error"
+
+
+def _index_failed(error: Exception | None) -> None:
+    """Note what kept records from being indexed — not a catalogue merely locked, which the next
+    append makes up for — or that nothing does any more."""
+    try:
+        if error is None:
+            _index_error().unlink(missing_ok=True)
+        elif not isinstance(error, sqlite3.Error):
+            _index_error().write_text(f"{type(error).__name__}: {error}"[:300])
+    except OSError:
+        pass
+
+
+def index_note() -> str:
+    """Why the catalogue is falling behind the store, "" when it isn't: until it catches up, what
+    it doesn't hold can't be joined or judged."""
+    try:
+        return f"records can't be indexed ({_index_error().read_text()})"
+    except OSError:
+        return ""
 
 
 def _seal(live: Segment, segs: list[Segment], cat: Catalogue | None) -> None:

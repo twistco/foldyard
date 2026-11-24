@@ -160,8 +160,11 @@ class Held:
             self._every = kept()
         return self._every
 
-    def add(self, e: Evidence) -> None:
-        self._every = _in_order([*self.every, e])
+    def put(self, e: Evidence) -> None:
+        """``e`` as it is now, in place of what was read of it (when it was: until anything is,
+        the disk says)."""
+        if self._every is not None:
+            self._every = _in_order([*(x for x in self._every if x.id != e.id), e])
 
     def drop(self, e: Evidence) -> None:
         if self._every is not None:
@@ -229,11 +232,12 @@ def keep(cat: monitorstore.Catalogue, now: float, going: frozenset[str] = frozen
     if not limit or (not boots and not root().exists()):
         return
     st = State.load()
+    fresh = st.unsettled is None  # no state of this version yet: the one before left `.new-<id>`
     before = asdict(st)
     try:
         held = Held()
-        for stale in (root() / ".new").glob("*"):  # a crash while writing one
-            shutil.rmtree(stale, ignore_errors=True)
+        for stale in (*(root() / ".new").glob("*"), *(root().glob(".new-*") if fresh else ())):
+            shutil.rmtree(stale, ignore_errors=True)  # a crash while writing one
         _confirm(cat, st, held, limit)
         _finish(st, held, limit)
         boots.sort(key=lambda b: _age(cat, b))
@@ -302,6 +306,7 @@ def _confirm(cat: monitorstore.Catalogue, st: State, held: Held, limit: int) -> 
             if _meta(e) != before:
                 _write(e.path / "meta.json", _meta(e))
                 e.size = _size(e.path)
+                held.put(e)
         except FileNotFoundError:
             held.drop(e)  # the operator removed it meanwhile
             continue
@@ -555,8 +560,7 @@ def _flush(
         shutil.rmtree(e.path, ignore_errors=True)  # one whose meta.json can't be read
         e.size = _size(new)
         new.rename(e.path)
-        held.drop(e)
-        held.add(e)
+        held.put(e)
         if _waits(e):
             st.unsettled = [*(st.unsettled or []), e.id]
         st.pending.remove(p)

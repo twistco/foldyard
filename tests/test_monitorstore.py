@@ -956,6 +956,10 @@ def test_a_record_of_a_shape_nobody_writes_stops_nothing(state, who, path):
 
 
 def test_indexing_that_fails_never_stops_the_store(state, monkeypatch):
+    import time
+
+    from foldyard import devmode
+
     def broken(*a, **k):
         raise AttributeError("boom")
 
@@ -963,8 +967,15 @@ def test_indexing_that_fails_never_stops_the_store(state, monkeypatch):
         m.setattr(ms.Catalogue, "add", broken)
         ms.append([snap(0), crossed(1), snap(2)])
         ms.append([ev(3)])
+        # said, where it would otherwise only show as a catalogue falling behind
+        assert "AttributeError: boom" in ms.index_note()
+        assert "boom" in monitorlog.store_summary()
+        monitorlog.Cursor(pulled=time.time()).save()
+        [row] = list(devmode._monitor_events_check())
+        assert row[0] == "warn" and "boom" in row[2]
     assert _seqs(ms.read(None, 1 << 20)[0]) == [0, 1, 2, 3]
     ms.append([ev(4)])  # and is made up for by the next one that doesn't
+    assert ms.index_note() == ""
     with ms.Catalogue.open() as cat:
         assert _crossings(cat) == [(1, 1, BOX)]
 

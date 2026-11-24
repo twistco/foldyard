@@ -2713,6 +2713,8 @@ def _monitor_events_check():
         why = "nothing pulled yet — is the supervisor running? `fy host`"
     elif age > 60:
         why = f"last pull {age:.0f}s ago — is the supervisor running? `fy host`"
+    elif monitorstore.index_note():
+        why = monitorlog.printable(monitorstore.index_note())
     elif budget_note:
         why = budget_note
     else:
