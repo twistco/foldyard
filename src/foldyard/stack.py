@@ -2384,7 +2384,9 @@ def stack_declared(verb: str, box_verb: str | None) -> int | None:
             "drive one ([project].compose is unset in foldyard.toml)."
         )
         if box_verb:
-            print(f"  The dev box: {box_verb}")
+            # box.main refuses it in a box
+            where = " (on your computer)" if box_verb == "fy box down" and config.in_box() else ""
+            print(f"  The dev box: {box_verb}{where}")
         print("  To bring a stack in: fy docs quickstart (step 3) · fy docs configuration")
         return 0
     return 1 if _missing_declared_compose() else None

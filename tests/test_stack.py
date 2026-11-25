@@ -1324,6 +1324,14 @@ def test_stack_verbs_without_a_declared_stack_explain_and_exit_zero(
         assert "fy box" not in out
 
 
+@pytest.mark.parametrize("run", [lambda: stack.down(), lambda: stack.nuke()], ids=["down", "nuke"])
+def test_in_a_box_the_note_says_where_the_box_goes_down(stackless_repo, monkeypatch, capsys, run):
+    # `fy box down` is refused in here: the note mustn't send an agent into the refusal.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert run() == 0
+    assert "fy box down (on your computer)" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(("verb", "run", "_"), _STACK_VERBS, ids=[v[0] for v in _STACK_VERBS])
 def test_stack_verbs_with_a_declared_file_missing_abort_naming_it(
     fake_repo, capture_run, capsys, verb, run, _
