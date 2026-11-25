@@ -25,6 +25,12 @@ from foldyard import keyless
         ("sk-proj-deadbeef", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
         ("sk-svcacct-foo", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
         ("  sk-ant-api03-x  ", ("ANTHROPIC_API_KEY", "Claude API key")),  # trims first
+        # Only the Copilot-only fine-grained PAT is pasted; `oauth` mints its broad token host-side.
+        ("github_pat_11ABC", ("COPILOT_GITHUB_TOKEN", "GitHub fine-grained PAT (Copilot)")),
+        # Whole-identity tokens and classic PATs are not stored under any name: use `oauth`, which
+        # never pastes one, and Copilot refuses classic PATs itself.
+        ("gho_abc", None),
+        ("ghu_abc", None),
         ("ghp_nope", None),
         ("", None),
     ],
@@ -329,6 +335,14 @@ def test_secret_ok_rejects_base64_of_the_wrong_thing():
 def test_secret_ok_non_b64_uses_the_pattern_directly():
     assert keyless.secret_ok("ghp_abc123", "ghp_*", False) == "ghp_abc123"
     assert keyless.secret_ok("nope", "ghp_*", False) is None
+    # `|` separates whole-value alternatives (for any provider that accepts several shapes): any
+    # of them matches, and nothing else does — including a value that only contains one as a
+    # substring. This grammar belongs to [[secret]] rows, not to any one agent's credential.
+    pattern = "sk-ant-api*|sk-ant-oat*"
+    for value in ("sk-ant-api03-abc", "sk-ant-oat01-xyz"):
+        assert keyless.secret_ok(value, pattern, False) == value
+    for value in ("ghp_abc", "xgithub_pat_abc", ""):
+        assert keyless.secret_ok(value, pattern, False) is None
     # No pattern ⇒ anything non-empty is accepted (the caller still rejects blanks).
     assert keyless.secret_ok("whatever", "", False) == "whatever"
 
@@ -683,6 +697,40 @@ def test_an_unreadable_codex_auth_json_counts_as_a_login(tmp_path):
     assert keyless.codex_stored_login(tmp_path) == [str(tmp_path / "auth.json")]
 
 
+def test_copilot_config_json_user_rows_are_not_a_finding(tmp_path):
+    # A keyless session legitimately names its user in this CLI-managed file — those rows are NOT a
+    # stored login. This is JSONC, and a comment mentioning the dummy must not trip the scan either.
+    config = tmp_path / "config.json"
+    config.write_text(
+        '{\n  // CLI-managed\n  "loggedInUsers": [{"login": "someone", "host": "github.com"}],\n'
+        '  "lastLoggedInUser": "someone",\n  "token": "gho_foldyarddummy",\n}'
+    )
+    assert keyless.copilot_stored_token(tmp_path) == []
+
+
+@pytest.mark.parametrize("prefix", ["github_pat_", "gho_", "ghu_", "ghp_"])
+def test_copilot_config_json_with_a_real_token_is_found(tmp_path, prefix):
+    # Any shape of GitHub credential the CLI's `storeTokenPlaintext` can persist, wherever it sits
+    # in the file, is a finding. The path is returned, NEVER the token value itself.
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"auth": {"token": prefix + "A" * 40}}))
+    assert keyless.copilot_stored_token(tmp_path) == [str(config)]
+
+
+def test_copilot_config_json_short_names_are_not_credentials(tmp_path):
+    # A key such as `gho_id` is not a 40-character token; the length floor keeps it out.
+    (tmp_path / "config.json").write_text(json.dumps({"gho_id": "ghu_short"}))
+    assert keyless.copilot_stored_token(tmp_path) == []
+
+
+def test_copilot_config_json_absent_or_unparseable_is_clean(tmp_path):
+    # Unlike Codex's auth.json, this is ordinary CLI state: its presence (even torn) isn't a finding
+    # — only a token-shaped value is. The scan is textual, so JSONC comments/trailing commas are moot.
+    assert keyless.copilot_stored_token(tmp_path) == []
+    (tmp_path / "config.json").write_text("{torn // but no token")
+    assert keyless.copilot_stored_token(tmp_path) == []
+
+
 def test_credential_env_holding_anything_but_the_dummy_is_named():
     env = {"ANTHROPIC_API_KEY": "sk-ant-dummy", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-real"}
     assert keyless.credential_env_leaks(keyless.CLAUDE_KEYLESS, env) == ["CLAUDE_CODE_OAUTH_TOKEN"]
@@ -691,9 +739,20 @@ def test_credential_env_holding_anything_but_the_dummy_is_named():
     assert keyless.credential_env_leaks(keyless.CODEX_KEYLESS, {"OPENAI_API_KEY": "sk-x"}) == [
         "OPENAI_API_KEY"
     ]
+    assert (
+        keyless.credential_env_leaks(
+            keyless.COPILOT_KEYLESS, {"COPILOT_GITHUB_TOKEN": "gho_foldyarddummy"}
+        )
+        == []
+    )
+    assert keyless.credential_env_leaks(
+        keyless.COPILOT_KEYLESS, {"COPILOT_GITHUB_TOKEN": "github_pat_real"}
+    ) == ["COPILOT_GITHUB_TOKEN"]
 
 
-@pytest.mark.parametrize(("table", "kinds"), [("claude", "oauth"), ("codex", "chatgpt")])
+@pytest.mark.parametrize(
+    ("table", "kinds"), [("claude", "oauth"), ("codex", "chatgpt"), ("copilot", "api-key")]
+)
 def test_the_no_keyless_refusal_names_the_personal_file_and_the_kinds(table, kinds):
     text = keyless.no_keyless_block(table)
     assert f"[{table}]" in text and "keyless" in text

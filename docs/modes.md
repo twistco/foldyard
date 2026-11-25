@@ -44,7 +44,8 @@ in:
 - `[[inject]]` — one `off | on` switch per entry. The entry's `kind` says how its credential is
   made: a static token, a GitHub App installation token (`github-app`), or your own `gh` token
   (`gh-cli`, always an emergency switch) — [configuration](./configuration.md#inject);
-- `claude` and `codex` — when you declare the agent's table, with its `keyless` key (below).
+- `claude`, `codex` and `copilot` — when you declare the agent's table, with its `keyless` key
+  (below).
 
 Everything else — cloud identity, auth simulators, LLM routing — comes from plugins your project
 opts into. No plugin in the config, no switch on the dashboard. So `fy mode` shows *your* project.
@@ -224,8 +225,8 @@ services starting and stopping — on a real machine with zero credentials. See
 
 ## Keyless agents
 
-A coding agent in the box (`[claude]` or `[codex]`) always runs keyless, and you get an on/off
-switch for it:
+A coding agent in the box (`[claude]`, `[codex]` or `[copilot]`) always runs keyless, and you get an
+on/off switch for it:
 
 ```bash
 fy mode claude=on
@@ -237,12 +238,13 @@ prompt: paste your key or token. foldyard recognises its kind from the prefix an
 — and the proxy replaces that header with the real value in flight. The real value is never typed in
 the box, never in the repo, never in scrollback.
 
-There is no in-box login to fall back on. A `[claude]` or `[codex]` table without `keyless` is
-refused (by `fy box up` and `fy box recreate` on your computer, by `fy claude` and `fy codex` in the
-box); set it in your `foldyard.local.toml`
-([configuration](./configuration.md#claude--codex--vscode)). A login made in the box anyway
-(`/login` in `claude`, `codex login`) leaves a real credential in the box's volume, so `fy verify`
-fails on it and `fy doctor` in the box names the file to remove.
+There is no in-box login to fall back on. A `[claude]`, `[codex]` or `[copilot]` table without
+`keyless` is refused (by `fy box up` and `fy box recreate` on your computer, by `fy claude`,
+`fy codex` and `fy copilot` in the box); set it in your `foldyard.local.toml`
+([configuration](./configuration.md#claude--codex--copilot--vscode)). A login made in the box anyway
+(`/login` in `claude`, `codex login`, `copilot login`) leaves a real credential in the box's volume
+— for Copilot, in its CLI-managed `config.json` or `COPILOT_GITHUB_TOKEN` — so `fy verify` fails on
+it and `fy doctor` in the box names the file or variable to clear.
 
 | keyless mode | dummy in the box | header the client sends | proxy rewrites on | real value lives in |
 | -- | -- | -- | -- | -- |
@@ -250,6 +252,17 @@ fails on it and `fy doctor` in the box names the file to remove.
 | `[claude] oauth` | `CLAUDE_CODE_OAUTH_TOKEN` env | `authorization: Bearer …` | `api.anthropic.com` | `host.env` |
 | `[codex] api-key` | `OPENAI_API_KEY` env | `Authorization: Bearer …` | `api.openai.com` | `host.env` |
 | `[codex] chatgpt` | a dummy `~/.codex/auth.json` | `Authorization: Bearer …` | `chatgpt.com` (codex's API + workspace-discovery paths) | your real `auth.json` on your computer, refreshed by the token service |
+| `[copilot] api-key` | `COPILOT_GITHUB_TOKEN` env | `Authorization: Bearer …` | `api.github.com` + the plan's `api.*.githubcopilot.com` host | `host.env` (a Copilot-only fine-grained PAT) |
+| `[copilot] oauth` | `COPILOT_GITHUB_TOKEN` env | `Authorization: Bearer …` | `api.github.com` only `/copilot_internal/`, + the plan's `api.*.githubcopilot.com` host | your host's `gh auth token`, minted on demand; `on` is a timed emergency |
+
+The Copilot rungs differ because of what the token can do. `api-key` is a fine-grained PAT scoped to
+**Copilot Requests only**, so injecting it on all of `api.github.com` is harmless. `oauth` reuses
+`gh auth token` — your whole GitHub identity — so `fy mode copilot=on` carries a TTL and reverts by
+itself, and its `api.github.com` rule is limited to `/copilot_internal/`. Copilot's own hosts still
+get the token (including the MCP endpoint that acts on GitHub with your full scope); the time limit
+bounds that reach. Optional `[copilot] oauth_user = "<login>"` picks which github.com account's `gh`
+token is minted — the minter pins `--hostname github.com` and forwards `--user`, so no global
+`gh auth switch` is needed. See [configuration](./configuration.md#claude--codex--copilot--vscode).
 
 With the switch `off`, the box holds only the dummy and can't reach the provider at all. The proxy
 doesn't forward the dummy either: it answers the request itself with a 401 whose message names the
@@ -276,11 +289,11 @@ line per attempt. Pasting a missing secret into `host.env` takes effect straight
 service holds up only the requests that need its credential; the rest of the box's traffic carries
 on.
 
-`fy claude` and `fy codex` check first: with the agent's switch off they say so before launching
-and, in a terminal, wait for you to switch it on from your computer (Enter launches anyway). That
-covers starting a session; the proxy's answer covers the rest — a time limit running out
-mid-session, or an agent started some other way — and the first such answer per switch also raises a
-notification on your computer.
+`fy claude`, `fy codex` and `fy copilot` check first: with the agent's switch off they say so before
+launching and, in a terminal, wait for you to switch it on from your computer (Enter launches
+anyway). That covers starting a session; the proxy's answer covers the rest — a time limit running
+out mid-session, or an agent started some other way — and the first such answer per switch also
+raises a notification on your computer.
 
 Codex on a ChatGPT subscription shows the proxy's message only in passing (a failed model-list
 refresh), then stops on its startup workspace discovery, which reports any failure as a fixed

@@ -12,11 +12,16 @@ just ``gh auth logout`` (or letting the mode TTL lapse) rather than waiting out 
 
 Run (the inject plugin builds this command from ``sys.executable``)::
 
-    python -m foldyard.plugins.gh_cli_token
+    python -m foldyard.plugins.gh_cli_token [--hostname github.com] [--user LOGIN]
+
+The flags are optional and forwarded to ``gh auth token``. With neither, the kind keeps its
+active-host semantics. Copilot's ``oauth`` rung pins ``--hostname github.com`` and may name one
+login, so a host's GHE login can never be minted for github.com by accident.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -26,10 +31,17 @@ _TTL = 240
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="gh_cli_token")
+    parser.add_argument("--hostname", help="the GitHub host to read the token for")
+    parser.add_argument("--user", help="the account on that host whose token to print")
+    args = parser.parse_args(argv)
+    command = ["gh", "auth", "token"]
+    if args.hostname:
+        command += ["--hostname", args.hostname]
+    if args.user:
+        command += ["--user", args.user]
     try:
-        out = subprocess.run(
-            ["gh", "auth", "token"], capture_output=True, text=True, timeout=15, check=True
-        )
+        out = subprocess.run(command, capture_output=True, text=True, timeout=15, check=True)
     except FileNotFoundError:
         print(
             "gh_cli_token: the gh CLI isn't installed "

@@ -1231,11 +1231,12 @@ def test_transcript_sync_seconds(fresh_config, tmp_path):
     }
     for line, expected in cases.items():
         (tmp_path / "foldyard.toml").write_text(
-            f'[project]\nname = "x"\n[claude]\n{line}\n[codex]\n{line}\n'
+            f'[project]\nname = "x"\n[claude]\n{line}\n[codex]\n{line}\n[copilot]\n{line}\n'
         )
         fresh_config(FOLDYARD_REPO=tmp_path)
         assert config.claude_transcript_sync_seconds() == expected, line
         assert config.codex_transcript_sync_seconds() == expected, line
+        assert config.copilot_transcript_sync_seconds() == expected, line
 
 
 def test_transcript_sync_seconds_absent_without_table(fresh_config, tmp_path):
@@ -1243,6 +1244,7 @@ def test_transcript_sync_seconds_absent_without_table(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path)
     assert config.claude_transcript_sync_seconds() == 0.0
     assert config.codex_transcript_sync_seconds() == 0.0
+    assert config.copilot_transcript_sync_seconds() == 0.0
 
 
 def test_claude_keyless_absent_without_table(fresh_config, tmp_path):
@@ -1268,6 +1270,72 @@ def test_codex_keyless_modes(fresh_config, tmp_path):
     (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n')
     fresh_config(FOLDYARD_REPO=tmp_path)
     assert config.codex_keyless() == ""
+
+
+def test_copilot_keyless_modes(fresh_config, tmp_path):
+    # `api-key` (the Copilot-only PAT, aliased by `true`) and `oauth` (host-minted gh token) are the
+    # two modes; anything else is off, including [claude]'s `oauth` typo of a Copilot value.
+    cases = {
+        "keyless = true": "api-key",
+        'keyless = "api-key"': "api-key",
+        'keyless = "oauth"': "oauth",
+        'keyless = "nope"': "",
+        "": "",
+    }
+    for line, expected in cases.items():
+        (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[copilot]\n{line}\n')
+        fresh_config(FOLDYARD_REPO=tmp_path)
+        assert config.copilot_keyless() == expected, line
+    # No [copilot] table at all → off (and not enabled).
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.copilot_keyless() == "" and config.copilot_enabled() is False
+
+
+def test_copilot_oauth_user_reads_one_github_login(fresh_config, tmp_path):
+    # The optional rung selector: a real GitHub login, trimmed, or "" when absent/invalid.
+    cases = {
+        'oauth_user = "my-github-login"': "my-github-login",
+        'oauth_user = "another-login"': "another-login",
+        'oauth_user = "  my-github-login  "': "my-github-login",
+        'oauth_user = ""': "",
+        'oauth_user = "a b"': "",
+        'oauth_user = "-evil"': "",
+        f'oauth_user = "{"a" * 40}"': "",  # GitHub logins are at most 39 chars
+        "": "",
+    }
+    for line, expected in cases.items():
+        (tmp_path / "foldyard.toml").write_text(f'[project]\nname = "x"\n[copilot]\n{line}\n')
+        fresh_config(FOLDYARD_REPO=tmp_path)
+        assert config.copilot_oauth_user() == expected, line
+
+
+def test_copilot_enabled_is_table_presence(fresh_config, tmp_path):
+    # A BARE table (manual login) is still an opt-in: it installs the CLI and mounts its home.
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n[copilot]\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.copilot_enabled() is True
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "x"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.copilot_enabled() is False
+    # A non-table value is not the documented opt-in (`[copilot]`), so it does not enable it.
+    (tmp_path / "foldyard.toml").write_text('copilot = true\n[project]\nname = "x"\n')
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.copilot_enabled() is False
+
+
+def test_copilot_system_prompt_like_the_other_agents(fresh_config, tmp_path):
+    (tmp_path / "foldyard.toml").write_text(
+        '[project]\nname = "p"\n[copilot]\nsystem_prompt = "be grounded"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.copilot_system_prompt() == "be grounded"
+    assert config.claude_system_prompt() == ""  # the three are independent tables
+    assert config.codex_system_prompt() == ""
+    # A non-string is ignored, not stringified (same contract as Claude's/Codex's).
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "p"\n[copilot]\nsystem_prompt = 3\n')
+    config.clear_caches()
+    assert config.copilot_system_prompt() == ""
 
 
 def test_gcp_project_and_sa_labels_from_toml(fresh_config, tmp_path):

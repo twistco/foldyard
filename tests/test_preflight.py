@@ -41,6 +41,7 @@ def _wire(
     proxy_enabled=False,
     claude_keyless="",
     codex_keyless="",
+    copilot_keyless="",
     github="off",
     mitmdump: str | None = "/venv/bin/mitmdump",
     tables=None,
@@ -69,9 +70,11 @@ def _wire(
     monkeypatch.setattr(preflight.config, "proxy_enabled", lambda: proxy_enabled)
     monkeypatch.setattr(preflight.config, "claude_keyless", lambda: claude_keyless)
     monkeypatch.setattr(preflight.config, "codex_keyless", lambda: codex_keyless)
-    # Undeclared unless a test says so: the ambient (repo) config declares both agents.
+    monkeypatch.setattr(preflight.config, "copilot_keyless", lambda: copilot_keyless)
+    # Undeclared unless a test says so: the ambient (repo) config declares all three agents.
     monkeypatch.setattr(preflight.config, "claude_enabled", lambda: False)
     monkeypatch.setattr(preflight.config, "codex_enabled", lambda: False)
+    monkeypatch.setattr(preflight.config, "copilot_enabled", lambda: False)
     monkeypatch.setattr(preflight.config, "_table", lambda name: tables.get(name, {}))
     monkeypatch.setattr(preflight.config, "in_box", lambda: in_box)
     monkeypatch.setattr(preflight.devmode, "read", lambda: {"mode": {"github": github}})
@@ -121,6 +124,14 @@ def test_mitmproxy_not_checked_when_no_proxy_needed(monkeypatch):
     assert preflight.issues() == []
 
 
+def test_copilot_keyless_alone_requires_the_proxy(monkeypatch):
+    # The third keyless agent routes too: without mitmproxy its dummy token reaches no injector.
+    _wire(monkeypatch, copilot_keyless="api-key", mitmdump=None)
+    assert any("mitmproxy" in p and "Reinstall foldyard" in p for p in preflight.issues())
+    _wire(monkeypatch, copilot_keyless="", mitmdump=None)  # bare [copilot] needs none
+    assert preflight.issues() == []
+
+
 def test_lima_with_keyless_is_clean(monkeypatch):
     # Keyless on lima is ROUTED now (config.host_alias emits the Lima host gateway, so the box
     # reaches the Mac proxy) — the old hard-block must be gone.
@@ -163,6 +174,38 @@ def test_recognised_keyless_value_does_not_block(monkeypatch):
     # A valid value that normalises fine raises no typo complaint.
     _wire(monkeypatch, claude_keyless="oauth", tables={"claude": {"keyless": "oauth"}})
     assert not any("isn't recognised" in p for p in preflight.issues())
+
+
+def test_unrecognised_copilot_keyless_value_blocks(monkeypatch):
+    # A typo normalises to "" (silently off) — say so, and name both supported rungs.
+    _wire(monkeypatch, copilot_keyless="", tables={"copilot": {"keyless": "oath"}})
+    problems = preflight.issues()
+    assert any(
+        "[copilot].keyless" in p and "oath" in p and "api-key | oauth | true" in p for p in problems
+    )
+    _wire(monkeypatch, copilot_keyless="oauth", tables={"copilot": {"keyless": "oauth"}})
+    assert not any("isn't recognised" in p for p in preflight.issues())
+
+
+def test_invalid_copilot_oauth_user_blocks(monkeypatch):
+    _wire(monkeypatch, copilot_keyless="oauth", tables={"copilot": {"oauth_user": "-evil"}})
+    problems = preflight.issues()
+    assert any("[copilot].oauth_user" in p and "GitHub login" in p for p in problems)
+    _wire(
+        monkeypatch, copilot_keyless="oauth", tables={"copilot": {"oauth_user": "my-github-login"}}
+    )
+    assert not any("[copilot].oauth_user" in p for p in preflight.issues())
+
+
+def test_copilot_oauth_user_outside_the_oauth_rung_blocks(monkeypatch):
+    # The selector would be silently ignored on the PAT rung — say so instead.
+    _wire(
+        monkeypatch,
+        copilot_keyless="api-key",
+        tables={"copilot": {"oauth_user": "my-github-login"}},
+    )
+    problems = preflight.issues()
+    assert any("[copilot].oauth_user" in p and 'keyless = "oauth"' in p for p in problems)
 
 
 def test_nested_project_inside_another_git_repo_blocks(monkeypatch, tmp_path):
@@ -367,7 +410,7 @@ def test_no_github_table_no_refusal(monkeypatch):
 # ── an agent table without keyless: no in-box login (ADR-0008, amended 2026-11-18) ───────────
 
 
-@pytest.mark.parametrize("table", ["claude", "codex"])
+@pytest.mark.parametrize("table", ["claude", "codex", "copilot"])
 def test_an_agent_table_without_keyless_is_refused(monkeypatch, table):
     _wire(monkeypatch)
     monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: True)
@@ -375,7 +418,9 @@ def test_an_agent_table_without_keyless_is_refused(monkeypatch, table):
     assert f"[{table}] has no `keyless`" in block and "foldyard.local.toml" in block
 
 
-@pytest.mark.parametrize(("table", "kind"), [("claude", "oauth"), ("codex", "chatgpt")])
+@pytest.mark.parametrize(
+    ("table", "kind"), [("claude", "oauth"), ("codex", "chatgpt"), ("copilot", "api-key")]
+)
 def test_an_agent_table_with_keyless_or_absent_is_fine(monkeypatch, table, kind):
     _wire(monkeypatch, **{f"{table}_keyless": kind})
     monkeypatch.setattr(preflight.config, f"{table}_enabled", lambda: True)

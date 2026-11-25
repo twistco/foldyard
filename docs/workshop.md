@@ -178,6 +178,14 @@ manager:
 - **Codex with a ChatGPT subscription:** install the [Codex CLI](https://github.com/openai/codex) on
   your computer, not only in an editor, and run `codex login` there once. foldyard reads that login
   on your computer and keeps it fresh; nothing is pasted.
+- **GitHub Copilot (recommended):** a fine-grained PAT from
+  https://github.com/settings/personal-access-tokens/new — resource owner your personal account,
+  Account permissions → **Copilot Requests only**, no repository access (it starts `github_pat_`).
+  It is injected on `api.github.com`, so it must be able to do nothing else there. Classic `ghp_`
+  PATs, and pasted `gho_`/`ghu_` tokens, are refused; if your seat can't use such a PAT, use
+  `[copilot] keyless = "oauth"` instead — it mints `gh auth token` on your computer on a timed
+  emergency switch, with the GitHub API rule limited to `/copilot_internal/`. With `oauth`, set
+  `oauth_user = "<login>"` to pick one of several github.com accounts already logged into `gh`.
 
 ### What success looks like
 
@@ -249,7 +257,7 @@ baked VM disk — bake on the computer that uses it ([why](./base-vm.md#what-kee
 | 1 | Scaffold | `fy init --with vscode`; add `--memory 4096` on 8 GB or 16 GB WSL machines, `--name <name>` if the folder name has spaces | The project name must be letters, digits, `.`, `_` and `-`, starting with a letter or digit. `--with vscode` writes `[vscode]` uncommented, so `fy code` works in the first box. |
 | 2 | The box | `fy box up`: **Enter** adopts the new config, `y` grants each recommended host; then `fy box shell` | "▶ cloning the base VM" and "the base VM's, already in this VM (no build)". A "(no clone: …)" line says why not. |
 | 3 | Prove it | `fy verify` on your computer, and again in the box | ALL PASS. A push check that fails in the box usually means no `origin` remote. |
-| 4 | An agent | `fy code` opens VS Code in the box; there, uncomment `[claude]` (or `[codex]`) and its `keyless` line in `foldyard.toml`. Then, on your computer, `fy config diff` (the box's edit, waiting for you), `fy config adopt`, `fy box recreate` (paste the token at the hidden prompt), `fy mode claude=on`, `fy claude` (for Codex: `codex=on`, `fy codex`) | A plain `fy box up` on a running box doesn't add the agent. If you skip `fy config adopt`, `fy box up` asks, and its default (Enter) is *ignore*. A 401 naming `fy mode claude=on` means the switch is off. Recreating the box closes VS Code's window onto it: `fy code` again. |
+| 4 | An agent | `fy code` opens VS Code in the box; there, uncomment `[claude]` (or `[codex]` / `[copilot]`) and its `keyless` line in `foldyard.toml`. Then, on your computer, `fy config diff` (the box's edit, waiting for you), `fy config adopt`, `fy box recreate` (paste the token at the hidden prompt), `fy mode claude=on`, `fy claude` (for Codex: `codex=on`, `fy codex`; for Copilot: `copilot=on`, `fy copilot`) | A plain `fy box up` on a running box doesn't add the agent. If you skip `fy config adopt`, `fy box up` asks, and its default (Enter) is *ignore*. A 401 naming `fy mode claude=on` means the switch is off. Recreating the box closes VS Code's window onto it: `fy code` again. |
 | 5 | The stack | Ask the agent to fill in `[project]` (`compose`, `app`, `app_port`) and `[ports]`, then `fy config diff`, `fy config adopt`, `fy up`, `fy ps`, `fy logs <svc>`, `fy open` | The allowlist learns for **one hour after the first `fy box up`**, then enforces, so by now new hosts may be refused. `fy allow learn` grants what it saw; `fy allow enforce learn --for 30m` learns again. `fy tui` shows the Network Log. |
 | 6 | Extras | `fy tui`, `fy worktree add <name>`, `fy doctor` | — |
 

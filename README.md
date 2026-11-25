@@ -43,10 +43,10 @@ fy box shell                       # you're in the box
 No custom image is needed: foldyard ships a Debian box with the engine client, git and uv. To grow
 it into one tuned for your repo, run `foldyard skill install bootstrap-devbox` and then the skill.
 
-An agent inside the box (`fy claude`, `fy codex`) is told what `fy` is and how to edit the config,
-so it can help you set foldyard up. Its edits don't take effect on their own: the next `fy box up`
-shows you the change and asks you to approve it. The agent can't sneak a change in, and you can
-still share the config with your team.
+An agent inside the box (`fy claude`, `fy codex`, `fy copilot`) is told what `fy` is and how to edit
+the config, so it can help you set foldyard up. Its edits don't take effect on their own: the next
+`fy box up` shows you the change and asks you to approve it. The agent can't sneak a change in, and
+you can still share the config with your team.
 
 **One prerequisite: a clean repo.** The VM mounts only your repo, so the zero-credential guarantee
 holds exactly when that repo holds *config, not credentials*. Scan your history with
@@ -132,8 +132,8 @@ own task runners (`just`, npm scripts) stay yours — foldyard runs *under* them
   traffic and enforces the allowlist, backed by the VM firewall · `fy doctor` · a TUI.
 - **Plugins** — token services (a GCP metadata emulator; `[[inject]]` credentials from config alone
   — static header- or query-parameter tokens, GitHub App installation tokens) · editor attach (VS
-  Code) · agents (Claude Code and Codex, keyless: the box holds a dummy key and the proxy swaps in
-  your real one).
+  Code) · agents (Claude Code, Codex and the GitHub Copilot CLI, keyless: the box holds a dummy key
+  and the proxy swaps in your real one).
 
 Each project gets its own rootless [Lima](https://lima-vm.io) VM, named after the project. They run
 side by side, so a `fy box shell` or `fy code` session in one project survives while you work in

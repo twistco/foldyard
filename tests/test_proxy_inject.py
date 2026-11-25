@@ -1497,6 +1497,57 @@ async def test_no_credential_is_injected_or_reissued_on_cleartext(gh, monkeypatc
     assert inj._rule_for(tls) is not None
 
 
+async def test_a_lone_rule_overwrites_a_box_held_credential(gh, monkeypatch, fake_minter, tmp_path):
+    # A Copilot rule names the dummy but injects on every matching request: the proxy decides the
+    # identity reaching the host. A stray in-box login (or an exchanged token a future CLI may
+    # send) is overwritten with our token, not forwarded. A request carrying the dummy in any
+    # scheme — or no credential at all — injects, and our own 401 re-issue still finds the rule.
+    monkeypatch.setenv(
+        "INJECT_RULES",
+        json.dumps(
+            [
+                {
+                    "host": "api.githubcopilot.com",
+                    "command": fake_minter.command,
+                    "header": "Authorization",
+                    "value_prefix": "Bearer ",
+                    "dummies": ["gho_foldyarddummy"],
+                    "any_scheme": True,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setenv("PROXY_LOG_FILE", str(tmp_path / "egress.jsonl"))
+    inj = gh.Injector()
+    assert len(inj.rules) == 1
+
+    box_token = "Bearer tid=abc;exp=123;sku=bus"  # what a login/exchange in the box would send
+    f = _Flow("api.githubcopilot.com", path="/v1/chat/completions")
+    f.request.headers["Authorization"] = box_token
+    assert inj._rule_for(f) is inj.rules[0]
+    await inj.request(f)
+    assert f.request.headers["Authorization"] == "Bearer token FAKE"
+    assert f.metadata.get("egress_proxy_injected") is True
+
+    for sent in ("gho_foldyarddummy", "Bearer gho_foldyarddummy", "token gho_foldyarddummy"):
+        f = _Flow("api.githubcopilot.com", path="/v1/chat/completions")
+        f.request.headers["Authorization"] = sent
+        assert inj._rule_for(f) is inj.rules[0]
+        await inj.request(f)
+        assert f.request.headers["Authorization"] == "Bearer token FAKE"
+        assert f.metadata.get("egress_proxy_injected") is True
+
+    f = _Flow("api.githubcopilot.com", path="/v1/chat/completions")  # no credential at all
+    assert inj._rule_for(f) is inj.rules[0]
+    await inj.request(f)
+    assert f.request.headers["Authorization"] == "Bearer token FAKE"
+
+    f = _Flow("api.githubcopilot.com", path="/v1/chat/completions")  # a 401 re-issue
+    f.request.headers["Authorization"] = "Bearer token FAKE"  # what apply() wrote
+    f.metadata["egress_proxy_sent"] = {"h:authorization": "Bearer gho_foldyarddummy"}
+    assert inj._rule_for(f) is inj.rules[0]  # the original dummy is still ours, not foreign
+
+
 def test_default_deny_off_never_blocks(gh, monkeypatch, tmp_path):
     # No DEFAULT_DENY: http_connect is a no-op — back-compat for the pre-allowlist behaviour.
     monkeypatch.setenv("INJECT_HOST", "")

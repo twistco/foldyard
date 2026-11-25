@@ -19,11 +19,11 @@
 
 # ── Turn a shared block OFF: `disabled = true` ───────────────────────────────────────────
 # The merge can otherwise only ADD, and several tables are PRESENCE-gated — declaring
-# [claude] / [codex] / [vscode] / [plugins.<name>] at all IS the opt-in — so blanking their
-# keys doesn't switch them off. `disabled = true` removes the block from the resolved config
-# as if it had never been written; the team keeps it, you don't get it. The case it exists
-# for: the repo commits [codex], you don't have a Codex subscription, and you'd rather not
-# have the CLI installed on box-up, be asked for a credential, or carry a dead codex row in
+# [claude] / [codex] / [copilot] / [vscode] / [plugins.<name>] at all IS the opt-in — so
+# blanking their keys doesn't switch them off. `disabled = true` removes the block from the
+# resolved config as if it had never been written; the team keeps it, you don't get it. The case
+# it exists for: the repo commits [codex], you don't have a Codex subscription, and you'd rather
+# not have the CLI installed on box-up, be asked for a credential, or carry a dead codex row in
 # `fy mode`. Works at any depth ([plugins.github] too), and `disabled = false` here puts a
 # block back that the SHARED file disabled. `fy config widenings` lists what you've removed.
 # [codex]
@@ -54,6 +54,29 @@
 # keyless = "chatgpt"
 # system_prompt = """
 # …your orientation prompt for `fy codex`.
+# """
+#
+# GitHub Copilot CLI (`fy copilot`) — two keyless rungs. RECOMMENDED: `api-key`, a Copilot-only
+# fine-grained PAT (https://github.com/settings/personal-access-tokens/new): resource owner your
+# personal account, Account permissions → Copilot Requests only, NO repository access (starts
+# `github_pat_`). It is injected on api.github.com with no path limit, so it must be able to do
+# nothing else there. Classic `ghp_` PATs and pasted `gho_`/`ghu_` are refused.
+# `oauth` is for seats that can't use such a PAT: it reuses `gh auth token` on your computer — your
+# whole GitHub identity — so its `on` is a timed emergency switch (`fy mode copilot=on ttl=30m`)
+# and its api.github.com rule is limited to /copilot_internal/. Nothing is pasted or stored.
+# Captured host-side like the others (for `api-key`); the box holds a dummy and the proxy swaps in
+# the real token. Then `fy mode copilot=on`. `keyless` is required: a [copilot] table without it is
+# refused (there is no in-box login).
+# `system_prompt` works here exactly as it does for [claude]; `fy copilot` writes it into
+# $COPILOT_HOME/instructions/, which every session in this box loads.
+# A keyless [copilot] needs api.github.com to itself: the GitHub `[[inject]]` rows deliver a
+# credential to that same host, so turn them off while a Copilot rung is on.
+# [copilot]
+# keyless = "api-key"  # experimental (recommended)
+# keyless = "oauth"    # experimental: gh token, timed emergency switch
+# oauth_user = "my-github-login"  # optional, oauth only: which github.com gh account to use
+# system_prompt = """
+# …your orientation prompt for `fy copilot`.
 # """
 
 # ── Your machine, not the project's ──────────────────────────────────────────────────────

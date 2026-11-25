@@ -1937,6 +1937,11 @@ def codex_transcript_sync_seconds() -> float:
     return _transcript_sync_seconds("codex")
 
 
+def copilot_transcript_sync_seconds() -> float:
+    """``[copilot].transcript_sync_seconds`` — see :func:`_transcript_sync_seconds`."""
+    return _transcript_sync_seconds("copilot")
+
+
 def vscode_enabled() -> bool:
     """True when the consumer declares a ``[vscode]`` table — mounts the vscode-server volume so
     ``fy code`` (VS Code attach) reuses its server across box recreations. Absent ⇒ no volume."""
@@ -2057,6 +2062,68 @@ def codex_config() -> dict:
     Empty/absent ⇒ ``{}`` (no ``-c`` beyond the prompt)."""
     raw = _table("codex").get("config")
     return raw if isinstance(raw, dict) else {}
+
+
+def copilot_enabled() -> bool:
+    """True when the consumer declares a ``[copilot]`` table — installs the GitHub Copilot CLI on
+    box-up and mounts its persisted ``~/.copilot`` (settings, sessions) volume. Absent ⇒ no Copilot
+    in the box. The table also needs ``keyless``: there is no in-box login."""
+    return isinstance(_toml().get("copilot"), dict)
+
+
+def copilot_keyless() -> str:
+    """``[copilot].keyless`` — opt the box into KEYLESS Copilot auth: NO real token in the box, the
+    egress proxy supplies the real one host-side, like the Claude/Codex/``[[inject]]`` injectors.
+    Modes:
+
+      - ``"api-key"`` (``true`` aliases it) — the recommended rung. A Copilot-ONLY fine-grained PAT
+        (``github_pat_…``: personal-account resource owner, Account permissions → Copilot Requests,
+        no repository access) is captured into ``host.env``; the box bakes a dummy
+        ``COPILOT_GITHUB_TOKEN`` and the proxy rewrites ``Authorization`` with ``Bearer `` + that
+        PAT on every Copilot API host (:data:`foldyard.keyless.COPILOT_KEYLESS_HOSTS`). Its scope is
+        why an unpath-limited rule on ``api.github.com`` is fine here.
+      - ``"oauth"`` — no paste and nothing stored: the packaged ``gh-cli`` minter runs `gh auth
+        token` on your computer. That is your whole GitHub identity, so the ``on`` level is an
+        emergency with a TTL and the ``api.github.com`` rule is limited to ``/copilot_internal/``.
+
+    Classic ``ghp_`` PATs are refused by Copilot; ``gho_``/``ghu_`` pastes are refused at the
+    capture prompt — use ``oauth`` for a token from `gh`. Absent/false/unrecognised ⇒ ``""``, which
+    a declared ``[copilot]`` is refused with: there is no in-box login (ADR-0008, amended
+    2026-11-18; ``preflight.agent_issues``)."""
+    raw = _table("copilot").get("keyless")
+    if raw is True or raw == "api-key":
+        return "api-key"
+    if raw == "oauth":
+        return "oauth"
+    return ""
+
+
+# GitHub logins are alphanumeric or single hyphens, 1–39 chars, never starting/ending with a hyphen.
+# Validating here keeps `--user` from being read as another `gh` flag when the minter forwards it.
+_GITHUB_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+
+
+def copilot_oauth_user() -> str:
+    """``[copilot].oauth_user`` — the github.com login whose host-side ``gh`` token the Copilot
+    ``oauth`` rung mints. Optional: ``""`` (absent or empty) means the active github.com account,
+    which the minter pins explicitly so a GHE default host can never win. Ignored by ``api-key``
+    (and reported by preflight if set there). An invalid login reads as ``""`` and is reported by
+    :func:`foldyard.preflight.issues` rather than silently ignoring the typo."""
+    raw = _table("copilot").get("oauth_user")
+    if not isinstance(raw, str):
+        return ""
+    login = raw.strip()
+    return login if _GITHUB_LOGIN.fullmatch(login) else ""
+
+
+def copilot_system_prompt() -> str:
+    """Box-orientation prompt for a Copilot session. From ``[copilot].system_prompt`` (""), the same
+    key and the same job as :func:`claude_system_prompt` — only the delivery differs, because the
+    Copilot CLI has no ``--append-system-prompt`` and no ad-hoc config override: ``fy copilot``
+    writes it to ``$COPILOT_HOME/instructions/foldyard.instructions.md``, one of the personal
+    instruction sources the CLI loads for every session (see ``box._seed_copilot_instructions``)."""
+    raw = _table("copilot").get("system_prompt")
+    return str(raw) if isinstance(raw, str) else ""
 
 
 # ── gcp-metadata plugin config ([plugins.gcp-metadata]) ────────────────────────────────
@@ -2190,7 +2257,8 @@ def secret_specs() -> list[dict]:
     """The ``[[secret]]`` array-of-tables — each entry declares a host-side secret a posture needs
     present in host.env: ``var`` (required), ``label``, ``how`` (the "where do I get this?" hint,
     PRINTED at the capture prompt and never executed), ``pattern`` (an fnmatch GLOB the value must
-    match — a glob, not a regex, because this field is repo-controlled: see ``keyless.secret_ok``),
+    match, with ``|``-separated whole-value alternatives allowed — still globs, not a regex, because
+    this field is repo-controlled: see ``keyless.secret_ok``),
     ``base64`` (store encoded — host.env is single-line), ``when`` (posture gate, same semantics as
     ``[[overlay]]``). Absent/malformed ⇒ ``[]``; non-dict entries are skipped, and FIELD validation
     is the registry's (loud, at merge — see ``Registry.secrets``). See

@@ -1,6 +1,6 @@
 """Keyless agent auth — the credential taxonomy + the host-side capture of the real secret.
 
-The prize (ADR-0008): the box runs Claude Code / Codex with a PLACEHOLDER
+The prize (ADR-0008): the box runs Claude Code / Codex / GitHub Copilot with a PLACEHOLDER
 credential and the egress proxy rewrites it in flight with the real one, which lives ONLY in
 ``~/.foldyard/<project>/host.env`` on the host — never in the box, never in the repo. The same shape
 as an ``[[inject]]`` rule (a dummy in the box + the ``static_token`` minter on the host).
@@ -17,7 +17,9 @@ registry hot path:
   - **The capture** (:func:`classify`, :func:`ensure_cred`): on ``fy box up`` (host, TTY) with a
     keyless mode configured and no matching cred in host.env yet, prompt ONCE for "an API key or
     token", classify it by prefix (no need to ask which — ``sk-ant-api`` → Claude key,
-    ``sk-ant-oat`` → Claude OAuth, ``sk-`` → OpenAI/Codex key), and append it to host.env. The
+    ``sk-ant-oat`` → Claude OAuth, ``sk-`` → OpenAI/Codex key, ``github_pat_`` → a Copilot-only
+    fine-grained PAT), and append it to host.env. Copilot's broader ``oauth`` rung mints its token
+    host-side instead, so nothing is pasted or stored for it. The
     I/O (prompt/echo) is injected so the logic is pure + unit-testable.
 
 And one posture convenience beside them, :func:`seed_posture`: a worktree's FIRST adoption mirrors
@@ -31,6 +33,7 @@ import base64
 import fcntl
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -89,6 +92,62 @@ CODEX_KEYLESS: dict[str, dict[str, str]] = {
         "value_prefix": "Bearer ",
         "how": "create one at https://platform.openai.com/api-keys",
         "prefix": "sk-",
+    },
+}
+
+
+# The GitHub Copilot CLI's keyless targets. The box bakes a dummy ``COPILOT_GITHUB_TOKEN`` and the
+# proxy rewrites ``Authorization`` in flight. Copilot talks to a PLAN-SPECIFIC API host
+# (business/individual/enterprise), and it ALWAYS validates the token against ``api.github.com``
+# before any Copilot call — so every host that can carry it is listed, rather than guessing which
+# plan the operator's seat is on. A rule names the dummy (so a shared host can tell this credential
+# from another's), and ``any_scheme`` (set by the plugin) covers the schemes a GitHub client may
+# use: ``Bearer <dummy>``, ``token <dummy>``, or the bare value. The proxy overwrites the header on
+# those hosts, so a token obtained in the box is never forwarded.
+#   ``api-key`` — a Copilot-ONLY fine-grained PAT (``github_pat_…``): resource owner your personal
+#                 account, Account permissions → Copilot Requests, NO repository access. It is
+#                 injected on api.github.com with no path limit, so it must be able to do nothing
+#                 there but Copilot — that is how "the credential owns its scope" (ADR-0031) holds.
+#                 OAuth/user tokens (``gho_``/``ghu_``) are NOT accepted here: they carry your whole
+#                 GitHub identity, and classic ``ghp_`` PATs are refused by Copilot itself.
+#   ``oauth``   — no paste: the host-side ``gh-cli`` minter supplies `gh auth token`, so it is the
+#                 same broad token the ``gh-cli`` kind injects on an emergency switch. The plugin
+#                 therefore limits its api.github.com rule to ``/copilot_internal/`` and makes the
+#                 switch emergency (TTL + auto-revert); the token still reaches Copilot's own hosts,
+#                 including the GitHub MCP endpoint, which is what the time limit bounds.
+COPILOT_KEYLESS_HOSTS = (
+    "api.github.com",  # token validation + `copilot_internal/*` (the first call of every session)
+    "api.githubcopilot.com",
+    "api.individual.githubcopilot.com",
+    "api.business.githubcopilot.com",
+    "api.enterprise.githubcopilot.com",
+    "copilot.github.com",
+    "cafe.github.com",  # Copilot auth/entitlement
+    "exp.business.githubcopilot.com",  # business-plan experiments/config
+)
+# ``prefix`` is empty for oauth: nothing is pasted or stored for that rung, so there is no shape for
+# the classifier to name. `value_prefix` belongs to the api-key rung only (the static minter returns
+# the bare PAT); the gh-cli minter already returns `Bearer <token>`.
+COPILOT_KEYLESS: dict[str, dict[str, str]] = {
+    "api-key": {
+        "env": "COPILOT_GITHUB_TOKEN",
+        "header": "Authorization",
+        "dummy": "gho_foldyarddummy",
+        "value_prefix": "Bearer ",
+        "how": (
+            "create a fine-grained PAT (github_pat_…) at "
+            "https://github.com/settings/personal-access-tokens/new — resource owner your personal "
+            "account, Account permissions → Copilot Requests only, NO repository access"
+        ),
+        "prefix": "github_pat_",
+    },
+    "oauth": {
+        "env": "COPILOT_GITHUB_TOKEN",
+        "header": "Authorization",
+        "dummy": "gho_foldyarddummy",
+        "value_prefix": "",
+        "how": "no paste — `fy mode copilot=on ttl=30m` uses `gh auth token` on your computer",
+        "prefix": "",
     },
 }
 
@@ -224,16 +283,16 @@ def dummy_box_args(taxonomy: dict, kind: str) -> list[str]:
 
 # ── no in-box login (ADR-0008, amended 2026-11-18) ───────────────────────────────────────────
 #
-# Keyless is the only supported way an agent is credentialed. A `[claude]`/`[codex]` without
-# `keyless` is refused at launch (:func:`no_keyless_block`), and a login made in the box anyway —
-# the box is root, so nothing can stop one — is found by `fy verify` and `fy doctor` in the files
-# the agents themselves write it to. Read in the box, of the box's own files.
+# Keyless is the only supported way an agent is credentialed. A `[claude]`/`[codex]`/`[copilot]`
+# without `keyless` is refused at launch (:func:`no_keyless_block`), and a login made in the box
+# anyway — the box is root, so nothing can stop one — is found by `fy verify` and `fy doctor` in
+# the files the agents themselves write it to. Read in the box, of the box's own files.
 
 
 def no_keyless_block(table: str) -> str:
-    """The refusal for a declared ``[claude]``/``[codex]`` with no ``keyless``: why, and the one
-    line that fixes it, in the personal file — which credential you pay for is yours, and a
-    ``keyless`` in the shared file prompts every colleague for one they may not have."""
+    """The refusal for a declared ``[claude]``/``[codex]``/``[copilot]`` with no ``keyless``: why,
+    and the one line that fixes it, in the personal file — which credential you pay for is yours,
+    and a ``keyless`` in the shared file prompts every colleague for one they may not have."""
     kinds = {
         "claude": (
             ('"oauth"', "a token from `claude setup-token` on your computer"),
@@ -242,6 +301,10 @@ def no_keyless_block(table: str) -> str:
         "codex": (
             ('"chatgpt"', "your ChatGPT subscription (`codex login` on your computer once)"),
             ('"api-key"', "an OpenAI API key"),
+        ),
+        "copilot": (
+            ('"api-key"', "a Copilot-only fine-grained PAT (recommended)"),
+            ('"oauth"', "your `gh` token, via a timed emergency switch"),
         ),
     }[table]
     choices = "".join(f"\n      keyless = {k:<11}# {why}" for k, why in kinds)
@@ -315,6 +378,30 @@ def codex_stored_login(codex_home: Path) -> list[str]:
     return []
 
 
+# A real GitHub credential can reach a box's Copilot home via the CLI's OWN `storeTokenPlaintext`
+# setting (a token in the CLI-managed JSONC config.json when no system keychain exists). That file's
+# shape is CLI-version-dependent and CLI-owned, so this looks for a token-SHAPED VALUE anywhere in
+# it, never for a particular key — and never edits the file. The `loggedInUsers` rows are NOT the
+# signal: a keyless session legitimately names its user there. Length floor keeps a key such as
+# `gho_id` from reading as a credential; real tokens are 40+ characters. Only paths are returned,
+# never the value itself, so a token cannot reach verify/doctor output or logs.
+_COPILOT_TOKEN_SHAPE = re.compile(r"github_pat_[A-Za-z0-9_]{20,}|gh[pou]_[A-Za-z0-9_]{20,}")
+
+
+def copilot_stored_token(copilot_home: Path) -> list[str]:
+    """``$COPILOT_HOME/config.json`` when it holds a real-looking GitHub token: the path, or ``[]``.
+    Unlike Codex's auth.json — a file that exists only to hold a credential — this file is ordinary
+    CLI state, so its mere presence (or an unreadable one) is not a finding; only a token value is.
+    foldyard's dummy is exempt. Read-only: foldyard never writes this CLI-managed JSONC file."""
+    path = copilot_home / "config.json"
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    dummy = COPILOT_KEYLESS["api-key"]["dummy"]
+    return [str(path)] if any(m != dummy for m in _COPILOT_TOKEN_SHAPE.findall(text)) else []
+
+
 def stored_login_rows(
     label: str, found: list[str], leaks: list[str], remove: str
 ) -> list[tuple[str, str]]:
@@ -352,10 +439,15 @@ def credential_env_leaks(taxonomy: dict, environ) -> list[str]:
 # Prefix → (host.env var, human label). Order matters: the Claude ``sk-ant-…`` prefixes are more
 # specific than the bare OpenAI ``sk-`` and so must be tested first. ``sk-proj-…`` (OpenAI project
 # keys) falls under ``sk-``. This is the "no need to ask which" classifier from the design.
+# GitHub tokens: only the Copilot-only fine-grained PAT is pasted at the keyless prompt. ``gho_``
+# and ``ghu_`` carry the operator's whole GitHub identity — the `oauth` rung mints one host-side via
+# `gh auth token` instead of storing it, so a paste is refused here. ``ghp_`` is absent on purpose:
+# Copilot refuses classic PATs. An unrecognised value is stored nowhere.
 _CLASSIFY: list[tuple[str, tuple[str, str]]] = [
     ("sk-ant-api", ("ANTHROPIC_API_KEY", "Claude API key")),
     ("sk-ant-oat", ("CLAUDE_CODE_OAUTH_TOKEN", "Claude OAuth token")),
     ("sk-", ("OPENAI_API_KEY", "OpenAI / Codex API key")),
+    ("github_pat_", ("COPILOT_GITHUB_TOKEN", "GitHub fine-grained PAT (Copilot)")),
 ]
 
 
@@ -435,7 +527,9 @@ def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
     from repo config that anything able to write the checkout can edit, and feeding that to Python's
     backtracking ``re`` engine makes `fy box up` hangable by a crafted pattern (`(.*)*x` against a
     2 KiB paste). A glob can't nest quantifiers, so the whole class is gone rather than mitigated —
-    and every real shape check here is a prefix or a substring anyway.
+    and every real shape check here is a prefix or a substring anyway. ``|`` separates ALTERNATIVES
+    (each a whole-value glob, any of which may match) — for a credential whose provider accepts
+    several shapes, e.g. ``sk-ant-api*|sk-ant-oat*``.
 
     For a ``b64`` secret the paste must be valid base64 whose DECODED text matches, and the paste is
     stored verbatim. That's deliberately strict: host.env is single-line, so the declared ``how``
@@ -444,13 +538,14 @@ def secret_ok(value: str, pattern: str, b64: bool) -> str | None:
     as a broken key."""
     from fnmatch import fnmatchcase
 
+    globs = [g for g in pattern.split("|") if g]
     if b64:
         try:
             decoded = base64.b64decode(value, validate=True).decode()
         except (ValueError, UnicodeDecodeError):
             return None
-        return value if (not pattern or fnmatchcase(decoded, pattern)) else None
-    return value if (not pattern or fnmatchcase(value, pattern)) else None
+        return value if (not globs or any(fnmatchcase(decoded, g) for g in globs)) else None
+    return value if (not globs or any(fnmatchcase(value, g) for g in globs)) else None
 
 
 SECRET_FILE_MAX = 64 * 1024
@@ -672,14 +767,15 @@ def ensure_cred(
 
 
 def seed_posture(wt_cfg: Config) -> dict[str, str]:
-    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex`` axes) into
-    a worktree's posture file, so its keyless box comes up injectable. Called by
+    """Mirror the main checkout's KEYLESS AI-assistant posture (the ``claude``/``codex``/``copilot``
+    axes) into a worktree's posture file, so its keyless box comes up injectable. Called by
     :func:`foldyard.configpin.adopt` at the worktree's FIRST adoption — wherever that happens
     (``fy worktree add``, the launch gate, ``fy config adopt``, the TUI) — with ``wt_cfg`` being
     what was just adopted. Returns the axes it set (``{}`` for none).
 
     Why this is needed: posture is per-worktree and a fresh worktree has no ``dev-mode.json``, so
-    every axis reads its rung-0 default (off). With ``claude``/``codex`` off, the worktree's own
+    every axis reads its rung-0 default (off). With ``claude``/``codex``/``copilot`` off, the
+    worktree's own
     egress proxy installs NO token-inject rule on its per-worktree port — so codex/claude in the
     worktree box send the far-future *dummy* token, 401, then try to refresh with the dummy refresh
     token and fail with *"Your access token could not be refreshed."* The real creds are already
@@ -697,7 +793,8 @@ def seed_posture(wt_cfg: Config) -> dict[str, str]:
     operator never chose: ``set_mode`` writes EVERY axis into the file, so any earlier write to the
     worktree's posture leaves explicit offs behind. Fail-safe by design — the guard can only keep
     an axis off, never turn one on. A non-keyless developer (no
-    ``[claude]``/``[codex]`` ``keyless`` in their local toml) gets a no-op. Written with
+    ``[claude]``/``[codex]``/``[copilot]`` ``keyless`` in their local toml) gets a no-op. Written
+    with
     ``reconcile=False``: nothing of the worktree is up before its first adoption (the launch verbs
     refuse an unadopted checkout), and the supervisor reconciles from the posture file. Best-effort
     — a hiccup here must not fail the adoption that called it."""
@@ -708,7 +805,11 @@ def seed_posture(wt_cfg: Config) -> dict[str, str]:
         return {}
     try:
         with config.using(wt_cfg):
-            configured = (("claude", config.claude_keyless()), ("codex", config.codex_keyless()))
+            configured = (
+                ("claude", config.claude_keyless()),
+                ("codex", config.codex_keyless()),
+                ("copilot", config.copilot_keyless()),
+            )
             keyless_axes = [axis for axis, on in configured if on]
             if not keyless_axes:
                 return {}

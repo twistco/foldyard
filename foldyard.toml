@@ -172,6 +172,23 @@ lives outside this box, out of your reach.
 [codex.config]
 model_reasoning_summary = "auto"
 tui = { raw_output_mode = false }
+#
+# GitHub Copilot CLI (`fy copilot`). Declaring [copilot] installs it on box-up + mounts
+# $COPILOT_HOME (settings + sessions). Keyless like Claude (a [copilot] without `keyless` is
+# refused): the proxy injects the PAT host-side, never in the box. It needs api.github.com to
+# itself, so the GitHub [[inject]] rows below must be off while a Copilot rung is on.
+# `keyless = "api-key"` (experimental, RECOMMENDED) prompts once for a Copilot-only fine-grained
+# PAT: personal-account resource owner, Account permissions → Copilot Requests only, no repository
+# access. Classic `ghp_` PATs and pasted `gho_`/`ghu_` are refused — use `oauth` for the latter.
+# `keyless = "oauth"` (experimental) instead reuses `gh auth token` on your computer on a timed
+# emergency switch, with the api.github.com rule limited to /copilot_internal/.
+# [copilot]
+# keyless = "api-key"
+# transcript_sync_seconds = 5
+# system_prompt = """
+# You are root in foldyard's own foldyard dev box, started by `fy copilot` with permission
+# prompts skipped. Read CLAUDE.md for how this repo works, then follow it.
+# """
 
 # GitHub for the box (`fy mode github=on` on your computer; walkthrough: `fy docs github-app`).
 # twistco's PR-bot App, the installation Tangible's box uses too; `repositories` narrows each
