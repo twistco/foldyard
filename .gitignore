@@ -25,7 +25,8 @@ foldyard.local.toml
 # Session handover notes for the next Claude Code session — local, never committed
 HANDOVER-*.md
 .claude/settings.local.*
-# Claude Code's personal, uncommitted instructions; never committed (tests/test_agents_md.py)
+# Claude Code's personal, uncommitted instructions; never committed (tests/test_agents_md.py).
+# Start yours with `@AGENTS.md`: Claude Code's docs say a file here is read instead of AGENTS.md.
 CLAUDE.local.md
 
 # >>> foldyard (managed) — do not edit inside this block >>>

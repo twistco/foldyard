@@ -22,7 +22,7 @@ Two halves, deliberately apart:
   number). Any stretch of the store is joined with the catalogue's snapshots around it
   (:func:`join`), never just the ones that happen to fall inside the bytes read: two snapshots can
   be a minute and tens of megabytes apart under load, and a byte window once silently dropped
-  every event between them (2026-10-21).
+  every event between them (2026-10-21). With no catalogue to be had, it is the records alone.
 """
 
 from __future__ import annotations

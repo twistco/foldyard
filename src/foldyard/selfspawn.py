@@ -16,8 +16,9 @@ parent's (``confighash`` runs in the main checkout), the entry silently moves in
 child that runs elsewhere takes its environment from :func:`env`, which pins each entry where the
 parent resolved it.
 
-``tests/test_selfspawn.py`` plants a ``foldyard/`` and runs the real child, and fails on any new
-``sys.executable, "-m"`` argv in the package.
+``tests/test_selfspawn.py`` plants a ``foldyard/`` and runs the real child, and fails on a new
+``sys.executable, "-m"`` written out in the package: a pattern in the source, so an argv put
+together some other way gets past it.
 
 Stdlib-only and import-free: the plugins and the hot path use it.
 """
