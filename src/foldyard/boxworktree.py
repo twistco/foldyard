@@ -10,8 +10,9 @@ registers it, like any existing worktree, and gives it the rest.
 
 * **The volume is mounted into the running box** by a one-off container (:func:`_helper`,
   ``assets/boxworktree/attach.py``) through the engine socket the box already holds. It shares the
-  box's pid namespace, drops every capability and takes back the three the mount needs. Nothing on
-  your computer runs, and nothing is asked of it.
+  box's pid namespace, drops every capability and takes back the three the mount needs, never
+  ``--privileged`` (pinned by ``tests/test_boxworktree.py``), and runs the BOX's python, as its own
+  image needn't have one. Nothing on your computer runs, and nothing is asked of it.
 * **Before anything installs.** ``git worktree add`` runs with the repo's hooks off, the volumes go
   on, and only then does the post-checkout hook run (a hook that installs is the usual one).
 * **The dir underneath is read-only** (0555), for when the volume isn't mounted: the box was

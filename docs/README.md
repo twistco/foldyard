@@ -112,6 +112,7 @@ Start at [AGENTS.md](../AGENTS.md), the map for people and agents alike.
 
 - [forwarder-spike.md](./forwarder-spike.md) — whether an in-VM forwarder can stamp each proxy
   connection with the container it came from, and what it costs (2026-10-22, for ADR-0034).
+
 - [guest-os.md](./guest-os.md) — why the VM runs Fedora (Lima's podman template), what a VM costs
   and whether a leaner guest would be safer, what Fedora 45 and podman 6 broke and the fixes, the
   pasta port forwarder, and moving a project's VM to Fedora 45 in place (2026-11-20), with the

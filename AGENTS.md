@@ -129,12 +129,12 @@ consumer they run against.
 
 | Area | Modules |
 | -- | -- |
-| CLI, config | `cli` · `config` · `configpin` (the adopted config) · `exposure` · `experimental` · `projects` |
+| CLI, config | `cli` · `config` · `configpin` (the adopted config) · `privatecfg` · `exposure` · `experimental` · `projects` |
 | Stack | `stack` · `composeguard` · `guestcompose` · `registrylogins` · `confighash` · `reconcile` · `state_view` |
 | Posture | `devmode` · `verify` · `preflight` · `allowlist` · `keyless` · `credscope` · `plugins/` |
-| VM | `machine` · `machine_backend` · `basevm` · `boxmounts` · `hostwall` · `sandbox` · `guestlog` · `prereq` |
+| VM | `machine` · `machine_backend` · `basevm` · `upgrade` · `guestfiles` · `boxmounts` · `hostwall` · `sandbox` · `guestlog` · `prereq` |
 | Box | `box` · `boximage` · `crossmask` · `crossinject` · `agents` · `boxpackages` · `paste` · `hostclock` · `hostgit` |
 | Host daemons | `supervisor` · `selfspawn` · `forwarder` · `attribution` |
-| Guest monitor | `monitor` · `monitorlog` · `monitorstore` · `monitorhooks` · `monitorsink` |
-| Worktrees, git | `worktree` · `worktree_registry` · `githeal` · `mountwrite` · `transcripts` · `ports` |
+| Guest monitor | `monitor` · `monitorlog` · `monitorstore` · `monitorevidence` · `monitorhooks` · `monitorsink` |
+| Worktrees, git | `worktree` · `boxworktree` · `worktree_registry` · `worktree_published` · `githeal` · `mountwrite` · `transcripts` · `ports` |
 | Other | `tui` · `init` · `skills` · `docs` · `changelog` · `compat` · `buildgate` · `browser` · `vscode` · `podman_desktop` · `term` |
