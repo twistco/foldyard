@@ -179,7 +179,7 @@ _AGENT_PROMPT = [
     "# user's computer. So the blast radius is this repo plus this project's containers — never",
     "# that computer. Prove it any time with `fy verify` (expect ALL PASS).",
     "#",
-    "# `fy` works in here for the read and box verbs: `fy verify`, `fy box shell|ps|down`, and",
+    "# `fy` works in here for the read and box verbs: `fy verify`, `fy box shell|ps`, and",
     "# `fy mode` to SEE the credential mode — the mode is SET on the user's computer, not in",
     "# here, and so are egress grants. A second checkout beside this one is `fy worktree add <name>`,",
     "# then `WORKTREE=<name> fy <verb>`.",

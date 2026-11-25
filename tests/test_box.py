@@ -2434,6 +2434,27 @@ def test_down_noops_without_provisioning_when_machine_gone(fake, monkeypatch):
     assert not fake["mirror"].exists()
 
 
+@pytest.mark.parametrize("worktree", ["", "feat"])
+@pytest.mark.parametrize("cmd", ["down", "recreate"])
+def test_a_box_is_never_removed_from_inside_a_box(fake, monkeypatch, capsys, cmd, worktree):
+    # Its own would end the agent asking, half-way through. Another worktree's is as much somebody
+    # else's session, and on your computer that worktree goes by `fy worktree remove`.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    monkeypatch.setenv("WORKTREE", worktree)
+    _running_box(fake, monkeypatch)
+    fake["mirror"].write_text("{}\n")
+    assert box.main(cmd, ["--yes"]) == 1
+    assert fake["calls"] == [] and fake["mirror"].exists()
+    err = capsys.readouterr().err
+    assert f"`fy box {cmd}`" in err and "your computer" in err
+
+
+def test_the_refused_down_says_how_a_box_lets_go_of_a_worktree(monkeypatch, capsys):
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert box.main("down") == 1
+    assert "fy worktree remove" in capsys.readouterr().err
+
+
 # ── recreate ───────────────────────────────────────────────────────────────────────────
 
 
