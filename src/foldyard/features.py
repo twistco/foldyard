@@ -376,7 +376,9 @@ def _toml(value: object) -> str:
 def _use(key: Key, merged: dict, shared: dict, local: dict) -> Use:
     entries = _entries(merged.get(key.table))
     if not key.field:
-        return Use(key, key.table in merged, origin=_origin(key, shared, local))
+        # `bool(entries)`: a table counts declared, an array only with an entry left after the
+        # `disabled = true` ones are dropped (the merge leaves an empty list behind).
+        return Use(key, bool(entries), origin=_origin(key, shared, local))
     values = [e[key.field] for e in entries if key.field in e]
     if not values:
         return Use(key, False)
@@ -400,17 +402,18 @@ def _origin(key: Key, shared: dict, local: dict) -> str:
 def check(shared: dict, local: dict) -> Report:
     """``shared`` (foldyard.toml) and ``local`` (foldyard.local.toml), each as parsed. Pure."""
     merged = config.merge_config(shared, local)
-    uses = [_use(k, merged, shared, local) for k in KEYS if k.pitch]
+    # Each file under today's names, as the merge reads it: a local `wall` is a local `firewall`.
+    shared_now, local_now = config._apply_renames(shared), config._apply_renames(local)
+    uses = [_use(k, merged, shared_now, local_now) for k in KEYS if k.pitch]
     problems: list[Problem] = []
-    for doc, origin in ((shared, SHARED), (local, LOCAL)):
-        renamed_away = config._apply_renames(doc)
-        problems += _unknown(renamed_away, origin)
-        problems += _removed(doc, origin)
-        problems += _old_defaults(renamed_away, origin)
+    for raw, now, origin in ((shared, shared_now, SHARED), (local, local_now, LOCAL)):
+        problems += _unknown(now, origin)
+        problems += _removed(raw, origin)
+        problems += _old_defaults(now, origin)
     problems += _renamed(shared, local)
     project = merged.get("project")
     reviewed = project.get("recommended_foldyard_version") if isinstance(project, dict) else None
-    return Report(uses, problems, reviewed if isinstance(reviewed, str) else None)
+    return Report(uses, problems, _printable(reviewed) if isinstance(reviewed, str) else None)
 
 
 def _files(cfg: config.Config) -> tuple[dict, dict]:

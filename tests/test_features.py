@@ -258,6 +258,17 @@ def test_a_disabled_table_is_not_in_use():
     assert not _row(report, "codex").used
 
 
+def test_an_array_whose_every_entry_is_disabled_is_not_in_use():
+    shared = {"inject": [{"switch": "a", "disabled": True}]}
+    assert not _row(features.check(shared, {}), "inject").used
+
+
+def test_a_renamed_key_set_locally_is_credited_to_the_local_file():
+    report = features.check({"machine": {"firewall": False}}, {"machine": {"wall": True}})
+    row = _row(report, "machine", "firewall")
+    assert row.used and row.value is True and row.origin == features.LOCAL
+
+
 def test_the_reviewed_version_is_the_recommended_one():
     shared = {"project": {"recommended_foldyard_version": "0.12.0"}}
     assert features.check(shared, {}).reviewed == "0.12.0"
@@ -340,6 +351,14 @@ def test_a_key_or_value_carrying_terminal_escapes_is_shown_as_text():
     assert "\x07" not in text and "\x1b]" not in text and "\x1b[2K" not in text
     assert "\\x1b]52;c;" in text  # kept visible: it's part of what the config says
     assert all(c.isprintable() for p in report.problems for c in p.label + p.detail)
+
+
+def test_a_recommended_version_carrying_terminal_escapes_is_shown_as_text():
+    # "99<ESC>…" still orders as 99, so the "reviewed up to" line prints it.
+    report = features.check({"project": {"recommended_foldyard_version": f"99{ESC}"}}, {})
+    assert report.reviewed is not None and report.reviewed.isprintable()
+    text = "\n".join(features.render(report))
+    assert "reviewed up to 99\\x1b]52" in text and "\x1b]" not in text
 
 
 # ── the verb ───────────────────────────────────────────────────────────────────────────────────
