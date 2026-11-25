@@ -21,10 +21,16 @@ PRIV="podman run --rm --privileged --user 0 --security-opt label=disable -v $S:$
 round() { echo "== $1"; g "$2 $S/attack.sh $S" | show; }
 config_bound() { g "findmnt -rn -o TARGET $S/repo/.git/config >/dev/null && echo bound || echo 'NOT bound'"; }
 
+# A VM already called that is somebody's: refused, before the trap that deletes ours.
+if limactl list -q 2>/dev/null | grep -qx "$VM"; then
+    echo "a VM called $VM already exists" >&2
+    rm -rf "$S"
+    exit 1
+fi
+trap 'limactl delete -f "$VM" >/dev/null 2>&1 || true; rm -rf "$S"' EXIT
 limactl clone foldyard-base "$VM" --tty=false --mount-only "$S:w" --mount-type virtiofs >/dev/null
 chmod 700 "$HOME/.lima/$VM/sock" 2>/dev/null || true # Lima 2.1.3's clone leaves it 0000
 limactl start "$VM" --tty=false >/dev/null 2>&1
-trap 'limactl delete -f "$VM" >/dev/null 2>&1; rm -rf "$S"' EXIT
 g 'uname -r; podman --version'
 
 round "control: box-shaped container, no guard" "$BOX"

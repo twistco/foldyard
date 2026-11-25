@@ -137,8 +137,14 @@ mount to lose and no boot to be early for: macOS's immutable flag (`chflags -h u
 and an access rule (`chmod +a "everyone deny delete"`, what macOS puts on `~/Documents`) that keeps
 `.git` from being moved aside. The rest of `.git` stays as it is.
 
-Tried 2026-11-25 in a scratch repository (macOS, APFS, Apple git 2.54), the attacks run as a process
-of the same user, which is what the share's server is:
+**The lock is only as good as what the share can't say.** Its owner can undo it: `chflags -h nouchg`
+clears the flag and `chmod -N` drops the rule, neither needing root, and then every swap works
+again. So a process running as you isn't kept out, and this is no defence against one. It keeps a
+box out only if nothing a box can reach makes your computer clear a flag or a rule for it.
+
+Tried 2026-11-25 in a scratch repository (macOS, APFS, Apple git 2.54). The share's server runs as
+you, so the attacks did too, using only what a filesystem protocol carries (write, rename, link,
+delete, `chmod`, not `chflags` or the rules):
 
 | what | result |
 | -- | -- |
@@ -152,9 +158,10 @@ of the same user, which is what the share's server is:
 `.git/commondir` is made in advance, holding `.`, and locked: git honours one in any git directory,
 so a box could otherwise point yours at another. `config.worktree` is read only if `config` asks.
 
-**Not tested, and it decides this:** a guest's root, through virtiofs. It should be refused, as the
-server asks your kernel as you and the protocol carries neither the flag nor the rule, but nobody
-has run it. Fork, VS Code and other tools with a git library of their own haven't been tried either.
+**Not tested, and it decides this:** a guest's root, through virtiofs. FUSE has no operation for the
+flag or the rule, but Apple's server isn't open to read: whether it passes on an extended attribute
+that holds one (`com.apple.system.Security` for the rule), or an ioctl, is what has to be tried.
+Fork, VS Code and other tools with a git library of their own haven't been tried either.
 
 **What it would cost.** A box needs a `config` at the same path on its own side, copied from yours,
 so what one side sets the other no longer sees by itself. Submodules' `config` and each linked
@@ -220,9 +227,11 @@ Linux or WSL2 host the clone would use 9p, the row this scope hasn't seen.
 
 ## Phases
 
-1. The spike immutable pointers need: the attacks above from a box's root, through virtiofs, and
-   Fork on such a repository. If they hold, they come before the report on macOS, which then covers
-   what is left: planted `.git`s, hook managers' files, Linux and WSL2.
+1. The spike immutable pointers need, from a box's root through virtiofs: the attacks above, and
+   undoing the lock first (`chattr` and `FS_IOC_SETFLAGS`, `setxattr` and `removexattr` on the names
+   macOS keeps flags and rules under, `chmod` in every form), then swapping. And Fork on such a
+   repository. If they hold, they come before the report on macOS, which then covers what is left:
+   planted `.git`s, hook managers' files, Linux and WSL2.
 2. The report (Part 1, what's left), experimental: the fingerprint and its tick, the notification,
    the doctor row, the verb to see and accept a change.
 3. `fy share`, independent of the report and buildable alongside it.
