@@ -22,7 +22,8 @@ prefix, caches, the foldyard self-install, and `fy claude` (the launcher).
 
 VALIDATION CAVEAT: box CREATION can't be exercised from inside the box (it would recreate the
 running box). The command assembly is golden-tested (engine mocked) + faithful to the recipe;
-`up`/`build` want a host / fresh-box run. `shell`/`down`/`ps` are safe everywhere.
+`up`/`build` want a host / fresh-box run. `shell`/`ps` are safe everywhere; `down`/`recreate` are
+refused in a box.
 """
 
 from __future__ import annotations
@@ -2824,10 +2825,18 @@ def _up(
 
 
 def main(cmd: str = "shell", args: list[str] | None = None) -> int:
-    if cmd == "recreate" and config.in_box():
-        # From in here the removal would end this very process half-way, with nothing left to
-        # create the box again.
-        _err("✗ `fy box recreate` removes the box it runs in — run it from your computer.")
+    if cmd in ("recreate", "down") and config.in_box():
+        # From in here the removal would end this very process half-way, and the agent that asked
+        # for it, with nothing left to create the box again. Another worktree's box is refused too:
+        # it may hold somebody else's session. Guidance, not a wall: a box has the engine.
+        if cmd == "recreate":
+            _err("✗ `fy box recreate` removes the box it runs in — run it from your computer.")
+        else:
+            _err(
+                "✗ `fy box down` would end this box, or another worktree's, and every session in "
+                "it — run it from your computer. A worktree you're done with goes, box and all, by "
+                "`fy worktree remove <name>` there; in here that takes the ones a box made."
+            )
         return 1
     # Fail fast on unmet host prereqs before _ctx() creates the machine.
     if cmd in ("up", "recreate"):

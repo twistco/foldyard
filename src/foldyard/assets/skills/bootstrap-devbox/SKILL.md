@@ -145,9 +145,9 @@ its own (foldyard knows where its installers fetch from).
 ### 4. Rebuild from the codified config and verify
 
 Prove the Dockerfile + config reproduce the hand-built box. **The rebuild is the human's, not
-yours:** `fy box down` from inside the box tears down the box you are running in, and the new config
-only takes effect once they approve it on their computer anyway. Commit, then ask them to run, on
-their computer:
+yours:** `fy box down` is refused inside the box, as it would remove the box you are running in, and
+the new config only takes effect once they approve it on their computer anyway. Commit, then ask
+them to run, on their computer:
 
 ```bash
 fy config diff                              # read your foldyard.toml changes…

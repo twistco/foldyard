@@ -1259,7 +1259,7 @@ def box_down(
         False, "--yes", "-y", help="don't ask before stopping agents still running in the box"
     ),
 ) -> None:
-    """Stop and remove the dev box (login and CLI volumes kept).
+    """Stop and remove the dev box (login and CLI volumes kept). On your computer only.
 
     Agents still running in it (`fy agent ls`) are named first, and on a terminal it asks before
     stopping them."""
