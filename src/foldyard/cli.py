@@ -497,6 +497,9 @@ def ls(
         False, "--verbose", "-v", help="list each leftover adoption, not only how many"
     ),
     here: bool = typer.Option(False, "--here", hidden=True, help="this project's engine side"),
+    features: bool = typer.Option(
+        False, "--features", help="each project's use of foldyard's features, newest first"
+    ),
 ) -> None:
     """Every foldyard project on your computer, and what needs attention.
 
@@ -506,7 +509,9 @@ def ls(
     a stopped VM is reported, never started; `fy prune` forgets the adoptions."""
     from . import projects
 
-    raise typer.Exit(projects.ls(here_only=here, as_json=as_json, verbose=verbose))
+    raise typer.Exit(
+        projects.ls(here_only=here, as_json=as_json, verbose=verbose, features=features)
+    )
 
 
 @app.command("prune")
@@ -1765,6 +1770,29 @@ def config_widenings() -> None:
         mode = devmode.read(apply_expiry=True)["mode"]
         report = exposure.render(exposure.collect(cfg, mode))
     print("\n".join(report))
+
+
+@config_app.command("features")
+def config_features(
+    as_json: bool = typer.Option(False, "--json", help="machine-readable output"),
+) -> None:
+    """What foldyard can do, what this config uses, and the keys in it foldyard won't act on.
+
+    Features are listed by the release that added them, newest first, so what arrived since this
+    project was set up comes first; the releases up to `[project] recommended_foldyard_version`
+    sit under a line. Then the problems: unknown keys (a typo, with the nearest real key),
+    removed ones, renamed ones, and an old default written out. Exits 1 on an unknown or removed
+    key. Reads the adopted config on your computer, the checkout's in a box."""
+    import json
+
+    from . import features, term
+
+    report = features.collect(_active_config())
+    if as_json:
+        print(json.dumps(features.as_dict(report), indent=2))
+    else:
+        print("\n".join(features.render(report, color=term.color_enabled())))
+    raise typer.Exit(1 if report.failed else 0)
 
 
 @config_app.command("adopt")

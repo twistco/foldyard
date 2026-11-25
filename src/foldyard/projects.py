@@ -83,6 +83,7 @@ class Project:
     unavailable: str = ""  # why the engine-side facts are missing
     notes: list[Note] = field(default_factory=list)
     below_floor: bool = False  # older than its min_foldyard_version: its child would be refused
+    features: dict | None = None  # `features.as_dict` of its adopted config, with --features
 
 
 @dataclass
@@ -249,7 +250,12 @@ def _worktree_notes(checkout: Path) -> list[Note]:
 
 
 def _describe(
-    checkout: Path, instances: dict[str, dict] | None, installed: str, fp: str
+    checkout: Path,
+    instances: dict[str, dict] | None,
+    installed: str,
+    fp: str,
+    *,
+    features: bool = False,
 ) -> Project:
     """One adopted project, from the host's own record — no engine, no child process."""
     from . import configpin
@@ -294,7 +300,16 @@ def _describe(
                 ' project\'s migration, or set backend = "lima"'
             )
             notes.append(Note("✗", why, "fy config adopt"))
-    return Project(name, str(checkout), vm, state, notes=notes, below_floor=below_floor)
+        report = _features(cfg) if features else None
+    return Project(
+        name, str(checkout), vm, state, notes=notes, below_floor=below_floor, features=report
+    )
+
+
+def _features(cfg: config.Config) -> dict:
+    from . import features
+
+    return features.as_dict(features.collect(cfg))
 
 
 def _left_adoptions() -> list[Leftover]:
@@ -562,9 +577,10 @@ def _ask(p: Project) -> None:
 # ── the listing ──────────────────────────────────────────────────────────────────────────────
 
 
-def collect(*, ask_children: bool = True) -> Listing:
+def collect(*, ask_children: bool = True, features: bool = False) -> Listing:
     """Every adopted project, what's left over, and the base VM. Without ``ask_children`` the
-    engine-side facts are left unasked (`fy prune` needs only what's on disk)."""
+    engine-side facts are left unasked (`fy prune` needs only what's on disk); with ``features``
+    each project's adopted config is held against what foldyard can do (`fy ls --features`)."""
     import foldyard
 
     from . import configpin, supervisor
@@ -572,7 +588,7 @@ def collect(*, ask_children: bool = True) -> Listing:
     instances = _lima_instances()
     fingerprint = supervisor._code_fingerprint()
     projects = [
-        _describe(c, instances, foldyard.__version__, fingerprint)
+        _describe(c, instances, foldyard.__version__, fingerprint, features=features)
         for c in configpin.adopted_checkouts()
     ]
     # Below a project's floor its child would only be refused by it, saying nothing else.
@@ -633,7 +649,10 @@ _LIMA_SILENT = (
 )
 
 
-def render(listing: Listing, *, verbose: bool = False) -> str:
+def render(
+    listing: Listing, *, verbose: bool = False, features: bool = False, width: int | None = None
+) -> str:
+    """``width``: the terminal's, which the features table fits its project names to."""
     if not listing.projects and not listing.leftovers and listing.base_vm is None:
         empty = (
             "No projects yet: a project is listed once its config is adopted on this computer "
@@ -665,6 +684,8 @@ def render(listing: Listing, *, verbose: bool = False) -> str:
                 lines.append(f"    {n.level} {n.text}" + (f" — `{n.fix}`" if n.fix else ""))
             if p.vm.running and p.unavailable:
                 lines.append(f"    ⚠ boxes and agents unknown: {p.unavailable}")
+    if features:
+        lines += _features_section(listing.projects, width)
     if listing.lima_unavailable:
         lines += ["", _LIMA_SILENT]
     if listing.leftovers:
@@ -689,6 +710,77 @@ def render(listing: Listing, *, verbose: bool = False) -> str:
             "(`fy machine base status` says whether it's current)",
         ]
     return "\n".join(lines)
+
+
+#: The narrowest a project's column gets: below it a name is unreadable, so the table overflows.
+_MIN_NAME_WIDTH = 6
+
+
+def _name_width(names: list[str], room: int | None) -> int:
+    """The widest a column may be for the table to fit ``room`` columns: every name whole when it
+    fits (or when there's no terminal to fit), else cut just enough."""
+    longest = max(len(n) for n in names)
+    if room is None:
+        return longest
+    for cap in range(longest, _MIN_NAME_WIDTH, -1):
+        if sum(min(len(n), cap) for n in names) + 2 * (len(names) - 1) <= room:
+            return cap
+    return _MIN_NAME_WIDTH
+
+
+def _features_section(projects: list[Project], width: int | None = None) -> list[str]:
+    """`fy ls --features`: a row per feature, newest release first, a column per project. A
+    ``+`` is the one to look at — a feature newer than the project's recommended version (or any,
+    without one) that it doesn't use: added since whoever last raised that version read the
+    changelog."""
+    from . import compat, features
+
+    shown = [p for p in projects if p.features is not None]
+    if not shown:
+        return []
+    names = [p.project for p in shown]
+    first = shown[0].features or {}
+    rows = [(f["since"], f["title"]) for f in first["features"]]
+    label_w = max(len(label) for _, label in rows)
+    # A name too long for the terminal is broken over as many header lines as it needs.
+    cap = _name_width(names, None if width is None else width - label_w - 6)
+    pieces = [[n[i : i + cap] for i in range(0, len(n), cap)] for n in names]
+    widths = [min(len(n), cap) for n in names]
+    lines = [
+        "",
+        "Features by release, newest first (● in use · not set · + not set, and newer than the "
+        "project's recommended version):",
+    ]
+    for row in range(max(len(p) for p in pieces)):
+        cells = [
+            (p[row] if row < len(p) else "").ljust(w) for p, w in zip(pieces, widths, strict=True)
+        ]
+        lines.append((" " * (label_w + 6) + "  ".join(cells)).rstrip())
+    newest_first = sorted(
+        range(len(rows)), key=lambda i: compat._parse(rows[i][0]) or (0,), reverse=True
+    )  # stable: within a release, the register's order
+    for n, i in enumerate(newest_first):
+        since, label = rows[i]
+        if n == 0 or rows[newest_first[n - 1]][0] != since:
+            lines.append(f"  {since}")
+        cells = []
+        for p, w in zip(shown, widths, strict=True):
+            doc = p.features or {}
+            used, reviewed = doc["features"][i]["used"], features.behind(since, doc["reviewed"])
+            cells.append(("●" if used else "·" if reviewed else "+").ljust(w))
+        lines.append(f"    {label.ljust(label_w)}  " + "  ".join(cells).rstrip())
+    troubled = [p for p in shown if (p.features or {}).get("problems")]
+    if troubled:
+        lines += [
+            "",
+            "Keys foldyard won't act on as written (`fy config features` in the checkout):",
+        ]
+        for p in troubled:
+            lines.append(f"  {p.project}  {_short(p.checkout)}")
+            for prob in (p.features or {})["problems"]:
+                glyph = features.GLYPH[prob["kind"]]
+                lines.append(f"    {glyph} {prob['label']} — {prob['detail']}  ({prob['origin']})")
+    return lines
 
 
 def _adoption_counts(adoptions: list[Leftover]) -> list[str]:
@@ -720,15 +812,27 @@ def to_json(listing: Listing, *, verbose: bool = False) -> str:
     return json.dumps(doc, indent=2)
 
 
-def ls(*, here_only: bool, as_json: bool, verbose: bool = False) -> int:
+def _terminal_width() -> int | None:
+    """The terminal's width, or ``None`` when the output isn't one (piped: nothing to fit)."""
+    import shutil
+
+    if not sys.stdout.isatty():
+        return None
+    return shutil.get_terminal_size().columns
+
+
+def ls(*, here_only: bool, as_json: bool, verbose: bool = False, features: bool = False) -> int:
     if config.in_box():
         _err("✗ `fy ls` lists this computer's projects — run it on your computer, not in a box.")
         return 1
     if here_only:
         print(json.dumps(here()))
         return 0
-    listing = collect()
-    print(to_json(listing, verbose=verbose) if as_json else render(listing, verbose=verbose))
+    listing = collect(features=features)
+    if as_json:
+        print(to_json(listing, verbose=verbose))
+    else:
+        print(render(listing, verbose=verbose, features=features, width=_terminal_width()))
     return 0
 
 

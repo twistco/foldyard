@@ -260,7 +260,7 @@ def test_fy_ls_runs_outside_a_project(monkeypatch, tmp_path):
     monkeypatch.setattr(projects, "ls", lambda **k: seen.append(k) or 0)
     result = CliRunner().invoke(cli.app, ["ls", "--json"])
     assert result.exit_code == 0, result.output
-    assert seen == [{"here_only": False, "as_json": True, "verbose": False}]
+    assert seen == [{"here_only": False, "as_json": True, "verbose": False, "features": False}]
 
 
 def test_size_reads_like_a_person_would_write_it():
@@ -567,4 +567,104 @@ def test_fy_ls_passes_verbose(monkeypatch, tmp_path):
     seen: list = []
     monkeypatch.setattr(projects, "ls", lambda **k: seen.append(k) or 0)
     assert CliRunner().invoke(cli.app, ["ls", "--verbose"]).exit_code == 0
-    assert seen == [{"here_only": False, "as_json": False, "verbose": True}]
+    assert seen == [{"here_only": False, "as_json": False, "verbose": True, "features": False}]
+
+
+# ── --features: what each project uses of foldyard, side by side ──────────────────────────────
+
+
+@pytest.fixture
+def featured(host, monkeypatch):
+    from foldyard import features
+
+    files = {
+        "alpha": ({"project": {"recommended_foldyard_version": "0.12.0"}, "box": {"packages": []}},
+                  {"machine": {"firwall": True}}),
+        "beta": ({"machine": {"monitor": "observe"}}, {}),
+    }  # fmt: skip
+    monkeypatch.setattr(features, "_files", lambda cfg: files[config.project()])
+    return host
+
+
+def test_features_are_read_only_when_asked(featured):
+    assert all(p.features is None for p in projects.collect().projects)
+    got = projects.collect(features=True)
+    alpha = _row(got, "alpha").features
+    assert alpha is not None and alpha["reviewed"] == "0.12.0"
+    assert [p["label"] for p in alpha["problems"]] == ["[machine] firwall"]
+
+
+def test_the_features_section_has_a_column_per_project_newest_release_first(featured):
+    out = projects.render(projects.collect(features=True), features=True)
+    section = out[out.index("Features ") :]
+    header = next(line for line in section.splitlines() if "alpha" in line and "beta" in line)
+    assert header.index("alpha") < header.index("beta")
+    packages = next(line for line in section.splitlines() if "[box] packages" in line)
+    monitor = next(line for line in section.splitlines() if '[machine] monitor = "observe"' in line)
+    git_hooks = next(line for line in section.splitlines() if "[box] git_hooks" in line)
+    # alpha uses packages; beta hasn't set it, and with no recommended version nothing is reviewed
+    assert packages.split()[-2:] == ["●", "+"]
+    assert monitor.split()[-2:] == ["·", "●"]  # 0.6.0 ≤ alpha's 0.12.0: reviewed, not new
+    assert git_hooks.split()[-2:] == ["·", "+"]  # 0.12.0 is alpha's own: reviewed
+    assert section.index("0.12.0") < section.index("0.5.0")
+    assert "alpha" in section[section.index("won't act on") :] and "[machine] firwall" in section
+
+
+def test_without_features_the_listing_is_unchanged(featured):
+    assert "Features " not in projects.render(projects.collect())
+
+
+def test_fy_ls_features_flag(featured):
+    result = CliRunner().invoke(cli.app, ["ls", "--features"])
+    assert result.exit_code == 0, result.output
+    assert "[box] packages" in result.output
+
+
+def _wide_listing(names: list[str]) -> projects.Listing:
+    from foldyard import features
+
+    doc = features.as_dict(features.check({"box": {"packages": []}}, {}))
+    return projects.Listing(
+        [
+            projects.Project(n, f"/w/{n}", projects.Vm(n, "lima", "stopped"), "down", features=doc)
+            for n in names
+        ],
+        [],
+        None,
+    )
+
+
+def _table(out: str) -> list[str]:
+    section = out[out.index("Features ") :].splitlines()
+    return section[1 : section.index("  0.15.0") if "  0.15.0" in section else None]
+
+
+NAMES = ["danieldemmel.me-next", "immich-smart-metadata", "ab"]
+
+
+def test_project_names_are_whole_when_the_terminal_has_room():
+    for width in (None, 400):
+        head = _table(projects.render(_wide_listing(NAMES), features=True, width=width))
+        assert head[0].split() == NAMES and len(head) == 1
+
+
+def test_long_names_are_broken_just_enough_to_fit_the_terminal():
+    whole = projects.render(_wide_listing(NAMES), features=True)
+    full = max(len(line) for line in _table(whole))
+    width = full - 8  # a little short: names are cut, but only as much as that needs
+    out = projects.render(_wide_listing(NAMES), features=True, width=width)
+    head = _table(out)
+    assert len(head) > 1 and all(len(line) <= width for line in head)
+    cap = len(head[0].split()[0])
+    assert "".join(line.split()[0] for line in head if line.strip()) == NAMES[0]
+    # the widest cut that fits: one more character for each cut name would overflow
+    assert len(head[0]) + sum(len(n) > cap for n in NAMES) > width
+    packages = next(line for line in out.splitlines() if "[box] packages" in line)
+    assert len(packages) <= width
+    assert packages.index("●") == head[0].index(NAMES[0][:cap])
+
+
+def test_a_terminal_too_narrow_for_any_cut_keeps_names_readable():
+    head = _table(projects.render(_wide_listing(NAMES), features=True, width=20))
+    assert min(len(c) for c in head[0].split()) >= 2  # "ab" whole
+    assert len(head[0].split()[0]) == projects._MIN_NAME_WIDTH

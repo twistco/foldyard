@@ -81,6 +81,10 @@ red.
   section.
 - **Not ready to stand behind a setting?** It goes in `experimental.REGISTER`, gets the
   `*(experimental)*` tag in docs/configuration.md, and its fragment says `experimental: true`.
+- **A new `foldyard.toml` key goes in `features.KEYS`** with the release it ships in, and a `pitch`
+  if a project would turn it on. Otherwise `fy config features` calls it unknown, and
+  `tests/test_features.py` fails on a documented key that isn't there. If you change a default, add
+  the old value to `features.OLD_DEFAULTS`.
 - **Skills, the `fy init` scaffold and shipped docs teach, and don't fail when they're wrong.**
   Write commands in backticks so `tests/test_agent_guide.py` can check them, and don't restate
   `--help`.
@@ -129,7 +133,7 @@ consumer they run against.
 
 | Area | Modules |
 | -- | -- |
-| CLI, config | `cli` · `config` · `configpin` (the adopted config) · `privatecfg` · `exposure` · `experimental` · `projects` |
+| CLI, config | `cli` · `config` · `configpin` (the adopted config) · `privatecfg` · `exposure` · `experimental` · `features` · `projects` |
 | Stack | `stack` · `composeguard` · `guestcompose` · `registrylogins` · `confighash` · `reconcile` · `state_view` |
 | Posture | `devmode` · `verify` · `preflight` · `allowlist` · `keyless` · `credscope` · `plugins/` |
 | VM | `machine` · `machine_backend` · `basevm` · `upgrade` · `guestfiles` · `boxmounts` · `hostwall` · `sandbox` · `guestlog` · `prereq` |

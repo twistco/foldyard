@@ -67,6 +67,24 @@ Some keys are no longer honoured at all — `[proxy] allow`, `[[inject]] minter`
 `[[inject]] token_env`, `[vscode] workspace_file`. `fy config widenings` names each one with its
 replacement, and `fy doctor` warns about them.
 
+### What your config uses, and what it doesn't
+
+An upgrade adds features, but nothing adds them to your `foldyard.toml`. `fy config features` lists
+what foldyard can do, by the release that added it and newest first, and marks what this config
+uses. The releases at or below your `recommended_foldyard_version` sit under a line, since whoever
+raised it read the changelog up to there. After that it lists the keys foldyard won't act on as
+written:
+
+- an unknown key, with the nearest real one (foldyard reads no schema, so a typo is otherwise
+  silent);
+- a removed key, with what replaced it;
+- a renamed key;
+- an old default written out, such as `passthrough = ["@all"]` from before 0.4.0.
+
+It exits 1 on an unknown or removed key, so CI can run it. `fy ls --features` puts every project on
+your computer side by side, with a `+` where a project doesn't use a feature newer than its
+recommended version.
+
 ### Experimental settings
 
 A setting tagged *(experimental)* below is off unless you turn it on, and makes one or both of two
