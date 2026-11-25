@@ -642,6 +642,27 @@ the point. At-least-once delivery leaves one shape that is not tampering, and pa
 chained from the same `prev` (it may carry more events). The next line chains from the re-sent one,
 and so does the recorded state.
 
+**Size.** A file hook's file has no limit of its own; the store's budget (§2.1) doesn't cover it. A
+`file` ending in `.gz` (`--gzip`) holds each line as a gzip member of its own, so a line is still
+appended in one go and a failed write still undone: 14.5 times smaller at gzip's level 1 and 19.9 at
+6 over a tenth of a real 25 GB file's lines. The sink uses 6. `max_mb` (`--max-mb`) rotates it: at
+the start of a round, the supervisor moves a full file to `NAME.<first>-<last>.jsonl` beside itself
+and the next line begins a new one. The chain runs on: the state records the `(seq, mac)` each file
+starts after and ends on, so `check` verifies any of them, and one that is deleted or edited still
+fails. The intent is saved before the file moves and the result after, so a supervisor that died in
+between finishes the move in its next round. A name already taken holds rotation back, and says so,
+never delivery; a file held back is named by the lines it has when it does move. A file holding a
+line the state doesn't record (a supervisor that died between the two) waits until it is re-sent, so
+a piece ends exactly where its record says, and `check` fails one with anything added. `check` finds
+a file's record by its path, so one moved elsewhere no longer checks. The next file is made by its
+first line: until then there is none, and `check` says nothing was written since. Only the
+supervisor rotates: it alone writes the file and the state.
+
+**`check` reads a line at a time** (a member, in a `.gz`), and stops at one over 256 MiB, so its
+memory is a line's and not the file's. It once read the file whole and then split it, some 50 GB for
+a 25 GB file. In a `.gz` it is stricter than a gzip reader, which skips padding and joins members:
+each member must be exactly one line.
+
 The box can still read the file (the point), and it can still damage it — truncate it, delete it,
 fill the disk. The check makes that visible; it doesn't prevent it. A read-only mount the box gets
 the events through is the structural fix, scoped separately.

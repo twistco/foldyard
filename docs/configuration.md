@@ -477,6 +477,13 @@ disk_gib = 60
       - The directory must exist. The file is created if it doesn't. Each file belongs to one hook;
         pointing a hook at a new file starts its numbering again there. Give it a file no earlier
         hook wrote: lines starting again at 1 after old ones fail `fy monitor check`.
+      - It grows without limit unless you give it one: about 1 KB an event, uncompressed (a busy
+        experiment wrote 25 GB in two and a half weeks). `fy monitor hook add … --gzip`, or a `file`
+        ending in `.gz`, compresses each line, some 15–20 times smaller; any gzip reader reads it.
+        `--max-mb 512` (`max_mb = 512`) moves a full file aside and begins a new one:
+        `events.1-72.jsonl`, named by its lines' numbers. The numbering runs on, and each file
+        checks on its own at its own path. Moving one elsewhere or deleting it is yours to do, and
+        one moved elsewhere no longer checks.
       - Each line is signed with a key only your computer holds
         (`~/.foldyard/<project>/monitor-sink.key`), numbered, and linked to the line before it. The
         box can still edit the file, but `fy monitor check <path>` finds any line edited, removed,

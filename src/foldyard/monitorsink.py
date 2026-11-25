@@ -20,6 +20,7 @@ somewhere nobody looks is worse than a refusal the supervisor log and ``fy docto
 from __future__ import annotations
 
 import errno
+import gzip
 import hashlib
 import hmac
 import json
@@ -27,6 +28,8 @@ import os
 import re
 import secrets
 import stat
+import zlib
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,8 +45,18 @@ _MAX_HOPS = 32
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
+CHUNK = 1 << 20  # read at a time
+# The longest line the sink could write is far below this (500 events a batch): past it a line is
+# not the sink's, and holding it would let whatever can write the file fill this computer's memory.
+MAX_LINE = 256 << 20
+
+
 class Refused(Exception):
     """The sink won't touch this path (a symlink, a missing directory, not a regular file)."""
+
+
+class Unreadable(Exception):
+    """What comes next in the file can't be a line of the sink's (:func:`lines`)."""
 
 
 # ── the key ────────────────────────────────────────────────────────────────────────────
@@ -205,16 +218,21 @@ def check_path(path: str) -> None:
         os.close(parent)
 
 
-def append(path: str, line: bytes) -> None:
-    """Append ``line`` to ``path`` (created 0644 if absent). One write call, repeated only for a
-    short write. A write that fails part-way is UNDONE — the file is cut back to where it ended —
-    so the sink never leaves a torn line: any shape :func:`verify` excused, the box could write.
-    A file that doesn't end in a newline (something else wrote it) is ended first, so the sink's
-    line stays a line of its own."""
+def append(path: str, line: bytes) -> int:
+    """Append ``line`` to ``path`` (created 0644 if absent), returning the file's size then. One
+    write call, repeated only for a short write. A write that fails part-way is UNDONE — the file is
+    cut back to where it ended — so the sink never leaves a torn line: any shape :func:`verify`
+    excused, the box could write. A file that doesn't end in a newline (something else wrote it) is
+    ended first, so the sink's line stays a line of its own. A path ending in ``.gz`` gets each line
+    as a gzip member of its own: the file is an ordinary gzip file, grown and undone a line at a
+    time like any other."""
+    packed = compressed(path)
+    if packed:
+        line = gzip.compress(line, 6, mtime=0)
     fd = _open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, writing=True)
     try:
         size = os.fstat(fd).st_size
-        if size and os.pread(fd, 1, size - 1) != b"\n":
+        if not packed and size and os.pread(fd, 1, size - 1) != b"\n":
             line = b"\n" + line
         view = memoryview(line)
         try:
@@ -229,6 +247,7 @@ def append(path: str, line: bytes) -> None:
                     f"off ({cut.strerror}) — `fy monitor check` will report that line"
                 ) from None
             raise
+        return size + len(line)
     finally:
         os.close(fd)
 
@@ -244,14 +263,121 @@ def open_for_reading(path: str) -> int:
 def read(path: str) -> bytes:
     """``path``'s bytes, opened the same no-follow way (a planted link or FIFO is refused, not
     read or waited on)."""
+    return b"".join(_chunks(path))
+
+
+def _chunks(path: str) -> Iterator[bytes]:
     fd = _open(path, os.O_RDONLY, writing=False)
     try:
-        chunks = []
-        while chunk := os.read(fd, 1 << 20):
-            chunks.append(chunk)
-        return b"".join(chunks)
+        while chunk := os.read(fd, CHUNK):
+            yield chunk
     finally:
         os.close(fd)
+
+
+def compressed(path: str) -> bool:
+    """Whether the file's lines are gzip members: its name says so."""
+    return path.endswith(".gz")
+
+
+def lines(path: str) -> Iterator[bytes]:
+    """``path``'s lines one at a time, newlines kept, opened the same no-follow way: never the
+    whole file in memory (a 25 GB one took `check` some 50). A last line without a newline is a
+    fragment. :class:`Unreadable` where what comes next can't be a line of the sink's."""
+    return _members(_chunks(path)) if compressed(path) else _split(_chunks(path))
+
+
+def _too_long() -> Unreadable:
+    return Unreadable(f"longer than any line the sink writes ({MAX_LINE >> 20} MiB)")
+
+
+def _split(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    parts: list[bytes] = []
+    held = 0
+    for chunk in chunks:
+        *ended, rest = chunk.split(b"\n")
+        for piece in ended:
+            if held + len(piece) > MAX_LINE:
+                raise _too_long()
+            yield b"".join([*parts, piece, b"\n"])
+            parts, held = [], 0
+        parts.append(rest)
+        held += len(rest)
+        if held > MAX_LINE:
+            raise _too_long()
+    if fragment := b"".join(parts):
+        yield fragment
+
+
+def _members(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    """Each gzip member's one line. Stricter than a gzip reader, which skips padding and joins
+    members: what it would read past, the sink didn't write."""
+    source = iter(chunks)
+    data = next(source, b"")
+    while data:
+        member = zlib.decompressobj(wbits=31)
+        out: list[bytes] = []
+        size = 0
+        while not member.eof:
+            if not data and not (data := next(source, b"")):
+                raise Unreadable(
+                    "cut off part-way through a gzip member — if the supervisor was writing just "
+                    "then, check again"
+                )
+            try:
+                piece = member.decompress(data, MAX_LINE + 1 - size)
+            except zlib.error:
+                raise Unreadable("not gzip the sink wrote") from None
+            out.append(piece)
+            size += len(piece)
+            if size > MAX_LINE:
+                raise _too_long()
+            data = member.unused_data if member.eof else member.unconsumed_tail
+        line = b"".join(out)
+        if line.count(b"\n") != 1 or not line.endswith(b"\n"):
+            raise Unreadable("a gzip member that isn't one line")
+        yield line
+        data = data or next(source, b"")
+
+
+def size(path: str) -> int:
+    """The file's size, 0 when there is none; never through a link."""
+    parent, name = _open_parent(path)
+    try:
+        st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    finally:
+        os.close(parent)
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused(f"{path} is not a regular file")
+    return st.st_size
+
+
+def exists(path: str) -> bool:
+    """Whether anything is at ``path``, a dangling link included."""
+    parent, name = _open_parent(path)
+    try:
+        os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(parent)
+    return True
+
+
+def move(path: str, name: str) -> None:
+    """Rename the sink's file to ``name`` in its own directory, never over anything there."""
+    if "/" in name or name in ("", ".", ".."):
+        raise Refused(f"{name!r} is not a file name")
+    check_path(path)
+    if exists(os.path.join(os.path.dirname(path), name)):
+        raise Refused(f"{os.path.dirname(path)}/{name} already exists")
+    parent, old = _open_parent(path)
+    try:
+        os.rename(old, name, src_dir_fd=parent, dst_dir_fd=parent)
+    finally:
+        os.close(parent)
 
 
 # ── the signed line ────────────────────────────────────────────────────────────────────
@@ -306,17 +432,27 @@ def _mac_of(key: bytes, doc: dict) -> str:
 class Check:
     lines: int = 0
     events: int = 0
+    first_seq: int = 1
     last_seq: int = 0
     problem: str = ""  # the first one; "" = the file holds what the sink wrote
     line: int = 0  # where it is (1-based; the last line for a problem with the tail)
     notes: list[str] = field(default_factory=list)
 
 
-def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) -> Check:
-    """Does ``data`` hold exactly the lines the sink wrote for ``hook``? Every line's mac, the
-    sequence from 1 with no gap, each line's ``prev`` naming the line before, and the end against
-    ``state`` — the hook's last written ``(seq, mac)`` as the supervisor recorded it, which is
-    what catches lines cut from the end.
+def verify(
+    data: bytes | Iterable[bytes],
+    key: bytes,
+    hook: str,
+    state: tuple[int, str] | None,
+    start: tuple[int, str] = (0, ""),
+    ended: bool = False,
+) -> Check:
+    """Does ``data`` (a file's bytes, or its :func:`lines`) hold exactly the lines the sink wrote
+    for ``hook``? Every line's mac, the sequence with no gap, each line's ``prev`` naming the line
+    before, and the end against ``state`` — the hook's last written ``(seq, mac)`` as the
+    supervisor recorded it, which is what catches lines cut from the end. The chain starts after
+    ``start``: the last ``(seq, mac)`` of the file before, for one rotation started. A file that has
+    ``ended`` (rotated out) holds nothing past ``state``.
 
     Every line must be the exact bytes :func:`signed_line` writes for its content: a line that
     parses to the same thing but reads differently (a duplicate key, which ``json.loads`` resolves
@@ -328,16 +464,29 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
     again, chained from the same ``prev``, possibly with more events. The next line chains from the
     re-sent one, and so does the recorded state.
     """
-    out = Check()
-    raw = data.split(b"\n")
-    tail = raw.pop()  # what follows the last newline: b"" when the file ends cleanly
-    seq, mac, parent = 0, "", ""  # the chain's head: its seq, its mac, the `prev` it named
+    out = Check(first_seq=start[0] + 1)
+    source = iter(_split([data]) if isinstance(data, bytes) else data)
+    (seq, mac), parent = start, ""  # the chain's head: its seq, its mac, the `prev` it named
+    n = 0  # lines read
 
     def fail(n: int, why: str) -> Check:
         out.problem, out.line = why, n
         return out
 
-    for n, line in enumerate(raw, 1):
+    while True:
+        try:
+            line = next(source)
+        except StopIteration:
+            break
+        except Unreadable as e:
+            return fail(n + 1, f"not a line the sink wrote ({e})")
+        if not line.endswith(b"\n"):
+            return fail(
+                n + 1,
+                "not a line the sink wrote (an unterminated fragment — if the supervisor was "
+                "writing just then, check again)",
+            )
+        n += 1
         doc = _parse(line)
         if doc is None:
             return fail(n, "not a line the sink wrote (not JSON, or no `sink` object)")
@@ -349,7 +498,7 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
                 "computer's sink",
             )
         body = {k: v for k, v in doc.items() if k != "sink"}
-        if not body or signed_line(key, body, sink["seq"], sink["prev"])[0] != line + b"\n":
+        if not body or signed_line(key, body, sink["seq"], sink["prev"])[0] != line:
             return fail(
                 n,
                 "signed content, but not the bytes the sink wrote (reformatted, or a key given "
@@ -359,7 +508,7 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
             return fail(n, f"belongs to hook '{doc.get('hook')}', not '{hook}'")
         if sink["seq"] == seq + 1 and sink["prev"] == mac:
             parent, seq, mac = mac, seq + 1, sink["mac"]
-        elif seq and sink["seq"] == seq and sink["prev"] == parent:
+        elif seq > start[0] and sink["seq"] == seq and sink["prev"] == parent:
             out.notes.append(
                 f"line {n}: seq {seq} re-sent (written, but not recorded before the supervisor "
                 "stopped)"
@@ -372,13 +521,7 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
         else:
             return fail(n, f"seq {seq + 1} doesn't chain from the line before it (`prev`)")
         out.events += len(doc.get("events") or [])
-    out.lines, out.last_seq = len(raw), seq
-    if tail:
-        return fail(
-            len(raw) + 1,
-            "not a line the sink wrote (an unterminated fragment — if the supervisor was writing "
-            "just then, check again)",
-        )
+    out.lines, out.last_seq = n, seq
     if state is None:
         return fail(
             out.lines,
@@ -394,6 +537,12 @@ def verify(data: bytes, key: bytes, hook: str, state: tuple[int, str] | None) ->
         )
     if seq == want_seq and seq and not hmac.compare_digest(mac, want_mac):
         return fail(out.lines, f"the last line isn't the one the sink wrote last (seq {seq})")
+    if seq > want_seq and ended:
+        return fail(
+            out.lines,
+            f"the file ends at seq {seq}, but ends at seq {want_seq} in the record of when it was "
+            "moved aside — lines were added",
+        )
     if seq > want_seq:
         out.notes.append(
             f"seq {want_seq + 1}–{seq}: written, not yet recorded in the hook's state (it is at "
