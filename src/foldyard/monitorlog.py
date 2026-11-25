@@ -456,6 +456,68 @@ class Event:
     crossed: bool = False  # additive: see the class doc
 
 
+# `observe-files`' hooks on changes that aren't writes: what each is called in ``detail``.
+_FILE_CHANGES = {
+    "security_path_unlink": "unlink",
+    "security_path_chmod": "chmod",
+    "security_path_truncate": "truncate",
+    "security_file_truncate": "truncate",
+    "security_path_rename": "rename",
+    "security_path_link": "link",
+    "security_path_chroot": "chroot",
+}
+
+
+def _file_change(fn: str, body: dict) -> str:
+    """``<operation> <path>``, the path being the name that changed: for a rename or a link, the
+    new one, with the other in brackets. A name that reads differently in its own filesystem (it is
+    in a mount, or its process changed its root) is followed by that too: the two disagreeing is
+    what tells a volume's file, or a chroot's, from the container's own."""
+    paths = [
+        (a.get("path_arg") or a.get("file_arg") or a.get("dentry_arg") or {}).get("path", "?")
+        for a in body.get("args") or []
+    ]
+    what, inner = _FILE_CHANGES[fn], ""
+    if fn == "security_path_unlink" and len(paths) == 2:
+        directory, inner = paths
+        what += f" {(path := _in(directory, inner))}"
+    elif fn == "security_path_rename" and len(paths) == 4:
+        from_dir, old, directory, inner = paths
+        what += f" {(path := _in(directory, inner))} (from {_in(from_dir, old)})"
+    elif fn == "security_path_link" and len(paths) == 3:
+        old, directory, inner = paths
+        what += f" {(path := _in(directory, inner))} (to {_beside(old, directory, inner)})"
+    else:
+        return f"{what} {paths[-1] if paths else '?'}" + _refusal(body)
+    if path != inner:
+        what += f" [{inner} in its filesystem]"
+    return what + _refusal(body)
+
+
+def _in(directory: str, name: str) -> str:
+    """A name's path as its process sees it: in ``directory``, whatever its own filesystem says."""
+    return f"{directory.rstrip('/')}/{name.rsplit('/', 1)[-1]}"
+
+
+def _beside(old: str, directory: str, new: str) -> str:
+    """A link's old name, which is on the new one's mount: what its filesystem calls it, with the
+    mount placed by the new name's directory, known both ways."""
+    seen = directory.rstrip("/").split("/")
+    inner = new.split("/")[:-1]
+    while len(seen) > 1 and len(inner) > 1 and seen[-1] == inner[-1]:
+        seen.pop()
+        inner.pop()
+    if old.split("/")[: len(inner)] != inner:
+        return f"{old} in its filesystem"
+    return "/".join([*seen, *old.split("/")[len(inner) :]])
+
+
+def _refusal(body: dict) -> str:
+    """How a refused access ends, as the kernel said it; ``""`` when it was let through."""
+    ret = (body.get("return") or {}).get("int_arg")
+    return "" if ret in (0, None) else f" → {ret}"
+
+
 def _kind(body: dict, kind: str) -> tuple[str, str]:
     if kind == "process_exec":
         return "exec", ""
@@ -464,6 +526,8 @@ def _kind(body: dict, kind: str) -> tuple[str, str]:
     if kind == "process_kprobe":
         fn = body.get("function_name", "")
         arg = (body.get("args") or [{}])[0]
+        if fn in _FILE_CHANGES:
+            return "file", _file_change(fn, body)
         if fn == "tcp_connect":
             s = arg.get("sock_arg", {})
             return "connect", f"{s.get('daddr', '?')}:{s.get('dport', '?')}"
@@ -471,11 +535,7 @@ def _kind(body: dict, kind: str) -> tuple[str, str]:
             args = body.get("args") or []
             mask = args[1].get("int_arg") if len(args) > 1 else None
             what = {2: "write", 4: "read"}.get(mask or 0, f"mask {mask}")
-            ret = (body.get("return") or {}).get("int_arg")
-            outcome = (
-                "" if ret in (0, None) else f" → {ret}"
-            )  # a refused access, as the kernel said
-            return "file", f"{what} {arg['file_arg'].get('path', '?')}{outcome}"
+            return "file", f"{what} {arg['file_arg'].get('path', '?')}{_refusal(body)}"
         return "other", fn
     return "other", kind
 

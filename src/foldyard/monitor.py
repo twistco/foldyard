@@ -57,6 +57,7 @@ _BASE_URL = "https://github.com/cilium/tetragon/releases/download"
 # First line after the shebang of the rendered boot script; lima.yaml carries it verbatim.
 MARKER = "# fy-monitor "
 POLICY = "fy-observe"
+SECOND_POLICY = "fy-observe-files"  # beside it, under `observe-files`
 RELAY_GRACE = 30.0  # seconds a relay may take to come up once the policy loaded
 _INBOX = "/var/lib/fy-monitor/inbox"
 
@@ -66,7 +67,7 @@ def _err(*a: object) -> None:
 
 
 def wanted() -> bool:
-    return config.machine_monitor() == "observe"
+    return config.machine_monitor() != "off"
 
 
 def _asset(name: str) -> Path:
@@ -95,6 +96,38 @@ def relay_key() -> str:
     return key
 
 
+def _files() -> bool:
+    return config.machine_monitor() == "observe-files"
+
+
+def _policy(on: bool) -> str:
+    """The policy text for the configured level. `observe-files` appends one selector, so every
+    byte of `observe`'s (and with it its recording's id) stays as it was."""
+    text = _asset("policy.yaml").read_text().rstrip("\n")
+    if on and _files():
+        text += "\n" + _asset("policy-writes.yaml").read_text().rstrip("\n")
+    return text
+
+
+# `observe-files` reads as loaded only once both policies are: Tetragon can run on with one of them
+# missing. Spliced into the helper, not written there: `observe`'s bytes stay as they were.
+_SECOND_ENABLED = (
+    f" && /usr/local/bin/tetra tracingpolicy list 2>/dev/null | POLICY={SECOND_POLICY} "
+    "policy_enabled"
+)
+
+
+def _second_policy(on: bool) -> str:
+    """The shell that writes `observe-files`' second policy, or ``""`` (and not one byte more)."""
+    if not (on and _files()):
+        return ""
+    text = _asset("policy-files.yaml").read_text().rstrip("\n")
+    return (
+        "cat >/etc/tetragon/tetragon.tp.d/fy-observe-files.yaml <<'__FY_MONITOR_POLICY_2__'\n"
+        f"{text}\n__FY_MONITOR_POLICY_2__\n\n"
+    )
+
+
 def render(on: bool) -> tuple[str, str]:
     """The boot script for ``on`` (observe) or off, and its id — a hash of the rendered content,
     so a new release, policy or script reads as a different recording."""
@@ -105,7 +138,10 @@ def render(on: bool) -> tuple[str, str]:
         .replace("@@HELPER@@", _asset("fy-monitor.sh").read_text().rstrip("\n"))
         .replace("@@RELAY@@", _asset("relay.py").read_text().rstrip("\n"))
         .replace("@@RELAY_KEY@@", relay_key() if on else "")
-        .replace("@@POLICY@@", _asset("policy.yaml").read_text().rstrip("\n"))
+        .replace("@@POLICY@@", _policy(on))
+        .replace("@@SECOND_POLICY@@", _second_policy(on))
+        .replace("@@AND_SECOND_ENABLED@@", _SECOND_ENABLED if on and _files() else "")
+        .replace("@@OR_SECOND@@", f" or {SECOND_POLICY}" if on and _files() else "")
         .replace("@@VERSION@@", TETRAGON_VERSION)
         .replace("@@SHA_X86_64@@", TETRAGON_SHA256["x86_64"])
         .replace("@@SHA_AARCH64@@", TETRAGON_SHA256["aarch64"])

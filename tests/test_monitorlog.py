@@ -970,6 +970,91 @@ def test_join_describes_connections_and_file_access():
     ]
 
 
+def _file_detail(function: str, *paths: str, ret: int | None = None):
+    # As Tetragon reports them: a dentry or path argument is a `path_arg`, a file a `file_arg`.
+    kind = "file_arg" if function == "security_file_truncate" else "path_arg"
+    e = ev(200, kind="process_kprobe", function_name=function,
+           args=[{kind: {"path": p}} for p in paths], ret=ret)  # fmt: skip
+    (got,) = monitorlog.attribute(_records(snap({200: [BOX]}), e), "fyex")
+    return got.kind, got.detail
+
+
+@pytest.mark.parametrize(
+    ("function", "paths", "detail"),
+    [
+        ("security_path_unlink", ("/etc", "/etc/x"), "unlink /etc/x"),
+        ("security_path_chroot", ("/tmp/fake",), "chroot /tmp/fake"),
+        ("security_path_chmod", ("/etc/x",), "chmod /etc/x"),
+        ("security_path_truncate", ("/etc/x",), "truncate /etc/x"),
+        ("security_file_truncate", ("/etc/x",), "truncate /etc/x"),
+        # the name that changed comes first, so `<operation> <path>` reads the same for all of them
+        (
+            "security_path_rename",
+            ("/tmp", "/tmp/a", "/etc", "/etc/x"),
+            "rename /etc/x (from /tmp/a)",
+        ),
+        ("security_path_link", ("/etc/x", "/tmp", "/tmp/hl"), "link /tmp/hl (to /etc/x)"),
+    ],
+)
+def test_a_file_change_that_isnt_a_write_is_a_file_event_with_its_path(function, paths, detail):
+    assert _file_detail(function, *paths) == ("file", detail)
+
+
+def test_a_refused_rename_says_so():
+    got = _file_detail("security_path_rename", "/tmp", "/tmp/a", "/etc", "/etc/x", ret=-13)
+    assert got == ("file", "rename /etc/x (from /tmp/a) → -13")
+
+
+@pytest.mark.parametrize(
+    ("function", "paths", "detail"),
+    [
+        # Tetragon resolves a name (a dentry) only up to the root of its own filesystem, so in a
+        # mount it reads as a path it isn't. As measured (v1.8.0, kernel 7.2):
+        (  # a volume at /opt
+            "security_path_unlink",
+            ("/opt/sub", "/home/u/volumes/v1/_data/sub/x"),
+            "unlink /opt/sub/x [/home/u/volumes/v1/_data/sub/x in its filesystem]",
+        ),
+        (  # /dev/shm, which any container can write: not the container's /etc
+            "security_path_link",
+            ("/etc/x", "/dev/shm/etc", "/etc/y"),
+            "link /dev/shm/etc/y (to /dev/shm/etc/x) [/etc/y in its filesystem]",
+        ),
+        (  # a process that chrooted to /tmp/fake
+            "security_path_rename",
+            ("/etc", "/tmp/fake/etc/a", "/etc", "/tmp/fake/etc/b"),
+            "rename /etc/b (from /etc/a) [/tmp/fake/etc/b in its filesystem]",
+        ),
+        # a link's other name is reported only within its filesystem: one outside what the new
+        # name's directory says about the mount is given as it is
+        (
+            "security_path_link",
+            ("/other/x", "/opt", "/home/u/v/_data/y"),
+            "link /opt/y (to /other/x in its filesystem) [/home/u/v/_data/y in its filesystem]",
+        ),
+        ("security_path_unlink", ("/", "/x"), "unlink /x"),
+        ("security_path_rename", ("/mnt", "/a", "/mnt", "/b"), "rename /mnt/b (from /mnt/a) [/b in its filesystem]"),
+    ],
+)  # fmt: skip
+def test_a_name_in_a_mount_is_the_path_its_process_used(function, paths, detail):
+    assert _file_detail(function, *paths) == ("file", detail)
+
+
+@pytest.mark.parametrize(
+    ("function", "paths"),
+    [
+        ("security_path_unlink", ()),
+        ("security_path_unlink", ("/etc",)),
+        ("security_path_rename", ("/etc", "/etc/x")),
+        ("security_path_link", ("/etc/x",)),
+        ("security_path_chroot", ()),
+    ],
+)
+def test_a_file_change_with_a_path_missing_is_still_a_file_event(function, paths):
+    what = function.removeprefix("security_path_")
+    assert _file_detail(function, *paths) == ("file", f"{what} {paths[-1] if paths else '?'}")
+
+
 # BashArena's firewall daemon reloading iptables, as Tetragon reports it: the parent hop and the
 # exec ids are what tell a container's own daemon from a command a session ran.
 _DAEMON = {"binary": "/bin/bash", "arguments": "/usr/local/bin/firewall-daemon", "pid": 41,

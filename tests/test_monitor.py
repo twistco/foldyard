@@ -616,3 +616,182 @@ def test_doctor_hooks_rows_report_each_hooks_health(doctor_env, tmp_path):
         and "3 events delivered" in rows["monitor hook score"][2]
     )
     assert rows["monitor hook ca"][0] == "warn" and "4 events skipped" in rows["monitor hook ca"][2]
+
+
+# ── the `observe-files` level: writes under a general set of directories, container processes only
+
+
+@pytest.fixture
+def observe_files(monkeypatch):
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe-files")
+
+
+def _selectors(script: str) -> list[str]:
+    policy = script.split("__FY_MONITOR_POLICY__")[1]
+    body = policy.split("call: security_file_permission", 1)[1].split("\n  - call:", 1)[0]
+    body = re.sub(r"^\s*#.*\n", "", body, flags=re.M)
+    return [s.rstrip() for s in re.split(r"^    - (?=match)", body, flags=re.M)[1:]]
+
+
+def test_observe_renders_exactly_the_packaged_policy(monkeypatch):
+    # A changed byte is a changed id, and refuses every running observed VM as stale: a level
+    # nobody asked for must not do that to the one they run.
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    script, _ = monitor.render(True)
+    assert script.split("__FY_MONITOR_POLICY__")[1].strip("'\n") == monitor._asset(
+        "policy.yaml"
+    ).read_text().rstrip("\n")
+
+
+def test_observe_files_adds_one_selector_to_observes_own(observe_files, monkeypatch):
+    wide, wide_id = monitor.render(True)
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    plain, plain_id = monitor.render(True)
+    assert wide_id != plain_id
+    assert _selectors(wide)[: len(_selectors(plain))] == _selectors(plain)
+    assert len(_selectors(wide)) == len(_selectors(plain)) + 1
+    assert len(_selectors(wide)) <= 5  # Tetragon's limit for one hook
+
+
+def test_observe_files_keeps_only_writes_by_processes_outside_the_vms_mount_namespace(
+    observe_files,
+):
+    added = _selectors(monitor.render(True)[0])[-1]
+    assert re.search(r"index: 1\s+operator: Equal\s+values:\s+- \"2\"", added)  # MAY_WRITE
+    assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", added)
+
+
+def test_observe_files_watches_whole_directories_and_never_container_storage(observe_files):
+    # `/etc` would match `/etcetera`. And podman's own processes are outside the VM's mount
+    # namespace too: a watched /home or /var would record every image layer they unpack.
+    added = _selectors(monitor.render(True)[0])[-1]
+    paths = re.findall(r"- (/\S+)$", added, re.M)
+    assert paths and all(p.endswith("/") for p in paths)
+    storage = "/home/user.guest/.local/share/containers/storage/overlay/x"
+    for own in (storage, "/var/lib/containers/storage/overlay/x",
+                "/var/lib/fy-monitor/spool/1", "/var/log/tetragon/tetragon.log"):  # fmt: skip
+        assert not any(own.startswith(p) for p in paths), own
+
+
+def test_observe_files_never_enforces(observe_files):
+    script, _ = monitor.render(True)
+    assert "matchActions" not in script and "action:" not in "".join(_selectors(script)).lower()
+
+
+# Measured 2026-11-24 (Tetragon v1.8.0, kernel 7.2): a write selector alone misses each of these.
+_HOOKS = {
+    # A name's DIRECTORY, resolved through mounts, not the name: that reads as `/etc/x` for
+    # `/dev/shm/etc/x`, and as `/x` in a volume at `/opt` (measured 2026-11-24).
+    "security_path_rename": {"0", "2"},  # the old directory and the new: either a watched one
+    "security_path_unlink": {"0"},
+    "security_path_chmod": {"0"},
+    "security_path_truncate": {"0"},
+    "security_file_truncate": {"0"},  # ftruncate, and an open that truncates
+    "security_path_link": {"0", "1"},  # the old name (its directory isn't given), the new directory
+}
+_NAMES = {"security_path_rename": "0 1 2 3", "security_path_unlink": "0 1", "security_path_link": "0 1 2"}  # fmt: skip
+
+
+def _hooks(script: str) -> dict[str, str]:
+    policy = script.split("__FY_MONITOR_POLICY_2__")[1] if "POLICY_2__" in script else ""
+    return {c.split("\n", 1)[0]: c for c in re.split(r"^  - call: ", policy, flags=re.M)[1:]}
+
+
+def test_observe_files_records_what_a_write_selector_misses(observe_files, monkeypatch):
+    assert set(_hooks(monitor.render(True)[0])) == {*_HOOKS, "security_path_chroot"}
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    assert _hooks(monitor.render(True)[0]) == {}
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe-files")
+    assert _hooks(monitor.render(False)[0]) == {}
+
+
+def test_no_policy_holds_more_prefix_filters_than_tetragon_does(observe_files):
+    # Nine or more in one policy and it doesn't load, which stops Tetragon ("failed to insert
+    # string_prefix_map_8: key too big for map", live 2026-11-24).
+    script, _ = monitor.render(True)
+    for policy in (script.split("__FY_MONITOR_POLICY__")[1], "".join(_hooks(script).values())):
+        assert 0 < policy.count("operator: Prefix") <= 8
+
+
+@pytest.mark.parametrize(("call", "indexes"), _HOOKS.items())
+def test_each_added_hook_is_held_to_the_watched_directories_and_to_containers(
+    observe_files, call, indexes
+):
+    # Unfiltered, they cost 27,000 events for one package install, against 3,100 without them.
+    script, _ = monitor.render(True)
+    watched = re.findall(r"- (/\S+)$", _selectors(script)[-1], re.M)
+    selectors = re.split(r"^    - (?=matchArgs)", _hooks(script)[call], flags=re.M)[1:]
+    assert {re.search(r"index: (\d)", s).group(1) for s in selectors} == indexes  # type: ignore
+    assert len(selectors) <= 5  # Tetragon's limit for one hook
+    for s in selectors:
+        exact = "operator: Equal" in s  # the directory itself: `/etc`, and not `/etcetera`
+        assert re.findall(r"- (/\S+)$", s, re.M) == [w.rstrip("/") if exact else w for w in watched]
+        assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", s)
+
+
+@pytest.mark.parametrize(("call", "indexes"), _NAMES.items())
+def test_a_hook_on_names_takes_their_directories_too(observe_files, call, indexes):
+    hook = _hooks(monitor.render(True)[0])[call]
+    args = hook.split("returnArg")[0]
+    assert re.findall(r"index: (\d)", args) == indexes.split()
+    for i in re.findall(
+        r"index: (\d)\s+operator: Equal", hook
+    ):  # a directory, as its process sees it
+        assert re.search(rf"index: {i}\s+type: path", args)
+
+
+def test_observe_files_records_a_container_that_changes_its_root(observe_files):
+    # After it, every path the process uses is another file's than it says.
+    hook = _hooks(monitor.render(True)[0])["security_path_chroot"]
+    assert re.search(r"index: 0\s+type: path", hook) and "matchArgs" not in hook
+    assert re.search(r"namespace: Mnt\s+operator: NotIn\s+values:\s+- host_ns", hook)
+
+
+@pytest.mark.parametrize("call", [*_HOOKS, "security_path_chroot"])
+def test_an_added_hook_the_kernel_lacks_never_stops_tetragon(observe_files, call):
+    # One hook that can't attach fails its whole policy, and with it every other recording.
+    assert re.search(r"ignore:\s+callNotFound: true", _hooks(monitor.render(True)[0])[call])
+
+
+def _reported(script: str, *rows: str) -> str:
+    """What the rendered helper's report says of a tetra that lists ``rows``."""
+    if shutil.which("bash") is None:
+        pytest.skip("no bash on this host")
+    names = ("policy_enabled", "verb_report")
+    fns = [re.search(rf"^{n}\(\) \{{.*?^\}}", script, re.S | re.M) for n in names]
+    body = "\n".join(f.group(0) for f in fns if f).replace("/usr/local/bin/tetra", "tetra")
+    table = "ID NAME DOMAIN STATE\n" + "".join(f"{i} {r}\n" for i, r in enumerate(rows, 1))
+    stubs = 'systemctl() { :; }; sleep() { :; }; seq() { echo 1 2; }; put() { echo "$1: $2"; }\n'
+    stubs += f"tetra() {{ printf '%s' '{table}'; }}\n"
+    res = subprocess.run(
+        ["bash", "-c", f"set -uo pipefail\nPOLICY=fy-observe\n{stubs}{body}\nverb_report"],
+        text=True, capture_output=True, check=True,
+    )  # fmt: skip
+    return res.stdout.strip()
+
+
+@pytest.mark.spawns("bash")
+@pytest.mark.parametrize("state", ["", "load_error", "disabled"])
+def test_observe_files_isnt_loaded_until_both_its_policies_are(observe_files, state):
+    # Tetragon runs on with the second one refused, and records none of what it's for.
+    script, _ = monitor.render(True)
+    first, second = "fy-observe static enabled", "fy-observe-files static "
+    said = _reported(script, first, *([second + state] if state else []))
+    assert said == "policy: failed: fy-observe or fy-observe-files not loaded after 600s"
+    assert _reported(script, second + "enabled") == said
+    assert _reported(script, second + "enabled", first) == "policy: loaded fy-observe"
+
+
+@pytest.mark.spawns("bash")
+def test_observe_waits_for_its_one_policy(monkeypatch):
+    monkeypatch.setattr(monitor.config, "machine_monitor", lambda: "observe")
+    script, _ = monitor.render(True)
+    assert _reported(script, "fy-observe static enabled") == "policy: loaded fy-observe"
+    assert _reported(script) == "policy: failed: fy-observe not loaded after 600s"
+    assert "fy-observe-files" not in script
+
+
+def test_both_levels_want_the_monitor(monkeypatch):
+    for level, on in (("off", False), ("observe", True), ("observe-files", True)):
+        monkeypatch.setattr(monitor.config, "machine_monitor", lambda level=level: level)
+        assert monitor.wanted() is on

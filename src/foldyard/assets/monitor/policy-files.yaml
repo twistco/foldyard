@@ -1,0 +1,282 @@
+# `observe-files` (a second policy, beside fy-observe): file changes that aren't writes, held to the
+# same directories as its write selector. Its own policy because Tetragon holds 8 prefix filters
+# per policy: one more here, or these in fy-observe, and the load fails, which stops Tetragon.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: fy-observe-files
+spec:
+  kprobes:
+  # What a write selector misses, held to the same directories: a file moved into or out of place,
+  # deleted, made executable, truncated (or opened with O_TRUNC), or given a second name. Measured
+  # 2026-11-24 (Tetragon v1.8.0, kernel 7.2): 295 events for a three-package install of 3,144 execs
+  # and exits. Not recorded: writes through mmap, and writes through a second name the file already
+  # has (a hard link, a bind mount). These hooks run before the file's permissions are checked: an
+  # attempt the kernel then refused for lack of permission is recorded like one that worked (only a
+  # refusal by an LSM carries a code). `callNotFound`: a hook the kernel lacks mustn't take the rest
+  # of the policy down with it.
+  # A name (a dentry) is resolved only up to the root of its own filesystem: `/dev/shm/etc/x`, which
+  # any container can write, reads `/etc/x`, and `/opt/x` in a volume at `/opt` reads `/x`. So it is
+  # the name's DIRECTORY that is matched, resolved through mounts as its process sees it, exactly or
+  # by prefix (`/etc` alone would match `/etcetera`), and both are recorded. A link's old name comes
+  # without its directory: it has to be on the new one's mount, which is how the parser places it.
+  - call: security_path_rename
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    - index: 2
+      type: path
+    - index: 3
+      type: dentry
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 2
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_unlink
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: path
+    - index: 1
+      type: dentry
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 0
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_chmod
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: path
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_truncate
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: path
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_file_truncate
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: file
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  - call: security_path_link
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: dentry
+    - index: 1
+      type: path
+    - index: 2
+      type: dentry
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Prefix
+        values:
+        - /etc/
+        - /usr/local/
+        - /opt/
+        - /root/
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+    - matchArgs:
+      - index: 1
+        operator: Equal
+        values:
+        - /etc
+        - /usr/local
+        - /opt
+        - /root
+      matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns
+  # After a chroot, every path the process uses is another file's than it says: recorded, so a write
+  # to /etc/… that follows one reads as such. Only what the kernel would allow (it checks the
+  # capability first). Podman does it to unpack an image: some ten events, labelled `podman`.
+  - call: security_path_chroot
+    syscall: false
+    return: true
+    ignore:
+      callNotFound: true
+    args:
+    - index: 0
+      type: path
+    returnArg:
+      index: 0
+      type: int
+    selectors:
+    - matchNamespaces:
+      - namespace: Mnt
+        operator: NotIn
+        values:
+        - host_ns

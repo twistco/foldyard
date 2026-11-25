@@ -131,13 +131,13 @@ verb_report() {
             put policy "failed: tetragon.service is $(systemctl is-active tetragon.service)"
             return 0
         fi
-        if /usr/local/bin/tetra tracingpolicy list 2>/dev/null | policy_enabled; then
+        if /usr/local/bin/tetra tracingpolicy list 2>/dev/null | policy_enabled@@AND_SECOND_ENABLED@@; then
             put policy "loaded $POLICY"
             return 0
         fi
         sleep 5
     done
-    put policy "failed: $POLICY not loaded after 600s"
+    put policy "failed: $POLICY@@OR_SECOND@@ not loaded after 600s"
 }
 
 case "${1:-}" in

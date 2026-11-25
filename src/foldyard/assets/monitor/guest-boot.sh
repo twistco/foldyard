@@ -89,7 +89,7 @@ cat >/etc/tetragon/tetragon.tp.d/fy-observe.yaml <<'__FY_MONITOR_POLICY__'
 @@POLICY@@
 __FY_MONITOR_POLICY__
 
-# 2b. Tetragon and the relay are NEVER enabled units: this script starts them, every boot, once
+@@SECOND_POLICY@@# 2b. Tetragon and the relay are NEVER enabled units: this script starts them, every boot, once
 #     their config above is current. Enabled, they started early in boot with the PREVIOUS boot's
 #     config — a policy change only took effect minutes later, when this script restarted them
 #     (live, 2026-10-04: an old policy's feedback loop ran ~90 s into a boot that had fixed it).
