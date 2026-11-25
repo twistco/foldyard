@@ -19,6 +19,7 @@ exclude_docs: |
   !talks/README.md
   demo/
   ebpf-spike-kit/
+  git-guard-spike-kit/
   archive/lima-network-forcing-kit/
 
 hooks:
@@ -101,6 +102,7 @@ nav:
       - isolation-layers.md
       - compose-in-vm-scope.md
       - fleet-scope.md
+      - git-guard-scope.md
       - lima-backend-scope.md
       - lima-wall-machine-integration.md
       - nested-virt.md
