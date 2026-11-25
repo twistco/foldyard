@@ -15,7 +15,7 @@ Three ways to deliver that, and the other two are worse:
     one topic at a time.
 
 The consumer-facing subset is force-included at build time (see ``pyproject.toml``); contributor
-material (DEVELOPMENT.md, the design notes, the wall kit) deliberately stays in the repo. When
+material (docs/dev/, the design notes, the wall kit) deliberately stays in the repo. When
 foldyard is running from a source checkout — an editable install, or the repo itself — the repo's
 ``docs/`` is used instead, so a contributor sees their edits without rebuilding.
 

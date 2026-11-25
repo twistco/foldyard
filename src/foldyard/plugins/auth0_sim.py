@@ -22,8 +22,8 @@ PROJECT-AGNOSTIC: every consumer-specific value (the simulator harness dir, the 
 overrides, the container suffix) is read from ``[plugins.auth0-sim]`` in ``foldyard.toml`` via
 ``config``; the published port is ``[ports].SIM_PORT`` — nothing consumer-specific is baked in here.
 Stdlib only (loads on the recipe hot path). Assumes the dump is already imported.
-(Spinout note: this plugin is Tangible-bound — it migrates into the consumer repo via
-``[plugins].load`` in spinout Phase 2, decisions D3/D4.)
+(Tangible-bound, and slated for DELETION, not migration — ADR-0024: it turned out to be data, so
+a declarative ``[[axis]]`` table replaces it, once that is built.)
 """
 
 from __future__ import annotations

@@ -14,6 +14,9 @@ module-level singleton that reads ``os.environ`` and the working directory. It l
 podman-compose internals, so it degrades to "unavailable" (never to a guess) if those move;
 tests/test_confighash.py pins the contract against the installed version.
 
+This is the verdict of reconcile's stack scope. The live oracles, against labels a real ``up``
+wrote, are tests/test_probes_e2e.py and tests/test_e2e.py.
+
 Stdlib-only at import; reconcile imports this lazily for ``fy state``.
 """
 

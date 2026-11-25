@@ -1,7 +1,7 @@
 """MkDocs hooks for the docs site (mkdocs.yml).
 
 The pages under docs/ are written for GitHub and for `fy docs`, so their relative links point at
-whatever the repo has: DEVELOPMENT.md beside docs/, a workflow file, a directory like `./adrs/`,
+whatever the repo has: AGENTS.md beside docs/, a workflow file, a directory like `./adrs/`,
 a script in a kit. The site holds only docs/ minus `exclude_docs`, so each such link would be a
 dead link — and a failed `--strict` build. Rather than change pages that render correctly where
 they are read today, this rewrites links at build time:

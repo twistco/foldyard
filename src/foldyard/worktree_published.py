@@ -4,9 +4,9 @@ The registry (:mod:`foldyard.worktree_registry`) is your computer's own and no b
 box had was what it was created with, so it couldn't tell a worktree registered since from a plain
 ``git worktree add`` one, and ``fy worktree remove`` in a box refused both. This is the registry's
 names, with each worktree's pooled ports and port offset (for a box made before it, which would
-otherwise refuse it: ``stack._pooled``), one file per main checkout in the to-box (ADR-0033), which
-a box can only read. Written by ``fy worktree add`` / ``remove`` and, when it differs, by each
-supervisor tick.
+otherwise refuse it: ``stack._pooled``; what a box was given at create comes first), one file per
+main checkout in the to-box (ADR-0033), which a box can only read. Written by ``fy worktree add`` /
+``remove`` and, when it differs, by each supervisor tick.
 
 A box reads no list as UNKNOWN, never as "none registered": there may be no to-box, or the foldyard
 on your computer may be from before this. It guides a command in the box, and nothing on your

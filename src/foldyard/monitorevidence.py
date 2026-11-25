@@ -4,7 +4,8 @@ monitor's store and past its budget (docs/monitor-pipeline.md §3.3).
 Once a crossing's segment leaves the store, a time and a container are all that remain of it. So
 each one's WINDOW — its boot's records from :data:`SIDE_SECONDS` before it to as long after — is
 copied to ``logs/evidence/<id>/``, which no reader of the store lists (sparing the segments in place
-would leave holes in a store whose hooks and retention take it to be contiguous):
+would leave holes in a store whose hooks and retention take it to be contiguous, and a hook whose
+position fell in one would wait for good):
 
 * ``records.jsonl.gz``: the window's lines, as the store had them;
 * ``context.jsonl.gz``: what joining them takes from the catalogue (:func:`monitorlog.around`) and

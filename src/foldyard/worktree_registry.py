@@ -9,11 +9,16 @@ a box-controlled worktree), or a ``[machine].worktrees_root`` pointed somewhere 
 So the host keeps the list itself. Only ``fy worktree add`` (host-only) writes it; ``fy worktree
 remove`` drops the entry. An entry counts while its directory is still the real, non-symlinked
 path that was recorded and still holds a ``.git``. The store is keyed by the MAIN checkout's real
-path — like :func:`foldyard.configpin.pin_dir`, never by anything the config declares.
+path — like :func:`foldyard.configpin.pin_dir`, never by anything the config declares. Everything
+host-side that enumerates worktrees (the supervisor, the git heal, `fy mode`, the TUI) reads this;
+a listing of the worktrees root is only ever reported on (:func:`unregistered`).
 
-It also records each registered worktree's PORT OFFSET (:func:`offsets`), in a file beside the
-registry rather than in it: an older supervisor still running after an editable upgrade reads the
-registry as name → path and drops anything else.
+It also records each registered worktree's PORT OFFSET (:func:`offsets`, through
+``stack.worktree_offsets``), in a file beside the registry rather than in it: an older supervisor
+still running after an editable upgrade reads the registry as name → path and drops anything else.
+The box gets every offset baked in at create (``FY_WORKTREE_OFFSETS``). Should two daemons still
+want one port (a pin, ``WT_OFFSET``), the supervisor runs one and blocks the other
+(``supervisor._port_sharers``), and never reaps its own.
 
 Stdlib-only: the supervisor's reconcile tick reads it."""
 

@@ -5,8 +5,8 @@ permissions ARE the box's scope there, decided in the App's settings where an or
 them. What foldyard owes instead is that a widening never happens silently. A kind's capability
 probe reads the scope (:class:`~foldyard.plugins.CredentialScope`); the supervisor records it here
 and, when it differs from the last observation, logs one line and raises one notification.
-`fy config widenings` and `fy mode` read the record OFFLINE — a report never calls the provider
-(ADR-0023: doctor checks presence, offline).
+`fy config widenings`, `fy mode` and the TUI read the record OFFLINE — a report never calls the
+provider (ADR-0023: doctor checks presence, offline).
 
 The record, ``config.credential_scopes_file()``, is keyed by switch, then by the credential's
 identity (an App + installation)::

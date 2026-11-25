@@ -10,7 +10,10 @@ repo.)
 This is an INTERIM clamp, and it says so: a key-by-key list the compose spec can outgrow, and a
 check on a path the client opens moments later by name — a box that swaps a checked file for a
 symlink in between can still win that race. The structural fix runs the compose client in the VM,
-where host files are unreachable by construction.
+where host files are unreachable by construction. Its sibling clamp is ``stack._host_passthrough``,
+the compose client's allowlisted env.
+
+Asked by every compose call that creates or builds (``stack._escapes``), on the host only.
 
 Two passes, because rendering both helps and hides:
 

@@ -68,31 +68,51 @@ Why foldyard is built the way it is.
 
 ## Contributing to foldyard
 
-Start at [DEVELOPMENT.md](../DEVELOPMENT.md): the module map, test tiers, CI and conventions.
+Start at [AGENTS.md](../AGENTS.md), the map for people and agents alike.
+
+- [dev/testing.md](./dev/testing.md) — the test tiers: what runs anywhere, what needs an engine,
+  what only runs on a real host.
+
+- [dev/ci.md](./dev/ci.md) — the CI jobs, and why each is shaped as it is.
+
+- [dev/gotchas.md](./dev/gotchas.md) — conventions, and the traps worth knowing first.
+
+- [dev/invariants.md](./dev/invariants.md) — what must always hold, with the reasoning.
 
 - [releasing.md](./releasing.md) — how a release is cut (tag-driven).
+
 - [linux-support.md](./linux-support.md) — what has been run on a Linux host and inside WSL2, and
   what hasn't yet.
+
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
   (macOS, Linux, WSL2), with measurements.
+
 - [compose-in-vm-scope.md](./compose-in-vm-scope.md) — `[machine] compose = "vm"`: the compose
   client runs in the VM instead of on your computer, what the spike found, and what's left before it
   can retire the compose path guard.
+
 - [fleet-scope.md](./fleet-scope.md) — the agent control plane: what `fy agent` is as a first
   version, and the next phase (a hosted control plane, interaction, sizing).
+
 - [lima-backend-scope.md](./lima-backend-scope.md) — the VM-backend contract (lima and podman) and
   the tricky parts of the Lima backend.
+
 - [lima-wall-machine-integration.md](./lima-wall-machine-integration.md) — how the box reaches the
   proxy on the host, and the design of the VM and host firewalls.
+
 - [nested-virt.md](./nested-virt.md) — nested-KVM rigs for testing the paths that only run on the
   host, including `just nested-test`: the host tier in a VM of its own on an Apple M3+.
+
 - [monitor-pipeline.md](./monitor-pipeline.md) — the guest monitor's host side: the storage
   measurements (chDB, DuckDB, SQLite, compressed JSONL), retention tiers, filtering at source, the
   score → decide → review pipeline, and hooks.
+
 - [ebpf-monitoring-spike.md](./ebpf-monitoring-spike.md) — whether Tetragon runs in the Lima guest
   and can attribute events to containers (2026-10-03), with a kit to re-run it.
+
 - [forwarder-spike.md](./forwarder-spike.md) — whether an in-VM forwarder can stamp each proxy
   connection with the container it came from, and what it costs (2026-10-22, for ADR-0034).
+
 - [guest-os.md](./guest-os.md) — why the VM runs Fedora (Lima's podman template), what a VM costs
   and whether a leaner guest would be safer, what Fedora 45 and podman 6 broke and the fixes, the
   pasta port forwarder, and moving a project's VM to Fedora 45 in place (2026-11-20), with the

@@ -16,8 +16,9 @@
   2026-11-12:** `podman machine` is no longer a foldyard backend
   ([ADR-0036](./0036-lima-only-podman-machine-backend-removed.md)), so nothing here needs to
   exercise it, and the rig's L1 is a Lima VM.
-- **Sources:** DEVELOPMENT.md (test tiers, nested-virt architecture, confirmations),
-  docs/history/nested-podman-in-devbox.md, docs/history/lima-network-forcing-spike.md
+- **Sources:** the contributor guide (now docs/dev/testing.md: test tiers, nested-virt architecture,
+  confirmations), docs/history/nested-podman-in-devbox.md,
+  docs/history/lima-network-forcing-spike.md
 
 ## Context
 

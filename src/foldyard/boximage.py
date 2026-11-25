@@ -4,8 +4,8 @@ the base VM's share.
 Split out of box.py so the base VM's bake (basevm.py — `fy machine base bake`, `fy prereq
 --fetch`) can compute and build it without importing box, and through it machine: machine's
 ``MACHINE`` binds at import from the project name, which outside a project is the working
-directory's name — and a project-less verb must not care where it is run from. Imports only
-config (stdlib otherwise).
+directory's name, one the plain-name check (``config._safe_name``) can refuse — and a project-less
+verb must not care where it is run from. Imports only config (stdlib otherwise).
 """
 
 from __future__ import annotations
