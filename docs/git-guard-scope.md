@@ -1,13 +1,13 @@
 # Keeping the box out of what your git runs: scope
 
 Status: **Part 1's read-only guard was spiked on 2026-11-18 and does not hold** on a macOS host (vz,
-virtiofs); what's left of Part 1 is reporting. Part 2, `fy share`, is unchanged by the spike.
-Nothing is built. Related: [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)
-(this is its first remaining channel),
-[ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md) (read-only that holds outside
-the box), [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md) (an opt-in feature's own root
-script in the guest), and [security.md](./security.md)'s "Git's own hooks run on your computer". The
-kit that ran the spike: [git-guard-spike-kit/](./git-guard-spike-kit/).
+virtiofs); what's left of Part 1 is reporting, and an option on your computer's own filesystem that
+is tried on the host only. Part 2, `fy share`, is unchanged by the spike. Nothing is built. Related:
+[ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md) (this is its first remaining
+channel), [ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md) (read-only that
+holds outside the box), [ADR-0032](./adrs/0032-a-root-collector-in-the-guest.md) (an opt-in
+feature's own root script in the guest), and [security.md](./security.md)'s "Git's own hooks run on
+your computer". The kit that ran the spike: [git-guard-spike-kit/](./git-guard-spike-kit/).
 
 ## The problem
 
@@ -127,7 +127,43 @@ It is weaker than read-only, and honest about it: between the box's write and yo
 there is a race, which a tick of a few seconds narrows and doesn't close. An app like Fork,
 refreshing in the background, can lose that race.
 
-### The structural option left, unproven
+### A structural option on your computer: immutable pointers (tried on the host only)
+
+The guard failed in the guest because your git renames a new file over `config`. Git doesn't do that
+when `config` is a symlink: it follows the link and rewrites the target. So `.git/config` and
+`.git/hooks` can be symlinks to files outside the share, under `~/.foldyard/<project>/`, and the
+links never change. What never changes can be locked by your own computer's filesystem, which has no
+mount to lose and no boot to be early for: macOS's immutable flag (`chflags -h uchg`) on each link,
+and an access rule (`chmod +a "everyone deny delete"`, what macOS puts on `~/Documents`) that keeps
+`.git` from being moved aside. The rest of `.git` stays as it is.
+
+Tried 2026-11-25 in a scratch repository (macOS, APFS, Apple git 2.54), the attacks run as a process
+of the same user, which is what the share's server is:
+
+| what | result |
+| -- | -- |
+| commit, switch, push with a new upstream, `git config`, `git remote add`, rename a branch, fetch, `pack-refs`, `gc`, `fsck`, merge, `worktree add` and `remove`, `git init` again | all work; the new upstream lands in the file outside, and `config` is still a link |
+| your own hook, in the directory outside | still runs |
+| rename over, delete, relink or move `config`, `hooks` or `commondir`; move or delete `.git` | all refused |
+| `chmod` on `.git` | lands; the access rule stays |
+| moving the checkout itself aside | lands here, but in a VM the checkout is the share's root |
+| a `.git` made in a subdirectory | still taken by git run there: only the report covers it |
+
+`.git/commondir` is made in advance, holding `.`, and locked: git honours one in any git directory,
+so a box could otherwise point yours at another. `config.worktree` is read only if `config` asks.
+
+**Not tested, and it decides this:** a guest's root, through virtiofs. It should be refused, as the
+server asks your kernel as you and the protocol carries neither the flag nor the rule, but nobody
+has run it. Fork, VS Code and other tools with a git library of their own haven't been tried either.
+
+**What it would cost.** A box needs a `config` at the same path on its own side, copied from yours,
+so what one side sets the other no longer sees by itself. Submodules' `config` and each linked
+worktree's `.git` and `commondir` need the same locks, made when foldyard makes the worktree and
+reported when something else does. Undoing it must be one verb, as a locked file confuses whoever
+deletes the checkout. Linux and WSL2 hosts have no flag a user can set (`chattr +i` needs root), so
+there it would stay a report.
+
+### The other structural option, unproven
 
 A **directory** mount survives where a file mount doesn't, because nothing renames `.git` itself
 (the pin makes that so for the box, and your git never does). A FUSE filesystem in the guest,
@@ -184,10 +220,13 @@ Linux or WSL2 host the clone would use 9p, the row this scope hasn't seen.
 
 ## Phases
 
-1. The report (Part 1, what's left), experimental: the fingerprint and its tick, the notification,
+1. The spike immutable pointers need: the attacks above from a box's root, through virtiofs, and
+   Fork on such a repository. If they hold, they come before the report on macOS, which then covers
+   what is left: planted `.git`s, hook managers' files, Linux and WSL2.
+2. The report (Part 1, what's left), experimental: the fingerprint and its tick, the notification,
    the doctor row, the verb to see and accept a change.
-2. `fy share`, independent of the report and buildable alongside it.
-3. The FUSE spike, only if the report's race proves too wide in use.
+3. `fy share`, independent of the report and buildable alongside it.
+4. The FUSE spike, only if neither of the first two is enough.
 
 ## Decisions for the maintainer
 
