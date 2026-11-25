@@ -323,6 +323,25 @@ def test_only_unknown_and_removed_keys_fail():
     assert not features.check({"proxy": {"passthrough": ["@all"]}}, {}).failed
 
 
+# ── what the config chose is shown, never obeyed by the terminal ───────────────────────────────
+
+ESC = "\x1b]52;c;cHduZWQ=\x07\x1b[2K"  # write the clipboard, then erase the line
+
+
+def test_a_key_or_value_carrying_terminal_escapes_is_shown_as_text():
+    # The checkout is box-writable, so its key names and values are the box's choice.
+    shared = {
+        "machine": {ESC: True, "compose": f"host{ESC}"},
+        "inject": [{"switch": f"gh{ESC}", "app_idd": 1}],
+        ESC: {},
+    }
+    report = features.check(shared, {})
+    text = "\n".join(features.render(report, color=True))
+    assert "\x07" not in text and "\x1b]" not in text and "\x1b[2K" not in text
+    assert "\\x1b]52;c;" in text  # kept visible: it's part of what the config says
+    assert all(c.isprintable() for p in report.problems for c in p.label + p.detail)
+
+
 # ── the verb ───────────────────────────────────────────────────────────────────────────────────
 
 

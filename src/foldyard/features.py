@@ -297,7 +297,8 @@ def _unknown(doc: dict, origin: str) -> list[Problem]:
             # A scalar at the top level is no table at all; a table is named as one.
             label = f"[{table}]" if isinstance(value, (dict, list)) else table
             hint = _suggest(table, SHAPES, "`[{}]`")
-            found.append(Problem("unknown", label, f"not a table foldyard reads{hint}", origin))
+            detail = f"not a table foldyard reads{hint}"
+            found.append(Problem("unknown", _printable(label), _printable(detail), origin))
             continue
         if shape == OPEN:
             continue
@@ -313,7 +314,7 @@ def _unknown(doc: dict, origin: str) -> list[Problem]:
                     where = f" (entry {i + 1}" + (f", {switch}" if switch else "") + ")"
                 hint = _suggest(name, known - {config.DISABLE_KEY}, "`{}`")
                 detail = f"not a key foldyard reads{where}{hint}"
-                found.append(Problem("unknown", key.label, detail, origin))
+                found.append(Problem("unknown", _printable(key.label), _printable(detail), origin))
     return found
 
 
@@ -347,6 +348,14 @@ def _old_defaults(doc: dict, origin: str) -> list[Problem]:
             )
             found.append(Problem("old-default", label, detail, origin))
     return found
+
+
+def _printable(text: str) -> str:
+    """``text`` with whatever a terminal would act on shown as its escape. Key names and values
+    come from a box-writable checkout, and this report prints them on your computer: a quoted TOML
+    key can carry an escape sequence that writes the clipboard or erases the line saying it's
+    wrong. The same rule as ``monitorlog.printable``, without importing the monitor."""
+    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
 
 
 def _file(in_local: bool) -> str:
@@ -449,7 +458,7 @@ def _feature_line(use: Use, width: int) -> str:
     if use.origin == LOCAL:
         tags.append(LOCAL)
     if not use.used and use.value is not None:
-        tags.append(f"set to {_toml(use.value)}")
+        tags.append(f"set to {_printable(_toml(use.value))}")
     tail = f"  ({', '.join(tags)})" if tags else ""
     return f"    {'●' if use.used else '·'} {use.key.title.ljust(width)}  {use.key.pitch}{tail}"
 
