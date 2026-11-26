@@ -74,6 +74,51 @@ def test_supervisor_logs_ignored_worktrees_once_per_change(host, monkeypatch):
     assert len(logged) == 2 and "older" in logged[1]
 
 
+# The box names those dirs: each name reaches your terminal (and the log) with its control
+# characters shown as escapes, so none of them acts on it.
+UNPRINTABLE = "\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"  # OSC 52, a C1 CSI, a bidi flip
+CONTROLS = {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"}
+
+
+def test_doctor_shows_a_box_chosen_dir_name_inert(host):
+    _main, root = host
+    _stray(root, f"old{UNPRINTABLE}")
+    _status, _name, detail = devmode._worktree_registry_check()
+    assert "old\\x1b]52" in detail and not CONTROLS & set(detail)
+
+
+def test_doctor_shows_a_box_made_worktrees_name_inert(host, monkeypatch):
+    from foldyard import boxworktree
+
+    monkeypatch.setattr(boxworktree, "names", lambda _main: [f"boxed{UNPRINTABLE}"])
+    _status, _name, detail = devmode._worktree_registry_check()
+    assert "boxed\\x1b]52" in detail and not CONTROLS & set(detail)
+
+
+def test_the_supervisor_logs_a_box_chosen_dir_name_inert(host, monkeypatch):
+    _main, root = host
+    logged: list[str] = []
+    monkeypatch.setattr(supervisor, "log", logged.append)
+    monkeypatch.setattr(supervisor, "_unregistered_seen", [])
+    _stray(root, f"old{UNPRINTABLE}")
+    supervisor._report_unregistered()
+    assert "old\\x1b]52" in logged[0] and not CONTROLS & set(logged[0])
+
+
+def test_mode_workspaces_shows_box_chosen_names_inert(monkeypatch, capsys):
+    ws = {
+        "name": f"old{UNPRINTABLE}",
+        "branch": f"wt/old{UNPRINTABLE}",
+        "path": f"/repo-worktrees/old{UNPRINTABLE}",
+        "containers": 0,
+        "devbox": False,
+    }
+    monkeypatch.setattr(devmode, "workspaces", lambda: [ws])
+    assert devmode.main(["workspaces"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("old\\x1b]52") == 3 and not CONTROLS & set(out)
+
+
 def test_main_repo_is_the_main_checkout_even_when_foldyard_repo_names_a_worktree(
     tmp_path, fresh_config
 ):

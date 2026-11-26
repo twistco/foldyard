@@ -726,6 +726,29 @@ def test_another_dirs_git_file_cannot_borrow_a_box_made_worktrees_marker(world, 
     assert not boxworktree.is_box_made(world["main"], d)
 
 
+def test_a_relative_git_file_is_still_its_box_made_worktree(world):
+    """`worktree.useRelativePaths` (git 2.48+) writes the `.git` file relative to the checkout:
+    it is read from there, and still names the admin dir under main's `.git/worktrees`."""
+    boxworktree.add("fix")
+    wt = world["root"] / "fix"
+    (wt / ".git").write_text("gitdir: ../../repo/.git/worktrees/fix\n")
+    assert boxworktree.is_box_made(world["main"], wt)
+
+
+@pytest.mark.parametrize(
+    "gitdir", ["../../evil/fix", "../../repo/.git/worktrees/../../evil/fix", "../../repo/.git"]
+)
+def test_a_relative_git_file_leading_elsewhere_is_no_box_made_worktree(world, tmp_path, gitdir):
+    boxworktree.add("fix")
+    evil = tmp_path / "evil" / "fix"
+    evil.mkdir(parents=True)
+    (evil / boxworktree.MARKER).write_text("x")
+    d = world["root"] / "planted"
+    d.mkdir()
+    (d / ".git").write_text(f"gitdir: {gitdir}\n")
+    assert not boxworktree.is_box_made(world["main"], d)
+
+
 def test_your_computer_says_a_box_made_it_and_the_doctor_does_not_warn(
     world, monkeypatch, capsys, tmp_path
 ):

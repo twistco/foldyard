@@ -2422,6 +2422,39 @@ def test_logs_tails_the_last_n_lines(monkeypatch, tmp_path, capsys):
     assert capsys.readouterr().out == "line 97\nline 98\nline 99\n"
 
 
+# What reaches the log can carry terminal control sequences: a child daemon's output is written
+# straight into it, and an older foldyard wrote box-chosen names raw. `fy host logs` writes each
+# line with them gone (a colour code too), tabs kept.
+_RAW_LINE = "a\x1b]52;c;aGk=\x07 \x1b[31mred\x1b[0m\tb\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}c\r\n"
+_CONTROLS = {"\x1b", "\x07", "\x9b", "\r", "\N{RIGHT-TO-LEFT OVERRIDE}"}
+
+
+def test_logs_writes_each_line_inert(monkeypatch, tmp_path, capsys):
+    _, _, log = _verbs(monkeypatch, tmp_path)
+    log.write_text(f"first\n{_RAW_LINE}last\n")
+    assert supervisor.logs() == 0
+    out = capsys.readouterr().out
+    assert out == "first\na]52;c;aGk= red\tb2Jc\nlast\n"
+
+
+def test_logs_follow_writes_what_arrives_inert(monkeypatch, tmp_path, capsys):
+    _, _, log = _verbs(monkeypatch, tmp_path)
+    log.write_text("first\n")
+    naps: list[float] = []
+
+    def nap(seconds: float) -> None:
+        if naps:
+            raise KeyboardInterrupt
+        naps.append(seconds)
+        with log.open("a") as f:
+            f.write(_RAW_LINE)
+
+    monkeypatch.setattr(supervisor.time, "sleep", nap)
+    assert supervisor.logs(follow=True) == 0
+    out = capsys.readouterr().out
+    assert "red\tb" in out and not _CONTROLS & set(out)
+
+
 def test_logs_without_a_log_says_so(monkeypatch, tmp_path, capsys):
     _verbs(monkeypatch, tmp_path)
     assert supervisor.logs() == 1 and "no supervisor log yet" in capsys.readouterr().err

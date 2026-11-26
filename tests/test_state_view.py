@@ -5,6 +5,7 @@ agreement/disagreement renders as the right status with the fix in the row."""
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -288,3 +289,16 @@ def test_state_names_a_blocked_daemons_reason(isolated_state, offline_engine, mo
     out = capsys.readouterr().out
     assert rc == 1
     assert "BLOCKED — can't bind :41100 — foreign" in out and "DOWN" not in out
+
+
+def test_state_shows_a_box_chosen_service_name_inert(overlay_repo, monkeypatch, capsys):
+    """A box can create a container on its engine with the project's labels and any service label
+    it likes: `fy state` shows it with its control characters as escapes."""
+    evil = "x\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"
+    monkeypatch.setattr(devmode, "_box_env_drift", lambda: [])
+    _stack_rows(monkeypatch, [_container("postgres"), _container(evil)], rendered={"postgres"})
+    state_view.show()
+    out = capsys.readouterr().out
+    assert "x\\x1b]52" in out
+    unmarked = re.sub(r"\x1b\[\d+m", "", out)  # the status marks' own colour
+    assert not {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"} & set(unmarked)

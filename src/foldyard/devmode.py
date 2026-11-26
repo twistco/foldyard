@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from . import config, configpin, mountwrite, worktree_registry
 from .machine_backend import LimaBackend, retired_block
 from .plugins import DoctorContext, registry
+from .term import printable
 
 if TYPE_CHECKING:
     from .box import EnvDrift
@@ -1353,6 +1354,9 @@ def _worktree_registry_check() -> tuple[str, str, str]:
         ]
     except OSError as e:  # pragma: no cover — unreadable state dir
         return _result(None, "worktrees", "", f"couldn't read the worktree registry: {e}")
+    # The box names those dirs: shown with their control characters as escapes (the TUI's doctor
+    # tab shows this row too).
+    box_made, stray = [printable(n) for n in box_made], [printable(n) for n in stray]
     fixes = "; ".join(f"`fy worktree add {n}`" for n in stray)
     return _result(
         True if not stray else None,
@@ -1640,7 +1644,7 @@ def _shadow_volume_check():
     import textwrap
 
     listed = textwrap.fill(
-        ", ".join(f'"{d}"' for d in exposed),
+        ", ".join(f'"{printable(d)}"' for d in exposed),  # the box names the dirs in the checkout
         width=88,
         initial_indent=" " * 10,
         subsequent_indent=" " * 10,
@@ -2195,7 +2199,7 @@ def _stack_shadow_check():
         yield _result(True, "stack shadowing", f"{n} container{'' if n == 1 else 's'} clean", "")
         return
     lines = "\n".join(
-        f"          {rel}  →  {', '.join(sorted(set(svcs)))}"
+        f"          {printable(rel)}  →  {', '.join(sorted(set(svcs)))}"  # the box names `rel`
         for rel, svcs in sorted(exposed.items())
     )
     n = len(exposed)
@@ -3038,7 +3042,8 @@ def main(argv: list[str]) -> int:
         for ws in workspaces():
             stack = "engine?" if ws["containers"] is None else f"{ws['containers']} containers"
             box = "devbox up" if ws["devbox"] else "no devbox"
-            print(f"  {ws['name']:<16} {ws['branch']:<28} {stack:<16} {box}   {ws['path']}")
+            name, branch, path = (printable(ws[k]) for k in ("name", "branch", "path"))
+            print(f"  {name:<16} {branch:<28} {stack:<16} {box}   {path}")
         return 0
     raise SystemExit(
         f"usage: foldyard mode [show|set switch=value… [ttl=…]|env|doctor [deep]|clock|"

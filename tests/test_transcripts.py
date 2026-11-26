@@ -922,6 +922,35 @@ def test_sweep_names_refused_folders_once_without_failing(mac, monkeypatch, tmp_
     assert transcripts._sweep_state[("", "Claude")]["refused"] == {"-tmp"}
 
 
+# The box names every entry in the tree: each one it is told about reaches your terminal (and the
+# supervisor's log) with its control characters shown as escapes.
+UNPRINTABLE = "\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"  # OSC 52, a C1 CSI, a bidi flip
+CONTROLS = {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"}
+
+
+def test_the_entries_it_names_are_shown_inert(mac, tmp_path, capsys):
+    _session(mac["src"], f"{mac['own']}/mine.jsonl", "mine")
+    _session(mac["src"], f"-other{UNPRINTABLE}/planted.jsonl")  # refused, by name
+    (mac["src"] / mac["own"] / f"link{UNPRINTABLE}").symlink_to(tmp_path)  # skipped, by path
+    assert transcripts.transcripts() == 0
+    err = capsys.readouterr().err
+    assert "-other\\x1b]52" in err and "link\\x1b]52" in err
+    assert not CONTROLS & set(err)
+
+
+def test_sweep_logs_a_refused_name_inert(mac, monkeypatch, tmp_path):
+    transcripts._sweep_state.clear()
+    monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(tmp_path / "archive"))
+    monkeypatch.setattr(config, "repo_root", lambda: mac["checkout"])
+    monkeypatch.setattr(config, "dev_vm_rel", lambda: "dev-stack")
+    monkeypatch.setattr(config, "claude_enabled", lambda: True)
+    monkeypatch.setattr(config, "claude_transcript_sync_seconds", lambda: 2.0)
+    _session(mac["src"], f"-other{UNPRINTABLE}/planted.jsonl")
+    logs: list[str] = []
+    transcripts.sweep(logs.append, "")
+    assert len(logs) == 1 and "-other\\x1b]52" in logs[0] and not CONTROLS & set(logs[0])
+
+
 def test_sweep_logs_a_planted_link_naming_it(mac, monkeypatch, tmp_path):
     transcripts._sweep_state.clear()
     monkeypatch.setenv("FOLDYARD_TRANSCRIPTS_ARCHIVE", str(tmp_path / "archive"))

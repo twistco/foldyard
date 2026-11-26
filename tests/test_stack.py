@@ -2321,6 +2321,19 @@ def test_a_refused_orphan_removal_is_reported_and_takes_no_dependent_with_it(
     assert any("has dependent containers" in ln for ln in lines)
 
 
+def test_orphan_sweep_names_a_box_chosen_service_inert(fake_repo, monkeypatch):
+    """A box can create a container on its engine with the project's labels and any service label
+    it likes: the announcement shows it with its control characters as escapes."""
+    evil = "x\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"
+    calls = _orphan_world(monkeypatch, services="app\n", ps="aaa\n", inspect=f"aaa {evil}\n")
+    lines: list[str] = []
+    stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lines.append)
+    assert [c for c in calls if c[1] == "rm"] == [["podman", "rm", "-f", "aaa"]]
+    shown = "\n".join(lines)
+    assert "x\\x1b]52" in shown
+    assert not {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"} & set(shown)
+
+
 def test_orphan_sweep_fails_safe_on_empty_render_and_unlabeled_containers(fake_repo, monkeypatch):
     # A failed/empty `config --services` render must remove NOTHING — an over-eager sweep here
     # is exactly the podman-compose bug this helper replaces.

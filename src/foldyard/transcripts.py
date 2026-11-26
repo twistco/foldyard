@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import boxmounts, config, mountwrite, stack
+from .term import printable
 
 
 def _err(*a: object) -> None:
@@ -324,9 +325,10 @@ def _mirror_dir(
 ) -> None:
     held = only is not None and depth == 0
     for name in sorted(os.listdir(src_fd)):
-        path = f"{rel}{name}"
+        # What the tally names is for reporting only, and the box chose it: kept inert from here.
+        path = f"{rel}{printable(name)}"
         if held and name != only:
-            tally.refused.append(name)
+            tally.refused.append(printable(name))
             continue
         try:
             mode = _lstat_at(src_fd, name).st_mode
@@ -343,7 +345,7 @@ def _mirror_dir(
             else:
                 _mirror_subdir(src_fd, dst_fd, name, path, depth, dry, tally)
         elif held:  # the project's name, but Claude only ever makes a folder there
-            tally.refused.append(f"{name} (not a folder)")
+            tally.refused.append(f"{printable(name)} (not a folder)")
         elif stat.S_ISREG(mode):
             _copy_file(src_fd, dst_fd, name, path, dry, tally)
         else:

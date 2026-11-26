@@ -1492,6 +1492,25 @@ def test_stack_check_counts_a_volume_on_the_path_or_any_parent_as_shadowed(tmp_p
     assert status == "ok" and "2 containers clean" in detail
 
 
+# The box names the dirs in the checkout: the rows show each with its control characters as escapes.
+_UNPRINTABLE = "\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"  # OSC 52, C1 CSI, bidi flip
+_CONTROLS = {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"}
+
+
+def test_shadow_check_shows_a_box_chosen_dir_name_inert(tmp_path, monkeypatch):
+    _tree(tmp_path, f"pkg{_UNPRINTABLE}/node_modules")
+    _status, detail = _shadow_row(monkeypatch, tmp_path, [])
+    assert "pkg\\x1b]52" in detail and not _CONTROLS & set(detail)
+
+
+def test_stack_check_shows_a_box_chosen_dir_name_inert(tmp_path, monkeypatch):
+    _tree(tmp_path, f"pkg{_UNPRINTABLE}/node_modules")
+    monkeypatch.setattr(devmode.config, "repo_root", lambda: tmp_path)
+    _stub_engine(monkeypatch, ["proj-web"], [_spec(("bind", str(tmp_path), "/app", True))])
+    (_status, _, detail) = _stack_row(list(devmode._stack_shadow_check()))
+    assert "pkg\\x1b]52" in detail and not _CONTROLS & set(detail)
+
+
 def test_stack_check_ignores_read_only_binds(tmp_path, monkeypatch):
     # A :ro checkout mount can't be clobbered by the container — Tangible's auth0-simulator
     # mounts its harness read-only and rsyncs out of it, which is correct and must not warn.

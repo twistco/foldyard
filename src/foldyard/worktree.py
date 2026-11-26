@@ -38,6 +38,7 @@ from . import (
     worktree_published,
     worktree_registry,
 )
+from .term import printable
 
 
 def _err(*a: object) -> None:
@@ -905,6 +906,95 @@ def _branch_of(path: Path) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def _own_admin_dir(main: Path, wt_dir: Path) -> Path | None:
+    """``wt_dir``'s admin dir (:func:`_admin_dir`), only where that is one directory directly under
+    ``main``'s ``.git/worktrees`` (its ``.git`` file is box-written), and named from there: the
+    path returned is ``main/.git/worktrees/<name>`` whatever the file said. A relative ``gitdir``
+    (``worktree.useRelativePaths``, git 2.48+) is resolved from the checkout first."""
+    if (admin := _admin_dir(wt_dir)) is None:
+        return None
+    admin = Path(os.path.normpath(admin))
+    home = main / ".git" / "worktrees"
+    if os.path.realpath(admin.parent) != os.path.realpath(home) or admin.name in ("", ".", ".."):
+        return None
+    return home / admin.name
+
+
+# A reftable repo (git 2.45+) keeps each worktree's HEAD in its ref store, and writes this
+# placeholder into the admin dir's HEAD file for older gits to trip on.
+_REFTABLE_HEAD = "refs/heads/.invalid"
+
+
+def _branch_read(main: Path, wt_dir: Path) -> str:
+    """``wt_dir``'s branch as ``git rev-parse --abbrev-ref HEAD`` would say it (``HEAD`` when
+    detached, ``""`` when it can't tell), READ from its HEAD in ``main``'s ``.git/worktrees``
+    rather than asked of git there. For a checkout your computer has no record of: the box made the
+    dir and wrote its ``.git`` file, which can name a git dir — and with it a config — the box
+    built, so nothing runs in it (:func:`devmode.workspaces`). The admin dir and its HEAD are
+    opened without following a link or blocking. A reftable repo's placeholder is answered from
+    ``main``'s own ``git worktree list`` (:func:`_listed_branch`). Only a name git would take as a
+    branch is returned: it is printed, and pasted into commands."""
+    if (admin := _own_admin_dir(main, wt_dir)) is None:
+        return ""
+    head = _read_head(admin)
+    if head == f"ref: {_REFTABLE_HEAD}":
+        branch = _listed_branch(main, wt_dir)
+    elif head.startswith("ref: refs/heads/"):
+        branch = head.removeprefix("ref: refs/heads/")
+    else:
+        return "HEAD" if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) else ""
+    return branch if len(branch) <= _BRANCH_MAX and _branch_name_ok(branch) else ""
+
+
+_BRANCH_MAX = 255  # a ref is a file name on most filesystems: no branch is longer
+
+
+def _read_head(admin: Path) -> str:
+    """The HEAD file in ``admin``, stripped; ``""`` when it is no regular file there."""
+    try:
+        dir_fd = os.open(admin, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return ""
+    try:
+        fd = os.open("HEAD", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        return ""
+    finally:
+        os.close(dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        return os.read(fd, 4096).decode(errors="replace").strip()
+    finally:
+        os.close(fd)
+
+
+def _listed_branch(main: Path, wt_dir: Path) -> str:
+    """The branch ``main``'s ``git worktree list`` names for ``wt_dir`` (:func:`_worktree_listing`:
+    git runs in main, never in the checkout), ``""`` when it names none."""
+    if (listing := _worktree_listing(main)) is None:
+        return ""
+    for path in dict.fromkeys((str(wt_dir), os.path.realpath(wt_dir))):
+        at = listing.find(f"\nworktree {path}\n")
+        if at == -1:
+            continue
+        entry = listing[at + 1 :].split("\n\n", 1)[0]
+        for line in entry.split("\n")[1:]:
+            if line.startswith("branch refs/heads/"):
+                return line.removeprefix("branch refs/heads/")
+        return ""
+    return ""
+
+
+def _branch_shown(main: Path, wt_dir: Path) -> str:
+    """``wt_dir``'s branch, for display: git's answer in a box or for a checkout your computer
+    registered, :func:`_branch_read` for any other dir under the worktrees root."""
+    if config.in_box():
+        return _branch_of(wt_dir)
+    known = {os.path.realpath(p) for p in worktree_registry.checkouts(main).values()}
+    return _branch_of(wt_dir) if os.path.realpath(wt_dir) in known else _branch_read(main, wt_dir)
+
+
 def _local_state_roots() -> tuple[Path, ...]:
     """The dirs holding per-worktree local state (posture + isolated VS Code), one child per
     worktree name. NOTE the namespace collision these create: ``vscode/worktrees`` (the legacy
@@ -1235,7 +1325,8 @@ def add(
         # Git GUIs implement "push" as push-to-tracking-branch, so a tracked origin/main
         # turns a routine branch push into a direct push TO main (bitten twice).
         argv = ["worktree", "add", "--no-track", "-b", branch, str(wt_dir)] + ([ref] if ref else [])
-        print(f"  new branch off {ref or f'current HEAD ({_branch_of(main)})'}")
+        # Either is read from the shared .git, which the box writes: shown inert.
+        print(f"  new branch off {printable(ref or f'current HEAD ({_branch_of(main)})')}")
     rc = _git_worktree_add(main, argv)
     if rc != 0:
         _err("✗ git worktree add failed")
@@ -1378,7 +1469,10 @@ def _register_existing(
         return _box_up(name) if box_up else 0
     if _no_pooled_port(name):
         return 1
-    print(f"'{name}' already exists: {os.path.realpath(wt_dir)} (branch {_branch_of(wt_dir)}).")
+    print(
+        f"'{name}' already exists: {printable(os.path.realpath(wt_dir))} "
+        f"(branch {printable(_branch_read(main, wt_dir))})."
+    )
     print("  Registering it lets your computer act on it: run its daemons, heal its git index,")
     print("  and reconcile it once its foldyard.toml is adopted.")
     masked = bool(config.box_shadow_volumes())
@@ -1579,7 +1673,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         return 1
 
     project = f"{config.project_prefix()}-{name}"
-    branch = _branch_of(wt_dir)
+    branch = printable(_branch_shown(main, wt_dir))  # display only: the branch is kept
     orphaned = not _registered_worktree(main, wt_dir)
     if orphaned and not force:
         _err(f"✗ '{name}' is ORPHANED — the checkout exists at {wt_dir} but git no longer")
@@ -1622,7 +1716,10 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         print("       checkout directory is deleted")
     print("  5. delete its local mode, isolated VS Code state + adopted config")
     if branch:
-        print(f"  The branch '{branch}' is KEPT (delete it later with: git branch -D {branch}).")
+        print(
+            f"  The branch '{branch}' is KEPT "
+            f"(delete it later with: git branch -D {shlex.quote(branch)})."
+        )
     if not (assume_yes or force):
         try:
             answer = input("Proceed? (y/N): ").strip()
@@ -1716,7 +1813,8 @@ def list_() -> int:
 
     made_here = set(boxworktree.names(main)) - known
     published = worktree_published.read(main) if config.in_box() else None
-    print(f"  {'main':<18} {_branch_of(main):<28} {main}")
+    # Names and branches here come from dirs and a .git the box writes: each shown inert.
+    print(f"  {'main':<18} {printable(_branch_of(main)):<28} {main}")
     if wt_root.is_dir():
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
@@ -1728,9 +1826,13 @@ def list_() -> int:
                     note = "  (made in a box)"
                 else:
                     note = "  (not registered)"
-                print(f"  {d.name:<18} {_branch_of(d):<28} {d}{note}")
+                branch = _branch_shown(main, d)
+                print(
+                    f"  {printable(d.name):<18} {printable(branch):<28} {printable(str(d))}{note}"
+                )
     stray = [] if config.in_box() else worktree_registry.unregistered(main, wt_root)
     if stray := [n for n in stray if n not in made_here]:
-        print(f"\n  Not registered — your computer runs nothing for: {', '.join(stray)}.")
+        shown = ", ".join(printable(n) for n in stray)
+        print(f"\n  Not registered — your computer runs nothing for: {shown}.")
         print("  If one is yours: `fy worktree add <name>` (asks before registering).")
     return 0

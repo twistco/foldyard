@@ -11,6 +11,7 @@ the box. Stdlib only.
 from __future__ import annotations
 
 from . import config, devmode, reconcile
+from .term import printable
 
 
 def show() -> int:
@@ -29,8 +30,10 @@ def show() -> int:
         if scope.host_only and devmode.in_box():
             continue
         for row in scope.rows(state):
-            print(f"  {marks[row.status]} {row.scope:<11} {row.desired}")
-            print(f"    {'':<11} → {row.observed}")
+            # A row can name what the engine answered — a container's labels, which anyone on it
+            # sets, the box included — so it is shown with its control characters as escapes.
+            print(f"  {marks[row.status]} {row.scope:<11} {printable(row.desired)}")
+            print(f"    {'':<11} → {printable(row.observed)}")
             worst = max(worst, {"ok": 0, "warn": 0, "unknown": 0, "drift": 1}[row.status])
     if worst:
         print("  (✗ = a tier disagrees with the desired mode — the fix is in its row)")

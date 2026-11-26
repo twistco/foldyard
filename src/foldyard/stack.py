@@ -1601,7 +1601,9 @@ def _remove_orphan_containers(
                 orphans.append((cid, service))
         if not orphans:
             return
-        names = ", ".join(s for _, s in orphans)
+        from .term import printable  # the service label is anyone's on the engine: the box's too
+
+        names = ", ".join(printable(s) for _, s in orphans)
         emit(
             f"▶ removing {len(orphans)} container(s) whose service left the rendered config "
             f"({names}); named volumes are kept…"
@@ -1609,7 +1611,7 @@ def _remove_orphan_containers(
         # No `--depend`: a live container that still `--requires` an orphan would go with it,
         # after `up`, with nothing to recreate it. A refusal leaves the orphan, and says so.
         cmd = [config.engine(), "rm", "-f"] + [cid for cid, _ in orphans]
-        emit("+ " + " ".join(cmd))
+        emit("+ " + printable(" ".join(cmd)))
         rm = _run(cmd, env=ctx.env)
         if rm.returncode != 0:
             emit(

@@ -59,6 +59,7 @@ from . import (
     worktree_registry,
 )
 from .plugins import CapabilityProbe
+from .term import printable
 
 TICK_SECONDS = 2.0
 RESTART_BACKOFF = 10.0
@@ -536,9 +537,20 @@ def restart() -> int:
     return 1
 
 
+def _inert(text: str) -> str:
+    """Log text as `fy host logs` writes it: each line with its control sequences and characters
+    gone (:func:`guestcompose.printable`). A child daemon's output goes into the log as it wrote
+    it, and an older foldyard wrote box-chosen names raw, so the file can carry an escape sequence
+    the box chose; foldyard's own lines now show those as their escapes, which this keeps."""
+    from .guestcompose import printable as clean
+
+    return "\n".join(clean(line) for line in text.split("\n"))
+
+
 def logs(lines: int = 50, follow: bool = False) -> int:
     """`fy host logs [-n N] [-f]`: the supervisor's log — its own lines and every child daemon's,
-    ISO-stamped. ``-f`` keeps following (from a truncated/replaced file too) until Ctrl-C."""
+    ISO-stamped. ``-f`` keeps following (from a truncated/replaced file too) until Ctrl-C. Written
+    inert (:func:`_inert`)."""
     if (rc := _refuse_in_box("fy host logs")) is not None:
         return rc
     path = config.supervisor_log_file()
@@ -554,7 +566,7 @@ def logs(lines: int = 50, follow: bool = False) -> int:
         if f.tell() > len(chunk) and b"\n" in chunk:
             chunk = chunk.split(b"\n", 1)[1]  # started mid-line
         tail = chunk.splitlines(keepends=True)[-lines:] if lines > 0 else []
-        sys.stdout.write(b"".join(tail).decode(errors="replace"))
+        sys.stdout.write(_inert(b"".join(tail).decode(errors="replace")))
         sys.stdout.flush()
         if not follow:
             return 0
@@ -562,7 +574,7 @@ def logs(lines: int = 50, follow: bool = False) -> int:
             while True:
                 data = f.read()
                 if data:
-                    sys.stdout.write(data.decode(errors="replace"))
+                    sys.stdout.write(_inert(data.decode(errors="replace")))
                     sys.stdout.flush()
                     continue
                 time.sleep(0.5)
@@ -1347,10 +1359,11 @@ def _report_unregistered() -> None:
         return
     _unregistered_seen[:] = stray
     if stray:
-        fixes = ", ".join(f"`fy worktree add {n}`" for n in stray)
+        shown = [printable(n) for n in stray]  # the box names them
+        fixes = ", ".join(f"`fy worktree add {n}`" for n in shown)
         log(
             f"⚠ worktrees not registered with this computer — running nothing for them: "
-            f"{', '.join(stray)}. If they are yours: {fixes}."
+            f"{', '.join(shown)}. If they are yours: {fixes}."
         )
 
 

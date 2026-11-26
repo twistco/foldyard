@@ -72,13 +72,8 @@ def _err(*a: object) -> None:
 def _marker(main: Path, wt_dir: Path) -> Path | None:
     """Where :data:`MARKER` goes for ``wt_dir``: its admin dir, only where that is one directory
     directly under ``main``'s ``.git/worktrees`` (its ``.git`` file is box-written)."""
-    admin = worktree._admin_dir(wt_dir)
-    home = main / ".git" / "worktrees"
-    if admin is None or ".." in admin.parts:
-        return None
-    if os.path.realpath(admin.parent) != os.path.realpath(home):
-        return None
-    return home / admin.name / MARKER
+    admin = worktree._own_admin_dir(main, wt_dir)
+    return None if admin is None else admin / MARKER
 
 
 def is_box_made(main: Path, wt_dir: Path) -> bool:
