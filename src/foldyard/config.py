@@ -644,9 +644,15 @@ def _version_declaration(key: str) -> str | None:
 
     Non-strings are ignored rather than coerced: TOML parses ``min_foldyard_version = 0.4``
     as a float, and a float has no third component — silently reading it as "0.4" would make
-    the floor mean something the author did not write. See :mod:`foldyard.compat`."""
+    the floor mean something the author did not write. See :mod:`foldyard.compat`.
+
+    Read as text (:func:`foldyard.term.printable`): the file is box-writable, the version gate
+    prints the value on your computer, and ``compat._parse`` orders ``"99<ESC>…"`` as 99. Escaped
+    rather than refused, so a floor stays a floor."""
+    from .term import printable
+
     value = _project_table().get(key)
-    return value if isinstance(value, str) and value else None
+    return printable(value) if isinstance(value, str) and value else None
 
 
 def min_foldyard_version() -> str | None:
@@ -665,9 +671,16 @@ def foldyard_version_reasons() -> dict[str, object]:
     A ledger, not a field: entries are appended and never rewritten, so no reason can drift out
     of date with the version it describes. Values are typed ``object`` because they are whatever
     the consumer's TOML held — :func:`foldyard.compat.reasons_between` does the narrowing, and
-    annotating ``str`` here would only hide that it has to. See :mod:`foldyard.compat`."""
+    annotating ``str`` here would only hide that it has to. See :mod:`foldyard.compat`.
+
+    Its keys and string values are read as text, as :func:`_version_declaration` reads a version:
+    the gate prints them on your computer."""
+    from .term import printable
+
     table = _project_table().get("foldyard_version_reasons")
-    return table if isinstance(table, dict) else {}
+    if not isinstance(table, dict):
+        return {}
+    return {printable(k): printable(v) if isinstance(v, str) else v for k, v in table.items()}
 
 
 def dev_vm_rel() -> str:

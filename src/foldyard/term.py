@@ -38,6 +38,15 @@ _COLORS = {
 _TOKEN = re.compile("|".join(re.escape(t) for t in _COLORS))
 
 
+def printable(text: str) -> str:
+    """``text`` with whatever a terminal would act on shown as its escape (``\\x1b``, ``\\x07``…).
+
+    For text a box can choose that foldyard prints on your computer — a ``foldyard.toml`` value,
+    a key name: kept visible rather than dropped, since it is part of what was written, and inert.
+    The same rule as ``monitorlog.printable``."""
+    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
+
+
 def paint(text: str) -> str:
     """``text`` with every status token wrapped in its ANSI color (reset after each)."""
     return _TOKEN.sub(lambda m: f"\x1b[{_COLORS[m.group(0)]}m{m.group(0)}\x1b[0m", text)

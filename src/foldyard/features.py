@@ -35,6 +35,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from . import compat, config
+from .term import printable as _printable  # key names and values are the box's to choose
 
 SHARED = "foldyard.toml"
 LOCAL = "foldyard.local.toml"
@@ -348,14 +349,6 @@ def _old_defaults(doc: dict, origin: str) -> list[Problem]:
             )
             found.append(Problem("old-default", label, detail, origin))
     return found
-
-
-def _printable(text: str) -> str:
-    """``text`` with whatever a terminal would act on shown as its escape. Key names and values
-    come from a box-writable checkout, and this report prints them on your computer: a quoted TOML
-    key can carry an escape sequence that writes the clipboard or erases the line saying it's
-    wrong. The same rule as ``monitorlog.printable``, without importing the monitor."""
-    return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
 
 
 def _file(in_local: bool) -> str:
