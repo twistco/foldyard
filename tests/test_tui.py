@@ -16,7 +16,7 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import timedelta
 from typing import cast
 
@@ -47,6 +47,18 @@ def _text(static) -> str:
 def _fid(app) -> str | None:
     """The focused widget's id (None if nothing focused) — narrows the Optional `focused`."""
     return app.focused.id if app.focused else None
+
+
+def _mode_button(app, axis: str, value: str) -> tui.ModeButton:
+    """The Mode tab's button for ``axis``=``value``, found by the switch and level it carries:
+    its id is never built from them."""
+    return next(b for b in app.query(tui.ModeButton) if (b.axis, b.value) == (axis, value))
+
+
+def _focused_mode(app) -> tuple[str, str] | None:
+    """The focused mode button's (switch, level), or None when focus is elsewhere."""
+    focused = app.focused
+    return (focused.axis, focused.value) if isinstance(focused, tui.ModeButton) else None
 
 
 # ── devmode: pure logic ─────────────────────────────────────────────────────────────
@@ -425,7 +437,7 @@ async def test_mode_button_targets_the_selected_workspace(monkeypatch):
         app = cast(tui.DevModeTui, pilot.app)
         app.query_one("#workspaces", tui.WorkspaceList).index = 1  # highlight the 'feat' worktree
         await pilot.pause()
-        btn = app.query_one("#github-on", tui.Button)
+        btn = _mode_button(app, "github", "on")
         app.on_button_pressed(tui.Button.Pressed(btn))
     assert seen["updates"] == {"github": "on"}
     assert seen["wt"] == "feat"  # wrote feat's posture under feat's binding, not main's
@@ -533,8 +545,8 @@ async def test_rapid_mode_toggles_serialize_the_stack_reconciles(monkeypatch):
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
         # two back-to-back mode-button presses, no waiting in between (the rapid toggle)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#gcp-logs", tui.Button)))
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#gcp-off", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "gcp", "logs")))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "gcp", "off")))
         await app.workers.wait_for_complete()
     assert counts["max_active"] == 1  # the reconciles never overlapped
     assert calls == [("0", "1"), ("1", "2")]  # both ran, in order, chained
@@ -584,10 +596,10 @@ async def test_rapid_toggles_on_different_worktrees_both_reconcile(monkeypatch):
         lv = app.query_one("#workspaces", tui.WorkspaceList)
         lv.index = 0  # main
         await pilot.pause()
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         lv.index = 1  # feat — immediately, while main's reconcile may still be running
         await pilot.pause()
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-off", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "off")))
         await app.workers.wait_for_complete()
     assert sorted(reconciled) == ["", "feat"]  # each ran once, under its own worktree
 
@@ -633,7 +645,7 @@ async def test_mode_grid_rebuilds_for_selected_worktree_axes(monkeypatch):
         app.refresh_mode()
         await pilot.pause()
         assert [row.axis for row in app.query(tui.AxisRow)] == ["github", "gcp"]
-        assert app.query_one("#gcp-logs", tui.Button)
+        assert _mode_button(app, "gcp", "logs")
 
 
 async def test_opens_on_the_checkout_it_was_launched_from(monkeypatch):
@@ -1644,13 +1656,13 @@ def test_copied_json_is_printable_ascii_whatever_the_box_wrote():
 async def test_down_enters_grid_then_arrows_move_between_cells():
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.press("down")  # tab strip → first cell
-        assert _fid(pilot.app) == "gcp-off"
+        assert _focused_mode(pilot.app) == ("gcp", "off")
         await pilot.press("right")
-        assert _fid(pilot.app) == "gcp-logs"
+        assert _focused_mode(pilot.app) == ("gcp", "logs")
         await pilot.press("down")  # next row (the storage axis now sits under gcp), same column
-        assert _fid(pilot.app) == "storage-staging"
+        assert _focused_mode(pilot.app) == ("storage", "staging")
         await pilot.press("up")
-        assert _fid(pilot.app) == "gcp-logs"
+        assert _focused_mode(pilot.app) == ("gcp", "logs")
 
 
 async def test_left_off_left_column_focuses_workspaces():
@@ -1690,7 +1702,7 @@ async def test_right_edge_stays_put():
         await pilot.press("down", "left")  # into grid then to workspaces
         await pilot.press("right")  # workspaces → grid first cell
         await pilot.press("right", "right", "right", "right")  # past the last gcp cell
-        assert _fid(pilot.app) == "gcp-user"  # clamped, not wrapped/crashed
+        assert _focused_mode(pilot.app) == ("gcp", "user")  # clamped, not wrapped/crashed
 
 
 async def test_selected_status_describes_focused_mode():
@@ -1877,17 +1889,17 @@ async def test_mode_grid_arrows_cross_columns_when_two_wide():
         app = pilot.app
         assert app.query_one("#mode-grid", tui.ModeGrid).cols == 2
         await pilot.press("down")  # tab strip → first cell
-        assert _fid(app) == f"{axes[0]}-off"
+        assert _focused_mode(app) == (axes[0], "off")
         await pilot.press("down")  # one visual row down = two axes on in DOM order
-        assert _fid(app) == f"{axes[2]}-{devmode.axes()[axes[2]][0]}"
+        assert _focused_mode(app) == (axes[2], devmode.axes()[axes[2]][0])
         # → off the right edge of a left-column axis crosses into its right-column neighbour…
         last0 = devmode.axes()[axes[0]][-1]
-        app.query_one(f"#{axes[0]}-{last0}", tui.Button).focus()
+        _mode_button(app, axes[0], last0).focus()
         await pilot.press("right")
-        assert _fid(app) == f"{axes[1]}-{devmode.axes()[axes[1]][0]}"
+        assert _focused_mode(app) == (axes[1], devmode.axes()[axes[1]][0])
         # …and ← off its left edge lands back on the left-column axis's last button (not workspaces)
         await pilot.press("left")
-        assert _fid(app) == f"{axes[0]}-{last0}"
+        assert _focused_mode(app) == (axes[0], last0)
 
 
 # ── TUI: responsive layout (detail pane fills, never overflows) ───────────────────────
@@ -2112,7 +2124,7 @@ async def test_mode_button_prompts_for_a_missing_secret_before_applying(monkeypa
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        btn = app.query_one("#github-on", tui.Button)
+        btn = _mode_button(app, "github", "on")
         app.on_button_pressed(tui.Button.Pressed(btn))
         await pilot.pause()
         assert isinstance(app.screen, tui.SecretScreen)
@@ -2145,7 +2157,7 @@ async def test_mode_button_secret_store_failure_is_reported_not_claimed(monkeypa
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
         monkeypatch.setattr(app, "notify", lambda msg, **_k: toasts.append(str(msg)))
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         await pilot.pause()
         for ch in "ghp_abc":
             await pilot.press(ch)
@@ -2163,7 +2175,7 @@ async def test_mode_button_secret_cancel_leaves_the_posture_unchanged(monkeypatc
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
@@ -2180,7 +2192,7 @@ async def test_mode_button_secret_wrong_shape_stays_on_the_modal(monkeypatch, tm
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         await pilot.pause()
         for ch in "nope":
             await pilot.press(ch)
@@ -2217,7 +2229,7 @@ async def test_mode_button_secret_takes_a_key_file_by_path(monkeypatch, tmp_path
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         await pilot.pause()
         assert isinstance(app.screen, tui.SecretScreen)
         assert "path" in _text(app.screen.query_one("#sec-body", tui.Static))
@@ -2260,7 +2272,7 @@ async def test_secret_dialog_takes_a_drop_that_arrived_with_nothing_focused(monk
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         await pilot.pause()
         assert isinstance(app.screen, tui.SecretScreen)
         app.screen.set_focus(None)  # what AppBlur did when the drag left for Finder
@@ -2321,20 +2333,20 @@ async def test_mode_button_refuses_a_switch_overlapping_another_and_says_which(
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
         monkeypatch.setattr(app, "notify", lambda msg, **_k: toasts.append(str(msg)))
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#b-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "b", "on")))
         await pilot.pause()
     assert any("a=on and b=on" in t and "`fy mode a=off`" in t for t in toasts)
     assert state.read_text() == '{"a": "on"}'
 
 
-async def test_a_hyphenated_switchs_button_sets_that_switch(monkeypatch, tmp_path):
-    # A button's id is "<switch>-<level>", so splitting it read `sanity-editor`'s off button as
-    # switch `sanity`, level `editor-off` — refused. The button carries its switch and level.
+def _switch_world(monkeypatch, tmp_path, switches: Mapping[str, tuple[str, ...]]) -> list:
+    """Bind a registry of just ``switches`` (name → levels) and stub the mode write; returns
+    the list each button press's ``set_mode`` updates land in."""
     from pbt import Registry, Switch, SyntheticPlugin
 
     axes = [
-        Switch(name=n, levels=("off", "on"), blurb={"off": "-", "on": "-"})
-        for n in ("sanity", "sanity-editor")
+        Switch(name=n, levels=levels, blurb=dict.fromkeys(levels, "-"))
+        for n, levels in switches.items()
     ]
     cfg = config.Config(
         repo_root=config.repo_root(), worktree="", toml={"project": {"name": "generic"}}
@@ -2347,13 +2359,62 @@ async def test_a_hyphenated_switchs_button_sets_that_switch(monkeypatch, tmp_pat
     monkeypatch.setattr(devmode, "missing_secrets", lambda updates: [])
     sets: list = []
     monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    return sets
+
+
+async def test_a_hyphenated_switchs_button_sets_that_switch(monkeypatch, tmp_path):
+    # A button's id was "<switch>-<level>", so splitting it read `sanity-editor`'s off button as
+    # switch `sanity`, level `editor-off` — refused. The button carries its switch and level.
+    sets = _switch_world(
+        monkeypatch, tmp_path, {"sanity": ("off", "on"), "sanity-editor": ("off", "on")}
+    )
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        for bid in ("#sanity-editor-on", "#sanity-editor-off", "#sanity-on"):
-            app.on_button_pressed(tui.Button.Pressed(app.query_one(bid, tui.Button)))
+        for axis, value in (("sanity-editor", "on"), ("sanity-editor", "off"), ("sanity", "on")):
+            app.on_button_pressed(tui.Button.Pressed(_mode_button(app, axis, value)))
             await pilot.pause()
     assert sets == [{"sanity-editor": "on"}, {"sanity-editor": "off"}, {"sanity": "on"}]
+
+
+async def test_a_switch_named_outside_textuals_id_rules_still_shows_and_sets(monkeypatch, tmp_path):
+    # `[[inject]] switch` only has to be printable, so `api.v2`, `a[b]` or `my api` is accepted
+    # config; built into a button id it raised BadIdentifier and `fy tui` exited on start. The
+    # buttons are found by the switch and level they carry, never by a selector.
+    names = ("api.v2", "a[b]", "my api", "sanity")
+    levels = ("off", "on.x", "on_x")  # one id if the odd characters were folded away
+    sets = _switch_world(monkeypatch, tmp_path, dict.fromkeys(names, levels))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.refresh_mode()  # the per-tick lookup of each row's buttons
+        rows = {r.axis: r for r in app.query(tui.AxisRow)}
+        assert list(rows) == list(names)
+        for row in rows.values():
+            buttons = {b.value: b for b in row.query(tui.ModeButton)}
+            assert list(buttons) == list(levels) and buttons["off"].variant == "success"
+            app.on_button_pressed(tui.Button.Pressed(buttons["on.x"]))
+            await pilot.pause()
+        ids = [b.id for b in app.query(tui.ModeButton)]
+        assert len(set(ids)) == len(ids)
+    assert sets == [{n: "on.x"} for n in names]
+
+
+async def test_a_switch_named_like_a_foldyard_widget_is_still_just_a_switch(monkeypatch, tmp_path):
+    # A readable "<switch>-<level>" id can be one of foldyard's own: switch `fix` gave `fix-on`,
+    # which the press handler took for a Doctor repair button (KeyError, and the app went down),
+    # and `doctor`/`refresh` the Doctor tab's re-run. A mode button's id is never built from names.
+    switches = {"fix": ("off", "on"), "doctor": ("off", "refresh"), "tab": ("off", "doctor")}
+    sets = _switch_world(monkeypatch, tmp_path, switches)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        ours = {w.id for w in app.query("*") if w.id and not isinstance(w, tui.ModeButton)}
+        assert not ours & {b.id for b in app.query(tui.ModeButton)}
+        for axis, levels in switches.items():
+            app.on_button_pressed(tui.Button.Pressed(_mode_button(app, axis, levels[1])))
+            await pilot.pause()
+    assert sets == [{axis: levels[1]} for axis, levels in switches.items()]
 
 
 async def test_mode_button_secret_empty_paste_skips_and_applies(monkeypatch, tmp_path):
@@ -2364,7 +2425,7 @@ async def test_mode_button_secret_empty_paste_skips_and_applies(monkeypatch, tmp
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#github-on", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "github", "on")))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -2378,7 +2439,7 @@ async def test_mode_button_with_nothing_missing_applies_directly(monkeypatch, tm
     async with tui.DevModeTui().run_test() as pilot:
         await pilot.pause()
         app = cast(tui.DevModeTui, pilot.app)
-        app.on_button_pressed(tui.Button.Pressed(app.query_one("#gcp-logs", tui.Button)))
+        app.on_button_pressed(tui.Button.Pressed(_mode_button(app, "gcp", "logs")))
         await pilot.pause()
         assert not isinstance(app.screen, tui.SecretScreen)
     assert sets == [{"gcp": "logs"}]
@@ -3486,7 +3547,7 @@ async def test_a_switch_blurb_from_config_shows_as_text_in_its_status(monkeypatc
         app = cast(tui.DevModeTui, pilot.app)
         row = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
         if focused:  # the preview line, for the button under the cursor
-            row.query_one("#github-off", tui.Button).focus()
+            row.button("off").focus()
             await pilot.pause()
         app.refresh_mode()
         _assert_inert(row.query_one(".axis-status", tui.Static).render())

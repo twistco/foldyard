@@ -2317,10 +2317,7 @@ def test_reconcile_stack_down_reaps_dropped_posture_service(fake_repo, capture_s
     def fake_run(cmd, **kw):
         calls.append(cmd)
         proc = _FakeProc()
-        if cmd[1] == "ps":
-            proc.stdout = "eee\n"
-        elif cmd[1] == "inspect":
-            proc.stdout = "eee metadata-emulator\n"
+        proc.stdout = _engine_lists(cmd, [("eee", "metadata-emulator")]) or ""
         return proc
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
@@ -2330,6 +2327,31 @@ def test_reconcile_stack_down_reaps_dropped_posture_service(fake_repo, capture_s
     assert ["podman", "rm", "-f", "eee"] in calls
     assert capture_stream == []  # nothing started
     assert any("level dropped" in ln and "metadata-emulator" in ln for ln in lines)
+
+
+def test_the_dropped_mode_service_reap_removes_only_ids_the_engine_gave(
+    fake_repo, capture_stream, monkeypatch
+):
+    # The same line-per-container read as the orphan sweep: a label's second line named a
+    # container of the box's choosing as a dropped emulator.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    calls: list[list[str]] = []
+    hostile = "web\nother-project-db metadata-emulator"
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        proc = _FakeProc()
+        proc.stdout = _engine_lists(cmd, [("eee", "metadata-emulator"), ("fff", hostile)]) or ""
+        return proc
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): False)
+    assert stack.reconcile_posture(_sig("metadata"), _sig(""), sink=lambda _l: None) is True
+    assert [c for c in calls if c[1] == "rm"] == [["podman", "rm", "-f", "eee"]]
+    # Running ones only (no `-a`: a stopped emulator serves nothing), and only this project's.
+    project = f"label=com.docker.compose.project={stack.resolve().project}"
+    ps = ["podman", "ps", "--filter", project, "--format", "json"]
+    assert [c for c in calls if c[1] == "ps"] == [ps]
 
 
 def test_stack_is_up_ignores_posture_services(fake_repo, monkeypatch):
@@ -2368,12 +2390,40 @@ def test_stack_is_up_ignores_posture_services(fake_repo, monkeypatch):
 # docstring). These pin the replacement's exact engine sequence and its fail-safe edges.
 
 
+_SERVICE = "com.docker.compose.service"
+
+
+def _engine_lists(cmd, containers: list[tuple[str, str | None]]) -> str | None:
+    """What the engine prints for a ``ps``/``inspect`` of ``containers`` (``(id, service label)``,
+    None for no label), in the format ``cmd`` asks for: the per-line template and the JSON alike,
+    so a label is rendered the way the engine renders it, newline and all. None for anything
+    else."""
+    fmt = cmd[cmd.index("--format") + 1] if "--format" in cmd else "json"
+    if cmd[1] == "ps" and fmt == "json":
+        rows = [
+            {"Id": cid, "Labels": {} if svc is None else {_SERVICE: svc}} for cid, svc in containers
+        ]
+        return json.dumps(rows)
+    if cmd[1] == "ps" and fmt == "{{.ID}}":
+        return "".join(f"{cid}\n" for cid, _ in containers)
+    if (
+        cmd[1] == "inspect"
+        and fmt == '{{.Id}} {{index .Config.Labels "com.docker.compose.service"}}'
+    ):
+        return "".join(f"{cid} {'<no value>' if svc is None else svc}\n" for cid, svc in containers)
+    return None
+
+
 def _orphan_world(
-    monkeypatch, *, services: str, ps: str, inspect: str, rm_stderr: str | None = None
+    monkeypatch,
+    *,
+    services: str,
+    containers: list[tuple[str, str | None]],
+    rm_stderr: str | None = None,
 ):
-    """Script the sweep's three probes (compose config --services, engine ps, engine inspect)
-    and record every command; returns the recorded call list. ``rm_stderr`` makes the engine
-    refuse the removal with it."""
+    """Script the sweep's probes (compose config --services, then the engine's listing of
+    ``containers``) and record every command; returns the recorded call list. ``rm_stderr``
+    makes the engine refuse the removal with it."""
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kw):
@@ -2381,10 +2431,8 @@ def _orphan_world(
         proc = _FakeProc()
         if "config" in cmd and "--services" in cmd:
             proc.stdout = services
-        elif cmd[1] == "ps":
-            proc.stdout = ps
-        elif cmd[1] == "inspect":
-            proc.stdout = inspect
+        elif (listed := _engine_lists(cmd, containers)) is not None:
+            proc.stdout = listed
         elif cmd[1] == "rm" and rm_stderr is not None:
             proc.returncode, proc.stderr = 125, rm_stderr
         return proc
@@ -2397,14 +2445,17 @@ def test_orphan_sweep_removes_only_departed_services(fake_repo, monkeypatch):
     calls = _orphan_world(
         monkeypatch,
         services="app\npostgres\n",
-        ps="aaa\nbbb\nccc\n",
-        inspect="aaa app\nbbb metadata\nccc postgres\n",
+        containers=[("aaa", "app"), ("bbb", "metadata"), ("ccc", "postgres")],
     )
     lines: list[str] = []
     stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lines.append)
     rms = [c for c in calls if c[1] == "rm"]
     assert rms == [["podman", "rm", "-f", "bbb"]]  # ONLY the departed service's container
     assert any("metadata" in ln for ln in lines)  # named in the sweep announcement
+    # Stopped containers too (`-a`: an exited orphan is still one), and only this project's.
+    project = "label=com.docker.compose.project=tangible-podman"
+    ps = ["podman", "ps", "-a", "--filter", project, "--format", "json"]
+    assert [c for c in calls if c[1] == "ps"] == [ps]
 
 
 def test_a_refused_orphan_removal_is_reported_and_takes_no_dependent_with_it(
@@ -2415,8 +2466,7 @@ def test_a_refused_orphan_removal_is_reported_and_takes_no_dependent_with_it(
     calls = _orphan_world(
         monkeypatch,
         services="app\n",
-        ps="aaa\nbbb\n",
-        inspect="aaa app\nbbb metadata\n",
+        containers=[("aaa", "app"), ("bbb", "metadata")],
         rm_stderr="Error: container bbb has dependent containers which must be removed before it",
     )
     lines: list[str] = []
@@ -2429,7 +2479,7 @@ def test_orphan_sweep_names_a_box_chosen_service_inert(fake_repo, monkeypatch):
     """A box can create a container on its engine with the project's labels and any service label
     it likes: the announcement shows it with its control characters as escapes."""
     evil = "x\x1b]52;c;aGk=\x07\x9b2J\N{RIGHT-TO-LEFT OVERRIDE}"
-    calls = _orphan_world(monkeypatch, services="app\n", ps="aaa\n", inspect=f"aaa {evil}\n")
+    calls = _orphan_world(monkeypatch, services="app\n", containers=[("aaa", evil)])
     lines: list[str] = []
     stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lines.append)
     assert [c for c in calls if c[1] == "rm"] == [["podman", "rm", "-f", "aaa"]]
@@ -2438,16 +2488,28 @@ def test_orphan_sweep_names_a_box_chosen_service_inert(fake_repo, monkeypatch):
     assert not {"\x1b", "\x07", "\x9b", "\N{RIGHT-TO-LEFT OVERRIDE}"} & set(shown)
 
 
+def test_orphan_sweep_removes_only_ids_the_engine_gave_whatever_a_label_holds(
+    fake_repo, monkeypatch
+):
+    # Read a line per container, a service label holding a newline started a line of its own,
+    # and its first word went into `rm -f` as an id: here another project's container, and an
+    # option that takes every container on the engine with it.
+    hostile = "app\nother-project-db gone\n--all gone"
+    calls = _orphan_world(
+        monkeypatch, services="app\n", containers=[("aaa", hostile), ("bbb", "app")]
+    )
+    stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lambda _ln: None)
+    assert [c for c in calls if c[1] == "rm"] == [["podman", "rm", "-f", "aaa"]]
+
+
 def test_orphan_sweep_fails_safe_on_empty_render_and_unlabeled_containers(fake_repo, monkeypatch):
     # A failed/empty `config --services` render must remove NOTHING — an over-eager sweep here
     # is exactly the podman-compose bug this helper replaces.
-    calls = _orphan_world(monkeypatch, services="", ps="aaa\n", inspect="aaa metadata\n")
+    calls = _orphan_world(monkeypatch, services="", containers=[("aaa", "metadata")])
     stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lambda _ln: None)
     assert not any(c[1] == "rm" for c in calls)
-    # Containers with no service label (or a `<no value>` template render) are never orphans.
-    calls = _orphan_world(
-        monkeypatch, services="app\n", ps="aaa\nbbb\n", inspect="aaa \nbbb <no value>\n"
-    )
+    # Containers with no service label (or an empty one) are never orphans.
+    calls = _orphan_world(monkeypatch, services="app\n", containers=[("aaa", ""), ("bbb", None)])
     stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lambda _ln: None)
     assert not any(c[1] == "rm" for c in calls)
 

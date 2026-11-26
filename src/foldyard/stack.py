@@ -1578,38 +1578,8 @@ def _remove_orphan_containers(
         services = {s.strip() for s in rendered.stdout.splitlines() if s.strip()}
         if rendered.returncode != 0 or not services:
             return
-        ps = _run(
-            [
-                config.engine(),
-                "ps",
-                "-a",
-                "--filter",
-                f"label=com.docker.compose.project={ctx.project}",
-                "--format",
-                "{{.ID}}",
-            ],
-            env=ctx.env,
-        )
-        ids = [i.strip() for i in ps.stdout.splitlines() if i.strip()]
-        if ps.returncode != 0 or not ids:
-            return
-        insp = _run(
-            [
-                config.engine(),
-                "inspect",
-                "--format",
-                '{{.Id}} {{index .Config.Labels "com.docker.compose.service"}}',
-                *ids,
-            ],
-            env=ctx.env,
-        )
-        if insp.returncode != 0:
-            return
-        orphans = []
-        for line in insp.stdout.splitlines():
-            cid, _, service = line.strip().partition(" ")
-            if cid and service and service != "<no value>" and service not in services:
-                orphans.append((cid, service))
+        listed = _project_services(ctx, stopped=True)
+        orphans = [(cid, svc) for cid, svc in listed or [] if svc and svc not in services]
         if not orphans:
             return
         from .term import printable  # the service label is anyone's on the engine: the box's too
@@ -2000,40 +1970,28 @@ def _running_managed_containers(ctx: Context, services: set[str]) -> list[tuple[
     if not services:
         return []
     try:
-        ps = _run(
-            [
-                config.engine(),
-                "ps",
-                "--filter",
-                f"label=com.docker.compose.project={ctx.project}",
-                "--format",
-                "{{.ID}}",
-            ],
-            env=ctx.env,
-        )
-        ids = [i.strip() for i in ps.stdout.splitlines() if i.strip()]
-        if ps.returncode != 0 or not ids:
-            return []
-        insp = _run(
-            [
-                config.engine(),
-                "inspect",
-                "--format",
-                '{{.Id}} {{index .Config.Labels "com.docker.compose.service"}}',
-                *ids,
-            ],
-            env=ctx.env,
-        )
-        if insp.returncode != 0:
-            return []
-        out = []
-        for line in insp.stdout.splitlines():
-            cid, _, service = line.strip().partition(" ")
-            if cid and service in services:
-                out.append((cid, service))
-        return out
+        listed = _project_services(ctx, stopped=False)
+        return [(cid, svc) for cid, svc in listed or [] if svc in services]
     except Exception:
         return []
+
+
+def _project_services(ctx: Context, *, stopped: bool) -> list[tuple[str, str]] | None:
+    """``(container id, compose service label)`` for the project's containers, running ones only
+    unless ``stopped``; ``""`` for no label. None when ``ps`` fails; output that isn't the JSON
+    expected raises, which both callers read as "remove nothing". Read as JSON, never one
+    ``--format`` line per container: anyone on the engine (the box too) sets a label to anything,
+    and a service label holding a newline started a line of its own, whose first word reached
+    ``rm -f`` as a container id. Only the engine's own ``Id`` is ever acted on."""
+    cmd = [config.engine(), "ps", *(["-a"] if stopped else [])]
+    cmd += ["--filter", f"label=com.docker.compose.project={ctx.project}", "--format", "json"]
+    ps = _run(cmd, env=ctx.env)
+    if ps.returncode != 0:
+        return None
+    return [
+        (c["Id"], (c.get("Labels") or {}).get("com.docker.compose.service", ""))
+        for c in json.loads(ps.stdout or "[]")
+    ]
 
 
 def _reconcile_posture_services(

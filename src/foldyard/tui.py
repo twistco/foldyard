@@ -41,6 +41,7 @@ Navigation is zoned (see DevModeTui / ModeGrid / WorkspaceList for the seams):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from collections.abc import Callable
@@ -1295,7 +1296,7 @@ class DevModeTui(App):
             emergency = emergency_rungs.get(row.axis, ())
             selected = None  # the value whose button currently has keyboard focus
             for value in rungs[row.axis]:
-                button = row.query_one(f"#{row.axis}-{value}", Button)
+                button = row.button(value)
                 button.variant = (
                     ("error" if value in emergency else "success")
                     if value == current
@@ -1364,16 +1365,16 @@ class DevModeTui(App):
             grid.mount(AxisRow(axis, values, emergency_rungs.get(axis, ())))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if isinstance(event.button, ModeButton):  # first: its names are config, never its id
+            self._mode_pressed(event.button.axis, event.button.value)
+            return
         bid = event.button.id or ""
         if bid == "doctor-refresh":  # the Doctor tab's manual re-run (replaces the d/D keys)
             self._run_doctor(deep=True)
-            return
-        if bid.startswith("fix-"):  # a Doctor-tab repair button, not a mode button
+        elif bid in self._fix_buttons:  # a Doctor-tab repair button
             self._run_fix(self._fix_buttons[bid])
-            return
-        if not isinstance(event.button, ModeButton):
-            return
-        axis, value = event.button.axis, event.button.value
+
+    def _mode_pressed(self, axis: str, value: str) -> None:
         # Apply to the SELECTED workspace (bound), so a posture button writes THAT worktree's mode
         # file (+ reconciles its stack) — not a host-wide global. The supervisor picks it up on its
         # next tick and reconciles that worktree's daemons.
@@ -2187,14 +2188,24 @@ class AxisRow(Vertical):
                 yield ModeButton(self.axis, value, label)
         yield Static("", classes="axis-status")
 
+    def button(self, value: str) -> ModeButton:
+        """This row's button for ``value``, found by the level it carries (see ModeButton)."""
+        for button in self.query(ModeButton):
+            if button.value == value:
+                return button
+        raise NoMatches(f"no {value!r} button")  # as query_one did: refresh_mode skips the tick
+
 
 class ModeButton(Button):
-    """A level button that carries its switch and level. Its id, ``<switch>-<level>``, is only
-    for finding it within its row: a switch name can hold a hyphen (``sanity-editor``), so the id
-    can't be split back into the two."""
+    """A level button that carries its switch and level, and is found by them (``AxisRow.button``),
+    never by its id. The names are config: a switch only has to be printable, so ``api.v2`` is no
+    Textual id, and a readable ``<switch>-<level>`` could be one of foldyard's own (switch ``fix``
+    gave ``fix-on``, a Doctor repair button's shape). So the id is a digest of the pair: not an
+    escape, which would fold ``on.x`` and ``on_x`` into one id, and a duplicate raises on mount."""
 
     def __init__(self, axis: str, value: str, label: str) -> None:
-        super().__init__(label, id=f"{axis}-{value}")
+        digest = hashlib.sha256(f"{axis}\0{value}".encode()).hexdigest()[:16]
+        super().__init__(label, id=f"mode-{digest}")
         self.axis = axis
         self.value = value
 

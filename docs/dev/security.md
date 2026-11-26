@@ -69,6 +69,11 @@ anything a person might need to read exactly uses `printable`.
 
 - **Config**: the host reads the adopted copy ([invariants](invariants.md)). A file that doesn't
   parse is never adopted, not even as a comment-only edit (`configpin.Unparseable`).
+- **Names from config in the TUI**: never in a widget id or a selector. A switch name only has to be
+  printable, and Textual raises on an id that isn't an identifier (`api.v2`, `a[b]`). A readable one
+  can also be foldyard's own (switch `fix` made `fix-on`, a Doctor repair button's id). Keep the
+  name as data on the widget, give it an id of its own (`ModeButton`'s digest), and find the widget
+  by its data (`AxisRow.button`).
 - **Git on main or a registered checkout**: `.git/config` and the hooks are the box's, and git reads
   them. Git that can check out, update a ref or refresh the index goes through `worktree._host_git`:
   no hooks, no fsmonitor, no fetch, and no run at all when the config can't be scanned for hooks.
@@ -81,6 +86,9 @@ anything a person might need to read exactly uses `printable`.
   - Open it with `O_NOFOLLOW | O_NONBLOCK`, check `S_ISREG`, and cap the size.
   - Only return a value of the shape you expect.
   - Name it from main's adopted config (`config.stray_identity`), not from the directory.
+- **Engine listings**: read `ps --format json` and act only on the engine's own `Id`
+  (`stack._project_services`). In a `--format` template with one line per container, a label holding
+  a newline starts a line of its own, and its first word reads as an id.
 - **Paths in general**: never follow a link the box could have placed. Compare `realpath`s before
   trusting that something is where it says it is.
 - **Commands**: none from config, and none run from the mount (ADR-0023). A consumer's script runs
