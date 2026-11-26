@@ -785,3 +785,16 @@ def test_config_text_carrying_escapes_is_shown_as_text_in_the_report(checkout):
     assert "key\\x1b]52" in body
     ok, _name, detail = exposure.doctor_row(exp)
     assert ok is None and "@nope\\x1b]52" in detail and not _controls(detail)
+
+
+# ── a file of the tree's that isn't read ─────────────────────────────────────────────────
+
+
+def test_a_local_file_that_isnt_read_is_named_not_reported_as_absent(checkout, special):
+    # Nothing adopted, so the widenings are the working tree's: an overlay the box made a FIFO
+    # read as absent, and the report would describe a config without it as if that were all.
+    cfg = checkout(BASE + 'passthrough = ["a.example"]\n')
+    special(cfg.repo_root / "foldyard.local.toml", "fifo")
+    exp = special.promptly(lambda: collect(cfg))
+    assert any("foldyard.local.toml isn't read: not a regular file" in c for c in exp.concerns)
+    assert "foldyard.local.toml isn't read: not a regular file" in rendered(cfg)

@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config
+from . import config, mountwrite
 
 # The label every dev-box image carries: the fingerprint of the inputs it was built from.
 FINGERPRINT_LABEL = "io.foldyard.box-fingerprint"
@@ -44,7 +44,10 @@ def image_fingerprint(img: dict, main: Path) -> str:
     payload = {
         "build_args": img.get("build_args") or {},
         "context": str(configured_context or "."),
-        "dockerfile_sha256": hashlib.sha256(dockerfile.read_bytes()).hexdigest(),
+        # The checkout's Dockerfile is the box's: a FIFO or a device is refused (OSError).
+        "dockerfile_sha256": hashlib.sha256(
+            mountwrite.read_regular(dockerfile, limit=mountwrite.TEXT_LIMIT)
+        ).hexdigest(),
         "target": img.get("target"),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

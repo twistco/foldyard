@@ -1704,11 +1704,16 @@ def config_status() -> None:
             "or `fy config adopt`."
         )
         raise typer.Exit(1)
+    unread = drift.refused_note()
     if not drift.changed:
         print(f"✓ [{drift.label}] the checkout matches the adopted config ({drift.tree_digest()})")
+        if unread:
+            print(f"⚠ {unread}.")
         raise typer.Exit(0)
     print(f"⚠ [{drift.label}] foldyard.toml differs from the adopted copy — the host runs the")
     print("  adopted one. `fy config diff`, then `fy config adopt` or `fy config revert`.")
+    if unread:
+        print(f"⚠ {unread}.")
     raise typer.Exit(1)
 
 

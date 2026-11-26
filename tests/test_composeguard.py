@@ -147,6 +147,17 @@ def test_an_included_files_own_paths_are_checked(tree):
     assert len(problems) == 1 and "stack/inc.yml" in problems[0]
 
 
+@pytest.mark.parametrize("kind", ["fifo", "endless"])
+def test_a_compose_file_that_never_ends_is_refused_promptly(tree, special, kind):
+    # A FIFO would block the scan's open, one being written to (a link to /dev/zero, too) read
+    # without end: refused as unreadable, which refuses the stack like any file the scan can't
+    # vouch for.
+    repo, _host, _write = tree
+    f = special(repo / "compose.yml", kind)
+    problems = special.promptly(lambda: composeguard.raw_problems([f], repo, [repo]))
+    assert len(problems) == 1 and problems[0].startswith("compose.yml")
+
+
 @pytest.mark.parametrize("tag", ["!override", "!reset"])
 def test_composes_merge_tags_are_readable(tree, tag):
     # The Compose spec's merge tags — a consumer's e2e overlay sets `depends_on: !override []`.

@@ -2263,6 +2263,118 @@ def test_reconcile_outcome_lands_in_the_host_log(fake_repo, capture_stream, monk
     assert "[mode]" in failed and "FAILED" in failed and "17" in failed
 
 
+# ── a compose file the box swapped for a FIFO: the TTL expiry runs this in the supervisor's tick ─
+
+
+def _compose_that_opens_its_files(calls: list):
+    """A stand-in for the host compose client: it opens each ``-f`` file the way podman-compose
+    does — a blocking ``open`` — unless it was given a timeout, where a FIFO makes it "run out"
+    (``TimeoutExpired``, what ``subprocess.run`` raises when it kills a client stuck there)."""
+    import stat
+
+    def run(cmd, timeout=None, cwd=None, **_kw):
+        if cmd[1:2] != ["compose"]:  # an engine probe: no compose file read
+            return _FakeProc()
+        calls.append((cmd, timeout))
+        files = [Path(cwd or ".", cmd[i + 1]) for i, a in enumerate(cmd[:-1]) if a == "-f"]
+        if timeout is None:
+            for f in files:
+                open(f).close()  # blocks until a writer comes: the hang under test
+        elif any(stat.S_ISFIFO(os.stat(f).st_mode) for f in files):
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return _FakeProc()
+
+    return run
+
+
+@pytest.fixture
+def fifo_compose(fake_repo, capture_stream, monkeypatch, special):
+    """fake_repo's compose file a FIFO, its stack up, its compose client a stand-in that blocks on
+    it (:func:`_compose_that_opens_its_files`). Yields the compose calls made, with their timeouts."""
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    calls: list = []
+    monkeypatch.setattr(stack.subprocess, "run", _compose_that_opens_its_files(calls))
+    special(fake_repo / "compose.podman.yml", "fifo")
+    return calls
+
+
+def test_a_fifo_compose_file_is_refused_before_the_client_runs(fifo_compose, special):
+    lines: list[str] = []
+    ok = special.promptly(
+        lambda: stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append)
+    )
+    assert ok is False  # never reported as reconciled
+    assert fifo_compose == []  # the client never ran on it
+    assert any("compose.podman.yml" in ln and "isn't a regular file" in ln for ln in lines), lines
+
+
+def test_a_compose_file_swapped_after_the_check_runs_out_the_deadline(
+    fifo_compose, special, monkeypatch
+):
+    # The check can't close the race (the box swaps the file in after it): every compose call the
+    # reconcile makes carries the deadline, and running out is a skipped reconcile, not a hang.
+    monkeypatch.setattr(stack, "_not_regular", lambda ctx: [])
+    lines: list[str] = []
+    ok = special.promptly(
+        lambda: stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append)
+    )
+    assert ok is False
+    assert fifo_compose and all(timeout is not None for _cmd, timeout in fifo_compose)
+    assert any("skipped" in ln and "didn't answer" in ln for ln in lines), lines
+    assert "skipped" in _host_log_lines()[-1]
+
+
+@pytest.mark.parametrize("kind", ["fifo", "devnull"])
+def test_a_project_env_that_isnt_a_regular_file_is_compose_s_to_skip(
+    fake_repo, capture_run, monkeypatch, special, kind
+):
+    # `.env -> /dev/null`, or the FIFO a secrets tool serves it as: the compose client skips a
+    # `.env` that isn't a regular file itself, so refusing compose over one only broke it.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    if kind == "fifo":
+        special(fake_repo / ".env", "fifo")
+    else:
+        (fake_repo / ".env").symlink_to(os.devnull)
+    ctx = stack.resolve(no_machine=True)
+    assert stack._not_regular(ctx) == []
+    assert special.promptly(lambda: stack._compose(ctx, ["ps"])) == 0
+    assert _composes(capture_run)
+
+
+@pytest.mark.parametrize("verb", [["up", "-d"], ["ps"]])
+def test_fy_up_says_a_compose_file_isnt_a_regular_file(
+    fake_repo, capture_run, monkeypatch, special, capsys, verb
+):
+    # The reason, not "the compose config didn't render" under a heading about paths outside the
+    # checkout: the client never runs.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    special(fake_repo / "compose.podman.yml", "fifo")
+    ctx = stack.resolve(no_machine=True)
+    assert special.promptly(lambda: stack._compose(ctx, verb)) == 1
+    err = capsys.readouterr().err
+    assert "compose.podman.yml isn't a regular file" in err, err
+    assert "outside the checkout" not in err and "didn't render" not in err
+    assert _composes(capture_run) == []
+
+
+def test_a_reconcile_a_refusal_stopped_is_not_reported_as_done(
+    fake_repo, capture_stream, monkeypatch
+):
+    # A refusal meant for a verb (a staging that can't be done safely, a worktree gone) is a
+    # SystemExit: caught, so the tick carries on, and reported as not reconciled.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+
+    def refuse(*_a, **_kw):
+        raise SystemExit("✗ couldn't stage it")
+
+    monkeypatch.setattr(stack, "_running_extra_profiles", refuse)
+    lines: list[str] = []
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append) is False
+    assert any("couldn't stage it" in ln for ln in lines)
+
+
 def test_reconcile_on_a_down_stack_says_so_in_the_host_log(fake_repo, capture_stream, monkeypatch):
     monkeypatch.setattr(config, "in_box", lambda: False)
     monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): False)
@@ -2543,6 +2655,41 @@ def test_orphan_sweep_fails_safe_on_empty_render_and_unlabeled_containers(fake_r
     calls = _orphan_world(monkeypatch, services="app\n", containers=[("aaa", ""), ("bbb", None)])
     stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lambda _ln: None)
     assert not any(c[1] == "rm" for c in calls)
+
+
+def test_the_orphan_sweep_has_a_budget_of_its_own(fake_repo, capture_stream, monkeypatch):
+    # The reconcile's one deadline can be spent by the `up` (a pull): the sweep after it still
+    # gets a minute, not the ~0.1 s left.
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    monkeypatch.setattr(stack, "RECONCILE_TIMEOUT", 0.0)  # spent before the sweep
+    given: list = []
+
+    def fake_run(cmd, timeout=None, **_kw):
+        if "--services" in cmd:
+            given.append(timeout)
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lambda _l: None)
+    assert given and given[0] > stack.ORPHAN_SWEEP_BUDGET - 5  # a minute, less the time it took
+
+
+@pytest.mark.parametrize("how", ["timeout", "failed render"])
+def test_an_orphan_sweep_that_didnt_happen_says_so(fake_repo, monkeypatch, how):
+    def fake_run(cmd, timeout=None, **_kw):
+        if "--services" in cmd:
+            if how == "timeout":
+                raise subprocess.TimeoutExpired(cmd, timeout or 1)
+            proc = _FakeProc()
+            proc.returncode = 1
+            return proc
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    lines: list[str] = []
+    skipped = stack._remove_orphan_containers(_fake_ctx(fake_repo, {}), lines.append)
+    assert skipped and any("left the rendered config" in ln and "skipped" in ln for ln in lines)
 
 
 # ── running-profile discovery (the `data` workers must survive posture reconciles) ─

@@ -1405,8 +1405,11 @@ def _report_config_drift(wt: str, cfg: config.Config) -> bool:
         return False
     if not drift.pinned_exists:
         current = _UNADOPTED
-    else:
-        current = drift.tree_digest() if drift.changed else ""
+    elif drift.changed:
+        current = drift.tree_digest()
+    else:  # matching, but for a file that isn't read: said once, like a drift
+        current = f"unread:{','.join(sorted(drift.refused))}" if drift.refused else ""
+    unread = drift.refused_note()
     previous = _config_drift_seen.get(wt)
     if current == previous:
         return drift.pinned_exists
@@ -1422,12 +1425,16 @@ def _report_config_drift(wt: str, cfg: config.Config) -> bool:
         if previous:  # drifted → clean: adopted, reverted, or edited back by hand
             log(f"✓ config{where}: the checkout matches the adopted foldyard.toml again")
         return True
+    if not drift.changed:
+        log(f"⚠ config{where}: {unread}.")
+        return True
     log(
         f"⚠ config{where}: foldyard.toml differs from the copy this host adopted ({current}) — "
         "STILL RUNNING THE ADOPTED ONE. Review with `fy config diff`, then `fy config adopt` "
         "or `fy config revert` (`fy up`/`fy host restart` also ask)."
+        + (f" {unread}." if unread else "")
     )
-    if not previous:
+    if not previous or previous.startswith("unread:"):  # unread was no drift: this is the edge
         _notify(
             f"fy {config.project()}: config drift{where}",
             "foldyard.toml changed — the host keeps running the copy it adopted",

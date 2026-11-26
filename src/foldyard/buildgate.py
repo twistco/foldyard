@@ -419,7 +419,13 @@ def _share(shared: list[dict], prompt: Callable[[str], str], echo: Callable[[str
         echo("  ✗ couldn't add them safely to foldyard.toml — here are the lines instead:")
         return False
     path = cfg.repo_root / "foldyard.toml"
-    current = path.read_bytes() if path.exists() else None
+    try:  # the box's file: a FIFO or a device there is refused, never read (mountwrite)
+        current = mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT)
+    except FileNotFoundError:
+        current = None
+    except OSError:
+        echo("  ✗ couldn't read foldyard.toml back — here are the lines instead:")
+        return False
     if current != original:
         echo("  ✗ foldyard.toml changed while you answered — here are the lines instead:")
         return False

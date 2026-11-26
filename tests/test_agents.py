@@ -5,6 +5,7 @@ No tmux and no engine run: subprocess.run is stubbed in every test that would re
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -658,6 +659,19 @@ def test_adopted_checkouts_reads_the_host_markers(monkeypatch, tmp_path):
     pin("gone-3", gone)
     pin("bare-4", bare)  # no foldyard.toml any more
     (state / "adopted" / "junk").mkdir()
+    assert configpin.adopted_checkouts() == [main]
+
+
+def test_a_project_whose_config_the_box_made_a_fifo_is_still_listed(monkeypatch, tmp_path):
+    # Its foldyard.toml isn't read, but the project is there: `fy agent ls` mustn't drop it.
+    state = tmp_path / "state"
+    monkeypatch.setenv("FOLDYARD_STATE_DIR", str(state))
+    main = tmp_path / "main"
+    main.mkdir()
+    os.mkfifo(main / "foldyard.toml")
+    pin = state / "adopted" / "main-1"
+    pin.mkdir(parents=True)
+    (pin / configpin.ADOPTED_MARKER).write_text(json.dumps({"checkout": str(main)}))
     assert configpin.adopted_checkouts() == [main]
 
 

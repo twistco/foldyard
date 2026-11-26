@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from datetime import timedelta
-from typing import cast
+from typing import ClassVar, cast
 
 import pytest
 from rich.text import Text
@@ -285,6 +285,11 @@ class _CleanDrift:
     # us — so the stand-in carries the real field shape, not just what the TUI path touches.
     pinned = dict.fromkeys(configpin.PINNED_FILES)
     tree = dict.fromkeys(configpin.PINNED_FILES)
+    refused: ClassVar[dict[str, str]] = {}
+    unadoptable: ClassVar[dict[str, str]] = {}
+
+    def refused_note(self) -> str:
+        return ""
 
     def summary(self) -> str:
         return ""
@@ -3074,6 +3079,41 @@ async def test_unadopted_checkout_asks_in_a_modal_instead_of_hanging(monkeypatch
         await pilot.pause()
         assert len(adopted) == 1
         assert ups == ["feat"]
+
+
+class _UnreadDrift(_UnadoptedDrift):
+    refused: ClassVar[dict[str, str]] = {"foldyard.local.toml": "not a regular file"}
+    unadoptable = refused
+
+    def refused_note(self) -> str:
+        return "foldyard.local.toml isn't read: not a regular file — not adoptable until fixed"
+
+
+async def test_the_adopt_modal_offers_no_adopt_a_file_that_isnt_read_would_refuse(monkeypatch):
+    adopted: list = []
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
+    monkeypatch.setattr(devmode, "box_up", lambda name: (0, "box up"))
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _UnreadDrift())
+    monkeypatch.setattr(tui.configpin, "adopt", lambda cfg, **_kw: adopted.append(cfg))
+
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, tui.AdoptConfigScreen)
+        shown = " ".join(_text(w) for w in app.screen.query(tui.Static))
+        assert "isn't read: not a regular file" in shown
+        assert "a adopt" not in shown
+
+        await pilot.press("a")
+        await pilot.pause()
+        assert adopted == []
+        assert isinstance(app.screen, tui.AdoptConfigScreen)  # still asking, not answered
 
 
 async def test_the_adopt_modal_reopens_when_the_tree_changed_while_it_was_open(monkeypatch):

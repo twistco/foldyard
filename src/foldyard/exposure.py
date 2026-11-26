@@ -147,6 +147,10 @@ class Exposure:
     # (old spelling, new spelling, origin) for renamed keys still written the old way. Still
     # honoured (config.RENAMED_KEYS aliases them), so this is a nudge to rename, not a gap.
     renamed: list[tuple[str, str, str]] = field(default_factory=list)
+    # A pinned file of the tree's that is there but isn't read, when the tree is what's reported
+    # (in the box, or nothing adopted): it reads as absent, so the report says it isn't
+    # describing that file (configpin's Drift.refused_note).
+    unread: str = ""
     # `[vscode]` declared, and where: the editor attach `fy code` sets up forwards the host's SSH
     # agent + git credentials into the box (Dev Containers does; no setting stops it) — the one
     # declared surface that carries a push path IN. Reported so the neutralisation is a known
@@ -175,6 +179,8 @@ class Exposure:
             n = len(self.recommend_dropped)
             out.append(f"`proxy.recommend` ignores {_plural(n, 'entry', 'entries')}")
         out += [f"`{old}` was renamed to `{new}`" for old, new, _origin in self.renamed]
+        if self.unread:
+            out.append(self.unread)
         if self.openings_error:
             out.append(self.openings_error.removeprefix("✗ "))
         return out
@@ -549,6 +555,7 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
         label=drift.label,
         adopted=drift.pinned_digest(),
         drifted=drift.changed,
+        unread=drift.refused_note() if (config.in_box() or not drift.pinned_exists) else "",
         in_box=config.in_box(),
         bundle_refs=refs,
         unknown_refs=unknown,
@@ -605,6 +612,8 @@ def render(exp: Exposure) -> list[str]:
     else:
         where = f"[{exp.label} · adopted {exp.adopted}]"
     out = [f"Repo-declared widenings — what foldyard.toml asks the HOST to allow   {where}", ""]
+    if exp.unread:
+        out += [f"  ⚠ {exp.unread}.", ""]
 
     if exp.openings_error:
         out.append(f"  ⚠ {exp.openings_error.removeprefix('✗ ')}")

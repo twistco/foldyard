@@ -2415,6 +2415,15 @@ class AdoptConfigScreen(ModalScreen):
             else self.drift.diff_rows()
         )
         headline = configpin.first_adoption_headline(self.drift, self.baseline) if first else ""
+        # A file that isn't read stops an adoption (configpin's Drift.unadoptable): only what can
+        # succeed is offered, and the dialog says why adopt isn't.
+        blocked = bool(self.drift.unadoptable)
+        then = (
+            "It can't be adopted until that file is fixed, so the box can't start until then."
+            if blocked
+            else "Adopting means the host runs THIS config. Until then the box can't start (the "
+            "host would otherwise reconcile from a config nobody has read)."
+        )
         with Vertical(id="adopt-dialog"):
             yield Static(
                 Text.from_markup(
@@ -2426,15 +2435,15 @@ class AdoptConfigScreen(ModalScreen):
                 Text.from_markup(
                     f"[dim]{escape(detail)}[/dim]"
                     + (f"\n{escape(headline)}" if headline else "")
-                    + "\n\nAdopting means the host runs THIS config. Until then the box can't "
-                    "start (the host would otherwise reconcile from a config nobody has read)."
+                    + f"\n\n{then}"
                 ),
                 id="adopt-body",
             )
             if rows:
                 with VerticalScroll(id="adopt-diff"):
                     yield Static(_diff_content(rows), id="adopt-diff-body")
-            yield Static("a adopt · i ignore · esc cancel", id="adopt-hint")
+            hint = "i ignore · esc cancel" if blocked else "a adopt · i ignore · esc cancel"
+            yield Static(hint, id="adopt-hint")
 
     def on_mount(self) -> None:
         """Focus the diff pane so ↑/↓/PageDown reach past the first screenful.
@@ -2451,6 +2460,8 @@ class AdoptConfigScreen(ModalScreen):
             pane.first(VerticalScroll).focus()
 
     def action_pick(self, answer: str) -> None:
+        if answer == "adopt" and self.drift.unadoptable:
+            return  # not offered: adopting would only be refused
         self.dismiss(answer)
 
     def action_cancel(self) -> None:

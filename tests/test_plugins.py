@@ -1388,6 +1388,50 @@ def test_gcp_stage_assets_stages_when_profile_forced_via_env(tmp_path, monkeypat
     assert staged.read_bytes() == (gcp.METADATA_DIR / "server.py").read_bytes()
 
 
+@pytest.mark.parametrize("kind", ["fifo", "endless", "link"])
+def test_gcp_stage_assets_replaces_what_the_box_planted_never_reads_or_writes_it(
+    tmp_path, monkeypatch, special, kind
+):
+    # The staged copy is in the checkout: the box can swap it for a FIFO (the compare's read
+    # blocks in open, and a mode change's reconcile runs this from the supervisor's tick), one
+    # being written to (read without end) or a link to a file of yours (the copy writes through
+    # it).
+    monkeypatch.setattr(config, "gcp_project", lambda: "p")
+    staged = tmp_path / "dev-stack" / ".devbox-foldyard" / "server.py"
+    staged.parent.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("yours\n")
+    if kind == "link":
+        staged.symlink_to(victim)
+    else:
+        special(staged, kind)
+    special.promptly(
+        lambda: gcp.GcpPlugin().stage_assets({"gcp": "sa"}, str(tmp_path), "dev-stack")
+    )
+    assert not staged.is_symlink()
+    assert staged.read_bytes() == (gcp.METADATA_DIR / "server.py").read_bytes()
+    assert victim.read_text() == "yours\n"
+
+
+@pytest.mark.parametrize("planted", ["linked dir", "absolute here"])
+def test_gcp_stage_assets_that_cant_stage_says_why_not_a_traceback(tmp_path, monkeypatch, planted):
+    # A `.devbox-foldyard` the box made a link (never written through), or a dev-VM dir outside
+    # the checkout: `fy up` stops with what to fix, as the proxy CA's staging does.
+    monkeypatch.setattr(config, "gcp_project", lambda: "p")
+    repo, elsewhere = tmp_path / "repo", tmp_path / "elsewhere"
+    (repo / "dev-stack").mkdir(parents=True)
+    elsewhere.mkdir()
+    here = "dev-stack"
+    if planted == "linked dir":
+        (repo / "dev-stack" / ".devbox-foldyard").symlink_to(elsewhere)
+    else:
+        here = str(elsewhere)
+    with pytest.raises(SystemExit) as stopped:
+        gcp.GcpPlugin().stage_assets({"gcp": "sa"}, str(repo), here)
+    assert "couldn't stage" in str(stopped.value)
+    assert not list(elsewhere.rglob("server.py"))
+
+
 def test_gcp_user_mode_is_minter_driven_not_a_box_relabel():
     # user mode used to set DEVBOX_SA="user" (relabel ⇒ box restart); now the escalation is the
     # live minter's job, so derive_env carries no box-relabel and the minter is told to allow it.

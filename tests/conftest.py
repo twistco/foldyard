@@ -796,3 +796,78 @@ def fifos(monkeypatch):
     planted = Fifos()
     yield planted
     planted.release()
+
+
+# ── files the box can plant in place of a regular one ────────────────────────────────────
+
+
+class Special:
+    """What the box can put where a host reads a file, on top of :class:`fifo.Fifos`:
+    ``special(path, kind)`` makes ``path``
+
+    - ``"fifo"``: a FIFO with no writer, the read that blocks in ``open``;
+    - ``"endless"``: a FIFO the fixture keeps feeding (slowly, so a reader that regressed doesn't
+      eat the memory), the read that never ends — until teardown closes the writer and the
+      reader gets EOF, so nothing outlives the test;
+    - ``"device"``: a link to ``/dev/zero``, which nothing can release. Only for code that checks
+      for a regular file before it reads (``mountwrite.read_regular`` itself).
+
+    :meth:`promptly` runs a call that must return anyway."""
+
+    def __init__(self, fifos) -> None:
+        import threading
+
+        self._fifos = fifos
+        self._stop = threading.Event()
+        self._feeders: list[tuple[int, threading.Thread]] = []
+
+    def __call__(self, path: Path, kind: str) -> Path:
+        import threading
+        import time
+
+        path = Path(path)
+        if kind == "device":
+            path.unlink(missing_ok=True)
+            path.symlink_to("/dev/zero")
+            return path
+        if kind not in ("fifo", "endless"):
+            raise ValueError(kind)
+        self._fifos.plant(path)
+        if kind == "endless":
+            # O_RDWR: a FIFO's write end opens without waiting for a reader this way.
+            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+            def feed() -> None:
+                while not self._stop.is_set():
+                    try:
+                        os.write(fd, b"x" * 4096)
+                    except BlockingIOError:
+                        pass
+                    time.sleep(0.001)
+
+            feeder = threading.Thread(target=feed, name="endless-fifo", daemon=True)
+            feeder.start()
+            self._feeders.append((fd, feeder))
+        return path
+
+    def promptly(self, fn, seconds: float = 10.0):
+        """``fn()``'s value, failing the test by name when it hasn't returned in ``seconds``."""
+        returned, value = self._fifos.returns_within(seconds, fn)
+        assert returned, f"{fn!r} didn't return within {seconds}s (blocked on a read?)"
+        return value
+
+    def release(self) -> None:
+        """Stop feeding: each endless FIFO's writer closes, so a reader still on it reads EOF."""
+        self._stop.set()
+        for fd, feeder in self._feeders:
+            feeder.join()
+            os.close(fd)
+
+
+@pytest.fixture
+def special(fifos):
+    """A :class:`Special`. Torn down before ``fifos`` (its dependency), which then releases every
+    FIFO and waits for the calls on them to finish."""
+    planted = Special(fifos)
+    yield planted
+    planted.release()

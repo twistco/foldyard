@@ -208,6 +208,8 @@ def raw_problems(files: list[Path], project_dir: Path, roots: Iterable[Path]) ->
     environment, not the box, and is not scanned."""
     import yaml
 
+    from . import mountwrite  # lazy, like yaml: stdlib-only, for the box-writable files below
+
     check = _Checker(roots)
     seen: set[Path] = set()
     dotenv = project_dir / ".env"
@@ -220,8 +222,8 @@ def raw_problems(files: list[Path], project_dir: Path, roots: Iterable[Path]) ->
             return
         seen.add(real)
         label = os.path.relpath(path, project_dir)
-        try:
-            doc = _load(path.read_text()) or {}
+        try:  # a FIFO or a device there would block the read or never end it: refused
+            doc = _load(mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT).decode()) or {}
         except (OSError, yaml.YAMLError) as e:
             check.problems.append(f"{label}: unreadable ({e})")
             return

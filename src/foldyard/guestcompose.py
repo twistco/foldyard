@@ -596,9 +596,11 @@ def stream_to(
     args: list[str],
     emit: Callable[[str], None],
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
+    timeout: float | None = None,
 ) -> int:
     """Like :func:`stream`, its two streams merged and handed to ``emit`` a line at a time (the
-    posture reconcile, whose output must not bleed over the TUI)."""
+    posture reconcile, whose output must not bleed over the TUI). Killed after ``timeout``
+    seconds (``devmode.run_stream``'s watchdog when None)."""
     from . import devmode
 
     command = _command("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main))
@@ -609,6 +611,7 @@ def stream_to(
     return devmode.run_stream(
         cmd,
         lambda line: emit(printable(line)),
+        timeout=devmode.STREAM_TIMEOUT if timeout is None else timeout,
         env=_ssh_env(),
         stdin=stdin,
         on_spawn=on_spawn,

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import threading
@@ -32,7 +33,7 @@ from functools import lru_cache
 from pathlib import Path
 from shutil import which
 
-from . import config, devmode, machine
+from . import config, devmode, machine, mountwrite
 
 
 def _err(*a: object) -> None:
@@ -854,7 +855,49 @@ def _compose_output(
 
     if guestcompose.wanted():
         return guestcompose.compose(ctx, args, timeout=timeout)
+    if bad := _not_regular(ctx):
+        return subprocess.CompletedProcess([*ctx.compose, *args], 1, "", _not_regular_says(bad))
     return _run([*ctx.compose, *args], env=ctx.env, cwd=str(ctx.main), timeout=timeout)
+
+
+# One deadline over every compose call a posture reconcile makes: a TTL expiry that settles a
+# dependent switch runs it in the supervisor's tick, where a client that never returns stops
+# everything after it (other expiries, the escalated daemons' stop, the heartbeat). Generous,
+# since the `up` it bounds may pull. It bounds a hang, nothing more: a reconcile in the tick
+# that runs past devmode.HEARTBEAT_STALE_SECONDS still reads as a wedged supervisor to the
+# launch paths meanwhile, as any slow compose call there always has.
+RECONCILE_TIMEOUT = 600.0
+# The orphan sweep after a successful `up` gets at least this long, whatever the `up` left of
+# RECONCILE_TIMEOUT: a pull can spend it all, and the sweep's render would get a tenth of a second.
+ORPHAN_SWEEP_BUDGET = 60.0
+
+
+def _not_regular(ctx: Context) -> list[str]:
+    """The ``-f`` files that are there but aren't regular files. The checkout is the box's, and
+    the compose client on your computer opens each with a blocking ``open``: a FIFO waits for a
+    writer that never comes, a link to ``/dev/zero`` reads without end. A cheap first line only:
+    the box can swap one in after this looks, so the calls the supervisor's tick can reach carry
+    a deadline too (:data:`RECONCILE_TIMEOUT`). A file that isn't there is compose's to report.
+    Not the project ``.env``: the client skips one that isn't a regular file itself, and people
+    have them (``.env -> /dev/null``, the FIFO a secrets manager serves it as)."""
+    files = [Path(f) if Path(f).is_absolute() else ctx.main / f for f in _compose_files(ctx)]
+    bad = []
+    for path in files:
+        try:
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                bad.append(str(path))
+        except OSError:
+            pass
+    return bad
+
+
+def _not_regular_says(bad: list[str]) -> str:
+    from .term import printable
+
+    return (
+        f"✗ not run: {', '.join(printable(p) for p in bad)} isn't a regular file (the box can "
+        "make one a FIFO or a link to a device, and the compose client would wait on it for ever)"
+    )
 
 
 def _compose_files(ctx: Context) -> list[str]:
@@ -926,6 +969,8 @@ def _escapes(
     project_dir = files[0].parent
     roots = [Path(ctx.env["FOLDYARD_CHECKOUT"]), ctx.main]
     problems = composeguard.raw_problems(files, project_dir, roots)
+    if bad := _not_regular(ctx):  # the client isn't run on one: say that, not "didn't render"
+        return [*problems, _not_regular_says(bad).removeprefix("✗ ")]
     doc = rendered if rendered is not None else _render_config(ctx, extra_profiles, deadline)
     if doc is None:
         problems.append("the compose config didn't render, so its paths couldn't be checked")
@@ -955,6 +1000,11 @@ def _compose(
     for the verbs that need your terminal (``_INTERACTIVE``), which inherit stdio.
     ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``); ``rendered``
     hands the path guard a render the caller already made."""
+    from . import guestcompose
+
+    if not guestcompose.wanted() and (bad := _not_regular(ctx)):
+        _err(_not_regular_says(bad))  # the reason, ahead of a guard that could only fail to render
+        return 1
     if (
         args[:1]
         and args[0] in _CREATES
@@ -963,7 +1013,6 @@ def _compose(
         for line in _refusal(problems):
             _err(line)
         return 1
-    from . import guestcompose
 
     full = [*_profile_flags(ctx, extra_profiles), *args]
     _err(_shown(ctx, full))
@@ -1600,8 +1649,11 @@ def _engine_says(proc: subprocess.CompletedProcess) -> str:
 
 
 def _remove_orphan_containers(
-    ctx: Context, emit: Callable[[str], None], extra_profiles: list[str] | None = None
-) -> None:
+    ctx: Context,
+    emit: Callable[[str], None],
+    extra_profiles: list[str] | None = None,
+    deadline: float | None = None,
+) -> str | None:
     """Remove this project's containers whose compose SERVICE is no longer in the rendered
     config — the targeted replacement for handing ``--remove-orphans`` to the reconcile's
     ``up``. The bundled podman-compose (1.6.0) implements ``up --remove-orphans`` by running
@@ -1613,18 +1665,30 @@ def _remove_orphan_containers(
     whose service label left the config (e.g. the metadata emulator after leaving the gcp
     rungs). Fail-safe in every direction — a failed render/probe, an empty service list, or
     a container with no service label all mean "remove nothing" (stale-but-running beats
-    swept-by-accident); named volumes are never touched."""
+    swept-by-accident); named volumes are never touched. Returns why the sweep was skipped (and
+    says so through ``emit``), or None when it ran."""
+
+    def skipped(why: str) -> str:
+        emit(f"⚠ removing containers whose service left the rendered config skipped: {why}")
+        return why
+
     try:
         rendered = _compose_output(
-            ctx, [*_profile_flags(ctx, extra_profiles), "config", "--services"]
+            ctx,
+            [*_profile_flags(ctx, extra_profiles), "config", "--services"],
+            timeout=_left(deadline),
         )
         services = {s.strip() for s in rendered.stdout.splitlines() if s.strip()}
-        if rendered.returncode != 0 or not services:
-            return
+        if rendered.returncode != 0:
+            return skipped(f"the service list didn't render (compose exited {rendered.returncode})")
+        if not services:
+            return skipped("the service list rendered empty")
         listed = _project_services(ctx, stopped=True)
-        orphans = [(cid, svc) for cid, svc in listed or [] if svc and svc not in services]
+        if listed is None:
+            return skipped("the engine couldn't list the project's containers")
+        orphans = [(cid, svc) for cid, svc in listed if svc and svc not in services]
         if not orphans:
-            return
+            return None
         from .term import printable  # the service label is anyone's on the engine: the box's too
 
         names = ", ".join(printable(s) for _, s in orphans)
@@ -1642,8 +1706,11 @@ def _remove_orphan_containers(
                 f"⚠ the engine refused to remove some of them (exit {rm.returncode}), so they "
                 f"stay: {_engine_says(rm)}"
             )
-    except Exception:
-        return  # best-effort: an orphan left running is recoverable, a bad sweep is not
+    except subprocess.TimeoutExpired as e:
+        return skipped(f"compose didn't answer within {int(e.timeout)}s")
+    except Exception as e:  # best-effort: an orphan left running is recoverable, a bad sweep not
+        return skipped(f"{type(e).__name__}: {e}")
+    return None
 
 
 def _stranded_dependents(
@@ -1925,6 +1992,7 @@ def reconcile_posture(
     new_profiles = new_posture["env"].get("COMPOSE_PROFILES", "")
     overlays = ", ".join(o.rsplit("/", 1)[-1] for o in new_posture["overlays"]) or "none"
     posture = f"profiles {prev_profiles or 'none'} → {new_profiles or 'none'}, overlays {overlays}"
+    deadline = time.monotonic() + RECONCILE_TIMEOUT
     try:
         ctx_mgr = config.using(cfg) if cfg is not None else nullcontext()
         with ctx_mgr:
@@ -1943,7 +2011,7 @@ def reconcile_posture(
                 # guardrail (2): never START the stack on a posture change — but DO converge the
                 # declared posture services: they are exactly what the flip is asking for (see
                 # _reconcile_posture_services).
-                ok = _reconcile_posture_services(ctx, mode, managed, emit)
+                ok = _reconcile_posture_services(ctx, mode, managed, emit, deadline)
                 _host_log(
                     f"stack {ctx.project} down — the mode applies on next `fy up` ({posture})"
                     + ("" if ok else "; posture services FAILED to converge")
@@ -1956,7 +2024,7 @@ def reconcile_posture(
                 ctx.env["FOLDYARD_CHECKOUT"],
                 ctx.env.get("HERE") or config.dev_vm_rel(),
             )
-            extra = _running_extra_profiles(ctx)
+            extra = _running_extra_profiles(ctx, deadline)
             emit(
                 f"▶ mode changed — reconciling stack "
                 f"({prev_profiles or 'none'} → {new_profiles or 'none'}"
@@ -1967,10 +2035,15 @@ def reconcile_posture(
             # sweep them first or it dies on name conflicts (e.g. a stack predating the
             # bundled-podman-compose switch).
             _reconcile_foreign_containers(ctx, emit)
-            rendered = _render_config(ctx, extra)
+            rendered = _render_config(ctx, extra, deadline)
             if _remove_stranded_dependents(ctx, rendered, emit, extra):
                 rc = _compose_captured(
-                    ctx, ["up", "-d"], emit, extra_profiles=extra, rendered=rendered
+                    ctx,
+                    ["up", "-d"],
+                    emit,
+                    extra_profiles=extra,
+                    rendered=rendered,
+                    deadline=deadline,
                 )
             else:
                 rc = 1
@@ -1986,12 +2059,34 @@ def reconcile_posture(
                 return False
             # Only after a SUCCESSFUL up: reap containers whose service left the new
             # posture's config (dropped profile/overlay). A failed up keeps everything.
-            _remove_orphan_containers(ctx, emit, extra_profiles=extra)
+            sweep_deadline = max(deadline, time.monotonic() + ORPHAN_SWEEP_BUDGET)
+            sweep = _remove_orphan_containers(
+                ctx, emit, extra_profiles=extra, deadline=sweep_deadline
+            )
             _host_log(
                 f"stack {ctx.project} reconciled ({posture}"
                 + (f", keeping running: {','.join(extra)}" if extra else "")
                 + ")"
+                + (f"; removing containers whose service left it skipped: {sweep}" if sweep else "")
             )
+    except subprocess.TimeoutExpired:  # a client stuck (a FIFO the box planted): never success
+        emit(
+            f"✗ stack mode reconcile skipped: compose didn't answer within "
+            f"{int(RECONCILE_TIMEOUT)}s — the stack may still be on the OLD mode; `fy up` "
+            "re-renders"
+        )
+        _host_log(
+            f"stack reconcile skipped: compose didn't answer within {int(RECONCILE_TIMEOUT)}s "
+            f"({posture})"
+        )
+        return False
+    # A refusal meant for a verb (a staging that can't be done safely, a worktree gone) mustn't
+    # end the supervisor's tick, which runs this for a TTL expiry that settles a dependent switch;
+    # nothing was reconciled, so it isn't reported as done.
+    except SystemExit as e:
+        emit(f"✗ stack mode reconcile skipped: {e}")
+        _host_log(f"stack reconcile skipped: {e} ({posture})")
+        return False
     except Exception as e:  # never let a reconcile hiccup break the mode write
         emit(f"⚠ stack mode reconcile skipped: {e}")
         _host_log(f"stack reconcile skipped: {e} ({posture})")
@@ -2038,7 +2133,11 @@ def _project_services(ctx: Context, *, stopped: bool) -> list[tuple[str, str]] |
 
 
 def _reconcile_posture_services(
-    ctx: Context, mode: dict, managed: dict[str, bool], emit: Callable[[str], None]
+    ctx: Context,
+    mode: dict,
+    managed: dict[str, bool],
+    emit: Callable[[str], None],
+    deadline: float | None = None,
 ) -> bool:
     """Converge ONLY the plugin-declared posture services while the stack is down.
 
@@ -2075,7 +2174,7 @@ def _reconcile_posture_services(
         f"▶ stack is down — starting the service(s) the mode depends on "
         f"({', '.join(wanted)}) for {ctx.project}…"
     )
-    rc = _compose_captured(ctx, ["up", "-d", *wanted], emit)
+    rc = _compose_captured(ctx, ["up", "-d", *wanted], emit, deadline=deadline)
     if rc != 0:
         emit(f"✗ mode service start failed (compose exited {rc}) — check above, then `fy up`")
         return False
@@ -2182,7 +2281,9 @@ def _service_profiles(ctx: Context, timeout: float | None = None) -> dict[str, l
         return out
     for f in files:
         path = Path(f) if Path(f).is_absolute() else ctx.main / f
-        services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
+        # In the checkout, so the box's: a FIFO or a device there is refused (OSError), not read.
+        text = mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT).decode()
+        services = (yaml.safe_load(text) or {}).get("services") or {}
         for name, spec in services.items():
             if isinstance(spec, dict) and spec.get("profiles"):
                 merged = [*out.get(name, []), *(str(p) for p in spec["profiles"])]
@@ -2336,31 +2437,39 @@ def _compose_captured(
     emit: Callable[[str], None],
     extra_profiles: list[str] | None = None,
     rendered: dict | None = None,
+    deadline: float | None = None,
 ) -> int:
     """Like ``_compose`` but never inherits the terminal fds: output is STREAMED line-by-line
     through ``emit`` (stderr merged into stdout, via devmode.run_stream) and the exit code is
     returned. Used by the posture reconcile so a TUI-driven `fy mode` toggle doesn't bleed raw
     compose output over the Textual UI (inherited fds bypass any Python-level stdout/stderr
     redirect — capturing is the only fix), and so the log pane fills LIVE during a slow recreate
-    instead of all at once at the end."""
+    instead of all at once at the end. ``deadline`` bounds every compose call here, the guard's
+    render as well as the run (killed at it: a non-zero exit)."""
+    from . import guestcompose
+
+    if not guestcompose.wanted() and (bad := _not_regular(ctx)):
+        emit(_not_regular_says(bad))
+        return 1
     if (
         args[:1]
         and args[0] in _CREATES
-        and (problems := _escapes(ctx, extra_profiles, rendered=rendered))
+        and (problems := _escapes(ctx, extra_profiles, rendered=rendered, deadline=deadline))
     ):
         for line in _refusal(problems):
             emit(line)
         return 1
-    from . import guestcompose
-
+    timeout = devmode.STREAM_TIMEOUT if deadline is None else _left(deadline) or 0.1
     full = [*_profile_flags(ctx, extra_profiles), *args]
     emit(_shown(ctx, full))
     watch = _watch_for(ctx, args, rendered)
     if guestcompose.wanted():
         if watch is None:
-            return guestcompose.stream_to(ctx, full, emit)
+            return guestcompose.stream_to(ctx, full, emit, timeout=timeout)
         return _watching(
-            watch, emit, lambda spawned: guestcompose.stream_to(ctx, full, emit, spawned)
+            watch,
+            emit,
+            lambda spawned: guestcompose.stream_to(ctx, full, emit, spawned, timeout=timeout),
         )
 
     def cleaned(line: str) -> None:  # the box's compose files and containers: as the VM path's
@@ -2370,12 +2479,19 @@ def _compose_captured(
             emit(guestcompose.printable(line))
 
     if watch is None:
-        return devmode.run_stream([*ctx.compose, *full], cleaned, env=ctx.env, cwd=str(ctx.main))
+        return devmode.run_stream(
+            [*ctx.compose, *full], cleaned, timeout=timeout, env=ctx.env, cwd=str(ctx.main)
+        )
     return _watching(
         watch,
         emit,
         lambda spawned: devmode.run_stream(
-            [*ctx.compose, *full], cleaned, env=ctx.env, cwd=str(ctx.main), on_spawn=spawned
+            [*ctx.compose, *full],
+            cleaned,
+            timeout=timeout,
+            env=ctx.env,
+            cwd=str(ctx.main),
+            on_spawn=spawned,
         ),
     )
 

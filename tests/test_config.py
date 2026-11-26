@@ -1417,3 +1417,26 @@ def test_vscode_settings_refuse_what_json_cannot_carry(fresh_config, tmp_path, b
     fresh_config(FOLDYARD_REPO=tmp_path)
     with pytest.raises(SystemExit, match=rf"\[vscode\.settings\] {re.escape(where)}:"):
         config.vscode_settings()
+
+
+# ── a checkout's TOML swapped for a file that never ends ──────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["fifo", "endless", "device"])
+@pytest.mark.parametrize("name", ["foldyard.toml", "foldyard.local.toml"])
+def test_a_special_file_for_the_tree_config_reads_as_absent_promptly(tmp_path, special, kind, name):
+    # The supervisor, the TUI's cards and every worktree_config read these: a FIFO would block
+    # the open, one being written to (a link to /dev/zero, too) read without end. The device
+    # link is safe to plant here: the read checks for a regular file before it reads a byte.
+    (tmp_path / "foldyard.toml").write_text('[project]\nname = "a"\n')
+    special(tmp_path / name, kind)
+    expected = {} if name == "foldyard.toml" else {"project": {"name": "a"}}
+    assert special.promptly(lambda: config._tree_toml(tmp_path)) == expected
+
+
+def test_a_tree_config_linked_to_a_regular_file_is_still_read(tmp_path):
+    shared = tmp_path / "shared.toml"
+    shared.write_text('[project]\nname = "a"\n')
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / "foldyard.toml").symlink_to(shared)
+    assert config._tree_toml(tmp_path / "repo") == {"project": {"name": "a"}}

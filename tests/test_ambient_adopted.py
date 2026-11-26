@@ -153,6 +153,13 @@ def test_no_notice_without_a_tree_config(host_checkout):
     assert config.unadopted_notice() is None  # nothing to adopt: an empty config IS the config
 
 
+def test_a_tree_config_that_isnt_a_regular_file_is_still_unadopted(host_checkout, special):
+    # A FIFO the box made of foldyard.toml is a file nobody adopted, not "no config here".
+    special(host_checkout / "foldyard.toml", "fifo")
+    notice = special.promptly(config.unadopted_notice)
+    assert notice and "isn't adopted" in notice
+
+
 def test_a_bound_config_is_never_called_unadopted(host_checkout):
     # The supervisor/TUI bind a worktree's config, and they only bind ADOPTED ones
     # (devmode.worktree_config): never report the ambient checkout's state over it.

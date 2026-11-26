@@ -722,6 +722,68 @@ def test_a_worktree_heals_in_its_own_git_dir(rig, tmp_path):
     assert wt_rig.host("status", "--porcelain").stdout == ""
 
 
+# ── a file the heal reads, swapped for one that never ends ─────────────────────────────────
+# Opening a FIFO with no writer blocks in `open` itself, and the sweep runs in the supervisor's
+# tick: one planted pipe and nothing after it in the tick ever runs again (a posture's TTL
+# expiry, the daemons' reconcile, the heartbeat). One being written to (a link to /dev/zero, too)
+# reads without end.
+
+
+@pytest.mark.parametrize("kind", ["fifo", "endless"])
+@pytest.mark.parametrize("name", ["HEAD", "index", "packed-refs", "reftable/tables.list"])
+def test_a_special_file_in_mains_git_dir_never_hangs_the_heal(rig, special, kind, name):
+    _box_commit(rig, "box", fileA="a2\n")  # an offer: the heal reads HEAD, refs and the index
+    if name == "packed-refs":  # read only when the loose ref isn't there
+        rig.host("pack-refs", "--all")
+    (rig.gitdir / name).parent.mkdir(exist_ok=True)
+    special(rig.gitdir / name, kind)
+    healed = special.promptly(lambda: heal(rig.repo))
+    # Anything but a regular file reads as absent: no HEAD, ref or index to trust, so no heal;
+    # an unreadable reftable list is no reftable, and the loose refs are what the heal reads.
+    assert healed is None or name == "reftable/tables.list"
+
+
+@pytest.mark.parametrize("kind", ["fifo", "endless"])
+@pytest.mark.parametrize("where", ["git file", "admin HEAD"])
+def test_a_special_file_for_a_worktree_never_hangs_the_heal(rig, tmp_path, special, kind, where):
+    wt = tmp_path / "wt"
+    rig.host("worktree", "add", "-q", str(wt), "-b", "side")
+    admin = rig.gitdir / "worktrees" / "wt"
+    (admin / f"index.fy-record.{rig.head()}").write_text("")  # an offer: HEAD is read
+    special(wt / ".git" if where == "git file" else admin / "HEAD", kind)
+    assert special.promptly(lambda: heal(wt, rig.repo)) is None
+
+
+def test_a_file_the_heal_reads_is_capped_even_as_it_grows(rig, monkeypatch):
+    # The size is checked when it's opened and again as it's read: the box can append meanwhile.
+    (rig.gitdir / "HEAD").write_bytes(b"ref: refs/heads/main\n" + b"x" * 100)
+    real = githeal.os.fstat
+    monkeypatch.setattr(
+        githeal.os,
+        "fstat",
+        lambda fd: os.stat_result((*tuple(real(fd))[:6], 1, *tuple(real(fd))[7:])),
+    )
+    root = os.open(rig.gitdir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert githeal._read_at(root, "HEAD", limit=50) is None
+        assert githeal._read_at(root, "HEAD", limit=200) is not None
+    finally:
+        os.close(root)
+
+
+def test_a_planted_fifo_never_stops_the_sweep(rig, tmp_path, special, monkeypatch):
+    # The tick's own view: the sweep returns, and the checkouts after the planted one still heal.
+    wt = tmp_path / "wt"
+    rig.host("worktree", "add", "-q", str(wt), "-b", "side")
+    special(wt / ".git", "fifo")
+    _box_commit(rig, "box", fileA="a2\n")
+    monkeypatch.setattr(githeal.config, "box_git_index_split", lambda: True)
+    monkeypatch.setattr(githeal, "_checkouts", lambda: (rig.repo, [wt, rig.repo]))
+    logged: list[str] = []
+    special.promptly(lambda: githeal.sweep(logged.append))
+    assert any("fast-forwarded" in line for line in logged)
+
+
 def test_malformed_proposal_names_are_ignored(rig):
     (rig.gitdir / "index.fy-proposed.not-hex.x.ff").write_bytes(b"DIRC")
     assert heal(rig.repo) is None

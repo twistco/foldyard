@@ -1212,10 +1212,13 @@ def _result(ok: bool | None, name: str, good: str, bad: str) -> tuple[str, str, 
     return ("ok" if ok else "warn" if ok is None else "fail", name, good if ok else bad)
 
 
+STREAM_TIMEOUT = 600.0  # run_stream's watchdog, unless the caller has a deadline of its own
+
+
 def run_stream(
     cmd: list[str],
     on_line: Callable[[str], None],
-    timeout: float = 600.0,
+    timeout: float = STREAM_TIMEOUT,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
     stdin: bytes | None = None,
@@ -1390,12 +1393,19 @@ def _config_pin_check() -> tuple[str, str, str]:
             "nothing adopted yet — your computer runs nothing for this checkout; `fy config "
             "diff`, then `fy config adopt` (`fy up` also asks)",
         )
+    unread = drift.refused_note()
     return _result(
-        True if not drift.changed else None,  # None ⇒ WARN: safe posture, outstanding decision
+        # None ⇒ WARN: safe posture, outstanding decision (or a file in it that isn't read)
+        True if not (drift.changed or unread) else None,
         "adopted config",
         f"foldyard.toml matches what the host runs ({drift.tree_digest()})",
-        "the checkout's foldyard.toml differs from the copy the host RUNS — `fy config diff`, "
-        "then `fy config adopt` or `fy config revert`",
+        (
+            "the checkout's foldyard.toml differs from the copy the host RUNS — `fy config diff`, "
+            "then `fy config adopt` or `fy config revert`"
+            if drift.changed
+            else "matches what the host runs"
+        )
+        + (f"; {unread}" if unread else ""),
     )
 
 

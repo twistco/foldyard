@@ -1,4 +1,5 @@
-"""Host-side writes into the repo mount that never follow a symlink the box planted.
+"""Host-side writes into the repo mount that never follow a symlink the box planted, and reads
+of a file there that the box can't make hang (:func:`read_regular`).
 
 Anything under a checkout — its dirs, ``.git/``, the dev-VM dir — is box-writable, so any path
 there may be a symlink to a file the operator owns (``~/.ssh/authorized_keys``, the project's
@@ -8,13 +9,84 @@ ones), writes a fresh temp file with ``O_EXCL | O_NOFOLLOW``, and renames it ove
 rename REPLACES a symlink rather than writing through it. A symlinked directory is an error.
 
 ``root`` itself is trusted: it is the checkout (or git dir) the host already chose.
-Stdlib-only: the supervisor's tick uses it."""
+Stdlib-only and import-light: the supervisor's tick uses it, and so does ``config``'s hot path
+(every TOML a checkout holds is read through :func:`read_regular`)."""
 
 from __future__ import annotations
 
+import errno
 import os
-import secrets
+import stat
 from pathlib import Path
+
+# A file of a checkout's that the host reads whole — a config, a compose file, a Dockerfile — is
+# refused above this size. Far beyond any real one (a large compose file is tens of KB), while a
+# box that grows one without end can't have the supervisor read it into memory every tick.
+TEXT_LIMIT = 16 << 20
+
+
+def read_regular(path: Path | str, *, limit: int, follow: bool = True) -> bytes:
+    """The bytes of the regular file at ``path``, for a path the box can write. Raises
+    ``OSError`` for anything else, ``FileNotFoundError`` when nothing is there, its ``strerror``
+    saying why (``not a regular file``, ``over 16 MiB``, ``Permission denied``…).
+
+    ``Path.read_bytes`` there lets the box hang the host: a FIFO with no writer blocks the
+    ``open`` itself (the supervisor's tick never returns), and a link to ``/dev/zero`` reads
+    without end. So the open is ``O_NONBLOCK`` (and ``O_NOCTTY``: a link to a terminal mustn't
+    become the daemon's controlling one), then :func:`read_opened`.
+
+    ``follow`` keeps today's behaviour where a link was followed (a ``foldyard.toml`` linked to a
+    monorepo's shared one): the check is on the file the link reaches, so a link to a device or
+    a FIFO is refused all the same. ``follow=False`` refuses a link at ``path`` itself
+    (``ELOOP``)."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+    fd = os.open(path, flags if follow else flags | os.O_NOFOLLOW)
+    try:
+        return read_opened(fd, limit=limit, name=str(path))
+    finally:
+        os.close(fd)
+
+
+def read_opened(fd: int, *, limit: int, name: str) -> bytes:
+    """The bytes of the file open on ``fd`` (opened ``O_NONBLOCK``, by :func:`read_regular` or a
+    caller walking a directory by fd), which must be a regular file (``EINVAL``) holding at most
+    ``limit`` bytes (``EFBIG``, checked as it is read too: the box can append meanwhile).
+
+    ``/dev/null`` reads as empty: people link ``foldyard.local.toml`` to it, it was read (and
+    adopted) as empty before, and a read of it ends at once. Any other device is refused."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        if stat.S_ISCHR(st.st_mode) and st.st_rdev == _dev_null():
+            return b""
+        raise OSError(errno.EINVAL, "not a regular file", name)
+    too_big = OSError(errno.EFBIG, f"over {_size(limit)}", name)
+    if st.st_size > limit:
+        raise too_big
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := os.read(fd, min(1 << 20, limit + 1 - size)):
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            raise too_big
+    return b"".join(chunks)
+
+
+def _size(limit: int) -> str:
+    return f"{limit >> 20} MiB" if limit >= 1 << 20 and not limit % (1 << 20) else f"{limit} bytes"
+
+
+_DEV_NULL: list[int | None] = []
+
+
+def _dev_null() -> int | None:
+    """``/dev/null``'s device number, looked up once (None where there is none)."""
+    if not _DEV_NULL:
+        try:
+            _DEV_NULL.append(os.stat(os.devnull).st_rdev)
+        except OSError:
+            _DEV_NULL.append(None)
+    return _DEV_NULL[0]
 
 
 def write(root: Path, rel: str | Path, data: bytes) -> None:
@@ -40,6 +112,8 @@ def write(root: Path, rel: str | Path, data: bytes) -> None:
             os.close(dfd)
             dfd = sub
         name = parts[-1]
+        import secrets  # lazy: ~1.6 ms of imports that config's hot path, reading, never needs
+
         tmp = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
         try:

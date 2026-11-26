@@ -37,7 +37,7 @@ def host(tmp_path, monkeypatch):
         tomls[root] = {"project": {"name": name}, "machine": {"backend": "lima"}}
     monkeypatch.setattr(configpin, "adopted_checkouts", lambda: list(checkouts))
     monkeypatch.setattr(configpin, "adopted_toml", lambda root: tomls.get(root))
-    monkeypatch.setattr(configpin, "inspect", lambda cfg: SimpleNamespace(changed=False))
+    monkeypatch.setattr(configpin, "inspect", lambda cfg: _drift(changed=False))
     vm_dir = tmp_path / "lima" / "alpha"
     vm_dir.mkdir(parents=True)
     (vm_dir / "diffdisk").write_bytes(b"x" * 8192)
@@ -152,10 +152,22 @@ def test_below_a_projects_floor_it_says_so_and_asks_no_child(host, monkeypatch):
     assert alpha.notes[0].fix == "uv tool upgrade foldyard"
 
 
+def _drift(changed: bool, unread: str = "") -> SimpleNamespace:
+    """A configpin.inspect stand-in: drifted or not, and a file that isn't read (or none)."""
+    return SimpleNamespace(changed=changed, refused_note=lambda: unread)
+
+
+def test_a_config_file_that_isnt_read_is_flagged(host, monkeypatch):
+    unread = "foldyard.local.toml isn't read: not a regular file — taken as absent"
+    monkeypatch.setattr(configpin, "inspect", lambda cfg: _drift(changed=False, unread=unread))
+    alpha = _row(projects.collect(), "alpha")
+    assert any(n.text == unread and n.fix == "fy config status" for n in alpha.notes)
+
+
 def test_config_drift_and_a_vanished_worktree_are_flagged(host, monkeypatch):
     from foldyard import worktree_registry
 
-    monkeypatch.setattr(configpin, "inspect", lambda cfg: SimpleNamespace(changed=True))
+    monkeypatch.setattr(configpin, "inspect", lambda cfg: _drift(changed=True))
     gone = str(host.tmp / "gone")
     monkeypatch.setattr(worktree_registry, "_load", lambda main: {"old": gone})
     monkeypatch.setattr(worktree_registry, "checkouts", lambda main: {})

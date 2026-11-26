@@ -500,10 +500,14 @@ def loads_toml(text: str) -> dict:
 
 def _read_toml(path: Path) -> dict:
     """Parse one TOML file; best-effort ``{}`` if it's absent or malformed, nested too deep
-    included (:func:`loads_toml`): env / defaults carry."""
+    included (:func:`loads_toml`): env / defaults carry. Anything but a regular file is refused
+    like an unreadable one (``mountwrite.read_regular``): the box can make it a FIFO, and the
+    supervisor reads it."""
+    from . import mountwrite  # lazy: config is imported everywhere, and mountwrite is stdlib-only
+
     try:
-        return loads_toml(path.read_text())
-    except (OSError, ValueError):  # absent or malformed → contribute nothing
+        return loads_toml(mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT).decode())
+    except (OSError, ValueError):  # absent, refused or malformed → contribute nothing
         return {}
 
 
@@ -555,7 +559,9 @@ def unadopted_notice() -> str | None:
     after the directory). Ambient only: a bound config is an adopted one by construction."""
     if _BOUND.get() is not None or ambient_adopted():
         return None
-    if not (_repo_root_ambient() / "foldyard.toml").is_file():
+    # exists(), not is_file(): one the box made a FIFO (or that can't be read) is still a config
+    # nobody adopted, not "no config here".
+    if not (_repo_root_ambient() / "foldyard.toml").exists():
         return None  # nothing to adopt: the empty config IS this checkout's config
     return (
         "! this checkout's foldyard.toml isn't adopted — your computer reads no config for it "

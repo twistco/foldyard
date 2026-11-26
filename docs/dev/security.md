@@ -80,6 +80,23 @@ anything a person might need to read exactly uses `printable`.
 
 - **Config**: the host reads the adopted copy ([invariants](invariants.md)). A file that doesn't
   parse is never adopted, not even as a comment-only edit (`configpin.Unparseable`).
+- **Reading a file the box can write**: open it non-blocking, require a regular file, and cap its
+  size, checking the size as it's read too: `mountwrite.read_regular` (`mountwrite.read_opened` on
+  an fd you opened yourself, as `githeal._read_at` does). A plain `read_text` there lets the box
+  hang the process on your computer: a FIFO with no writer blocks the `open` itself (one planted as
+  a worktree's `.git` file stopped the supervisor's tick, and a posture's expiry with it), and one
+  it keeps writing to (or a link to `/dev/zero`) reads without end. A link to a regular file is
+  still followed where it always was (`foldyard.toml`), and one to `/dev/null` reads as empty. A
+  refused file reads like an unreadable one, and its reason is said. Where that would change a
+  decision, refuse it and don't offer it, as adoption does (`configpin`'s `Drift.unadoptable`).
+- **A child that reads what the box wrote**: the host compose client opens the checkout's compose
+  files with a blocking `open`, so every compose call on your computer checks the `-f` files are
+  regular first (`stack._not_regular`) and says so when one isn't. Not the project `.env`: the
+  client skips one that isn't regular itself. The posture reconcile also runs under one deadline
+  (`stack.RECONCILE_TIMEOUT`), since the box can swap a file in after the check and the supervisor's
+  tick can run it: a TTL expiry does when it also turns off a switch that can't work without the
+  expired one (a plain expiry leaves the stack alone). Running out is a reconcile skipped, never one
+  done.
 - **Names from config in the TUI**: never in a widget id or a selector. A switch name only has to be
   printable, and Textual raises on an id that isn't an identifier (`api.v2`, `a[b]`). A readable one
   can also be foldyard's own (switch `fix` made `fix-on`, a Doctor repair button's id). Keep the
@@ -136,6 +153,7 @@ Repo text that steers the in-box agent (`[claude].system_prompt`, `[codex].syste
    `escape`.
 3. Does a child process's output reach the terminal? Then it is relayed, unless the verb is a
    terminal by design.
-4. Does code on your computer open a path, or run git, under something the box can write?
+4. Does code on your computer open a path, or run git, under something the box can write? A read
+   goes through `mountwrite.read_regular`.
 5. Does a decision on your computer read the tree's config instead of the adopted copy?
 6. Does a consent prompt put box-chosen text beside the thing being consented to?

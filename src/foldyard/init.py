@@ -687,7 +687,8 @@ def _update_gitignore(target: Path) -> str:
     if not path.exists():
         path.write_text(block + "\n")
         return "created"
-    existing = path.read_text()
+    # The checkout may be box-writable: a FIFO or a device there is refused (OSError), not read.
+    existing = mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT).decode()
     fenced = re.compile(re.escape(GITIGNORE_BEGIN) + r".*?" + re.escape(GITIGNORE_END), re.DOTALL)
     if fenced.search(existing):
         # A function replacement (not the string form) so re never touches `\`/`\g` in block.

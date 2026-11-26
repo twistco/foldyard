@@ -53,10 +53,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import config, term
+from . import config, mountwrite, term
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
 # The consumer config files the host pins. Order matters: it is the deep-merge order
 # (``foldyard.local.toml`` over ``foldyard.toml``), the same one ``config._toml_ambient`` uses.
@@ -128,7 +128,9 @@ def adopted_checkouts() -> list[Path]:
         checkout = doc.get("checkout")
         if isinstance(checkout, str) and checkout:
             path = Path(checkout)
-            if path.is_dir() and (path / "foldyard.toml").is_file():
+            # exists(), not is_file(): a foldyard.toml the box made a FIFO isn't read, but the
+            # project is still there.
+            if path.is_dir() and (path / "foldyard.toml").exists():
                 found.add(path)
     return sorted(found)
 
@@ -149,14 +151,29 @@ def pin_dir(cfg: config.Config) -> Path:
 def _read_files(base: Path) -> dict[str, bytes | None]:
     """Each pinned file's bytes under ``base``, ``None`` when absent — absence is meaningful
     state (no ``foldyard.local.toml`` is different from an empty one), so it's recorded rather
-    than collapsed to ``b""``."""
+    than collapsed to ``b""``. ``None`` too for one that can't be read (:func:`_read_tree`)."""
+    return _read_tree(base)[0]
+
+
+def _read_tree(base: Path) -> tuple[dict[str, bytes | None], dict[str, str]]:
+    """:func:`_read_files`, and the files that are THERE but were refused, each with why: not a
+    regular file (the box can make one a FIFO, whose open would block the supervisor's tick, or
+    keep writing to one), over ``mountwrite.TEXT_LIMIT``, or unreadable (a root-owned file a
+    ``sudo`` run left). Each reads as absent, and :func:`adopt` refuses while that would drop
+    what the adopted copy holds (:attr:`Drift.unadoptable`), so absence is never adopted in
+    place of a file nobody could read. A link to a regular file is followed, as it always was,
+    and one to ``/dev/null`` reads as empty."""
     out: dict[str, bytes | None] = {}
+    refused: dict[str, str] = {}
     for name in PINNED_FILES:
         try:
-            out[name] = (base / name).read_bytes()
-        except OSError:
+            out[name] = mountwrite.read_regular(base / name, limit=mountwrite.TEXT_LIMIT)
+        except FileNotFoundError:
             out[name] = None
-    return out
+        except OSError as e:
+            out[name] = None
+            refused[name] = e.strerror or type(e).__name__
+    return out, refused
 
 
 def digest(files: dict[str, bytes | None]) -> str:
@@ -221,6 +238,16 @@ def _unparseable_note(names: list[str]) -> str:
     )
 
 
+def _refused_note(refused: dict[str, str], *, blocks: bool) -> str:
+    """The words every surface uses for :attr:`Drift.refused` files: each one and why, and
+    whether that stops an adoption (:attr:`Drift.unadoptable`)."""
+    what = "; ".join(f"{name} isn't read: {why}" for name, why in refused.items())
+    if blocks:
+        it = "it" if len(refused) == 1 else "them"
+        return f"{what} — foldyard would take {it} as ABSENT, so not adoptable until fixed"
+    return f"{what} — taken as absent; the adopted copy has none either"
+
+
 def _read_as_empty_note(names: list[str], where: str) -> str:
     """The words for an ADOPTED copy (:func:`unparseable`) that doesn't parse."""
     verb = "doesn't" if len(names) == 1 else "don't"
@@ -257,6 +284,8 @@ class Drift:
     tree: dict[str, bytes | None]
     pinned: dict[str, bytes | None]
     adopted: bool  # the marker is present — an adoption happened, whatever it stored
+    # Tree files that are there but were refused (name → why), each absent in ``tree``.
+    refused: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @property
     def worktree(self) -> str:
@@ -282,6 +311,24 @@ class Drift:
         is pinned yet: "not adopted" is a first-run state to resolve, not a change to report."""
         return self.pinned_exists and self.tree != self.pinned
 
+    @property
+    def unadoptable(self) -> dict[str, str]:
+        """The :attr:`refused` files that stop an adoption: on a first one, all of them (nobody
+        has seen what they hold); after it, those the adopted copy HAS, which adopting the
+        absence would drop (a ``foldyard.local.toml``'s narrowings). One the adopted copy lacks
+        too changes nothing by being absent, so it's said, not refused."""
+        return {
+            name: why
+            for name, why in self.refused.items()
+            if not self.adopted or self.pinned.get(name) is not None
+        }
+
+    def refused_note(self) -> str:
+        """:func:`_refused_note` for this drift, or ``""`` when every file was read."""
+        if blocking := self.unadoptable:
+            return _refused_note(blocking, blocks=True)
+        return _refused_note(self.refused, blocks=False) if self.refused else ""
+
     def tree_digest(self) -> str:
         return digest(self.tree)
 
@@ -296,8 +343,15 @@ class Drift:
         is before anyone reads the diff (and the whole answer when the change is one line).
 
         Counts the lines :meth:`diff_rows` shows, so the two can't disagree; when a file changed
-        but nothing meaningful did, it says so rather than reporting a confusing ``0, 0``."""
+        but nothing meaningful did, it says so rather than reporting a confusing ``0, 0``. A file
+        that isn't read (:attr:`refused`) is said too, ahead of the rest when it stops adopting."""
         added, removed = _tally(self.diff_rows())
+        if self.unadoptable:  # read as absent, by nobody's choice: ahead of what it "removed"
+            return f"{self.refused_note()} ({added} line(s) added, {removed} removed)"
+        said = self._summary(added, removed)
+        return f"{said}; {self.refused_note()}" if self.refused else said
+
+    def _summary(self, added: int, removed: int) -> str:
         files = ", ".join(n for n in PINNED_FILES if self.pinned.get(n) != self.tree.get(n))
         # Never "only comment lines" when either side is read as empty, whatever its lines say.
         if broken := unparseable(self.tree, self.pinned):
@@ -312,7 +366,7 @@ class Drift:
     def diff_rows(self) -> list[DiffRow]:
         """The CHANGED lines, adopted → working tree, across every pinned file
         (:func:`diff_rows`) — what adopting would change about what the host runs."""
-        return diff_rows(self.pinned, self.tree, old="adopted", new="tree")
+        return diff_rows(self.pinned, self.tree, old="adopted", new="tree", refused=self.refused)
 
 
 # One line of a config diff: what it IS, and its text (:func:`diff_rows`).
@@ -325,6 +379,7 @@ def diff_rows(
     *,
     old: str,
     new: str,
+    refused: Mapping[str, str] | None = None,
 ) -> list[DiffRow]:
     """The CHANGED lines between two pinned-file sets, labelled ``old``/``new``.
 
@@ -358,7 +413,9 @@ def diff_rows(
 
     Shared by the two comparisons that matter, so neither can render differently from the other:
     adopted → tree (:meth:`Drift.diff_rows`) and main's adopted copy → a worktree's tree
-    (:func:`main_baseline`)."""
+    (:func:`main_baseline`). ``refused`` names the ``new`` files that are there but couldn't be
+    read, and why (:attr:`Drift.refused`): their header says so, never "absent"."""
+    refused = refused or {}
     rows: list[DiffRow] = []
     for name in PINNED_FILES:
         before, after = old_files.get(name), new_files.get(name)
@@ -372,13 +429,15 @@ def diff_rows(
         if not body and not (bad_before or bad_after):
             continue
         rows.append(("header", f"--- {old}/{name}" + _state(before, bad_before)))
-        rows.append(("header", f"+++ {new}/{name}" + _state(after, bad_after)))
+        rows.append(("header", f"+++ {new}/{name}" + _state(after, bad_after, refused.get(name))))
         rows.extend((kind, _shown(line)) for kind, line in body)
     return rows
 
 
-def _state(data: bytes | None, broken: bool) -> str:
-    """A diff header's note on one side's file: absent, or there but read as empty."""
+def _state(data: bytes | None, broken: bool, refused: str | None = None) -> str:
+    """A diff header's note on one side's file: absent, or there but read as empty or absent."""
+    if refused:
+        return f"  (isn't read: {refused}: read as ABSENT)"
     if data is None:
         return "  (absent)"
     return "  (doesn't parse: read as EMPTY)" if broken else ""
@@ -571,9 +630,8 @@ def inspect(cfg: config.Config) -> Drift:
     selected = current_dir(cfg)
     empty: dict[str, bytes | None] = dict.fromkeys(PINNED_FILES)
     files = _read_files(selected) if selected else empty
-    return Drift(
-        cfg=cfg, tree=_read_files(cfg.repo_root), pinned=files, adopted=selected is not None
-    )
+    tree, refused = _read_tree(cfg.repo_root)
+    return Drift(cfg=cfg, tree=tree, pinned=files, adopted=selected is not None, refused=refused)
 
 
 # ── a worktree measured against main ──────────────────────────────────────────────────
@@ -627,7 +685,11 @@ def main_baseline(drift: Drift) -> Baseline | None:
             return None
         return Baseline(
             digest=digest(main.pinned),
-            rows=tuple(diff_rows(main.pinned, drift.tree, old="main-adopted", new="tree")),
+            rows=tuple(
+                diff_rows(
+                    main.pinned, drift.tree, old="main-adopted", new="tree", refused=drift.refused
+                )
+            ),
             identical=main.pinned == drift.tree,
             main_unparseable=tuple(unparseable(main.pinned, drift.tree)),
         )
@@ -647,7 +709,9 @@ def first_adoption_headline(drift: Drift, base: Baseline | None) -> str:
     stripping is what makes the real thing short enough to read at a prompt (a typical consumer
     config is ~40% config-carrying lines)."""
     # Ahead of everything below: "declares nothing" or "grants nothing new" would both be read
-    # off a file the host would take as empty, here or in main's adopted copy.
+    # off a file the host would take as empty or absent, here or in main's adopted copy.
+    if drift.unadoptable:
+        return f"{drift.refused_note()}."
     if broken := unparseable(drift.tree, drift.pinned):
         return f"{_unparseable_note(broken)}. What it says:"
     if base is not None and base.main_unparseable:
@@ -766,7 +830,9 @@ class NeedsNewerFoldyard(RuntimeError):
 class Unparseable(RuntimeError):
     """The tree carries a pinned file with content that doesn't parse as TOML. Adopting it would
     hand the host an EMPTY file in its place — for ``foldyard.local.toml``, every narrowing it
-    holds dropped — on the strength of a diff that can't show that (:func:`unparseable`)."""
+    holds dropped — on the strength of a diff that can't show that (:func:`unparseable`). Raised
+    too for a pinned file that is there but can't be read (:attr:`Drift.unadoptable`): adopting
+    it would hand the host an ABSENT one, the same narrowings dropped."""
 
 
 def _refuse_unparseable(tree: dict[str, bytes | None], pinned: dict[str, bytes | None]) -> None:
@@ -847,6 +913,8 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
                 f"the config the host runs for main changed since this was measured against it "
                 f"({baseline} → {now}) — nothing adopted; review the new comparison"
             )
+    if blocking := drift.unadoptable:
+        raise Unparseable(f"{_refused_note(blocking, blocks=True)} — nothing adopted")
     _refuse_unparseable(drift.tree, drift.pinned)
     _refuse_unmet_floor(drift.tree)
     target = pin_dir(cfg)
@@ -1012,8 +1080,9 @@ def resolve(
       - ``"unadopted"`` — NOTHING adopted yet and no TTY: nothing was adopted, and there is no
         reviewed copy to fall back on either. :func:`gate` refuses the launch verb on this one.
       - ``"refused"`` — NOTHING adopted yet, the operator said adopt, and :func:`adopt` refused
-        (it changed since it was shown, it needs a newer foldyard, or it doesn't parse). Refused
-        at the launch like ``"unadopted"``, but there WAS a terminal, so it says so.
+        (it changed since it was shown, it needs a newer foldyard, or it doesn't parse) — or a
+        file in it isn't read (:attr:`Drift.unadoptable`), so adopting wasn't offered at all.
+        Refused at the launch like ``"unadopted"``, but there WAS a terminal, so it says so.
 
     Pure but for the injected ``prompt``/``echo``, like ``keyless.ensure_cred`` — tests drive it
     with no real stdin."""
@@ -1051,6 +1120,9 @@ def resolve(
                 "has read. On your computer: `fy config diff`, then `fy config adopt`."
             )
             return "unadopted"
+        if drift.unadoptable:  # adopting can only be refused: don't offer it
+            echo("✗ nothing adopted — fix that file, then run this again.")
+            return "refused"
         answer = prompt("  [a]dopt (default) · [q]uit: ").strip().lower()
         # EXACT matches only, as for drift below: anything but Enter / a / adopt declines. Declining
         # is not "ignore" — with nothing adopted there is nothing else to run, so the host runs
@@ -1092,12 +1164,15 @@ def resolve(
             "`fy config adopt` (accept) or `fy config revert` (put the file back)."
         )
         return "unresolved"
-    answer = prompt("  [a]dopt · [r]evert the file · [i]gnore for now (default): ").strip().lower()
+    # Adopt is offered only where it can succeed: a file that isn't read stops it (unadoptable).
+    can_adopt = not drift.unadoptable
+    offer = "[a]dopt · " if can_adopt else ""
+    answer = prompt(f"  {offer}[r]evert the file · [i]gnore for now (default): ").strip().lower()
     # EXACT matches only. A prefix test read "abort" as adopt and "reset" as revert — the two
     # words someone reaches for when they want out, mapped to the two irreversible-ish answers,
     # one of which hands the host a config nobody reviewed. Anything unrecognised falls through
     # to ignore, which changes nothing and asks again.
-    if answer in ("a", "adopt"):
+    if can_adopt and answer in ("a", "adopt"):
         try:
             adopt(cfg, reviewed=drift.tree_digest())
         except (ReviewStale, NeedsNewerFoldyard, Unparseable) as e:

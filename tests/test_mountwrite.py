@@ -8,6 +8,7 @@ gate's edit of ``foldyard.toml`` — must land in the checkout or not at all."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -225,3 +226,74 @@ def test_listdir_and_unlink_refuse_a_path_leaving_the_root(checkout, rel):
     if rel:  # "" is the root itself, which listdir may read
         with pytest.raises(ValueError):
             mountwrite.listdir(checkout, rel)
+
+
+# ── reading a file the box can write: regular, bounded, never blocking ──────────────────
+
+
+def test_read_regular_reads_a_regular_file_and_a_link_to_one(checkout, tmp_path):
+    (checkout / "foldyard.toml").write_bytes(b"[project]\n")
+    assert mountwrite.read_regular(checkout / "foldyard.toml", limit=100) == b"[project]\n"
+    shared = tmp_path / "shared.toml"
+    shared.write_bytes(b"x = 1\n")
+    (checkout / "linked.toml").symlink_to(shared)  # a monorepo's shared config keeps working
+    assert mountwrite.read_regular(checkout / "linked.toml", limit=100) == b"x = 1\n"
+    with pytest.raises(OSError):
+        mountwrite.read_regular(checkout / "linked.toml", limit=100, follow=False)
+
+
+@pytest.mark.parametrize("kind", ["fifo", "endless", "device"])
+@pytest.mark.parametrize("follow", [True, False])
+def test_read_regular_refuses_a_fifo_or_device_without_blocking(checkout, special, kind, follow):
+    path = special(checkout / "foldyard.toml", kind)
+    with pytest.raises(OSError):
+        special.promptly(lambda: mountwrite.read_regular(path, limit=1 << 20, follow=follow))
+
+
+def test_read_regular_refuses_a_directory(checkout):
+    (checkout / "foldyard.toml").mkdir()
+    with pytest.raises(OSError):
+        mountwrite.read_regular(checkout / "foldyard.toml", limit=100)
+
+
+def test_read_regular_refuses_a_file_over_the_limit(checkout):
+    (checkout / "big").write_bytes(b"x" * 101)
+    with pytest.raises(OSError, match="over 100 bytes"):
+        mountwrite.read_regular(checkout / "big", limit=100)
+    assert mountwrite.read_regular(checkout / "big", limit=101) == b"x" * 101
+    (checkout / "huge").write_bytes(b"x" * ((16 << 20) + 1))
+    with pytest.raises(OSError, match="over 16 MiB"):  # the words a refusal note shows
+        mountwrite.read_regular(checkout / "huge", limit=mountwrite.TEXT_LIMIT)
+
+
+def test_read_regular_caps_a_file_that_grows_while_it_is_read(checkout, monkeypatch):
+    # The size is checked before the read and again as it goes: the box can append meanwhile.
+    (checkout / "growing").write_bytes(b"x" * 101)
+    real = mountwrite.os.fstat
+    monkeypatch.setattr(
+        mountwrite.os,
+        "fstat",
+        lambda fd: os.stat_result((*tuple(real(fd))[:6], 1, *tuple(real(fd))[7:])),
+    )
+    with pytest.raises(OSError, match="over 100 bytes"):
+        mountwrite.read_regular(checkout / "growing", limit=100)
+
+
+def test_read_regular_reads_a_link_to_dev_null_as_empty(checkout):
+    # People link `foldyard.local.toml` to /dev/null; it was read (and adopted) as empty, and a
+    # read of it ends at once. Any other device is refused.
+    (checkout / "foldyard.local.toml").symlink_to(os.devnull)
+    assert mountwrite.read_regular(checkout / "foldyard.local.toml", limit=100) == b""
+
+
+def test_read_regular_says_why_it_refused(checkout, special):
+    path = special(checkout / "foldyard.toml", "fifo")
+    with pytest.raises(OSError) as refused:
+        mountwrite.read_regular(path, limit=100)
+    assert refused.value.strerror == "not a regular file"
+
+
+def test_read_regular_says_absent_as_file_not_found(checkout):
+    # Callers tell "absent" from "refused" by it (configpin records absence as state).
+    with pytest.raises(FileNotFoundError):
+        mountwrite.read_regular(checkout / "nope", limit=100)

@@ -61,6 +61,10 @@ _RECORD = re.compile(rf"index\.fy-record\.({_OID})")
 _REFUSED = re.compile(rf"index\.fy-refused\.({_OID})\.({_OID})\.({_OID})")
 
 _NOFOLLOW_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# A file the box can write, opened without blocking: a FIFO with no writer would block the open
+# itself, and the sweep runs in the supervisor's tick (nothing after it would run again). The
+# regular-file check after the open is what refuses it (mountwrite.read_opened, by fd here).
+_NOFOLLOW_FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
 
 # Refusals repeat every tick while the state persists — log each (rec, head) pair once.
 _warned: dict[str, tuple[str, str]] = {}
@@ -88,18 +92,15 @@ def _read_at(dfd: int, rel: str, limit: int = 1 << 16) -> bytes | None:
     except OSError:
         return None
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+        fd = os.open(name, _NOFOLLOW_FILE, dir_fd=d)
     except OSError:
         return None
     finally:
         os.close(d)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_size > limit:
-            return None
-        chunks = []
-        while chunk := os.read(fd, 1 << 20):
-            chunks.append(chunk)
-        return b"".join(chunks)
+    try:  # a regular file, capped as it is read too (the box can append meanwhile)
+        return mountwrite.read_opened(fd, limit=limit, name=rel)
+    except OSError:
+        return None
     finally:
         os.close(fd)
 
@@ -111,7 +112,7 @@ def _git_dir(repo: Path, main: Path) -> str | None:
     if Path(repo) == Path(main):
         return ".git"
     try:
-        fd = os.open(Path(repo) / ".git", os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(Path(repo) / ".git", _NOFOLLOW_FILE)
     except OSError:
         return None
     try:

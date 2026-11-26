@@ -1354,6 +1354,140 @@ def test_fy_config_adopt_refuses_a_file_that_does_not_parse(checkout, monkeypatc
     assert "proxy" not in configpin.effective(checkout).toml
 
 
+@pytest.mark.parametrize("kind", ["fifo", "endless", "device"])
+def test_a_special_file_in_the_tree_is_reported_and_never_adopted_as_absent(
+    checkout, monkeypatch, special, kind
+):
+    """The box swaps the narrowing overlay for a FIFO (whose open blocks: the supervisor's tick
+    reads the tree every 2 s), one being written to or a link to /dev/zero (read without end; the
+    read checks for a regular file before it reads a byte, so the device is safe to plant here).
+    Read promptly, refused, and said: adopting it as ABSENT would drop the narrowing, on a diff
+    that says "(absent)"."""
+    _narrowed(checkout)
+    special(checkout.repo_root / "foldyard.local.toml", kind)
+
+    drift = special.promptly(lambda: configpin.inspect(checkout))
+    assert drift.refused == {"foldyard.local.toml": "not a regular file"}
+    assert "foldyard.local.toml isn't read: not a regular file" in drift.summary()
+    for sink, shown in special.promptly(lambda: _three_sinks(checkout, monkeypatch)).items():
+        assert "isn't read: not a regular file" in shown and "(absent)" not in shown, (sink, shown)
+    with pytest.raises(configpin.Unparseable, match=r"foldyard\.local\.toml isn't read"):
+        configpin.adopt(checkout)
+    assert "proxy" not in configpin.effective(checkout).toml  # the narrowing still holds
+
+    logs, _notes = _capture_supervisor_output(monkeypatch)
+    assert special.promptly(lambda: supervisor._report_config_drift("", checkout)) is True
+    assert logs and "STILL RUNNING THE ADOPTED ONE" in logs[0]
+    assert "foldyard.local.toml isn't read: not a regular file" in logs[0]
+
+
+def test_adopt_is_not_offered_where_a_file_that_isnt_read_stops_it(checkout, special):
+    _narrowed(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text(EDITED)
+    special(checkout.repo_root / "foldyard.local.toml", "fifo")
+    asked: list[str] = []
+    lines: list[str] = []
+
+    def prompt(question: str) -> str:
+        asked.append(question)
+        return "a"  # typed anyway: not an answer here
+
+    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=lines.append) == (
+        "ignored"
+    )
+    assert asked and "[a]dopt" not in asked[0] and "[r]evert" in asked[0]
+    assert "proxy" not in configpin.effective(checkout).toml
+
+
+def test_a_first_adoption_with_a_special_file_in_the_tree_is_refused(checkout, special):
+    special(checkout.repo_root / "foldyard.local.toml", "fifo")
+    lines: list[str] = []
+
+    def prompt(question: str) -> str:
+        raise AssertionError(f"offered an adoption that can only be refused: {question}")
+
+    resolved = special.promptly(
+        lambda: configpin.resolve(checkout, interactive=True, prompt=prompt, echo=lines.append)
+    )
+    assert resolved == "refused"
+    assert not configpin.inspect(checkout).pinned_exists
+    assert any("foldyard.local.toml isn't read: not a regular file" in ln for ln in lines), lines
+
+
+def test_a_file_that_isnt_read_where_the_adopted_copy_has_none_is_said_not_refused(
+    checkout, special, monkeypatch
+):
+    # Absent in the adopted copy too: adopting its absence drops nothing, so an edit beside it
+    # adopts, and the file that isn't read is named wherever the drift is.
+    configpin.adopt(checkout)
+    special(checkout.repo_root / "foldyard.local.toml", "fifo")
+    (checkout.repo_root / "foldyard.toml").write_text(EDITED)
+    drift = configpin.inspect(checkout)
+    assert drift.refused and not drift.unadoptable
+    assert "foldyard.local.toml isn't read: not a regular file" in drift.summary()
+    assert "taken as absent; the adopted copy has none either" in drift.summary()
+    configpin.adopt(checkout)
+    assert "evil.example" in str(configpin.effective(checkout).toml)
+
+    # Nothing differs now, and the file still isn't read: the doctor row and `fy config status`
+    # say so, and the supervisor logs it once.
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    monkeypatch.setattr(devmode, "worktree_config", lambda _wt: checkout)
+    status, _name, detail = devmode._config_pin_check()
+    assert status == "warn" and "foldyard.local.toml isn't read" in detail, (status, detail)
+    monkeypatch.setattr(cli, "_active_config", lambda: checkout)
+    shown = CliRunner().invoke(cli.app, ["config", "status"]).output
+    assert "foldyard.local.toml isn't read" in shown, shown
+    logs, _notes = _capture_supervisor_output(monkeypatch)
+    for _ in range(2):
+        supervisor._report_config_drift("", checkout)
+    assert len(logs) == 1 and "foldyard.local.toml isn't read" in logs[0], logs
+
+
+def test_a_drift_after_a_file_that_isnt_read_is_still_notified(checkout, special, monkeypatch):
+    # The "isn't read" state is recorded as what the tick last saw; a real drift after it is
+    # still the clean→drifted edge an operator is notified on.
+    configpin.adopt(checkout)
+    special(checkout.repo_root / "foldyard.local.toml", "fifo")
+    logs, notes = _capture_supervisor_output(monkeypatch)
+    supervisor._report_config_drift("", checkout)
+    assert len(logs) == 1 and notes == []
+    (checkout.repo_root / "foldyard.toml").write_text(EDITED)
+    supervisor._report_config_drift("", checkout)
+    assert "STILL RUNNING THE ADOPTED ONE" in logs[-1]
+    assert len(notes) == 1
+
+
+def test_a_file_root_owns_is_named_for_what_it_is(checkout):
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads a file whatever its mode")
+    configpin.adopt(checkout)
+    local = checkout.repo_root / "foldyard.local.toml"
+    local.write_text(NARROWING)
+    local.chmod(0)
+    try:
+        drift = configpin.inspect(checkout)
+        assert drift.refused == {"foldyard.local.toml": "Permission denied"}
+        assert "foldyard.local.toml isn't read: Permission denied" in drift.summary()
+    finally:
+        local.chmod(0o644)
+
+
+def test_a_local_file_linked_to_dev_null_stays_adopted_as_empty(checkout):
+    # The usual way to switch an overlay off: it was read, and adopted, as empty. It still is.
+    import os
+
+    (checkout.repo_root / "foldyard.local.toml").symlink_to(os.devnull)
+    configpin.adopt(checkout)
+    drift = configpin.inspect(checkout)
+    assert drift.tree["foldyard.local.toml"] == b"" and not drift.refused and not drift.changed
+
+
 def test_a_cr_only_file_is_not_read_as_one_comment(checkout):
     """TOML's newline is LF or CRLF; a file using bare CRs is ONE line to the diff, and one that
     starts with `#` read as a single comment. It doesn't parse either, so that's what's said."""

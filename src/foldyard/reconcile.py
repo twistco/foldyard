@@ -308,7 +308,7 @@ def _overlay_services(paths: dict[str, Path]) -> dict[str, set[str] | None]:
     bundled podman-compose and is imported only here, off the hot path (as ``stack`` does)."""
     import yaml
 
-    from . import guestcompose
+    from . import guestcompose, mountwrite
 
     out: dict[str, set[str] | None] = {}
     if guestcompose.wanted():  # parsing them here would read box-written bytes on your computer
@@ -319,7 +319,9 @@ def _overlay_services(paths: dict[str, Path]) -> dict[str, set[str] | None]:
         return out
     for name, path in paths.items():
         try:
-            services = (yaml.safe_load(path.read_text()) or {}).get("services") or {}
+            # The overlay is the box's to write: a FIFO or a device there is refused, not read.
+            text = mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT).decode()
+            services = (yaml.safe_load(text) or {}).get("services") or {}
             out[name] = set(services) if isinstance(services, dict) else None
         except (OSError, yaml.YAMLError, AttributeError):
             out[name] = None

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -403,11 +402,30 @@ class GcpPlugin(Plugin):
         forced = "metadata" in os.environ.get("COMPOSE_PROFILES", "").split(",")
         if (mode.get("gcp", "off") == "off" and not forced) or not gcp_project():
             return
-        src = METADATA_DIR / "server.py"
-        dest = Path(checkout) / here / ".devbox-foldyard" / "server.py"
-        if not dest.exists() or dest.read_bytes() != src.read_bytes():  # idempotent
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
+        from .. import mountwrite  # lazy: stdlib-only, and only a configured gcp stages
+
+        src = (METADATA_DIR / "server.py").read_bytes()
+        rel = Path(here) / ".devbox-foldyard" / "server.py"
+        # The checkout is the box's: the staged copy may be a FIFO (the read would block, from the
+        # supervisor's tick too), a device or a link. Only a regular file is compared, and the
+        # copy replaces whatever is there rather than writing through it (mountwrite).
+        try:
+            current = mountwrite.read_regular(
+                Path(checkout) / rel, limit=mountwrite.TEXT_LIMIT, follow=False
+            )
+        except OSError:
+            current = None
+        if current != src:  # idempotent
+            try:
+                mountwrite.write(Path(checkout), rel, src)
+            except (OSError, ValueError) as e:
+                raise SystemExit(
+                    f"✗ couldn't stage the metadata emulator's server.py at "
+                    f"{term.printable(str(Path(checkout) / rel))}: {e}\n"
+                    "  A directory on that path is a symlink or not a directory, or the dev-VM dir"
+                    " is outside the checkout — the box can write the checkout, so foldyard won't "
+                    "write through one. Remove it and retry."
+                ) from None
 
     def derive_env(self, mode: dict) -> dict[str, str]:
         # Stack-side (not box) env: which compose profiles `fy up` runs. The metadata emulator

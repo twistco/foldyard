@@ -33,7 +33,7 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import urlsplit
 
-from . import boxmounts, config, machine, stack
+from . import boxmounts, config, machine, mountwrite, stack
 from .plugins import VerifyContext, registry
 
 _PASS = "\033[32m✓ PASS\033[0m"
@@ -208,8 +208,8 @@ def _workspace_rearms_git_bridge(settings: Path) -> list[str]:
     """The git-bridge settings a workspace ``settings.json`` sets to ``true``. A textual match, not
     a parse: the file is JSONC (comments, trailing commas) and an unparseable one must not read
     as "off"."""
-    try:
-        text = settings.read_text()
+    try:  # in the checkout: a FIFO or a device is refused (OSError) rather than read
+        text = mountwrite.read_regular(settings, limit=mountwrite.TEXT_LIMIT).decode()
     except OSError:
         return []
     return [k for k in _GIT_BRIDGE_SETTINGS if re.search(rf'"{re.escape(k)}"\s*:\s*true\b', text)]

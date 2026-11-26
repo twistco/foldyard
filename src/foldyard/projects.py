@@ -287,8 +287,11 @@ def _describe(
         notes = _version_notes(installed)
         below_floor = any(n.level == "✗" for n in notes)  # the only ✗ _version_notes gives
         state = _supervisor(vm, notes, fp)
-        if configpin.inspect(cfg).changed:
+        drift = configpin.inspect(cfg)
+        if drift.changed:
             notes.append(Note("⚠", "foldyard.toml changed since it was adopted", "fy config diff"))
+        if unread := drift.refused_note():
+            notes.append(Note("⚠", unread, "fy config status"))
         notes.extend(_worktree_notes(checkout))
         if vm.status == "missing":
             notes.append(Note("⚠", f"its VM {vm.name} doesn't exist (yet)", "fy up"))

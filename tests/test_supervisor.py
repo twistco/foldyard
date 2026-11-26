@@ -1120,6 +1120,70 @@ def test_expiry_without_dependents_reverts_only_the_lapsed_axis(isolated_state):
     assert mode["gcp"] == "off" and mode["github"] == "on"  # unrelated raised axis kept
 
 
+@pytest.mark.parametrize("swapped", [False, True])
+def test_an_expiry_returns_with_a_fifo_for_the_compose_file(
+    isolated_state, monkeypatch, special, tmp_path, swapped
+):
+    # An expiry that settles a dependent switch (llm=record without gcp) changes the stack's
+    # posture, so the tick reconciles the stack (set_mode → StackScope → reconcile_posture), whose
+    # host compose client opens the checkout's compose files with a blocking open: a FIFO there
+    # stopped the tick for good, the daemons' stop and the heartbeat with it. `swapped`: planted
+    # after the regular-file check looked, so the deadline is what returns.
+    import contextvars
+    import stat
+    import subprocess
+
+    from foldyard import config, devmode, stack
+
+    devmode.set_mode({"gcp": "sa", "llm": "record"})
+    raw = json.loads(isolated_state["auth"].read_text())
+    raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
+    isolated_state["auth"].write_text(json.dumps(raw))
+
+    fifo = special(tmp_path / "compose.yml", "fifo")
+    ctx = stack.Context(
+        main=tmp_path,
+        env={"FOLDYARD_CHECKOUT": str(tmp_path)},
+        compose=["podman", "compose", "-f", str(fifo)],
+        app="",
+        project="p",
+        worktree="",
+    )
+    compose_calls: list = []
+
+    def client(cmd, timeout=None, **_kw):  # the host compose client: a blocking open of each -f
+        if cmd[1:2] != ["compose"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        compose_calls.append(timeout)
+        if timeout is None:
+            open(fifo).close()
+        elif stat.S_ISFIFO(os.stat(fifo).st_mode):
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    # The test config's llm shapes no stack env: a signature that follows the mode, so it does.
+    monkeypatch.setattr(
+        devmode, "posture_signature", lambda mode: {"env": dict(mode), "overlays": []}
+    )
+    monkeypatch.setattr(config, "has_compose_stack", lambda: True)
+    monkeypatch.setattr(stack, "resolve", lambda **_kw: ctx)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    monkeypatch.setattr(stack.subprocess, "run", client)
+    monkeypatch.setattr(stack.devmode, "run_stream", lambda *a, **k: -9)
+    checked: list[bool] = []
+    real = stack._not_regular
+    monkeypatch.setattr(
+        stack, "_not_regular", lambda c: (checked.append(True), [] if swapped else real(c))[1]
+    )
+
+    bound = contextvars.copy_context()  # the bound config (a contextvar) isn't a thread's
+    mode = special.promptly(lambda: bound.run(supervisor.expire_user_modes))
+    assert mode["gcp"] == "off" and mode["llm"] == "off"
+    assert checked  # the expiry did reach the stack's compose
+    assert all(t is not None for t in compose_calls)
+    assert bool(compose_calls) == swapped
+
+
 # ── capability probes (consolidation proposal B) ─────────────────────────────────────────
 
 
