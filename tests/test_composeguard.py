@@ -10,6 +10,8 @@ in an included/extended file (`literal_only`); not following `include`/`extends`
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -113,6 +115,98 @@ def test_a_symlink_out_of_the_checkout_is_refused(tree):
     (repo / "api" / "link.env").symlink_to(host / "creds.env")
     problems = rendered(repo, {"services": {"api": {"env_file": "api/link.env"}}})
     assert len(problems) == 1 and "outside the checkout" in problems[0]
+
+
+def _point(repo: Path, host: Path, target: str) -> str:
+    """An env file value that reaches ``target``: itself, or through a link ("link:" / "fifo")."""
+    if target == "fifo":
+        os.mkfifo(host / "fifo")
+        target = "link:" + str(host / "fifo")
+    if target.startswith("link:"):
+        (repo / "api" / "x.env").symlink_to(target.removeprefix("link:"))
+        return "api/x.env"
+    return target
+
+
+_DEV_NULL = ["/dev/null", "link:/dev/null"]
+_NOT_DEV_NULL = ["/dev/zero", "link:/dev/random", "fifo", "/dev/null.d/x"]
+
+
+@pytest.mark.parametrize("target", _DEV_NULL)
+@pytest.mark.parametrize("key", ["env_file", "label_file"])
+def test_an_env_file_that_is_dev_null_passes(tree, key, target):
+    # What a `.env -> /dev/null` is for, named as an env file: nothing of yours to read, and the
+    # client reads it as empty (podman-compose skips a file that isn't regular).
+    repo, host, _write = tree
+    assert rendered(repo, {"services": {"api": {key: _point(repo, host, target)}}}) == []
+
+
+@pytest.mark.parametrize("target", _NOT_DEV_NULL)
+@pytest.mark.parametrize("key", ["env_file", "label_file"])
+def test_an_env_file_that_is_another_device_a_fifo_or_elsewhere_is_refused(tree, key, target):
+    repo, host, _write = tree
+    problems = rendered(repo, {"services": {"api": {key: _point(repo, host, target)}}})
+    assert len(problems) == 1 and "outside the checkout" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["/proc/self/fd/1", "/dev/stdout", "/dev/stdin", "/dev/fd/0", "/dev/fd/1", "link", "via-dir"],
+)
+@pytest.mark.parametrize("key", ["env_file", "label_file"])
+def test_an_env_file_through_a_descriptor_is_refused_even_when_it_reads_as_dev_null(
+    tree, monkeypatch, key, value
+):
+    # On Linux, /proc/self/fd/N (and /dev/stdout, /dev/fd/N through it) is a link to what fy's OWN
+    # descriptor is open on: /dev/null when fy's output is. To compose it is compose's descriptor,
+    # a pipe it could block on. This emulates Linux's resolution, so it is checked on macOS too.
+    repo, _host, _write = tree
+    realpath, islink, readlink = os.path.realpath, os.path.islink, os.readlink
+    descriptor = re.compile(r"^(/proc/self/fd|/dev/fd)/\d+$")
+
+    def linux(path, *a, **kw):
+        got = realpath(path, *a, **kw)
+        return "/dev/null" if got.startswith(("/proc/", "/dev/fd/")) else got
+
+    monkeypatch.setattr(os.path, "realpath", linux)
+    monkeypatch.setattr(os.path, "islink", lambda p: bool(descriptor.match(str(p))) or islink(p))
+    monkeypatch.setattr(
+        os, "readlink", lambda p, **kw: "/dev/null" if descriptor.match(str(p)) else readlink(p)
+    )
+    if value == "link":
+        (repo / "api" / "x.env").symlink_to("/proc/self/fd/1")
+        value = "api/x.env"
+    elif value == "via-dir":
+        (repo / "fds").symlink_to("/proc/self/fd")
+        value = "fds/1"
+    problems = rendered(repo, {"services": {"api": {key: value}}})
+    assert len(problems) == 1 and "outside the checkout" in problems[0]
+    (repo / ".env").symlink_to("/dev/stdout")
+    assert len(composeguard.raw_problems([], repo, [repo])) == 1
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"services": {"api": {"build": {"context": ".", "dockerfile": "/dev/null"}}}},
+        {"services": {"api": {"build": "/dev/null"}}},
+        {"secrets": {"s": {"file": "/dev/null"}}},
+    ],
+)
+def test_dev_null_is_still_outside_for_every_other_path(tree, doc):
+    repo, _host, _write = tree
+    assert len(rendered(repo, doc)) == 1
+
+
+@pytest.mark.parametrize("target", _DEV_NULL + _NOT_DEV_NULL)
+def test_the_raw_scan_allows_dev_null_as_an_included_env_file(tree, target):
+    repo, host, write = tree
+    value = _point(repo, host, target)
+    path = value if value.startswith("/") else "../" + value  # the included file is in stack/
+    write("stack/inc.yml", f"services:\n  x:\n    image: busybox\n    env_file: {path}\n")
+    f = write("compose.yml", f"include:\n  - path: stack/inc.yml\n    env_file: {value}\n")
+    problems = composeguard.raw_problems([f], repo, [repo])
+    assert problems == [] if target in _DEV_NULL else len(problems) == 2
 
 
 def test_the_main_checkout_is_an_allowed_root_for_a_worktree(tree, tmp_path):
@@ -229,6 +323,31 @@ def test_a_project_dotenv_symlinked_out_is_refused(tree):
     repo, host, write = tree
     f = write("compose.yml", "services: {}\n")
     (repo / ".env").symlink_to(host / "creds.env")
+    problems = composeguard.raw_problems([f], repo, [repo])
+    assert len(problems) == 1 and ".env" in problems[0]
+
+
+@pytest.mark.parametrize("hops", [1, 2])
+def test_a_project_dotenv_linked_to_dev_null_is_allowed(tree, hops):
+    # How people have compose load nothing: /dev/null holds nothing of yours, and the client (like
+    # `stack._not_regular`) skips a .env that isn't a regular file, so nothing waits on it either.
+    repo, _host, write = tree
+    f = write("compose.yml", "services: {}\n")
+    (repo / ".env").symlink_to(os.devnull if hops == 1 else repo / "null")
+    if hops == 2:
+        (repo / "null").symlink_to(os.devnull)
+    assert composeguard.raw_problems([f], repo, [repo]) == []
+
+
+@pytest.mark.parametrize("target", ["/dev/zero", "/dev/random", "fifo", "/dev/null.d/x"])
+def test_a_project_dotenv_linked_to_anything_else_out_is_refused(tree, target):
+    # Exactly /dev/null: another device reads without end, and a FIFO would block the client.
+    repo, host, write = tree
+    f = write("compose.yml", "services: {}\n")
+    if target == "fifo":
+        os.mkfifo(host / "fifo")
+        target = str(host / "fifo")
+    (repo / ".env").symlink_to(target)
     problems = composeguard.raw_problems([f], repo, [repo])
     assert len(problems) == 1 and ".env" in problems[0]
 

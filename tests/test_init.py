@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
+
+import pytest
 
 from foldyard import init
 
@@ -356,6 +359,94 @@ def test_update_gitignore_refreshes_managed_block_in_place(tmp_path):
     assert ".devbox-ca/" in gi
     # A second run is a no-op.
     assert init._update_gitignore(tmp_path) == "unchanged"
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_init_never_writes_through_a_linked_gitignore(tmp_path, capsys, exists):
+    # The checkout may be box-writable: a `.gitignore` linked to a file of yours would have had
+    # foldyard's block appended to it, or that file created. Git doesn't read a `.gitignore` that
+    # is a link, so the link is left as it is (a colleague's own keeps working as it did), and
+    # init says what to ignore instead.
+    repo, yours = tmp_path / "repo", tmp_path / "yours"
+    repo.mkdir()
+    if exists:
+        yours.write_text("mine\n")
+    (repo / ".gitignore").symlink_to(yours)
+    assert init.init(path=str(repo), name="demo") == 0
+    assert (repo / ".gitignore").is_symlink()
+    assert (yours.read_text() == "mine\n") if exists else not yours.exists()
+    out = capsys.readouterr().out
+    assert "link" in out and ".devbox-ca/" in out
+
+
+def test_init_rewrites_a_gitignore_without_following_a_link_swapped_in(tmp_path, monkeypatch):
+    # The write replaces the name, so a link the box swaps in after the read is replaced too,
+    # never written through.
+    repo, yours = tmp_path / "repo", tmp_path / "yours"
+    repo.mkdir()
+    yours.write_text("mine\n")
+    (repo / ".gitignore").write_text("node_modules/\n")
+    real_read = init.mountwrite.read_regular
+
+    def read_then_swap(path, **kw):
+        got = real_read(path, **kw)
+        os.unlink(path)
+        os.symlink(yours, path)
+        return got
+
+    monkeypatch.setattr(init.mountwrite, "read_regular", read_then_swap)
+    assert init._update_gitignore(repo) == "added"
+    assert yours.read_text() == "mine\n"
+    assert not (repo / ".gitignore").is_symlink()
+    assert "node_modules/" in (repo / ".gitignore").read_text()
+
+
+def test_a_gitignore_that_isnt_utf8_keeps_its_bytes(tmp_path):
+    # Git reads a .gitignore as bytes, so a Latin-1 one is a working one: init adds its block and
+    # leaves every other byte as it was, rather than stopping with a traceback.
+    (tmp_path / ".gitignore").write_bytes(b"caf\xe9/\n")
+    assert init.init(path=str(tmp_path), name="demo") == 0
+    gi = (tmp_path / ".gitignore").read_bytes()
+    assert gi.startswith(b"caf\xe9/\n\n") and init.GITIGNORE_BEGIN.encode() in gi
+    assert init._update_gitignore(tmp_path) == "unchanged"
+
+
+@pytest.mark.parametrize("fenced", [False, True], ids=["added", "updated"])
+def test_a_rewritten_gitignore_keeps_its_permissions(tmp_path, fenced):
+    stale = init.GITIGNORE_BEGIN + "\nold/\n" + init.GITIGNORE_END + "\n" if fenced else ""
+    (tmp_path / ".gitignore").write_text("node_modules/\n" + stale)
+    (tmp_path / ".gitignore").chmod(0o640)
+    assert init._update_gitignore(tmp_path) == ("updated" if fenced else "added")
+    assert (tmp_path / ".gitignore").stat().st_mode & 0o777 == 0o640
+
+
+def test_a_gitignore_init_cannot_read_is_the_file_it_names(tmp_path, capsys):
+    # A FIFO the box made of it is refused, not read: the error is about .gitignore, not about
+    # the foldyard.toml that was written fine.
+    os.mkfifo(tmp_path / ".gitignore")
+    assert init.init(path=str(tmp_path), name="demo") == 1
+    out = capsys.readouterr().out
+    assert f"✗ could not write {tmp_path / '.gitignore'}:" in out
+    assert f"could not write {tmp_path / 'foldyard.toml'}" not in out
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_init_never_writes_the_local_example_through_a_link(tmp_path, capsys, exists):
+    repo, yours = tmp_path / "repo", tmp_path / "yours"
+    repo.mkdir()
+    if exists:
+        yours.write_text("mine\n")
+    (repo / init.LOCAL_EXAMPLE).symlink_to(yours)
+    assert init.init(path=str(repo), name="demo") == 0
+    assert (yours.read_text() == "mine\n") if exists else not yours.exists()
+    assert (repo / init.LOCAL_EXAMPLE).is_symlink()  # a link counts as there, even a dangling one
+    out = capsys.readouterr().out
+    assert f"kept {repo / init.LOCAL_EXAMPLE}" in out and "link" in out and "--force" in out
+    # --force replaces the link with the template, as it does a linked foldyard.toml.
+    assert init.init(path=str(repo), name="demo", force=True) == 0
+    assert (yours.read_text() == "mine\n") if exists else not yours.exists()
+    assert not (repo / init.LOCAL_EXAMPLE).is_symlink()
+    assert "disabled = true" in (repo / init.LOCAL_EXAMPLE).read_text()
 
 
 def test_template_learns_then_enforces_and_recommends_the_bootstrap_hosts():

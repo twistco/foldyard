@@ -111,11 +111,12 @@ Three channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-rep
   the compose client that starts it runs on your computer, and the compose files are editable from
   the box. foldyard gives the client a minimal environment (never `host.env`; add names with
   `[project] compose_env`, which `fy config widenings` lists) and refuses to act on compose files
-  that name paths outside the checkout — `env_file:`, build contexts, `include:` and the like. That
-  check is a list of known keys, and the client re-opens each path after foldyard checked it, so it
-  narrows this channel rather than closing it. `[machine] compose = "vm"` closes it by running the
-  client in the VM, where those paths hold nothing of yours. It is experimental, and it will become
-  the default once it has been proven ([configuration](./configuration.md#machine)).
+  that name paths outside the checkout — `env_file:`, build contexts, `include:` and the like (a
+  `.env`, `env_file:` or `label_file:` that is `/dev/null` is fine: there's nothing of yours there).
+  That check is a list of known keys, and the client re-opens each path after foldyard checked it,
+  so it narrows this channel rather than closing it. `[machine] compose = "vm"` closes it by running
+  the client in the VM, where those paths hold nothing of yours. It is experimental, and it will
+  become the default once it has been proven ([configuration](./configuration.md#machine)).
 - **Registry logins stay on your computer.** A client there sends its logins to the VM's API service
   with each pull and build, all of them for a build, and the service keeps them in a temp file a box
   can read while it runs. So foldyard's clients get none, whatever `podman login` has stored. A

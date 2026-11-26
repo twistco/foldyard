@@ -46,6 +46,54 @@ def _inside(path: Path, roots: list[Path]) -> bool:
     return any(real == r or r in real.parents for r in roots)
 
 
+# Where a path names a process's own descriptors. On Linux each `/proc/self/fd/N` is a link to
+# what the descriptor is open on, so a path through one resolves, for foldyard, to whatever ITS
+# descriptor holds (`/dev/null` when its output is), while to compose it is compose's own: a pipe
+# it could block on. `/dev/stdout` and the like lead here too.
+_DESCRIPTORS = ("/proc", "/dev/fd")
+
+
+def _nothing(path: Path) -> bool:
+    """Does ``path`` reach exactly ``/dev/null``, never by way of a descriptor
+    (:data:`_DESCRIPTORS`)? How people have compose load nothing (a ``.env`` or an env file linked
+    there): nothing of yours is there to read, and the client reads it as empty (podman-compose
+    skips one that isn't a regular file). Only that device: another reads without end, and a FIFO
+    would block the client.
+
+    Resolved a component at a time, like ``realpath``, so every directory and link on the way is
+    seen: ``realpath`` alone would answer ``/dev/null`` for ``/proc/self/fd/1``."""
+    todo = list(Path(os.path.abspath(path)).parts[1:])
+    here, hops = "/", 0
+    while todo:
+        part = todo.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            here = os.path.dirname(here)
+            continue
+        step = os.path.join(here, part)
+        if any(step == d or step.startswith(d + "/") for d in _DESCRIPTORS):
+            return False
+        if not os.path.islink(step):
+            here = step
+            continue
+        hops += 1
+        if hops > 40:  # a loop, which the client couldn't open either
+            return False
+        try:
+            target = os.readlink(step)
+        except OSError:  # swapped meanwhile: not a link to /dev/null that can be vouched for
+            return False
+        todo[:0] = Path(target).parts[1:] if os.path.isabs(target) else Path(target).parts
+        if os.path.isabs(target):
+            here = "/"
+    return here == os.devnull
+
+
+# The keys whose file may be /dev/null (:func:`_nothing`): files compose reads as variables.
+_MAY_BE_NOTHING = ("env_file", "label_file", "include.env_file")
+
+
 def _remote(value: str) -> bool:
     """A build context the client would FETCH (git/http), with whatever credentials it finds."""
     return "://" in value or value.startswith("git@") or ".git#" in value or value.endswith(".git")
@@ -131,7 +179,8 @@ class _Checker:
             self.refuse(where, key, value, "is a remote source the client would fetch on the host")
             return None
         resolved = [Path(value) if Path(value).is_absolute() else base / value for base in bases]
-        if not all(_inside(p, self.roots) for p in resolved):
+        nothing = key in _MAY_BE_NOTHING and all(_nothing(p) for p in resolved)
+        if not nothing and not all(_inside(p, self.roots) for p in resolved):
             self.refuse(where, key, value, "is outside the checkout")
             return None
         return resolved[0]
@@ -202,10 +251,10 @@ def _load(text: str):
 
 def raw_problems(files: list[Path], project_dir: Path, roots: Iterable[Path]) -> list[str]:
     """What the render can't vouch for, read from the files: the ``-f`` files themselves and the
-    project ``.env`` (no symlink out), every ``include:``/``extends:`` target (literal, inside,
-    followed recursively) and every path in those targets (literal — they never reach the
-    render). A ``-f`` file OUTSIDE the checkout came from the adopted config or the operator's
-    environment, not the box, and is not scanned."""
+    project ``.env`` (no symlink out, but to ``/dev/null``), every ``include:``/``extends:``
+    target (literal, inside, followed recursively) and every path in those targets (literal —
+    they never reach the render). A ``-f`` file OUTSIDE the checkout came from the adopted config
+    or the operator's environment, not the box, and is not scanned."""
     import yaml
 
     from . import mountwrite  # lazy, like yaml: stdlib-only, for the box-writable files below
@@ -213,7 +262,8 @@ def raw_problems(files: list[Path], project_dir: Path, roots: Iterable[Path]) ->
     check = _Checker(roots)
     seen: set[Path] = set()
     dotenv = project_dir / ".env"
-    if os.path.lexists(dotenv) and not _inside(dotenv, check.roots):
+    # A link to /dev/null passes (:func:`_nothing`); `stack._not_regular` leaves `.env` alone.
+    if os.path.lexists(dotenv) and not _inside(dotenv, check.roots) and not _nothing(dotenv):
         check.refuse("project", ".env", dotenv, "is a symlink outside the checkout")
 
     def scan(path: Path, *, top: bool, base: Path | None = None) -> None:

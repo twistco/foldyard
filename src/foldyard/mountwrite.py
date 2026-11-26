@@ -89,8 +89,9 @@ def _dev_null() -> int | None:
     return _DEV_NULL[0]
 
 
-def write(root: Path, rel: str | Path, data: bytes) -> None:
-    """Write ``data`` to ``root/rel`` atomically, following no symlink below ``root``. Raises
+def write(root: Path, rel: str | Path, data: bytes, *, mode: int | None = None) -> None:
+    """Write ``data`` to ``root/rel`` atomically, following no symlink below ``root``, as a file
+    with permission bits ``mode`` (default: ``0o644`` less the umask). Raises
     ``ValueError`` for a ``rel`` that isn't a plain relative path inside ``root``, and ``OSError``
     (``ELOOP``/``ENOTDIR``) when a directory along it is a symlink or not a directory.
 
@@ -118,6 +119,8 @@ def write(root: Path, rel: str | Path, data: bytes) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
         try:
             with os.fdopen(fd, "wb") as fh:
+                if mode is not None:  # on the new file's own fd: nothing the box placed is touched
+                    os.fchmod(fh.fileno(), mode)
                 fh.write(data)
             os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
         except BaseException:

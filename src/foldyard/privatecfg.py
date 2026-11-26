@@ -166,19 +166,27 @@ def is_main_checkout(main: Path) -> bool:
 
 
 def read_nofollow(root: Path, rel: Path) -> str | None:
-    """``root/rel``'s text, following no link below ``root``; ``None`` when it isn't there."""
+    """``root/rel``'s text, following no link below ``root``; ``None`` when it isn't there. Raises
+    ``OSError`` for a link, or for anything but a regular file of at most
+    :data:`mountwrite.TEXT_LIMIT` (a FIFO the box keeps writing to would read without end), and
+    ``ValueError`` for text that isn't UTF-8."""
     try:
         dfd = mountwrite._open_dir(root, rel.parts[:-1])
     except FileNotFoundError:
         return None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
     try:
-        fd = os.open(rel.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        fd = os.open(rel.name, flags, dir_fd=dfd)
     except FileNotFoundError:
         return None
     finally:
         os.close(dfd)
-    with os.fdopen(fd, "rb") as fh:
-        return fh.read().decode()
+    try:
+        return mountwrite.read_opened(
+            fd, limit=mountwrite.TEXT_LIMIT, name=str(root / rel)
+        ).decode()
+    finally:
+        os.close(fd)
 
 
 def exclude_block() -> str:
@@ -227,7 +235,11 @@ def write_exclude(main: Path) -> str:
 def drop_gitignore_block(main: Path) -> str | None:
     """Take foldyard's block back out of ``main``'s ``.gitignore`` (a setup made the usual way),
     with the blank line ``fy init`` put before it. A ``.gitignore`` left empty that git doesn't
-    track was ``fy init``'s own, and goes. ``None`` when there was no block."""
+    track was ``fy init``'s own, and goes. ``None`` when there was no block. ``"linked"`` when
+    ``.gitignore`` is a link, left alone like ``fy init`` leaves it: git doesn't read one, so a
+    block in the file it names hides nothing, and the link may be the box's or a colleague's."""
+    if (main / ".gitignore").is_symlink():
+        return "linked"
     text = read_nofollow(main, Path(".gitignore"))
     if text is None:
         return None
@@ -298,9 +310,12 @@ def problems(checkout: Path) -> tuple[list[str], list[str]]:
     fails = [f"git tracks {p}: take it out of your branch's history before you push" for p in found]
     warns = [f"git would show {p}: {again} hides it" for p in unhidden(checkout) if p not in found]
     try:
-        gitignore = read_nofollow(checkout, Path(".gitignore")) or ""
-    except (OSError, ValueError):  # a link, or not UTF-8: either may be the box's
-        warns.append("couldn't read .gitignore (a link?), so foldyard's block may be in it")
+        # Git doesn't read a .gitignore that's a link, so a block in the file it names hides
+        # nothing, and `fy init --private` leaves the link alone (`drop_gitignore_block`).
+        linked = (checkout / ".gitignore").is_symlink()
+        gitignore = "" if linked else read_nofollow(checkout, Path(".gitignore")) or ""
+    except (OSError, ValueError):  # not a regular file, or not UTF-8: either may be the box's
+        warns.append("couldn't read .gitignore, so foldyard's block may be in it")
     else:
         if init.GITIGNORE_BEGIN in gitignore:
             fix = f"{again} moves it out"

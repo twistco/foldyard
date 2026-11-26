@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -657,11 +658,13 @@ def render_local(opts: InitOptions) -> str:
 def _write_local_example(target: Path, opts: InitOptions, *, force: bool) -> str:
     """Write ``foldyard.local.toml.example`` beside the config. Returns a status word ("written" |
     "kept") for the caller to report. Never clobbers without ``--force``: this template is meant to
-    grow into a project's own menu of overrides, and a re-run of `init` must not throw that away."""
+    grow into a project's own menu of overrides, and a re-run of `init` must not throw that away.
+    A link counts as there, and ``--force`` replaces it: the checkout may be box-writable, and
+    writing through one would put the template in whatever file of yours it names ("linked")."""
     path = target / LOCAL_EXAMPLE
-    if path.exists() and not force:
-        return "kept"
-    path.write_text(render_local(opts))
+    if os.path.lexists(path) and not force:
+        return "linked" if path.is_symlink() else "kept"
+    mountwrite.write(target, LOCAL_EXAMPLE, render_local(opts).encode())
     return "written"
 
 
@@ -681,27 +684,39 @@ def _gitignore_block() -> str:
 def _update_gitignore(target: Path) -> str:
     """Ensure ``target/.gitignore`` carries the managed foldyard block. Idempotent: a re-run
     replaces the block in place rather than appending a duplicate. Returns a status word
-    ("created" | "added" | "updated" | "unchanged") for the caller to report."""
+    ("created" | "added" | "updated" | "unchanged" | "linked") for the caller to report.
+
+    The checkout may be box-writable, so nothing here follows a link: every write replaces the
+    name (:func:`mountwrite.write`). A ``.gitignore`` that is a link is left alone ("linked"),
+    neither written through (it may name a file of yours) nor replaced (it may be a colleague's
+    own): git doesn't read a ``.gitignore`` that's a link, so the block would do nothing there."""
     path = target / ".gitignore"
     block = _gitignore_block()
-    if not path.exists():
-        path.write_text(block + "\n")
+    if path.is_symlink():
+        return "linked"
+    if not os.path.lexists(path):
+        mountwrite.write(target, ".gitignore", (block + "\n").encode())
         return "created"
-    # The checkout may be box-writable: a FIFO or a device there is refused (OSError), not read.
-    existing = mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT).decode()
+    # A FIFO or a device there is refused (OSError), not read; so is a link swapped in meanwhile.
+    # Git reads it as bytes, so one that isn't UTF-8 works: every byte is kept (surrogateescape).
+    raw = mountwrite.read_regular(path, limit=mountwrite.TEXT_LIMIT, follow=False)
+    existing = raw.decode(errors="surrogateescape")
+    st = os.lstat(path)  # the rewrite keeps the file's permissions (a link swapped in: the default)
+    mode = stat.S_IMODE(st.st_mode) & 0o777 if stat.S_ISREG(st.st_mode) else None
     fenced = re.compile(re.escape(GITIGNORE_BEGIN) + r".*?" + re.escape(GITIGNORE_END), re.DOTALL)
     if fenced.search(existing):
         # A function replacement (not the string form) so re never touches `\`/`\g` in block.
         updated = fenced.sub(lambda _: block, existing)
         if updated == existing:
             return "unchanged"
-        path.write_text(updated)
+        mountwrite.write(target, ".gitignore", updated.encode(errors="surrogateescape"), mode=mode)
         return "updated"
     # Append after whatever's there, separated by exactly one blank line.
     prefix = existing if existing.endswith("\n") else existing + "\n"
     if not prefix.endswith("\n\n"):
         prefix += "\n"
-    path.write_text(prefix + block + "\n")
+    data = (prefix + block + "\n").encode(errors="surrogateescape")
+    mountwrite.write(target, ".gitignore", data, mode=mode)
     return "added"
 
 
@@ -762,14 +777,17 @@ def init(
         blocks=active,
         private=private,
     )
+    writing = dest  # the file an error is about: a .gitignore the box made a FIFO is refused
     try:
         target.mkdir(parents=True, exist_ok=True)
         # Replaces a link rather than writing through it: the checkout may be box-writable.
         mountwrite.write(target, "foldyard.toml", render(opts).encode())
+        writing = target / LOCAL_EXAMPLE
         local_status = "private" if private else _write_local_example(target, opts, force=force)
+        writing = target / ".gitignore"
         gitignore_status = "unchanged" if private else _update_gitignore(target)
     except OSError as e:
-        print(f"✗ could not write {dest}: {e}")
+        print(f"✗ could not write {writing}: {e}")
         return 1
     floor = f" (floor: foldyard >= {opts.version})" if compat._parse(opts.version) else ""
     print(f"✓ wrote {dest}{floor}")
@@ -779,7 +797,14 @@ def init(
         print("  them, so there's nothing to uncomment and no box to recreate for them.")
     if local_status == "written":
         print(f"✓ wrote {target / LOCAL_EXAMPLE} (per-developer overrides — commit this template)")
-    if gitignore_status != "unchanged":
+    elif local_status == "linked":
+        print(f"⚠ kept {target / LOCAL_EXAMPLE} as it is: it's a link, and fy init never")
+        print("  writes through one (`--force` replaces it with the template)")
+    if gitignore_status == "linked":
+        print(f"⚠ left {target / '.gitignore'} as it is: it's a link, and git doesn't read a")
+        print("  .gitignore that's a link. Ignore these in a .gitignore that's a plain file, or in")
+        print(f"  .git/info/exclude:\n    {' '.join(GITIGNORE_ENTRIES)}")
+    elif gitignore_status != "unchanged":
         verb = "created" if gitignore_status == "created" else "updated"
         print(f"✓ {verb} {target / '.gitignore'} (box-generated dirs + foldyard.local.toml)")
     _install_agent_skill(target, force=force)
@@ -842,7 +867,10 @@ def _init_private(target: Path, *, convert: bool) -> int:
     except (OSError, ValueError) as e:  # ValueError: a file that isn't UTF-8
         print(f"✗ couldn't set up {target} privately: {e}")
         return 1
-    if gitignore:
+    if gitignore == "linked":
+        print(f"⚠ left {target / '.gitignore'} as it is: it's a link, and git doesn't read a")
+        print(f"  .gitignore that's a link. {privatecfg.EXCLUDE} hides foldyard's files instead.")
+    elif gitignore:
         print(f"✓ took foldyard's block back out of .gitignore ({gitignore})")
     if exclude != "unchanged":
         print(f"✓ hid foldyard's files with {target / privatecfg.EXCLUDE} (this clone only)")

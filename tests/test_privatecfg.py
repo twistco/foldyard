@@ -173,6 +173,45 @@ def test_the_exclude_list_is_never_written_through_a_planted_link(repo, tmp_path
     assert list(elsewhere.iterdir()) == []
 
 
+def test_read_nofollow_reads_a_regular_file_and_nothing_else(repo, tmp_path, monkeypatch):
+    # The checkout and its .git are the box's: a FIFO it keeps writing to, or one too big to hold,
+    # must be refused, not read without end. A link is refused, and a missing file is None.
+    assert privatecfg.read_nofollow(repo, Path("README.md")) == "upstream\n"
+    assert privatecfg.read_nofollow(repo, Path("nope")) is None
+    os.mkfifo(repo / "fifo")
+    writer = os.open(repo / "fifo", os.O_RDWR)  # a writer that never closes: a read never ends
+    try:
+        os.write(writer, b"x" * 1024)
+        with pytest.raises(OSError):
+            privatecfg.read_nofollow(repo, Path("fifo"))
+    finally:
+        os.close(writer)
+    (repo / "link").symlink_to(repo / "README.md")
+    with pytest.raises(OSError):
+        privatecfg.read_nofollow(repo, Path("link"))
+    from foldyard import mountwrite
+
+    monkeypatch.setattr(mountwrite, "TEXT_LIMIT", 4)
+    with pytest.raises(OSError):
+        privatecfg.read_nofollow(repo, Path("README.md"))
+
+
+def test_private_init_leaves_a_linked_gitignore_alone(repo, tmp_path, capsys):
+    # Git doesn't read a .gitignore that's a link, so there's no block of foldyard's to take out
+    # that git would see: the link (perhaps a colleague's own) and the file it names stay as they
+    # are, and the private setup goes ahead.
+    yours = tmp_path / "yours"
+    yours.write_text("mine\n" + init._gitignore_block() + "\n")
+    before = yours.read_text()
+    (repo / ".gitignore").unlink()
+    (repo / ".gitignore").symlink_to(yours)
+    assert init.init(path=str(repo), private=True) == 0
+    assert (repo / ".gitignore").is_symlink()
+    assert yours.read_text() == before
+    out = capsys.readouterr().out
+    assert "link" in out and ".gitignore" in out
+
+
 # ── the agent's note ─────────────────────────────────────────────────────────────────────
 
 
@@ -242,16 +281,22 @@ def test_doctor_in_a_worktree_judges_that_worktrees_index(private_repo, tmp_path
     assert status == "fail" and "git tracks foldyard.toml" in detail
 
 
-@pytest.mark.parametrize("what", ["link", "not-utf8"])
-def test_doctor_warns_of_a_gitignore_it_cannot_read(private_repo, tmp_path, what):
+def test_doctor_warns_of_a_gitignore_it_cannot_read(private_repo):
     path = private_repo / ".gitignore"
     path.unlink()
-    if what == "link":
-        path.symlink_to(tmp_path / "nowhere")
-    else:
-        path.write_bytes(b"\xff\xfe\n")
+    path.write_bytes(b"\xff\xfe\n")
     [(status, _name, detail)] = _row()
     assert status == "warn" and "couldn't read .gitignore" in detail
+
+
+def test_doctor_has_nothing_to_say_of_a_linked_gitignore(private_repo, tmp_path):
+    # Git doesn't read a .gitignore that's a link, so a block in the file it names hides nothing,
+    # and `fy init --private` leaves the link alone: a warning there could never be cleared.
+    yours = tmp_path / "yours"
+    yours.write_text(init._gitignore_block() + "\n")
+    (private_repo / ".gitignore").unlink()
+    (private_repo / ".gitignore").symlink_to(yours)
+    assert _row() == [("ok", "private setup", "git sees none of foldyard's files")]
 
 
 @pytest.mark.parametrize("name", ["a\tb.md", "café.md", 'q"uote.md'])
