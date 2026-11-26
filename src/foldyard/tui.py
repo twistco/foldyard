@@ -1273,7 +1273,9 @@ class DevModeTui(App):
         if bid.startswith("fix-"):  # a Doctor-tab repair button, not a mode button
             self._run_fix(self._fix_buttons[bid])
             return
-        axis, value = bid.split("-", 1)
+        if not isinstance(event.button, ModeButton):
+            return
+        axis, value = event.button.axis, event.button.value
         # Apply to the SELECTED workspace (bound), so a posture button writes THAT worktree's mode
         # file (+ reconciles its stack) — not a host-wide global. The supervisor picks it up on its
         # next tick and reconciles that worktree's daemons.
@@ -2078,8 +2080,19 @@ class AxisRow(Vertical):
             emergency = self.emergency or devmode.emergency().get(self.axis, ())
             for value in values:
                 label = f"{value} ⏱" if value in emergency else value
-                yield Button(label, id=f"{self.axis}-{value}")
+                yield ModeButton(self.axis, value, label)
         yield Static("", classes="axis-status")
+
+
+class ModeButton(Button):
+    """A level button that carries its switch and level. Its id, ``<switch>-<level>``, is only
+    for finding it within its row: a switch name can hold a hyphen (``sanity-editor``), so the id
+    can't be split back into the two."""
+
+    def __init__(self, axis: str, value: str, label: str) -> None:
+        super().__init__(label, id=f"{axis}-{value}")
+        self.axis = axis
+        self.value = value
 
 
 class BranchItem(ListItem):

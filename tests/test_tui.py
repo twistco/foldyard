@@ -2325,6 +2325,35 @@ async def test_mode_button_refuses_a_switch_overlapping_another_and_says_which(
     assert state.read_text() == '{"a": "on"}'
 
 
+async def test_a_hyphenated_switchs_button_sets_that_switch(monkeypatch, tmp_path):
+    # A button's id is "<switch>-<level>", so splitting it read `sanity-editor`'s off button as
+    # switch `sanity`, level `editor-off` — refused. The button carries its switch and level.
+    from pbt import Registry, Switch, SyntheticPlugin
+
+    axes = [
+        Switch(name=n, levels=("off", "on"), blurb={"off": "-", "on": "-"})
+        for n in ("sanity", "sanity-editor")
+    ]
+    cfg = config.Config(
+        repo_root=config.repo_root(), worktree="", toml={"project": {"name": "generic"}}
+    )
+    reg = Registry([SyntheticPlugin(axes, [], ())], config=cfg)
+    monkeypatch.setattr(devmode, "registry", lambda: reg)
+    monkeypatch.setattr(config, "mode_file", lambda: tmp_path / "dev-mode.json")
+    monkeypatch.setattr(config, "mirror_file", lambda: tmp_path / "mirror.json")
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(devmode, "missing_secrets", lambda updates: [])
+    sets: list = []
+    monkeypatch.setattr(devmode, "set_mode", _unchanged_set_mode(sets))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        for bid in ("#sanity-editor-on", "#sanity-editor-off", "#sanity-on"):
+            app.on_button_pressed(tui.Button.Pressed(app.query_one(bid, tui.Button)))
+            await pilot.pause()
+    assert sets == [{"sanity-editor": "on"}, {"sanity-editor": "off"}, {"sanity": "on"}]
+
+
 async def test_mode_button_secret_empty_paste_skips_and_applies(monkeypatch, tmp_path):
     # Mirrors ensure_secret's "empty": an operator who wants to arm now and paste later can.
     host_env = _needs_token(monkeypatch, tmp_path)
