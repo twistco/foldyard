@@ -1151,7 +1151,12 @@ def proxy_recommend() -> list[dict]:
     from a grant of the same key, and never for a build. Such an entry carries ``redirects_to``
     (normalised targets); others don't. Malformed entries and invalid keys are dropped rather
     than raising — this is read on prompt paths that must not crash — and
-    :func:`proxy_recommend_dropped` names them for the widenings report."""
+    :func:`proxy_recommend_dropped` names them for the widenings report.
+
+    ``why`` is read as text (:func:`foldyard.term.printable`): it is only ever shown, beside the
+    host, at the consent prompts and in the reports, and the file is box-writable. A key holding
+    anything a terminal acts on is dropped, not escaped: it is what the operator says yes to, and
+    no host has one."""
     return _proxy_recommend_parsed()[0]
 
 
@@ -1165,6 +1170,7 @@ def proxy_recommend_dropped() -> list[str]:
 def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
     # stdlib-only, no cycle: allowlist never imports config-time
     from .allowlist import follow_source, follow_target, grant_key
+    from .term import printable
 
     raw = _table("proxy").get("recommend")
     if raw is None:
@@ -1200,10 +1206,10 @@ def _proxy_recommend_parsed() -> tuple[list[dict], list[str]]:
             dropped.append(repr(entry)[:80])
             continue
         key = grant_key(host)
-        if key is None:
+        if key is None or not key.isprintable():
             dropped.append(repr(host.strip() or entry)[:80])
         elif (key, bool(follow)) not in {(e["host"], bool(e.get("redirects_to"))) for e in out}:
-            item: dict = {"host": key, "why": why.strip(), "when": when}
+            item: dict = {"host": key, "why": printable(why.strip()), "when": when}
             if follow:
                 item["redirects_to"] = follow
             out.append(item)
@@ -1358,7 +1364,12 @@ def machine_firewall_allow() -> list[FirewallOpening]:
     """``[machine] firewall_allow`` — direct TCP openings in the VM firewall, for a client that
     can't use an HTTP proxy (cloud-sql-proxy's instance dial). Each is ``{ to, port, why }``: one
     IP address (never a range or a name: nothing resolves at boot), one TCP port, and a reason. On
-    your computer this is the adopted config, so the box can't widen it. Refuses a bad entry."""
+    your computer this is the adopted config, so the box can't widen it. Refuses a bad entry.
+
+    The ``why`` is read as text (:func:`foldyard.term.printable`): it is only ever printed, by the
+    widenings report and `fy verify`."""
+    from .term import printable
+
     raw = _table("machine").get("firewall_allow", [])
 
     def bad(why: str) -> SystemExit:
@@ -1392,7 +1403,7 @@ def machine_firewall_allow() -> list[FirewallOpening]:
             raise bad(f"{to} port 53: the wall lets DNS reach local resolvers only")
         if not isinstance(why, str) or not why.strip():
             raise bad(f"{to} port {port} needs a why")
-        opening = FirewallOpening(str(net), port, why.strip())
+        opening = FirewallOpening(str(net), port, printable(why.strip()))
         if all((o.to, o.port) != (opening.to, opening.port) for o in out):
             out.append(opening)
     return out

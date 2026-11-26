@@ -345,6 +345,39 @@ def test_box_cannot_answer_recommendations(env, monkeypatch):
         allowlist.decline("a.example.com")
 
 
+# What the repo wrote is shown at the consent prompt, never obeyed by the terminal: a clipboard
+# write (OSC 52), a line erase that could hide the host being asked about, and a C1 CSI.
+TOML_ESC = r"\u001b]52;c;eA==\u0007\u001b[2K\u009b"
+
+
+def _controls(text: str) -> bool:
+    return any(c in text for c in "\x1b\x07\x9b")
+
+
+@pytest.mark.parametrize("mode", ["ask", "no terminal", "yes to all"])
+def test_a_recommendations_why_carrying_escapes_is_shown_as_text(env, mode):
+    _recommend(env, f'[{{ host = "a.example.com", why = "deps{TOML_ESC}" }}]')
+    assert all(e["why"].isprintable() for e in config.proxy_recommend())
+    prompt, echo, lines = _offer([""])
+    allowlist.offer_recommendations(
+        interactive=mode == "ask", prompt=prompt, echo=echo, accept_all=mode == "yes to all"
+    )
+    text = "\n".join(lines)
+    assert "deps\\x1b]52;c;eA==" in text and not _controls(text)
+
+
+def test_a_recommended_host_carrying_escapes_is_dropped_and_named_as_text(env):
+    # The host is what the operator says yes to: one carrying escapes could rewrite the question
+    # it appears in. No real host has one, so it's ignored — and named, inert, as ignored.
+    _recommend(env, f'["b{TOML_ESC}.example.com", "a.example.com"]')
+    assert [e["host"] for e in config.proxy_recommend()] == ["a.example.com"]
+    (dropped,) = config.proxy_recommend_dropped()
+    assert dropped.isprintable() and "\\x1b]52" in dropped
+    prompt, echo, lines = _offer([""])
+    allowlist.offer_recommendations(interactive=True, prompt=prompt, echo=echo)
+    assert not _controls("\n".join(lines))
+
+
 def test_a_damaged_store_stops_offers_and_a_malformed_declined_is_damage(env):
     _recommend(env, '["a.example.com"]')
     config.allow_store_file().write_text("{broken")

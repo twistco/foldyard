@@ -678,8 +678,13 @@ def _declared_requires() -> dict[str, list[Requires]]:
     the caller (``Registry.__init__``) binds the registry's config around it, like the switch
     snapshot. Malformed entries raise loudly (matching the Switch validation philosophy: a broken
     declaration fails in development, not as a guard that silently never fires); ``when`` /
-    ``accepts`` take a scalar or a list, like an ``[[overlay]]`` entry's ``when`` values."""
+    ``accepts`` take a scalar or a list, like an ``[[overlay]]`` entry's ``when`` values.
+    ``reason`` and ``message`` are read as text (:func:`foldyard.term.printable`): `fy mode` prints
+    them on your computer, and the file is box-writable. The names — ``switch``, ``needs``, the
+    levels, ``severity`` — are refused if they hold a character a terminal acts on: no real one
+    does, and `fy mode` spells them into its refusals."""
     from .. import config as config_mod
+    from ..term import printable
 
     def levels(raw: object) -> tuple[str, ...]:
         vals = raw if isinstance(raw, list) else [] if raw in (None, "") else [raw]
@@ -693,14 +698,20 @@ def _declared_requires() -> dict[str, list[Requires]]:
                 f"[[require]] entry must name a string `switch` (the owning switch) and `needs` "
                 f"(the required switch): {entry!r}"
             )
+        names = [owner, needs, *levels(entry.get("when")), *levels(entry.get("accepts"))]
+        if not all(name.isprintable() for name in [*names, str(entry.get("severity", ""))]):
+            raise ValueError(
+                f"[[require]] entry names a switch or level holding a character a terminal acts on "
+                f"— no real name does: {entry!r}"
+            )
         out.setdefault(owner, []).append(
             Requires(
                 when=levels(entry.get("when")),
                 switch=needs,
                 accepts=levels(entry.get("accepts")),
                 severity=str(entry.get("severity", "error")),
-                reason=str(entry.get("reason", "")),
-                message=str(entry.get("message", "")),
+                reason=printable(str(entry.get("reason", ""))),
+                message=printable(str(entry.get("message", ""))),
             )
         )
     return out
@@ -1056,8 +1067,11 @@ class Registry:
         hint at your own vault is one ``how = …`` line, never a copy of the plugin's ``pattern``
         (which would then rot the day the plugin tightens it). Malformed rows raise loudly, matching
         the ``[[require]]`` philosophy: a broken declaration fails in development, not as a prompt
-        that silently never fires."""
+        that silently never fires. A row's ``label`` and ``how`` are read as text
+        (:func:`foldyard.term.printable`): the capture prompt shows them, and the file is
+        box-writable."""
         from .. import config as config_mod
+        from ..term import printable
 
         out: list[Secret] = []
         for plugin in self.plugins:
@@ -1082,8 +1096,8 @@ class Registry:
                 base = by_var.get(var)
                 by_var[var] = Secret(
                     var=var,
-                    label=str(entry.get("label") or (base.label if base else var)),
-                    how=str(entry.get("how", base.how if base else "")),
+                    label=printable(str(entry.get("label") or (base.label if base else var))),
+                    how=printable(str(entry.get("how", base.how if base else ""))),
                     pattern=str(entry.get("pattern", base.pattern if base else "")),
                     b64=bool(entry.get("base64", base.b64 if base else False)),
                 )

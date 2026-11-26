@@ -408,8 +408,11 @@ def _secret_value(var: str) -> str:
 
 def _secret_hint(var: str, default: str) -> str:
     """The hint the operator actually sees, for doctor rows: a consumer's `[[secret]]` override for
-    ``var`` if there is one (the capture prompt gets the same one from ``Registry.secrets``)."""
+    ``var`` if there is one (the capture prompt gets the same one from ``Registry.secrets``), read
+    as text as it is there."""
+    from ..term import printable
+
     for entry in config.secret_specs():
         if entry.get("var") == var and entry.get("how"):
-            return str(entry["how"])
+            return printable(str(entry["how"]))
     return default

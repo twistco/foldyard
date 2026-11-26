@@ -749,3 +749,39 @@ def test_a_recommend_that_is_not_a_list_is_reported_too(checkout):
     exp = collect(checkout(BASE + 'recommend = "pypi.org"\n'))
     assert exp.recommended == [] and exp.recommend_dropped == ["'pypi.org'"]
     assert exposure.doctor_row(exp)[0] is None  # WARN: config that reads as an ask and isn't
+
+
+# ── what the repo wrote is shown, never obeyed by the terminal ────────────────────────
+
+
+# A clipboard write (OSC 52), a line erase that can hide the entry before it, and a C1 CSI.
+TOML_ESC = r"\u001b]52;c;eA==\u0007\u001b[2K\u009b"
+
+
+def _controls(text: str) -> bool:
+    return any(c in text for c in "\x1b\x07\x9b")
+
+
+def test_config_text_carrying_escapes_is_shown_as_text_in_the_report(checkout):
+    # The report exists to show what the repo asks for: an entry made of escapes could erase the
+    # line naming the widening before it. Every value stays what the proxy matches; only the
+    # printed copy is escaped.
+    cfg = checkout(
+        BASE + f'passthrough = ["evil{TOML_ESC}.example", "@nope{TOML_ESC}"]\n'
+        f'allow = ["old{TOML_ESC}.example"]\n'
+        f'recommend = [{{ host = "pypi.org", why = "deps{TOML_ESC}" }}]\n'
+        f'\n[machine]\nbackend = "lima"\nfirewall = true\nfirewall_allow = '
+        f'[{{ to = "34.147.131.70", port = 3307, why = "SQL{TOML_ESC}" }}]\n'
+        f'\n[claude.settings]\n"key{TOML_ESC}" = 1\n'
+    )
+    exp = collect(cfg)
+    assert exp.literals == ["evil\x1b]52;c;eA==\x07\x1b[2K\x9b.example"]  # the data, as written
+    # A why is only ever shown (here, and by `fy verify`'s firewall rows), so it's read as text.
+    assert [why for _to, _port, why in exp.openings] == ["SQL\\x1b]52;c;eA==\\x07\\x1b[2K\\x9b"]
+    body = rendered(cfg)
+    assert not _controls(body)
+    for shown in ("evil\\x1b]52", "@nope\\x1b]52", "old\\x1b]52", "deps\\x1b]52", "SQL\\x1b]52"):
+        assert shown in body, shown
+    assert "key\\x1b]52" in body
+    ok, _name, detail = exposure.doctor_row(exp)
+    assert ok is None and "@nope\\x1b]52" in detail and not _controls(detail)

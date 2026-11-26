@@ -42,6 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import config, configpin
+from .term import printable
 
 # Well-known hosts that serve git over HTTPS. The proxy refuses a git push by its URL
 # (`egress_proxy._is_git_push`), which it can't see inside a passthrough tunnel — so one of these
@@ -169,7 +170,7 @@ class Exposure:
             f"`{key}` is IGNORED ({_plural(len(values), 'entry', 'entries')})"
             for key, values, _fix, _origin in self.ignored
         ]
-        out += [f"unknown passthrough bundle @{ref}" for ref in self.unknown_refs]
+        out += [f"unknown passthrough bundle @{printable(ref)}" for ref in self.unknown_refs]
         if self.recommend_dropped:
             n = len(self.recommend_dropped)
             out.append(f"`proxy.recommend` ignores {_plural(n, 'entry', 'entries')}")
@@ -589,7 +590,12 @@ def collect(cfg: config.Config, mode: dict) -> Exposure:
 
 def render(exp: Exposure) -> list[str]:
     """The full inventory, as lines. Ordered by how much a reader should care: what isn't
-    decrypted, where credentials go, what steers the agent, what's stale."""
+    decrypted, where credentials go, what steers the agent, what's stale.
+
+    Every line is read as text (:func:`foldyard.term.printable`) on its way out: most carry what
+    the config wrote, which the box can write — and an entry made of escapes could erase the line
+    naming the widening before it. Only the printed copy: the values in ``exp`` stay the data the
+    proxy matches."""
     if exp.in_box:
         where = f"[{exp.label} · box view: this checkout, not the copy the host adopted]"
     elif not exp.adopted:
@@ -765,7 +771,7 @@ def render(exp: Exposure) -> list[str]:
     out.append(f"  Context: egress {wall} · {allowlist}.")
     if not exp.wall:
         out.append("    So the exemptions above bound what is LOGGED, not what can leave.")
-    return out
+    return [printable(line) for line in out]
 
 
 def doctor_row(exp: Exposure) -> tuple[bool | None, str, str]:

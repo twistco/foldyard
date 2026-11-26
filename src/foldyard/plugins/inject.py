@@ -283,7 +283,14 @@ class InjectPlugin(Plugin):
 
 
 def _validated(spec: dict, where: str) -> dict:
-    """One row checked against its kind's shape, with a pinned host filled in (see ``_specs``)."""
+    """One row checked against its kind's shape, with a pinned host filled in (see ``_specs``).
+    Its ``label`` is read as text (:func:`foldyard.term.printable`): it is only ever shown — as
+    the switch's `fy mode` blurb, the proxy's daemon label — and the file is box-writable. Every
+    other field is a name (a switch, a host, a header, a dummy) and is refused if it holds a
+    character a terminal acts on: no real one does, and they reach `fy mode`, the capture prompt
+    and the proxy's labels as they are."""
+    from ..term import printable
+
     name = spec.get("kind", DEFAULT)
     kind = KINDS.get(name) if isinstance(name, str) else None
     if kind is None:
@@ -316,8 +323,28 @@ def _validated(spec: dict, where: str) -> dict:
             )
         spec = {**spec, "host": kind.host}
     spec = {**spec, "box_env": _box_env(spec.get("box_env", {}), where)}
+    for key, value in spec.items():
+        if key != "label" and key not in RETIRED_FIELDS and not _printable(value):
+            raise ValueError(
+                f"{where}: `{key}` holds a character a terminal acts on ({value!r}) — it is a "
+                "name, and no real one does"
+            )
+    if spec.get("label"):
+        spec["label"] = printable(str(spec["label"]))
     kind.check(spec, where)
     return spec
+
+
+def _printable(value: object) -> bool:
+    """No string in ``value`` — itself, a list's items, a table's keys and values — holds a
+    character a terminal acts on (:meth:`str.isprintable`)."""
+    if isinstance(value, str):
+        return value.isprintable()
+    if isinstance(value, dict):
+        return all(_printable(k) and _printable(v) for k, v in value.items())
+    if isinstance(value, list):
+        return all(_printable(v) for v in value)
+    return True
 
 
 def _box_env(raw: object, where: str) -> dict[str, str]:

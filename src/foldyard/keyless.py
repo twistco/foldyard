@@ -475,10 +475,12 @@ def secret_entry(value: str, secret) -> tuple[str | None, str]:
     bare ``key.pem`` would be whatever the box put there. ``~/…`` and absolute paths are the
     operator's own choice; a terminal's quoting or backslash-escaping of a dragged-in path is
     undone first."""
+    from .term import printable
+
     stored = secret_ok(value, secret.pattern, secret.b64)
     if stored is not None:
         return stored, ""
-    shape = "doesn't look like " + secret.label
+    shape = "doesn't look like " + printable(secret.label)  # a box can choose it (`ensure_secret`)
     if not secret.b64:
         return None, f"that {shape}"
     path = _entry_path(value)
@@ -558,12 +560,18 @@ def ensure_secret(
     ``secret.how`` is echoed as the "where do I get this?" line and is **never executed** — the
     human runs it themselves and pastes the result. See :class:`~foldyard.plugins.Secret`.
 
-    Pure but for the injected ``prompt``/``echo``, like :func:`ensure_cred`."""
+    Pure but for the injected ``prompt``/``echo``, like :func:`ensure_cred`. ``label`` and ``how``
+    are shown as text (:func:`foldyard.term.printable`): either can carry what a box wrote — a
+    ``[[secret]]`` row's words, an ``[[inject]]`` row's switch and host — and this is the prompt a
+    credential is pasted into."""
+    from .term import printable
+
     if host_env_has(host_env, secret.var):
         return "present"
+    label, how = printable(secret.label), printable(secret.how)
     if not interactive:
         echo(
-            f"⚠ {secret.label} isn't in {host_env} (${secret.var}) — the mode that needs it "
+            f"⚠ {label} isn't in {host_env} (${secret.var}) — the mode that needs it "
             f"can't mint until it's set. Run `fy mode …` or `fy box up` on your computer with a "
             "TTY to be prompted."
         )
@@ -571,11 +579,11 @@ def ensure_secret(
     where = "stored on your computer at 0600, never in the box or the repo"
     if secret.b64:
         # The file's path first: foldyard encodes it, so the key never shows on a screen.
-        echo(f"▶ {secret.label}: give its file's full path, or paste it as base64 ({where}).")
+        echo(f"▶ {label}: give its file's full path, or paste it as base64 ({where}).")
     else:
-        echo(f"▶ {secret.label}: paste it ({where}).")
-    if secret.how:
-        echo(f"  (get it with: {secret.how})")
+        echo(f"▶ {label}: paste it ({where}).")
+    if how:
+        echo(f"  (get it with: {how})")
     if secret.b64:
         echo("  (drag the file onto this window, then press Enter — nothing shows as you do)")
     value = prompt("  value (hidden): ").strip()
@@ -591,7 +599,7 @@ def ensure_secret(
         return "mismatch"
     append_host_env(host_env, secret.var, to_store)
     echo(
-        f"✓ {note + ', ' if note else ''}stored {secret.label} in {host_env} (0600). The token "
+        f"✓ {note + ', ' if note else ''}stored {label} in {host_env} (0600). The token "
         "service on your computer reads it when it mints."
     )
     return "stored"

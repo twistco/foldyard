@@ -343,6 +343,25 @@ def test_the_gate_shows_a_build_recommendations_why(env):
     assert "CfT downloads" in asked[0]
 
 
+def test_a_build_recommendations_why_carrying_escapes_is_shown_as_text(env):
+    # The why is the repo's (box-writable) text, beside the host the operator is asked to grant.
+    esc = r"\u001b]52;c;eA==\u0007\u001b[2K\u009b"
+    toml = config.current().repo_root / "foldyard.toml"
+    toml.write_text(
+        toml.read_text().replace(
+            "[proxy]\n",
+            f'[proxy]\nrecommend = [{{ host = "storage.googleapis.com", why = "CfT{esc}",'
+            ' when = "build" }]\n',
+        )
+    )
+    config.clear_caches()
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com")]), (0, [])])
+    prompt, asked = _answers("o")
+    buildgate.run(build, what="box image", interactive=True, prompt=prompt)
+    assert "CfT\\x1b]52;c;eA==" in asked[0]
+    assert not any(c in asked[0] for c in "\x1b\x07\x9b")
+
+
 def test_the_shared_lines_are_build_recommendations(env):
     from foldyard import configpin
 

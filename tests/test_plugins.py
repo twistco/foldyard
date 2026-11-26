@@ -616,6 +616,103 @@ def test_declared_secret_overrides_a_plugins_own(fresh_config, tmp_path):
     assert pem.pattern == kinds.PEM_PATTERN
 
 
+# What a row's text says reaches your computer's terminal inert: a clipboard write (OSC 52), a line
+# erase and a C1 CSI, written as TOML escapes the way a box would write them.
+TOML_ESC = r"\u001b]52;c;eA==\u0007\u001b[2K\u009b"
+
+
+def _inert(text: str) -> bool:
+    return not any(c in text for c in "\x1b\x07\x9b") and "\\x1b]52;c;eA==" in text
+
+
+def test_a_declared_secrets_label_and_hint_reach_the_prompt_as_text(fresh_config, tmp_path):
+    # The capture prompt is where a credential gets pasted: what it says must be what it shows.
+    (tmp_path / "foldyard.toml").write_text(
+        f'[[secret]]\nvar = "PENPOT_TOKEN"\nlabel = "Penpot{TOML_ESC}"\nhow = "op{TOML_ESC}"\n'
+        'pattern = "pp-*"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    (secret,) = Registry([]).secrets({})
+    assert _inert(secret.label) and _inert(secret.how)
+    lines: list[str] = []
+    status = keyless.ensure_secret(
+        tmp_path / "host.env", secret, interactive=True, prompt=lambda _q: "x", echo=lines.append
+    )
+    assert status == "mismatch"  # …and its refusal names the label too
+    assert _inert("\n".join(lines)) and "doesn't look like Penpot\\x1b]52" in lines[-1]
+    assert _inert(kinds._secret_hint("PENPOT_TOKEN", ""))  # the doctor row's copy of the hint
+
+
+def test_an_inject_rows_label_reaches_fy_mode_as_text(fresh_config, tmp_path):
+    # The label is free text, shown as `fy mode`'s blurb for the switch and the proxy's label.
+    (tmp_path / "foldyard.toml").write_text(
+        f'[[inject]]\nswitch = "penpot"\nhost = "penpot.example"\nlabel = "Penpot{TOML_ESC}"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert _inert(devmode.mode_blurb()[("penpot", "on")])
+    (rule,) = devmode.registry().proxy_rules({"penpot": "on"})
+    assert _inert(rule.label)
+
+
+# The names in a row are identifiers — a switch (also a TUI widget id), a host, a header — and no
+# real one holds a character a terminal acts on. They reach `fy mode`, its refusals, the capture
+# prompt and the proxy's labels, so such a row is refused where it's read, like any malformed row,
+# with the value shown as text in the refusal.
+@pytest.mark.parametrize(
+    "row",
+    [
+        f'switch = "pp{TOML_ESC}"\nhost = "penpot.example"\n',
+        f'switch = "pp"\nhost = "penpot{TOML_ESC}.example"\n',
+        f'switch = "pp"\nhost = "penpot.example"\npath_prefix = "/mcp{TOML_ESC}"\n',
+        f'switch = "pp"\nhost = "penpot.example"\nheader = "X-Token{TOML_ESC}"\n',
+        f'switch = "pp"\nhost = "penpot.example"\nbox_env = {{ PP_TOKEN = "x{TOML_ESC}" }}\n',
+        f'switch = "gh{TOML_ESC}"\nkind = "github-app"\napp_id = 1\ninstallation_id = 2\n',
+    ],
+)
+def test_an_inject_row_whose_names_hold_escapes_is_refused_as_text(fresh_config, tmp_path, row):
+    (tmp_path / "foldyard.toml").write_text(f"[[inject]]\n{row}")
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    with pytest.raises(ValueError, match="character a terminal acts on") as e:
+        devmode.registry()
+    assert _inert(str(e.value))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        f'switch = "pp{TOML_ESC}"\nwhen = "on"\nneeds = "gcp"\naccepts = "sa"\n',
+        f'switch = "pp"\nwhen = "on"\nneeds = "gcp{TOML_ESC}"\naccepts = "sa"\n',
+        f'switch = "pp"\nwhen = "on"\nneeds = "gcp"\naccepts = ["sa{TOML_ESC}"]\n',
+        f'switch = "pp"\nwhen = "on{TOML_ESC}"\nneeds = "gcp"\naccepts = "sa"\n',
+        f'switch = "pp"\nwhen = "on"\nneeds = "gcp"\nseverity = "warn{TOML_ESC}"\n',
+    ],
+)
+def test_a_requirement_whose_names_hold_escapes_is_refused_as_text(fresh_config, tmp_path, fields):
+    # Its switch, needs and levels are spelled into `fy mode`'s refusal of a combination.
+    (tmp_path / "foldyard.toml").write_text(
+        f'[[inject]]\nswitch = "pp"\nhost = "penpot.example"\n[[require]]\n{fields}'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    # Some of these were refused already (an unknown switch, a level that isn't one), each naming
+    # the value as text; `needs` and `accepts` were taken as written.
+    with pytest.raises(ValueError) as e:
+        devmode.registry()
+    assert _inert(str(e.value))
+
+
+@pytest.mark.parametrize("field", ["message", "reason"])
+def test_a_declared_requirements_words_reach_fy_mode_as_text(fresh_config, tmp_path, field):
+    # `fy mode` prints a [[require]] row's message (or reason) when it refuses a combination.
+    (tmp_path / "foldyard.toml").write_text(
+        '[[inject]]\nswitch = "penpot"\nhost = "penpot.example"\n'
+        f'[[require]]\nswitch = "penpot"\nwhen = "on"\nneeds = "gcp"\naccepts = "sa"\n'
+        f'{field} = "needs sa{TOML_ESC}"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    issues = devmode.registry().mode_issues({"penpot": "on"})
+    assert issues and all(_inert(message) for _severity, message in issues)
+
+
 @pytest.mark.parametrize(
     "row",
     [
