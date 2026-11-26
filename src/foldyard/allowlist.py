@@ -889,7 +889,7 @@ def with_recommends(text: str, entries: list[dict], *, when: str = "") -> str | 
     import tomllib
 
     try:
-        before = tomllib.loads(text)
+        before = config.loads_toml(text)
     except tomllib.TOMLDecodeError:
         return None
     proxy = before.get("proxy", {})
@@ -937,7 +937,7 @@ def with_recommends(text: str, entries: list[dict], *, when: str = "") -> str | 
                 head = f"{text[: last + 1]}{comma}{text[last + 1 : line_start]}"
                 out = f"{head}{block}{text[line_start:]}"
     try:
-        after = tomllib.loads(out)
+        after = config.loads_toml(out)
     except tomllib.TOMLDecodeError:
         return None
     added = [

@@ -3040,8 +3040,8 @@ class _UnadoptedDrift(_CleanDrift):
     label = "worktree feat"
     worktree = "feat"
 
-    def diff(self) -> str:
-        return ""
+    def diff_rows(self) -> list[configpin.DiffRow]:
+        return []
 
 
 async def test_unadopted_checkout_asks_in_a_modal_instead_of_hanging(monkeypatch):
@@ -3113,7 +3113,11 @@ async def test_the_adopt_modal_shows_what_the_branch_changes_about_mains_config(
     the diff against the config the host already runs for main, right where the answer is given."""
     base = configpin.Baseline(
         digest="deadbeefdeadbeef",
-        body='--- main-adopted/foldyard.toml\n@@ [proxy] @@\n+passthrough = ["evil.example"]',
+        rows=(
+            ("header", "--- main-adopted/foldyard.toml"),
+            ("hunk", "@@ [proxy] @@"),
+            ("add", '+passthrough = ["evil.example"]'),
+        ),
         identical=False,
     )
     ups, adopted = [], []
@@ -3148,21 +3152,66 @@ async def test_the_adopt_modal_shows_what_the_branch_changes_about_mains_config(
         assert len(adopted) == 1 and ups == ["feat"]
 
 
+async def test_the_adopt_modal_styles_a_line_by_what_it_is_not_what_it_says(monkeypatch):
+    """A line inside a multi-line string can read `++ tree/…`, which after its `+` looks like a
+    file header. The modal styled lines by their text, so that addition was dimmed as framing;
+    it is styled by the kind the diff gave it (configpin.diff_rows)."""
+    prompt = '[claude]\nsystem_prompt = """\n{}\n"""\n'
+    rows = configpin.diff_rows(
+        {"foldyard.toml": prompt.format("-- adopted/foldyard.local.toml").encode()},
+        {"foldyard.toml": prompt.format("++ tree/foldyard.local.toml").encode()},
+        old="adopted",
+        new="tree",
+    )
+
+    class _Spoofed(_UnadoptedDrift):
+        label = "main"
+        worktree = ""
+
+        def diff_rows(self) -> list[configpin.DiffRow]:
+            return rows
+
+    monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
+    monkeypatch.setattr(devmode, "box_up", lambda name: (0, "box up"))
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _Spoofed())
+    monkeypatch.setattr(tui.configpin, "main_baseline", lambda drift: None)
+
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause()
+
+        assert isinstance(app.screen, tui.AdoptConfigScreen)
+        shown = app.screen.query_one("#adopt-diff-body", tui.Static).render()
+        assert isinstance(shown, tui.Content)
+        styles = {shown.plain[sp.start : sp.end]: str(sp.style) for sp in shown.spans}
+        assert styles["--- adopted/foldyard.toml"] == "dim"  # the real header
+        assert styles["--- adopted/foldyard.local.toml"] == "red"
+        assert styles["+++ tree/foldyard.local.toml"] == "green"
+
+
 async def test_the_adopt_modals_diff_is_focused_so_a_long_one_can_be_scrolled(monkeypatch):
     """`DevModeTui` sets AUTO_FOCUS = None so the arrows drive its tab strip, which means a modal
     focuses something explicitly or nothing is focused at all. This one showed the config decision
     in a scroll pane and focused nothing, so ↑/↓/PageDown went nowhere and only the first
     screenful was reachable — on the one screen whose content has to be read in full before it's
     answered, and where a first adoption with no baseline renders the WHOLE config."""
-    long_diff = "--- adopted/foldyard.toml\n+++ tree/foldyard.toml\n" + "\n".join(
-        f'+host = "h{i}.example"' for i in range(200)
-    )
+    long_diff: list[configpin.DiffRow] = [
+        ("header", "--- adopted/foldyard.toml"),
+        ("header", "+++ tree/foldyard.toml"),
+        *(("add", f'+host = "h{i}.example"') for i in range(200)),
+    ]
 
     class _LongDrift(_UnadoptedDrift):
         label = "main"
         worktree = ""
 
-        def diff(self) -> str:
+        def diff_rows(self) -> list[configpin.DiffRow]:
             return long_diff
 
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
@@ -3198,7 +3247,7 @@ async def test_the_adopt_modal_still_answers_when_there_is_no_diff_to_focus(monk
     ups, adopted = [], []
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
     monkeypatch.setattr(devmode, "box_up", lambda name: ups.append(name) or (0, "box up"))
-    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _UnadoptedDrift())  # diff() == ""
+    monkeypatch.setattr(tui.configpin, "inspect", lambda cfg: _UnadoptedDrift())  # no diff rows
     monkeypatch.setattr(
         tui.configpin, "adopt", lambda cfg, **_kw: adopted.append(cfg) or _CleanDrift()
     )
@@ -3229,8 +3278,12 @@ async def test_the_adopt_modal_lists_the_config_when_there_is_no_baseline(monkey
         label = "main"
         worktree = ""
 
-        def diff(self) -> str:
-            return "--- adopted/foldyard.toml  (absent)\n+++ tree/foldyard.toml\n+[proxy]"
+        def diff_rows(self) -> list[configpin.DiffRow]:
+            return [
+                ("header", "--- adopted/foldyard.toml  (absent)"),
+                ("header", "+++ tree/foldyard.toml"),
+                ("add", "+[proxy]"),
+            ]
 
     monkeypatch.setattr(devmode, "workspaces", _two_workspaces)
     monkeypatch.setattr(devmode, "box_up", lambda name: (0, "box up"))

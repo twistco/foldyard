@@ -36,6 +36,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -446,16 +448,56 @@ def disabled_blocks(shared: dict, local: dict) -> list[tuple[str, bool]]:
     return found
 
 
+class TooDeep(tomllib.TOMLDecodeError):
+    """A TOML document nested deeper than ``tomllib`` can read (:func:`loads_toml`)."""
+
+    def __init__(self, *_args: object) -> None:
+        # Not TOMLDecodeError's own init: its arguments changed in 3.14 (msg, doc, pos), and the
+        # old free-form ones warn there. The message is all a reader shows. ``*_args`` because a
+        # copy or an unpickle calls this with the message it was made with.
+        ValueError.__init__(self, "nested too deep to read")
+
+
+def loads_toml(text: str) -> dict:
+    """``tomllib.loads``, with a document nested too deep refused as a ``TOMLDecodeError``
+    (:class:`TooDeep`), the same for the same bytes wherever it's called from.
+
+    tomllib recurses about two frames per level of nested array or inline table, so somewhere
+    near 500 ``[`` it raises ``RecursionError``, which no reader catching ``TOMLDecodeError``
+    expects. And where is the CALLER's stack plus the file's nesting: called directly, one file
+    could pass at the launch gate (adopted) and fail in the supervisor or the TUI (read as
+    empty, a ``foldyard.local.toml``'s narrowings with it). So it parses in a thread of its own,
+    which always starts from the same depth. A pre-scan with a fixed cap would need a TOML
+    string lexer, and any mistake in it would refuse a working config.
+
+    Every TOML file the box can write goes through here (a checkout's config, an edit to it),
+    except the editable checkout's ``pyproject.toml``: ``foldyard._editable_version`` parses it
+    itself, keeping the package's root module from importing this one, and catches
+    ``RecursionError`` there. All that verdict picks is which version string ``fy`` reports."""
+    parsed: list[dict] = []
+    failed: list[BaseException] = []
+
+    def parse() -> None:
+        try:
+            parsed.append(tomllib.loads(text))
+        except BaseException as e:  # handed to the caller's thread, re-raised there
+            failed.append(e)
+
+    worker = threading.Thread(target=parse, name="foldyard-toml", daemon=True)
+    worker.start()
+    worker.join()
+    if failed:
+        if isinstance(failed[0], RecursionError):
+            raise TooDeep from None
+        raise failed[0]
+    return parsed[0]
+
+
 def _read_toml(path: Path) -> dict:
-    """Parse one TOML file; best-effort ``{}`` if it's absent or malformed. tomllib is stdlib on
-    3.11+ (the package's requires-python); if it's somehow absent, every file reads as ``{}`` and
-    env / defaults carry."""
+    """Parse one TOML file; best-effort ``{}`` if it's absent or malformed, nested too deep
+    included (:func:`loads_toml`): env / defaults carry."""
     try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover — <3.11 only
-        return {}
-    try:
-        return tomllib.loads(path.read_text())
+        return loads_toml(path.read_text())
     except (OSError, ValueError):  # absent or malformed → contribute nothing
         return {}
 

@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING
 from . import config, term
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 # The consumer config files the host pins. Order matters: it is the deep-merge order
 # (``foldyard.local.toml`` over ``foldyard.toml``), the same one ``config._toml_ambient`` uses.
@@ -184,12 +184,8 @@ def _load(data: bytes | None) -> dict | None:
     if not data:
         return {}
     try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover — <3.11 only
-        return {}
-    try:
-        return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError):  # tomllib recurses per nesting level
+        return config.loads_toml(data.decode("utf-8"))
+    except ValueError:  # not UTF-8, not TOML, or nested too deep (config.TooDeep)
         return None
 
 
@@ -299,9 +295,9 @@ class Drift:
         """``N added, M removed`` across the changed files — the one line that says how big this
         is before anyone reads the diff (and the whole answer when the change is one line).
 
-        Counts the same lines :meth:`diff` prints, so the two can't disagree; when a file changed
+        Counts the lines :meth:`diff_rows` shows, so the two can't disagree; when a file changed
         but nothing meaningful did, it says so rather than reporting a confusing ``0, 0``."""
-        added, removed = _tally(self.diff())
+        added, removed = _tally(self.diff_rows())
         files = ", ".join(n for n in PINNED_FILES if self.pinned.get(n) != self.tree.get(n))
         # Never "only comment lines" when either side is read as empty, whatever its lines say.
         if broken := unparseable(self.tree, self.pinned):
@@ -313,19 +309,23 @@ class Drift:
             return f"only blank/comment lines changed in {files}"
         return f"{added} line(s) added, {removed} removed in {files} (blank/comment lines ignored)"
 
-    def diff(self) -> str:
+    def diff_rows(self) -> list[DiffRow]:
         """The CHANGED lines, adopted → working tree, across every pinned file
-        (:func:`diff_files`) — what adopting would change about what the host runs."""
-        return diff_files(self.pinned, self.tree, old="adopted", new="tree")
+        (:func:`diff_rows`) — what adopting would change about what the host runs."""
+        return diff_rows(self.pinned, self.tree, old="adopted", new="tree")
 
 
-def diff_files(
+# One line of a config diff: what it IS, and its text (:func:`diff_rows`).
+DiffRow = tuple[term.DiffKind, str]
+
+
+def diff_rows(
     old_files: dict[str, bytes | None],
     new_files: dict[str, bytes | None],
     *,
     old: str,
     new: str,
-) -> str:
+) -> list[DiffRow]:
     """The CHANGED lines between two pinned-file sets, labelled ``old``/``new``.
 
     Deliberately not a unified diff. This is read in two places where scrolling isn't
@@ -344,6 +344,11 @@ def diff_files(
     bidi override can't erase or reorder a line under review, and the reviewer sees it is there.
     Only the text changes: whether there IS a difference stays a byte comparison.
 
+    Each line comes with its kind (``term.DiffKind``), set here where the line is made, and every
+    surface styles and counts by that, never by the text: after its ``+``/``-`` the text is the
+    box's, and a changed line whose text starts with ``--``/``++`` (a bare key like ``--x``, or
+    any line in a multi-line string) would pass for a ``---``/``+++`` file header.
+
     The one thing it can hide: a line INSIDE a multi-line string that looks like a comment or
     is blank (the filter is line-based, not a TOML parse). That can never make a difference
     silent — the callers compare BYTES to decide whether there is one, and report an empty diff
@@ -352,9 +357,9 @@ def diff_files(
     such, whatever its lines say (:func:`unparseable`).
 
     Shared by the two comparisons that matter, so neither can render differently from the other:
-    adopted → tree (:meth:`Drift.diff`) and main's adopted copy → a worktree's tree
+    adopted → tree (:meth:`Drift.diff_rows`) and main's adopted copy → a worktree's tree
     (:func:`main_baseline`)."""
-    lines: list[str] = []
+    rows: list[DiffRow] = []
     for name in PINNED_FILES:
         before, after = old_files.get(name), new_files.get(name)
         if before == after:
@@ -366,11 +371,10 @@ def diff_files(
         bad_before, bad_after = (_load(data) is None for data in (before, after))
         if not body and not (bad_before or bad_after):
             continue
-        lines.append(f"--- {old}/{name}" + _state(before, bad_before))
-        lines.append(f"+++ {new}/{name}" + _state(after, bad_after))
-        # After the sign, so a line's role (`term.diff_style` reads the first character) is ours.
-        lines.extend(_shown(line) for line in body)
-    return "\n".join(lines)
+        rows.append(("header", f"--- {old}/{name}" + _state(before, bad_before)))
+        rows.append(("header", f"+++ {new}/{name}" + _state(after, bad_after)))
+        rows.extend((kind, _shown(line)) for kind, line in body)
+    return rows
 
 
 def _state(data: bytes | None, broken: bool) -> str:
@@ -387,16 +391,11 @@ def _shown(line: str) -> str:
     return "\t".join(term.printable(part) for part in line.split("\t"))
 
 
-def _tally(body: str) -> tuple[int, int]:
-    """``(added, removed)`` over a :func:`diff_files` body — the ``+++``/``---`` headers start
-    with the same characters as the lines they introduce, so they're excluded explicitly."""
-    added = removed = 0
-    for line in body.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            added += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            removed += 1
-    return added, removed
+def _tally(rows: Iterable[DiffRow]) -> tuple[int, int]:
+    """``(added, removed)`` over :func:`diff_rows`, by kind: a changed line whose text starts
+    with ``--``/``++``, and so reads like a ``---``/``+++`` header, is still counted."""
+    kinds = [kind for kind, _text in rows]
+    return kinds.count("add"), kinds.count("remove")
 
 
 def _text(data: bytes | None) -> str:
@@ -457,7 +456,7 @@ def _toml_lines(text: str) -> list[str]:
     """``text``'s lines as TOML counts them, not as ``splitlines()`` does: that also breaks on
     NEL (a C1 control) and U+2028/9, which TOML allows inside a string — one value would read as
     two config lines, and the character would vanish into the break instead of being shown
-    (:func:`diff_files`). A bare CR isn't a TOML newline either; a file using them doesn't parse,
+    (:func:`diff_rows`). A bare CR isn't a TOML newline either; a file using them doesn't parse,
     and :func:`unparseable` says so."""
     if not text:
         return []
@@ -492,7 +491,7 @@ def _significant(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def _changed_lines(old: list[tuple[str, str]], new: list[tuple[str, str]]) -> list[str]:
+def _changed_lines(old: list[tuple[str, str]], new: list[tuple[str, str]]) -> list[DiffRow]:
     """The ``-``/``+`` lines between two :func:`_significant` sequences, each run preceded by its
     table header when that moves — every changed line, no context, no elision.
 
@@ -500,21 +499,22 @@ def _changed_lines(old: list[tuple[str, str]], new: list[tuple[str, str]]) -> li
     as junk, and a config file is full of repeated lines (``enabled = true`` under a dozen
     tables) — with it on, a long file's diff quietly degrades into "replaced everything"."""
     matcher = difflib.SequenceMatcher(None, [ln for _s, ln in old], [ln for _s, ln in new], False)
-    out: list[str] = []
+    out: list[DiffRow] = []
     locator: str | None = None
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
-        for sign, (section, line) in [
-            *(("-", row) for row in old[i1:i2]),
-            *(("+", row) for row in new[j1:j2]),
-        ]:
+        changed: list[tuple[term.DiffKind, str, tuple[str, str]]] = [
+            *(("remove", "-", row) for row in old[i1:i2]),
+            *(("add", "+", row) for row in new[j1:j2]),
+        ]
+        for kind, sign, (section, line) in changed:
             if section != locator:
                 # A changed line that IS its own table header locates itself; don't say it twice.
                 if section and line.strip() != section:
-                    out.append(f"@@ {section} @@")
+                    out.append(("hunk", f"@@ {section} @@"))
                 locator = section
-            out.append(f"{sign}{line}")
+            out.append((kind, f"{sign}{line}"))
     return out
 
 
@@ -595,7 +595,7 @@ class Baseline:
     ago). A baseline is only worth anything if an operator approved it."""
 
     digest: str  # main's adopted fingerprint — WHICH reviewed config this was measured against
-    body: str  # the changed lines (:func:`diff_files`); ``""`` when nothing meaningful differs
+    rows: tuple[DiffRow, ...]  # the changed lines (:func:`diff_rows`); none when nothing differs
     identical: bool  # byte-for-byte the same file set as main's adopted copy
     # Main's adopted files that don't parse (and differ from this tree): read as EMPTY for main,
     # so nothing about this tree is "already granted" there (:func:`unparseable`).
@@ -603,7 +603,7 @@ class Baseline:
 
     def summary(self) -> str:
         """``N added, M removed`` — the size of what this branch declares on top of main."""
-        added, removed = _tally(self.body)
+        added, removed = _tally(self.rows)
         return f"{added} line(s) added, {removed} removed"
 
 
@@ -627,7 +627,7 @@ def main_baseline(drift: Drift) -> Baseline | None:
             return None
         return Baseline(
             digest=digest(main.pinned),
-            body=diff_files(main.pinned, drift.tree, old="main-adopted", new="tree"),
+            rows=tuple(diff_rows(main.pinned, drift.tree, old="main-adopted", new="tree")),
             identical=main.pinned == drift.tree,
             main_unparseable=tuple(unparseable(main.pinned, drift.tree)),
         )
@@ -641,7 +641,7 @@ def first_adoption_headline(drift: Drift, base: Baseline | None) -> str:
     Textual modal), so they share the words rather than the formatting.
 
     With a baseline that's the comparison against main. Without one — main's own first adoption, or
-    a worktree cut before main was ever adopted — it introduces :meth:`Drift.diff` against the
+    a worktree cut before main was ever adopted — it introduces :meth:`Drift.diff_rows` against the
     empty pin, i.e. the config itself with its blank and comment lines taken out. That fallback is
     the point: "190 lines across foldyard.toml" is a measurement, not a review, and the comment
     stripping is what makes the real thing short enough to read at a prompt (a typical consumer
@@ -654,7 +654,7 @@ def first_adoption_headline(drift: Drift, base: Baseline | None) -> str:
         note = _read_as_empty_note(list(base.main_unparseable), "main's adopted")
         return f"Against the config the host runs for main (adopted {base.digest}): {note}."
     if base is None:
-        if not drift.diff():
+        if not drift.diff_rows():
             return "It declares nothing the host would read — no config lines at all."
         lead = (
             "Nothing is adopted for main either, so there is no reviewed config to measure this "
@@ -665,7 +665,7 @@ def first_adoption_headline(drift: Drift, base: Baseline | None) -> str:
         return f"{lead}Everything it declares is below, with comments and blank lines stripped:"
     if base.identical:
         return "Byte-identical to the config the host runs for main — adopting grants nothing new."
-    if not base.body:
+    if not base.rows:
         return (
             "The same config the host runs for main (only blank/comment lines differ) — adopting "
             "grants nothing new."
@@ -673,14 +673,14 @@ def first_adoption_headline(drift: Drift, base: Baseline | None) -> str:
     return f"Against the config the host runs for main (adopted {base.digest}): {base.summary()}."
 
 
-def first_adoption_body(drift: Drift, base: Baseline | None) -> str:
+def first_adoption_rows(drift: Drift, base: Baseline | None) -> list[DiffRow]:
     """The reviewable block under :func:`first_adoption_headline`: the diff against main when
-    there is a reviewed baseline, otherwise the config itself (:meth:`Drift.diff` against an empty
-    pin renders every config-carrying line as an addition).
+    there is a reviewed baseline, otherwise the config itself (:meth:`Drift.diff_rows` against an
+    empty pin renders every config-carrying line as an addition).
 
     Never both. Where a baseline exists it is smaller AND more informative — dumping the whole
     file underneath it would bury the handful of lines the branch actually changed."""
-    return base.body if base is not None else drift.diff()
+    return list(base.rows) if base is not None else drift.diff_rows()
 
 
 def effective(cfg: config.Config) -> config.Config:
@@ -776,17 +776,13 @@ def _refuse_unparseable(tree: dict[str, bytes | None], pinned: dict[str, bytes |
     broken = unparseable(tree, pinned)
     if not broken:
         return
-    import tomllib
-
     where = []
     for name in broken:
         try:
-            tomllib.loads((tree[name] or b"").decode("utf-8"))
+            config.loads_toml((tree[name] or b"").decode("utf-8"))
         except UnicodeDecodeError:
             where.append(f"{name}: not UTF-8")
-        except RecursionError:
-            where.append(f"{name}: nested too deep to read")
-        except ValueError as e:
+        except ValueError as e:  # config.TooDeep says "nested too deep to read"
             where.append(f"{name}: {term.printable(str(e))}")
     raise Unparseable(f"{_unparseable_note(broken)} ({'; '.join(where)}) — nothing adopted")
 
@@ -1038,9 +1034,9 @@ def resolve(
         # baseline, otherwise the config itself with the comments stripped out.
         base = main_baseline(drift)
         echo(f"  {first_adoption_headline(drift, base)}")
-        body = first_adoption_body(drift, base)
-        if body:
-            echo(term.paint_diff(body) if term.color_enabled(sys.stderr) else body)
+        rows = first_adoption_rows(drift, base)
+        if rows:
+            echo(term.paint_diff(rows, color=term.color_enabled(sys.stderr)))
             echo("  What these declarations let the host DO: `fy config widenings`.")
         for note in _stale_key_notes(cfg, drift.tree):
             echo(note)
@@ -1079,11 +1075,11 @@ def resolve(
         return "clean"
 
     echo(f"⚠ foldyard.toml changed since the host adopted it [{drift.label}] — {drift.summary()}")
-    body = drift.diff()
-    if body:
+    rows = drift.diff_rows()
+    if rows:
         # Colored here too, not just in `fy config diff`: this is the moment someone decides, and
         # a wall of monochrome context lines is where a one-line insertion hides.
-        echo(term.paint_diff(body) if term.color_enabled(sys.stderr) else body)
+        echo(term.paint_diff(rows, color=term.color_enabled(sys.stderr)))
     for note in _stale_key_notes(cfg, drift.tree):
         echo(note)
     echo(

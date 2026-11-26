@@ -20,6 +20,10 @@ import os
 import re
 import sys
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _GREEN, _RED, _BLUE = "32", "31", "34"
 
@@ -64,36 +68,32 @@ _CYAN, _DIM = "36", "2"
 
 _DIFF_ANSI = {"dim": _DIM, "cyan": _CYAN, "green": _GREEN, "red": _RED}
 
-
-def diff_style(line: str) -> str:
-    """One diff line's style name — ``dim`` (file headers) · ``cyan`` (hunk locators) ·
-    ``green`` (additions) · ``red`` (removals) · ``""`` (anything else).
-
-    LINE-scoped rather than another entry in :data:`_COLORS`: a ``-`` mid-sentence is a hyphen, and
-    the ``---``/``+++`` headers start with the same characters as the lines they introduce (hence
-    the header test first). Split out from :func:`paint_diff` because the TUI renders the same
-    diffs as Rich markup, and two renderers classifying lines differently is how one of them ends
-    up painting an addition as a removal."""
-    if line.startswith(("---", "+++")):
-        return "dim"
-    if line.startswith("@@"):
-        return "cyan"
-    if line.startswith("+"):
-        return "green"
-    if line.startswith("-"):
-        return "red"
-    return ""
+# What a line of a config diff IS (``configpin.diff_rows``): a file header, a hunk's table locator,
+# an addition or a removal.
+DiffKind = Literal["header", "hunk", "add", "remove"]
+_DIFF_STYLES: dict[str, str] = {"header": "dim", "hunk": "cyan", "add": "green", "remove": "red"}
 
 
-def paint_diff(text: str) -> str:
-    """A unified diff, colored the way every diff tool colors one (:func:`diff_style`). Callers
-    apply it at the print site, where the stream is known; the diff itself stays plain text so the
-    gate's prompt and the tests compare byte-exact strings."""
-    out = []
-    for line in text.splitlines():
-        style = diff_style(line)
-        out.append(f"\x1b[{_DIFF_ANSI[style]}m{line}\x1b[0m" if style else line)
-    return "\n".join(out)
+def diff_style(kind: DiffKind) -> str:
+    """The style of one diff line's ``kind``: ``dim`` (file headers) · ``cyan`` (hunk locators) ·
+    ``green`` (additions) · ``red`` (removals).
+
+    By the kind the diff gave the line, never by its text: the text after a ``+``/``-`` is the
+    box's to write, and a changed line whose text starts with ``--``/``++`` (a bare key like
+    ``--x``, or ``++ tree/foldyard.toml`` in a multi-line string) looks like a file header once
+    its sign is in front. Shared because the TUI renders the same diffs, and
+    two renderers classifying lines differently is how one of them ends up painting an addition
+    as a removal."""
+    return _DIFF_STYLES[kind]
+
+
+def paint_diff(rows: Iterable[tuple[DiffKind, str]], *, color: bool) -> str:
+    """A config diff's ``(kind, text)`` rows as text, each line in the color every diff tool
+    gives it (:func:`diff_style`) when ``color``, else exactly the plain text. Callers decide
+    ``color`` at the print site (:func:`color_enabled`), where the stream is known."""
+    if not color:
+        return "\n".join(text for _kind, text in rows)
+    return "\n".join(f"\x1b[{_DIFF_ANSI[diff_style(kind)]}m{text}\x1b[0m" for kind, text in rows)
 
 
 def color_enabled(stream=None) -> bool:

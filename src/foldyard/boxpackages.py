@@ -72,7 +72,7 @@ def _parse(name: str, text: str | None) -> dict:
     if text is None:
         return {}
     try:
-        return tomllib.loads(text)
+        return config.loads_toml(text)
     except tomllib.TOMLDecodeError as e:
         raise Refused(f"{name} doesn't parse ({e}).") from e
 
@@ -147,7 +147,7 @@ def add(root: Path, package: str) -> Path:
 
     new_text = _edited(old_text, package)
     try:
-        new_doc = tomllib.loads(new_text)
+        new_doc = config.loads_toml(new_text)
     except tomllib.TOMLDecodeError as e:
         raise Refused(f"the edit wouldn't parse ({e}).") from e
     expected = dict(old_doc)

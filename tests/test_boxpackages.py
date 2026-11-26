@@ -98,6 +98,7 @@ def test_a_local_file_without_the_list_leaves_it_to_the_shared_one(tmp_path):
         'x = """\n[box]\n"""\n',  # the only "[box]" is inside a string
         "[box]\npackages = 3\n",  # not a list
         "[box\n",  # doesn't parse
+        pytest.param("x = " + "[" * 5000 + "]" * 5000 + "\n", id="too-deep"),  # tomllib recurses
         '[box]\npackages = [\n  "a",  # one\n]\n',  # multi-line: added by hand
         '[box]\npackages = [\n  "a",\n  "b"\n]\n',
     ],

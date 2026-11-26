@@ -1730,16 +1730,16 @@ def config_diff() -> None:
         # that was the state it pointed at most often (a fresh worktree, first `fy box up`).
         base = configpin.main_baseline(drift)
         print(f"  {configpin.first_adoption_headline(drift, base)}")
-        body = configpin.first_adoption_body(drift, base)
-        if body:
+        rows = configpin.first_adoption_rows(drift, base)
+        if rows:
             if base is not None:
                 print("  `-` is what the host runs for main · `+` is what adopting here would add.")
             print()
-            print(term.paint_diff(body) if term.color_enabled() else body)
+            print(term.paint_diff(rows, color=term.color_enabled()))
             print("\n  What these declarations let the host DO: `fy config widenings`.")
         raise typer.Exit(1)
-    body = drift.diff()
-    if not body:
+    rows = drift.diff_rows()
+    if not rows:
         if not drift.changed:
             print(f"✓ [{drift.label}] no difference — the host runs exactly this config.")
             raise typer.Exit(0)
@@ -1750,7 +1750,7 @@ def config_diff() -> None:
         raise typer.Exit(1)
     print(f"⚠ [{drift.label}] adopted {drift.pinned_digest()} → checkout: {drift.summary()}")
     print("  `-` is what the host RUNS today · `+` is what adopting would change it to.\n")
-    print(term.paint_diff(body) if term.color_enabled() else body)
+    print(term.paint_diff(rows, color=term.color_enabled()))
     raise typer.Exit(1)
 
 

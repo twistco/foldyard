@@ -719,6 +719,8 @@ def test_with_recommends_refuses_what_it_cannot_edit_safely():
     # Anything it can't prove is a pure append comes back None; the caller prints the block.
     assert allowlist.with_recommends("[proxy\nbroken", _NEW) is None
     assert allowlist.with_recommends('[proxy]\nrecommend = "not a list"\n', _NEW) is None
+    too_deep = "x = " + "[" * 5000 + "]" * 5000 + "\n"  # tomllib's RecursionError
+    assert allowlist.with_recommends(too_deep, _NEW) is None
 
 
 def test_offer_can_grant_once_for_a_broad_host(env):

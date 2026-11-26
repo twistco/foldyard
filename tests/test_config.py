@@ -5,6 +5,7 @@ nothing reads the real repo or ~/.foldyard."""
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -321,6 +322,67 @@ def test_project_falls_back_to_dir_name_lowercased(fresh_config, tmp_path):
     repo.mkdir()
     fresh_config(FOLDYARD_REPO=repo, FOLDYARD_PROJECT=None)
     assert config.project() == "coolrepo"
+
+
+# tomllib recurses once per nesting level (about 2 frames each), so this raises RecursionError,
+# not TOMLDecodeError: about 500 levels is its limit from a fresh stack
+_TOO_DEEP = "x = " + "[" * 5000 + "]" * 5000 + "\n"
+
+
+@pytest.mark.parametrize("text", ["[project\n", _TOO_DEEP], ids=["broken", "too-deep"])
+def test_a_tree_config_that_doesnt_parse_reads_as_empty(fresh_config, tmp_path, text):
+    # The box writes the tree's config: however it fails to parse, it contributes nothing, never
+    # a traceback from every verb that reads it.
+    repo = tmp_path / "CoolRepo"
+    repo.mkdir()
+    (repo / "foldyard.toml").write_text(text)
+    fresh_config(FOLDYARD_REPO=repo, FOLDYARD_PROJECT=None)
+    assert config.project() == "coolrepo"
+
+
+def test_too_deep_toml_is_refused_as_a_decode_error():
+    # One shape of failure for every reader that already handles TOMLDecodeError.
+    with pytest.raises(tomllib.TOMLDecodeError, match="nested too deep to read"):
+        config.loads_toml(_TOO_DEEP)
+    assert config.loads_toml("a = [[1]]\n") == {"a": [[1]]}
+
+
+def _from_depth(frames: int, fn):
+    """``fn()`` called ``frames`` Python frames deeper than here."""
+    return fn() if frames == 0 else _from_depth(frames - 1, fn)
+
+
+def _verdict(text: str) -> str:
+    try:
+        config.loads_toml(text)
+    except tomllib.TOMLDecodeError as e:
+        return str(e)
+    return "read"
+
+
+@pytest.mark.parametrize("levels", range(100, 640, 20))
+def test_how_deep_a_file_may_nest_is_a_property_of_its_bytes(levels):
+    # tomllib's limit is the caller's stack plus the file's nesting: called directly, ~470 levels
+    # read from a shallow caller and not from one 300 frames deeper. Adoption (the launch gate)
+    # and the readers of the pin (the supervisor, the TUI) parse from different depths, so a file
+    # adopted at one could be read as EMPTY at another, its narrowings dropped with it.
+    text = "x = " + "[" * levels + "]" * levels + "\n"
+    shallow = _verdict(text)
+    assert [_from_depth(frames, lambda: _verdict(text)) for frames in (300, 600)] == [shallow] * 2
+
+
+def test_a_config_nested_as_deep_as_a_real_one_reads():
+    assert config.loads_toml("x = " + "[" * 100 + "]" * 100 + "\n")["x"]
+
+
+def test_too_deep_can_be_copied_and_pickled():
+    import copy
+    import pickle
+
+    with pytest.raises(config.TooDeep) as caught:
+        config.loads_toml(_TOO_DEEP)
+    for again in (copy.copy(caught.value), pickle.loads(pickle.dumps(caught.value))):
+        assert isinstance(again, config.TooDeep) and str(again) == "nested too deep to read"
 
 
 def test_dev_vm_dir_default_is_repo_root(fresh_config, tmp_path):

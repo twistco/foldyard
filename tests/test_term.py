@@ -81,29 +81,30 @@ def test_install_honours_no_color_and_dumb_terminals(monkeypatch, env):
     assert not isinstance(sys.stdout, term.ColorStream)
 
 
-DIFF = """--- adopted/foldyard.toml
-+++ tree/foldyard.toml
-@@ -2,4 +2,4 @@
- [proxy]
--passthrough = ["@all"]
-+passthrough = ["@all", "collector.example"]
- enforce = true"""
+DIFF: list[tuple[term.DiffKind, str]] = [
+    ("header", "--- adopted/foldyard.toml"),
+    ("header", "+++ tree/foldyard.toml"),
+    ("hunk", "@@ [proxy] @@"),
+    ("remove", '-passthrough = ["@all"]'),
+    ("add", '+passthrough = ["@all", "collector.example"]'),
+    ("remove", "--- a line the box wrote, removed"),
+]
 
 
-def test_paint_diff_colors_by_line_role():
-    painted = term.paint_diff(DIFF).splitlines()
+def test_paint_diff_colors_by_what_each_line_is():
+    painted = term.paint_diff(DIFF, color=True).splitlines()
 
-    assert painted[0] == "\x1b[2m--- adopted/foldyard.toml\x1b[0m"  # file headers dim…
-    assert painted[1] == "\x1b[2m+++ tree/foldyard.toml\x1b[0m"  # …NOT read as a +/- line
-    assert painted[2] == "\x1b[36m@@ -2,4 +2,4 @@\x1b[0m"
-    assert painted[3] == " [proxy]"  # context untouched
-    assert painted[4].startswith("\x1b[31m-passthrough")
-    assert painted[5].startswith("\x1b[32m+passthrough")
+    assert painted[0] == "\x1b[2m--- adopted/foldyard.toml\x1b[0m"  # file headers dim
+    assert painted[1] == "\x1b[2m+++ tree/foldyard.toml\x1b[0m"
+    assert painted[2] == "\x1b[36m@@ [proxy] @@\x1b[0m"
+    assert painted[3].startswith("\x1b[31m-passthrough")
+    assert painted[4].startswith("\x1b[32m+passthrough")
+    # By the row's kind, never its text: a removed line that reads like a header is a removal.
+    assert painted[5] == "\x1b[31m--- a line the box wrote, removed\x1b[0m"
 
 
-def test_paint_diff_leaves_prose_alone():
-    """It runs over whole echoed bodies (the adopt prompt), not just the hunks."""
-    assert term.paint_diff("nothing to see") == "nothing to see"
+def test_paint_diff_without_color_is_the_plain_text():
+    assert term.paint_diff(DIFF, color=False) == "\n".join(text for _kind, text in DIFF)
 
 
 def test_color_enabled_follows_the_same_rules_as_install(monkeypatch):

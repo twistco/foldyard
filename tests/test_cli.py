@@ -589,6 +589,7 @@ def test_an_editable_record_for_another_checkout_reports_its_metadata(
     [
         None,
         "[project\n",
+        "x = " + "[" * 5000 + "]" * 5000 + "\n",  # tomllib raises RecursionError on it
         b"\xff\xfe",
         '[project]\nname = "foldyard"\ndynamic = ["version"]\n',
         '[project]\nname = "foldyard"\nversion = 3\n',
@@ -599,6 +600,7 @@ def test_an_editable_record_for_another_checkout_reports_its_metadata(
     ids=[
         "missing",
         "malformed",
+        "too-deep",
         "not-utf8",
         "dynamic",
         "not-a-string",

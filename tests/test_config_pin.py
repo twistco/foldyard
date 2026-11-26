@@ -64,6 +64,11 @@ def _current(cfg) -> Path:
     return selected
 
 
+def _plain(rows: list[configpin.DiffRow] | tuple[configpin.DiffRow, ...]) -> str:
+    """A diff's rows as the text every surface prints when it isn't colouring."""
+    return term.paint_diff(rows, color=False)
+
+
 def _prompted(answer: str):
     """(prompt, echo, lines) for driving `resolve` with a canned answer, like keyless's tests."""
     lines: list[str] = []
@@ -253,7 +258,7 @@ def test_comment_and_blank_noise_never_reaches_the_diff(checkout):
     drift = configpin.inspect(checkout)
 
     assert drift.changed  # the bytes differ…
-    assert drift.diff().splitlines() == [  # …but only one line of CONFIG did
+    assert _plain(drift.diff_rows()).splitlines() == [  # …but only one line of CONFIG did
         "--- adopted/foldyard.toml",
         "+++ tree/foldyard.toml",
         "@@ [proxy] @@",
@@ -269,7 +274,7 @@ def test_a_comment_only_edit_is_reported_as_drift_with_nothing_to_review(checkou
     (checkout.repo_root / "foldyard.toml").write_text(TOML + "\n# just documenting this\n")
     drift = configpin.inspect(checkout)
 
-    assert drift.changed and drift.diff() == ""
+    assert drift.changed and _plain(drift.diff_rows()) == ""
     assert drift.summary() == "only blank/comment lines changed in foldyard.toml"
 
     prompt, echo, lines = _prompted("i")
@@ -284,7 +289,7 @@ def test_every_real_change_is_shown_however_many_there_are(checkout):
     (checkout.repo_root / "foldyard.toml").write_text(
         TOML + "\n[[inject]]\n" + "\n".join(f'host = "h{i}.example"' for i in range(400))
     )
-    body = configpin.inspect(checkout).diff()
+    body = _plain(configpin.inspect(checkout).diff_rows())
 
     assert body.count("\n+host = ") == 400
     assert "more diff lines" not in body
@@ -298,7 +303,7 @@ def test_changed_lines_are_located_by_their_table(checkout):
     (checkout.repo_root / "foldyard.toml").write_text(
         TOML + '\n[[inject]]\nhost = "api.example"\n\n[claude]\nenabled = true\n'
     )
-    body = configpin.inspect(checkout).diff().splitlines()
+    body = _plain(configpin.inspect(checkout).diff_rows()).splitlines()
 
     assert body[2:] == [
         "+[[inject]]",
@@ -427,7 +432,7 @@ def test_the_diff_stays_plain_text_and_the_summary_sizes_it(checkout):
     (checkout.repo_root / "foldyard.toml").write_text(EDITED)
     drift = configpin.inspect(checkout)
 
-    assert "\x1b" not in drift.diff()
+    assert "\x1b" not in _plain(drift.diff_rows())
     # One line replaced: the `+++`/`---` headers must not be counted as an add/remove.
     assert drift.summary() == (
         "1 line(s) added, 1 removed in foldyard.toml (blank/comment lines ignored)"
@@ -631,7 +636,7 @@ def test_a_worktrees_first_adoption_is_diffed_against_mains_adopted_config(check
 
     assert base is not None and not base.identical
     assert base.digest == configpin.inspect(checkout).pinned_digest()
-    assert base.body.splitlines() == [
+    assert _plain(base.rows).splitlines() == [
         "--- main-adopted/foldyard.toml",
         "+++ tree/foldyard.toml",
         "@@ [proxy] @@",
@@ -648,7 +653,7 @@ def test_a_worktree_matching_main_says_it_grants_nothing_new(checkout, worktree)
     drift = configpin.inspect(worktree)
     base = configpin.main_baseline(drift)
 
-    assert base is not None and base.identical and base.body == ""
+    assert base is not None and base.identical and _plain(base.rows) == ""
     assert "grants nothing new" in configpin.first_adoption_headline(drift, base)
 
 
@@ -660,7 +665,7 @@ def test_a_comment_only_difference_from_main_still_grants_nothing_new(checkout, 
     drift = configpin.inspect(worktree)
     base = configpin.main_baseline(drift)
 
-    assert base is not None and not base.identical and base.body == ""
+    assert base is not None and not base.identical and _plain(base.rows) == ""
     headline = configpin.first_adoption_headline(drift, base)
     assert "only blank/comment lines differ" in headline and "nothing new" in headline
 
@@ -677,7 +682,7 @@ def test_the_baseline_is_mains_ADOPTED_copy_never_its_working_tree(checkout, wor
     base = configpin.main_baseline(configpin.inspect(worktree))
 
     assert base is not None and not base.identical
-    assert "+passthrough = [" in base.body  # measured against the ADOPTED copy, so it shows
+    assert "+passthrough = [" in _plain(base.rows)  # measured against the ADOPTED copy, so it shows
 
 
 def test_no_baseline_when_main_itself_was_never_adopted(checkout, worktree):
@@ -727,7 +732,7 @@ def test_the_listing_says_when_a_checkout_declares_nothing(checkout):
     (checkout.repo_root / "foldyard.toml").write_text("# just a header\n\n")
     drift = configpin.inspect(checkout)
 
-    assert drift.diff() == ""
+    assert _plain(drift.diff_rows()) == ""
     assert "declares nothing" in configpin.first_adoption_headline(drift, None)
 
 
@@ -932,7 +937,7 @@ def test_a_change_inside_a_multiline_string_reaches_the_diff(checkout, quote):
 
     drift = configpin.inspect(checkout)
     assert drift.changed
-    lines = drift.diff().splitlines()
+    lines = _plain(drift.diff_rows()).splitlines()
     assert "-#before" in lines and "+#after" in lines, lines
     assert "@@ [claude] @@" in lines
 
@@ -947,7 +952,7 @@ def test_a_table_header_inside_a_multiline_string_is_not_a_locator(checkout):
     (checkout.repo_root / "foldyard.toml").write_text(
         TOML + '\n[claude]\nprompt = """\n[proxy]\n"""\nkeyless = true\n'
     )
-    lines = configpin.inspect(checkout).diff().splitlines()
+    lines = _plain(configpin.inspect(checkout).diff_rows()).splitlines()
     assert "@@ [claude] @@" in lines and "+keyless = true" in lines, lines
     assert "@@ [proxy] @@" not in lines
 
@@ -1015,7 +1020,7 @@ def test_an_escaped_delimiter_does_not_end_a_multiline_string_early(checkout):
 
     drift = configpin.inspect(checkout)
     assert drift.changed
-    lines = drift.diff().splitlines()
+    lines = _plain(drift.diff_rows()).splitlines()
     assert "-#before" in lines and "+#after" in lines, lines
 
 
@@ -1028,7 +1033,7 @@ def test_a_backslash_before_the_escape_still_closes_the_string(checkout):
     configpin.adopt(checkout)
     (checkout.repo_root / "foldyard.toml").write_text(TOML + body + "keyless = true\n")
 
-    lines = configpin.inspect(checkout).diff().splitlines()
+    lines = _plain(configpin.inspect(checkout).diff_rows()).splitlines()
     assert "+keyless = true" in lines, lines
     assert not any("a real comment" in line for line in lines), lines
 
@@ -1125,11 +1130,11 @@ def _inert(text: str) -> bool:
     return all(c.isprintable() for c in text.replace("\n", ""))
 
 
-def _three_sinks(cfg, monkeypatch) -> dict[str, str]:
+def _three_sinks(cfg, monkeypatch, *, styled: bool = False) -> dict[str, str]:
     """The adoption diff as each surface that shows it renders it: the launch gate's prompt, `fy
-    config diff`, and the TUI's adopt modal (its markup, rendered to the plain text on screen).
-    The gate is answered with something other than adopt, so nothing here adopts."""
-    from rich.text import Text
+    config diff`, and the TUI's adopt modal (the text on screen; ``styled``, with each line's
+    style as the ANSI color the terminal would give it). The gate is answered with something
+    other than adopt, so nothing here adopts."""
     from typer.testing import CliRunner
 
     from foldyard import cli, tui
@@ -1138,7 +1143,14 @@ def _three_sinks(cfg, monkeypatch) -> dict[str, str]:
     configpin.resolve(cfg, interactive=True, prompt=prompt, echo=echo)
     monkeypatch.setattr(cli, "_active_config", lambda: cfg)
     shown = CliRunner().invoke(cli.app, ["config", "diff"]).output
-    modal = Text.from_markup(tui._diff_markup(configpin.inspect(cfg).diff())).plain
+    content = tui._diff_content(configpin.inspect(cfg).diff_rows())
+    modal = content.plain
+    if styled:
+        ansi = {"dim": "2", "cyan": "36", "green": "32", "red": "31"}
+        modal = "\n".join(
+            f"\x1b[{ansi[str(span.style)]}m{content.plain[span.start : span.end]}\x1b[0m"
+            for span in content.spans
+        )
     return {"gate": "\n".join(lines), "fy config diff": shown, "tui": modal}
 
 
@@ -1214,7 +1226,7 @@ def test_a_line_break_toml_does_not_have_is_shown_not_taken(checkout, sep):
     (checkout.repo_root / "foldyard.toml").write_text(TOML + line + "\n")
     assert "passthrough" in tomllib.loads(TOML + line)["proxy"]["note"]  # one value, valid TOML
 
-    assert configpin.inspect(checkout).diff().splitlines() == [
+    assert _plain(configpin.inspect(checkout).diff_rows()).splitlines() == [
         "--- adopted/foldyard.toml",
         "+++ tree/foldyard.toml",
         "@@ [proxy] @@",
@@ -1227,13 +1239,66 @@ def test_a_crlf_file_diffs_like_its_lf_twin(checkout):
     added = '\n[claude]\nprompt = """\nBe brief.\n"""\n'
     configpin.adopt(checkout)
     (checkout.repo_root / "foldyard.toml").write_text(TOML + added)
-    lf = configpin.inspect(checkout).diff()
+    lf = _plain(configpin.inspect(checkout).diff_rows())
     (checkout.repo_root / "foldyard.toml").write_bytes(
         (TOML + added).replace("\n", "\r\n").encode()
     )
 
-    assert configpin.inspect(checkout).diff() == lf
+    assert _plain(configpin.inspect(checkout).diff_rows()) == lf
     assert "+Be brief." in lf.splitlines()
+
+
+def test_a_changed_line_that_reads_like_a_header_is_styled_as_the_change_it_is(
+    checkout, monkeypatch
+):
+    """A diff line's role is set where the line is made, never read back off its text. Inside a
+    multi-line string the box writes any line it likes, and after its sign one reads
+    `--- adopted/…` or `+++ tree/…`. Styled by its text it was dimmed as a file header, a change
+    passing as framing that announced a file the diff isn't about, and left out of the summary's
+    count, which then said only blank/comment lines had changed."""
+    prompt = '\n[claude]\nsystem_prompt = """\n{}\n"""\n'
+    (checkout.repo_root / "foldyard.toml").write_text(
+        TOML + prompt.format("-- adopted/foldyard.local.toml  (absent)")
+    )
+    configpin.adopt(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text(
+        TOML + prompt.format("++ tree/foldyard.local.toml")
+    )
+    removed, added = "--- adopted/foldyard.local.toml  (absent)", "+++ tree/foldyard.local.toml"
+    drift = configpin.inspect(checkout)
+
+    # The text is what it always was: only how it's styled and counted reads the rows.
+    assert _plain(drift.diff_rows()).splitlines() == [
+        "--- adopted/foldyard.toml",
+        "+++ tree/foldyard.toml",
+        "@@ [claude] @@",
+        removed,
+        added,
+    ]
+    assert drift.summary().startswith("1 line(s) added, 1 removed in foldyard.toml")
+
+    monkeypatch.setattr(term, "color_enabled", lambda stream=None: True)
+    for sink, shown in _three_sinks(checkout, monkeypatch, styled=True).items():
+        assert "\x1b[2m--- adopted/foldyard.toml\x1b[0m" in shown, sink  # the real header
+        assert f"\x1b[31m{removed}\x1b[0m" in shown, sink
+        assert f"\x1b[32m{added}\x1b[0m" in shown, sink
+
+
+def test_a_removed_bare_key_that_starts_with_dashes_is_a_removal(checkout):
+    """No string needed: `--x` is a valid bare key, and removing `--x = 1` renders `---x = 1`.
+    Read by its text, that was a header, dimmed and left out of the count."""
+    (checkout.repo_root / "foldyard.toml").write_text("--x = 1\n" + TOML)
+    configpin.adopt(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text(TOML)
+    drift = configpin.inspect(checkout)
+
+    assert drift.diff_rows() == [
+        ("header", "--- adopted/foldyard.toml"),
+        ("header", "+++ tree/foldyard.toml"),
+        ("remove", "---x = 1"),
+    ]
+    assert drift.summary().startswith("0 line(s) added, 1 removed in foldyard.toml")
+    assert "\x1b[31m---x = 1\x1b[0m" in term.paint_diff(drift.diff_rows(), color=True)
 
 
 # ── a file that doesn't parse is read as EMPTY: never shown as a comment-only change ────
@@ -1297,7 +1362,7 @@ def test_a_cr_only_file_is_not_read_as_one_comment(checkout):
 
     drift = configpin.inspect(checkout)
     assert "foldyard.toml doesn't parse" in drift.summary()
-    assert "doesn't parse" in drift.diff()
+    assert "doesn't parse" in _plain(drift.diff_rows())
     with pytest.raises(configpin.Unparseable):
         configpin.adopt(checkout)
 
@@ -1328,7 +1393,7 @@ def test_tabs_in_the_diff_are_kept(checkout):
         (checkout.repo_root / "foldyard.toml").read_text().replace('"]\n', '"]\t# \x1b\n')
     )
 
-    lines = configpin.inspect(checkout).diff().splitlines()
+    lines = _plain(configpin.inspect(checkout).diff_rows()).splitlines()
     assert '+\tpassthrough = ["trusted.example", "evil.example"]\t# \\x1b' in lines, lines
 
 
@@ -1361,6 +1426,26 @@ def test_a_box_made_worktree_name_is_shown_inert(checkout, monkeypatch):
         assert _inert(CliRunner().invoke(cli.app, ["config", verb]).output), verb
 
 
+@pytest.mark.parametrize("levels", [300, 400, 460, 480])
+def test_the_gate_and_the_pins_readers_reach_one_verdict_whatever_their_stack(levels):
+    """Adopting refuses what doesn't parse (:func:`configpin.unparseable`) at the gate's depth; the
+    supervisor and the TUI read the pin (``_parse``) from deeper. A `foldyard.local.toml` that
+    passed the one and read as EMPTY in the other would drop every narrowing it holds."""
+    local = (
+        "[box]\nx = " + "[" * levels + "]" * levels + '\n[claude]\nkeyless = "oauth"\n'
+    ).encode()
+    files = {"foldyard.toml": TOML.encode(), "foldyard.local.toml": local}
+
+    def deeper(frames: int, fn):
+        return fn() if frames == 0 else deeper(frames - 1, fn)
+
+    gate = configpin.unparseable(files)
+    for frames in (0, 300, 600):
+        assert deeper(frames, lambda: configpin.unparseable(files)) == gate
+        read = deeper(frames, lambda: configpin._parse(local))
+        assert (read == {}) == bool(gate), (frames, gate)
+
+
 # ── the mirror case: an ADOPTED copy that doesn't parse (a pin made before the refusal) ──
 
 BROKEN_TEAM = "# team \x01\n" + EDITED  # the host has been reading this as EMPTY
@@ -1385,7 +1470,10 @@ def test_an_adopted_copy_that_does_not_parse_is_never_a_comment_only_change(chec
     drift = configpin.inspect(checkout)
     assert "only blank/comment" not in drift.summary()
     assert "reading it as EMPTY" in drift.summary(), drift.summary()
-    assert "--- adopted/foldyard.toml  (doesn't parse: read as EMPTY)" in drift.diff().splitlines()
+    assert (
+        "--- adopted/foldyard.toml  (doesn't parse: read as EMPTY)"
+        in _plain(drift.diff_rows()).splitlines()
+    )
     for sink, shown in _three_sinks(checkout, monkeypatch).items():
         assert "doesn't parse" in shown, (sink, shown)
         assert "nothing the host reads would change" not in shown, sink
@@ -1401,7 +1489,7 @@ def test_mains_adopted_copy_that_does_not_parse_is_no_baseline_of_nothing_new(
 
     drift = configpin.inspect(worktree)
     base = configpin.main_baseline(drift)
-    assert base is not None and base.body
+    assert base is not None and _plain(base.rows)
     headline = configpin.first_adoption_headline(drift, base)
     assert "grants nothing new" not in headline
     assert "reading it as EMPTY" in headline, headline

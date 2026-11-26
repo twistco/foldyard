@@ -25,7 +25,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from . import hostgit, mountwrite
+from . import config, hostgit, mountwrite
 
 FILES = ("foldyard.toml", "foldyard.local.toml")
 SKILL = Path(".claude") / "skills" / "foldyard"
@@ -72,7 +72,7 @@ def mark_private(text: str) -> str:
     marked = _marked(text)
     by_hand = "add `private = true` to its [project] table yourself, then run this again"
     try:
-        before, after = tomllib.loads(text), tomllib.loads(marked)
+        before, after = config.loads_toml(text), config.loads_toml(marked)
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"foldyard.toml can't be edited safely ({e}): {by_hand}") from e
     project = before.get("project", {})

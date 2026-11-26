@@ -2364,15 +2364,16 @@ class AllowHostScreen(ModalScreen):
         self.dismiss(None)
 
 
-def _diff_markup(body: str) -> str:
-    """A config diff as Rich markup, classified by ``term.diff_style`` so the modal can't color a
-    line differently from the terminal's ``fy config diff``. Every line is escaped: a diff carries
-    arbitrary TOML, and a `[proxy]` table header is also valid markup."""
-    out = []
-    for line in body.splitlines():
-        style = term.diff_style(line)
-        out.append(f"[{style}]{escape(line)}[/{style}]" if style else escape(line))
-    return "\n".join(out)
+def _diff_content(rows: list[configpin.DiffRow]) -> Content:
+    """A config diff's rows (``configpin.diff_rows``), each line styled by its kind through
+    ``term.diff_style``, so the modal can't color a line differently from the terminal's
+    ``fy config diff``. Never parsed as markup: a diff carries arbitrary TOML."""
+    parts: list[str | tuple[str, str]] = []
+    for n, (kind, line) in enumerate(rows):
+        if n:
+            parts.append("\n")
+        parts.append((line, term.diff_style(kind)))
+    return _content(*parts)
 
 
 class AdoptConfigScreen(ModalScreen):
@@ -2408,8 +2409,10 @@ class AdoptConfigScreen(ModalScreen):
         # config itself, commentless; otherwise it's this checkout's own drift. Either way it goes
         # IN the modal rather than behind a "run `fy config diff`" pointer: this is where the
         # decision is taken, and on a first adoption that pointer used to lead to a refusal.
-        body = (
-            configpin.first_adoption_body(self.drift, self.baseline) if first else self.drift.diff()
+        rows = (
+            configpin.first_adoption_rows(self.drift, self.baseline)
+            if first
+            else self.drift.diff_rows()
         )
         headline = configpin.first_adoption_headline(self.drift, self.baseline) if first else ""
         with Vertical(id="adopt-dialog"):
@@ -2428,9 +2431,9 @@ class AdoptConfigScreen(ModalScreen):
                 ),
                 id="adopt-body",
             )
-            if body:
+            if rows:
                 with VerticalScroll(id="adopt-diff"):
-                    yield Static(Text.from_markup(_diff_markup(body)), id="adopt-diff-body")
+                    yield Static(_diff_content(rows), id="adopt-diff-body")
             yield Static("a adopt · i ignore · esc cancel", id="adopt-hint")
 
     def on_mount(self) -> None:

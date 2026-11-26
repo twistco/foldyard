@@ -73,7 +73,8 @@ def _editable_version(dist, package_dir) -> str | None:
             return None
         with (root / "pyproject.toml").open("rb") as f:
             project = tomllib.load(f).get("project")
-    except (OSError, ValueError):  # unreadable, undecodable, not JSON/TOML
+    except (OSError, ValueError, RecursionError):  # unreadable, undecodable, not JSON/TOML, or
+        # nested deeper than tomllib recurses (a box can write this checkout)
         return None
     version = project.get("version") if isinstance(project, dict) else None
     return version if isinstance(version, str) else None  # "" is falsy: the caller's `or` skips it

@@ -149,8 +149,9 @@ def test_marking_takes_tomls_other_spellings(text):
         'project = { name = "a" }\n',
         'note = """\n[project]\n"""\n',  # no table: text that looks like one
         "[project\n",
+        "x = " + "[" * 5000 + "]" * 5000 + "\n",  # nested too deep for tomllib to read
     ],
-    ids=["dotted", "inline", "in-a-string", "broken"],
+    ids=["dotted", "inline", "in-a-string", "broken", "too-deep"],
 )
 def test_converting_refuses_what_it_cannot_mark_and_leaves_the_file_alone(repo, text, capsys):
     (repo / "foldyard.toml").write_text(text)
