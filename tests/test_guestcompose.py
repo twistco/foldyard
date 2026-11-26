@@ -8,11 +8,14 @@ without a VM. The live check is the spike's (docs/compose-in-vm-scope.md, phase 
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -303,6 +306,7 @@ def no_host_client(vm, monkeypatch):
     subprocess fails the test by name. Stand-ins are set by each test."""
     monkeypatch.setattr(stack, "_run", _never)
     monkeypatch.setattr(stack.subprocess, "run", _never)
+    monkeypatch.setattr(guestcompose, "stream_here", _never)
     return vm
 
 
@@ -690,12 +694,9 @@ def test_the_packaged_box_image_stays_here(vm, tmp_path, monkeypatch):
     _gated(monkeypatch)
     monkeypatch.setattr(box, "_box_image_fingerprint", lambda main: "fp")
     monkeypatch.setattr(guestcompose, "stream_podman", _never)
+    monkeypatch.setattr(box.subprocess, "run", _never)
     ran = []
-    monkeypatch.setattr(
-        box.subprocess,
-        "run",
-        lambda cmd, **kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0),
-    )
+    monkeypatch.setattr(guestcompose, "stream_here", lambda cmd, env, cwd: ran.append(cmd) or 0)
     assert box._build_img("podman", tmp_path, {}) == 0
     assert ran[0][:2] == ["podman", "build"]
 
@@ -720,6 +721,404 @@ def test_run_relayed_keeps_the_streams_apart_and_cleans_them():
     assert rc == 3
     assert out == ["]0;pwnedout line"]
     assert err == ["err line"]
+
+
+# ── the same relay for what runs on your computer: a compose client, a build, a container ──
+
+
+def _sinks(monkeypatch) -> dict[str, list[str]]:
+    """Where :func:`guestcompose.stream_here` prints, recorded a line at a time."""
+    got: dict[str, list[str]] = {"stdout": [], "stderr": []}
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name: got[name].append)
+    return got
+
+
+def test_stream_here_keeps_the_streams_apart_and_cleans_them(capsys):
+    prog = _NOISY.decode().split("#", 1)[0]
+    rc = guestcompose.stream_here([sys.executable, "-I", "-c", prog], dict(os.environ))
+    assert rc == 3
+    out, err = capsys.readouterr()
+    assert out == "]0;pwnedout line\n"
+    assert err == "err line\n"
+
+
+def test_stream_here_gives_its_process_no_terminal(monkeypatch, tmp_path):
+    # Its stdin is empty, never yours: a verb that wants your terminal isn't sent here.
+    got = _sinks(monkeypatch)
+    prog = "import os, sys\nprint(repr(sys.stdin.read()), os.getcwd())\n"
+    yours, typed = os.pipe()  # this process's stdin, with something typed on it
+    os.write(typed, b"yours\n")
+    os.close(typed)
+    saved = os.dup(0)
+    os.dup2(yours, 0)
+    try:
+        rc = guestcompose.stream_here([sys.executable, "-I", "-c", prog], {}, str(tmp_path))
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(yours)
+    assert rc == 0
+    assert got["stdout"] == [f"'' {os.path.realpath(tmp_path)}"]
+
+
+_UNFLUSHED = (
+    "import os, sys, time\n"
+    "print('first')\n"  # no flush: a pipe block-buffers it unless PYTHONUNBUFFERED says not to
+    "deadline = time.monotonic() + 10\n"
+    "while not os.path.exists(sys.argv[1]):\n"
+    "    if time.monotonic() > deadline:\n"
+    "        sys.exit(1)\n"
+    "    time.sleep(0.01)\n"
+)
+
+
+def test_stream_here_relays_an_unbuffered_python_clients_lines_as_they_come(monkeypatch, tmp_path):
+    # podman-compose prints `logs -f` with a plain print(): through a pipe, a Python process holds
+    # that back until 8 KB pile up unless its env says not to (the compose env does:
+    # `stack.resolve`), and the relay must hand each line on as it comes.
+    seen = tmp_path / "seen"
+    lines: list[str] = []
+
+    def sink(line: str) -> None:
+        lines.append(line)
+        seen.touch()
+
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name: sink)
+    cmd = [sys.executable, "-s", "-c", _UNFLUSHED, str(seen)]
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONUNBUFFERED": "1"}
+    assert guestcompose.stream_here(cmd, env) == 0
+    assert lines == ["first"]
+
+
+def test_stream_here_runs_with_exactly_the_env_it_is_given(monkeypatch):
+    # The compose client interpolates its compose files from this env: a name added here only
+    # (`${PYTHONUNBUFFERED}`) would render differently from the captured calls and the config-hash
+    # check, which run with the same ctx.env, and read as drift.
+    got = _sinks(monkeypatch)
+    prog = "import os\nprint(os.environ.get('PYTHONUNBUFFERED'), os.environ.get('A'))\n"
+    assert guestcompose.stream_here([sys.executable, "-I", "-c", prog], {"A": "1"}) == 0
+    assert got["stdout"] == ["None 1"]
+
+
+# A child that writes far more than a pipe holds, then says how it ended.
+_FLOOD = "import sys\nfor i in range(200000):\n    print('line', i)\n"
+
+
+def _spawn_harness(code: str, tmp_path: Path) -> tuple[subprocess.Popen, Path]:
+    """``code`` run by this interpreter as foldyard's own process would be (its stderr to a file),
+    in a session of its own, so a test can be the terminal: read its stdout, close it, Ctrl-C it."""
+    err = tmp_path / "stderr"
+    with err.open("wb") as sink:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+            stderr=sink,
+            start_new_session=True,
+        )
+    return proc, err
+
+
+def _ended(proc: subprocess.Popen, timeout: float = 30) -> int:
+    """``proc``'s exit code, or the test fails (never hangs) when it doesn't end in time."""
+    import signal
+
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        pytest.fail(f"still running after {timeout}s")
+
+
+def test_a_reader_that_goes_away_ends_the_relay_instead_of_hanging_it(tmp_path):
+    # `fy logs | head -1`: once your end of the pipe is gone, the child's next write fails as it
+    # would have when it held the pipe itself, and foldyard ends with a BrokenPipeError the CLI
+    # turns into a quiet exit. Not a relay thread dying while the child blocks on a full pipe.
+    code = (
+        "import os, sys\n"
+        "from foldyard import guestcompose\n"
+        f"child = [sys.executable, '-c', {_FLOOD!r}]\n"
+        "try:\n"
+        "    guestcompose.stream_here(child, dict(os.environ))\n"
+        "except BrokenPipeError:\n"
+        "    os._exit(32)\n"
+        "os._exit(0)\n"
+    )
+    proc, err = _spawn_harness(code, tmp_path)
+    assert proc.stdout is not None
+    assert proc.stdout.readline() == b"line 0\n"
+    proc.stdout.close()  # what `head -1` does next
+    assert _ended(proc) == 32
+    assert "Exception in thread" not in err.read_text(errors="replace")
+
+
+def test_the_guests_relay_stops_too_when_its_sink_fails():
+    import threading
+
+    spawned: list[subprocess.Popen] = []
+
+    def gone(_line: str) -> None:
+        raise BrokenPipeError
+
+    raised: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            guestcompose.run_relayed(
+                [sys.executable, "-I", "-"], _FLOOD.encode(), gone, print, spawned.append
+            )
+        except BaseException as e:
+            raised.append(e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(30)
+    if t.is_alive():
+        spawned[0].kill()
+        pytest.fail("the relay hung once its sink failed")
+    assert [type(e) for e in raised] == [BrokenPipeError]
+
+
+def test_a_relayed_line_is_not_painted_as_foldyards_own(monkeypatch):
+    # `term.ColorStream` colours ✓/✗/▶ in foldyard's own output: a box's "✓ verify passed" must not
+    # come out in foldyard's green, as if foldyard said it.
+    from foldyard import term
+
+    raw = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", term.ColorStream(raw))
+    guestcompose._print_to("stderr")("✓ verify passed")
+    assert raw.getvalue() == "✓ verify passed\n"
+
+
+_TWENTY_THOUSAND = "import sys\nfor i in range(20000):\n    print('line', i)\n"
+
+
+def test_a_reader_that_stalls_still_gets_every_line(tmp_path):
+    # `fy up 2>&1 | less`, still on page one: the relay is blocked writing to you, not waiting on
+    # the child, so however long that lasts, nothing it has yet to hand on is dropped.
+    code = (
+        "import os, sys\n"
+        "from foldyard import guestcompose\n"
+        f"child = [sys.executable, '-c', {_TWENTY_THOUSAND!r}]\n"
+        "sys.exit(guestcompose.stream_here(child, dict(os.environ)))\n"
+    )
+    proc, err = _spawn_harness(code, tmp_path)
+    assert proc.stdout is not None
+    first = proc.stdout.read(100_000)
+    time.sleep(6)  # longer than any patience the relay has for a pipe that stays open
+    rest = proc.stdout.read()
+    assert _ended(proc) == 0, err.read_text(errors="replace")
+    assert (first + rest).count(b"\n") == 20000
+
+
+# A child that leaves a grandchild holding its stdout and stderr, says the grandchild's pid, exits.
+_LEAVES_A_GRANDCHILD = (
+    "import subprocess, sys\n"
+    "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+    "print(g.pid, flush=True)\n"
+)
+
+
+def test_a_grandchild_holding_the_pipe_doesnt_keep_the_relay_waiting(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(guestcompose, "_DRAIN_PATIENCE", 0.5)
+    got = _sinks(monkeypatch)
+    finished: list[int] = []
+    cmd = [sys.executable, "-I", "-c", _LEAVES_A_GRANDCHILD]
+    t = threading.Thread(target=lambda: finished.append(guestcompose.stream_here(cmd, {})))
+    t.daemon = True
+    t.start()
+    t.join(20)
+    try:
+        assert finished == [0], "the relay waited on a pipe only a grandchild held"
+    finally:
+        for pid in got["stdout"]:
+            os.kill(int(pid), signal.SIGKILL)
+
+
+def _chatty_grandchild(stream: str) -> str:
+    """A child that leaves a grandchild (in a session of its own) writing to ``stream`` nonstop,
+    says ``pid <grandchild>`` and exits."""
+    nonstop = f"import sys\nwhile True:\n    sys.{stream}.write('x' * 100 + '\\n')\n"
+    return (
+        "import subprocess, sys\n"
+        f"g = subprocess.Popen([sys.executable, '-c', {nonstop!r}], start_new_session=True)\n"
+        "print('pid', g.pid, flush=True)\n"
+    )
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_a_grandchild_that_never_stops_writing_doesnt_keep_the_relay_going(monkeypatch, stream):
+    # Once the child has exited, only what was already in the pipe can be its own: a grandchild
+    # still writing to the pipe it inherited can't keep foldyard relaying it for good.
+    import threading
+
+    monkeypatch.setattr(guestcompose, "_DRAIN_PATIENCE", 2.0)
+    pids: list[int] = []
+
+    def sink(line: str) -> None:
+        if line.startswith("pid "):
+            pids.append(int(line.split()[1]))
+
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name: sink)
+    finished: list[int] = []
+    cmd = [sys.executable, "-I", "-c", _chatty_grandchild(stream)]
+    t = threading.Thread(target=lambda: finished.append(guestcompose.stream_here(cmd, {})))
+    t.daemon = True
+    t.start()
+    t.join(30)
+    try:
+        assert finished == [0], "the relay kept relaying a grandchild after its process exited"
+    finally:
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                os.killpg(pid, signal.SIGKILL)
+
+
+def test_show_prints_the_boxs_line_cleaned_and_unpainted(monkeypatch):
+    # The one sink for relayed text that isn't a stream: a build's tail, an engine's stderr.
+    from foldyard import term
+
+    raw = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", term.ColorStream(raw))
+    guestcompose.show("\x1b]52;c;ZXZpbA==\x07✓ verify passed")
+    assert raw.getvalue() == "]52;c;ZXZpbA==✓ verify passed\n"
+
+
+def test_a_line_your_terminal_cant_encode_is_shown_escaped_not_fatal(monkeypatch):
+    # A stdout that isn't UTF-8 (LANG=C): the relay's print would raise, and stop relaying.
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw, encoding="ascii")
+    monkeypatch.setattr(sys, "stdout", out)
+    guestcompose._print_to("stdout")("caf\u00e9 ok")
+    out.flush()
+    assert raw.getvalue() == b"caf\\xe9 ok\n"
+
+
+def test_a_line_with_no_end_is_relayed_in_bounded_pieces():
+    # A box can print gigabytes with no newline: the relay must not hold it all to find one.
+    pieces: list[int] = []
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import sys\nsys.stdout.write('x' * 1_000_000)\n"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert guestcompose.relay(proc, lambda line: pieces.append(len(line)), print) == 0
+    assert sum(pieces) == 1_000_000
+    assert max(pieces) <= guestcompose._LINE_CAP
+
+
+# A child that is busy writing when the interrupt lands, and ignores it (as a client mid-write
+# might), so the relay has to stop it and its threads are still relaying when it does.
+_BUSY = (
+    "import signal\n"
+    "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+    "while True:\n"
+    "    print('x' * 200, flush=True)\n"
+)
+
+
+@pytest.mark.parametrize("round_", range(5))
+def test_ctrl_c_during_busy_output_ends_as_an_interrupt_not_an_abort(tmp_path, round_):
+    # The relay threads were still printing as the interpreter shut down, and Python aborted
+    # ("could not acquire lock for <stdout> at interpreter shutdown"): SIGABRT, not the interrupt.
+    import signal
+
+    code = (
+        "import os, sys\n"
+        "from foldyard import guestcompose\n"
+        f"child = [sys.executable, '-c', {_BUSY!r}]\n"
+        "try:\n"
+        "    guestcompose.stream_here(child, dict(os.environ))\n"
+        "except KeyboardInterrupt:\n"
+        "    sys.exit(130)\n"
+    )
+    proc, err = _spawn_harness(code, tmp_path)
+    assert proc.stdout is not None
+    assert proc.stdout.readline()  # it is relaying
+    os.killpg(proc.pid, signal.SIGINT)  # the terminal's Ctrl-C: the whole foreground group
+
+    import threading
+
+    drained = threading.Thread(target=proc.stdout.read, daemon=True)  # a terminal keeps reading
+    drained.start()
+    rc = _ended(proc)
+    said = err.read_text(errors="replace")
+    assert "Fatal Python error" not in said, said
+    assert rc == 130, said
+
+
+def _interrupt_on(word: str):
+    """A sink that sends the main thread a real SIGINT when ``word`` arrives: an interrupt
+    landing while the relay waits, as the terminal's Ctrl-C would."""
+    import signal
+    import threading
+
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def sink(line: str) -> None:
+        if line == word:
+            signal.pthread_kill(main, signal.SIGINT)
+
+    return sink
+
+
+def test_an_interrupted_watched_stream_here_stops_its_process_group(monkeypatch):
+    # Its own group means the terminal's Ctrl-C no longer reaches it: the interrupt must, and
+    # reach what it started too (a compose client's podman children), so the group is stopped.
+    from foldyard import devmode
+
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name: _interrupt_on("started"))
+    stopped: list[subprocess.Popen] = []
+    real_stop = devmode.stop_group
+    monkeypatch.setattr(devmode, "stop_group", lambda p: stopped.append(p) or real_stop(p))
+    spawned: list[subprocess.Popen] = []
+    cmd = [sys.executable, "-I", "-c", _CHATTY_SLEEPER.decode()]
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)  # a worker may ignore it
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            guestcompose.stream_here(cmd, {}, on_spawn=spawned.append)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert stopped == spawned
+    assert spawned[0].poll() is not None
+
+
+class _Interrupted:
+    """A process whose wait is interrupted once, as by Ctrl-C."""
+
+    pid = 4242
+
+    def __init__(self) -> None:
+        self.stdout = io.BytesIO(b"")
+        self.stderr = io.BytesIO(b"")
+        self.waits = 0
+        self.terminated = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits += 1
+        if self.waits == 1:
+            raise KeyboardInterrupt
+        return -15
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+def test_an_interrupted_relay_ends_its_process_before_it_passes_the_interrupt_on():
+    from typing import Any, cast
+
+    proc = _Interrupted()
+    with pytest.raises(KeyboardInterrupt):
+        guestcompose.relay(cast(Any, proc), print, print)
+    assert proc.terminated and proc.waits == 2  # reaped, not left behind
+    stopped: list[object] = []
+    proc = _Interrupted()
+    with pytest.raises(KeyboardInterrupt):
+        guestcompose.relay(cast(Any, proc), print, print, stop=stopped.append)
+    assert stopped == [proc] and not proc.terminated
 
 
 def test_run_stream_feeds_a_large_stdin_and_merges_the_output():

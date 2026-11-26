@@ -12,7 +12,8 @@ What it then does is ``yard["mode"]``:
 * ``"none"`` — the checkout: record what the worktree held when handed over (``yard["seen"]``: its
   files, and its admin dir's), leave an empty index where the checkout would have written one (so
   ``add`` sees it reach your computer) unless ``yard["index"]`` is False, and return
-  ``yard["rc"]``. The check: answer ``yard["out"]`` on stdout with ``yard["rc"]``, running nothing;
+  ``yard["rc"]``. The check: answer ``yard["out"]`` on stdout and ``yard["err"]`` on stderr with
+  ``yard["rc"]``, running nothing;
 * ``"local"`` — run the container's argv HERE (git, or ``sh -c <script>``), in its ``-w`` dir with
   its ``-e`` env plus ``FY_YARD=1`` (so a rig's filter can say where it ran): the yard without a
   container, so what it writes exists afterwards. A test running the check this way runs a
@@ -28,6 +29,10 @@ the engine couldn't start: is there a git in the image at all? It is recorded in
 
 ``yard["image"]`` is what ``box.image_exists`` answers. Every other ``subprocess.run`` goes
 through to whatever ran before (the real one, or a test's own fake installed earlier).
+
+A run whose output is relayed to your terminal (``guestcompose.stream_here``: the checkout, and
+``worktree_init``'s container) is answered the same way, through whatever ``subprocess.run`` is
+installed when it is asked, and recorded in ``yard["relayed"]``: nothing is ever spawned for it.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from foldyard import box, config
+from foldyard import box, config, guestcompose
 
 ENGINE = "podman"
 IMAGE = "proj-devbox:latest"
@@ -60,12 +65,14 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
         "image": True,
         "index": True,
         "out": "fy-clean\n",
+        "err": b"",
         "then": None,
         "runs": [],
         "checks": [],
         "probes": [],
         "git": True,
         "seen": {},
+        "relayed": [],
     }
     monkeypatch.setattr(config, "box_image", lambda: {"tag": IMAGE})
     monkeypatch.setattr(
@@ -89,7 +96,9 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
                 kw = {k: v for k, v in kw.items() if k not in ("env", "cwd")}
                 got = before(["sh", *argv], *a, cwd=workdir, env=_env(cmd), **kw)
             else:
-                got = subprocess.CompletedProcess(cmd, yard["rc"], yard["out"].encode(), None)
+                got = subprocess.CompletedProcess(
+                    cmd, yard["rc"], yard["out"].encode(), yard["err"]
+                )
             if yard["then"] is not None:  # what the container (the box's filters) wrote meanwhile
                 yard["then"]()
             return got
@@ -112,4 +121,11 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
         return subprocess.CompletedProcess(cmd, yard["rc"])
 
     monkeypatch.setattr(subprocess, "run", run)
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        yard["relayed"].append(list(cmd))
+        kw = {"cwd": cwd} if cwd is not None else {}
+        return subprocess.run(cmd, env=env, **kw).returncode
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
     return yard

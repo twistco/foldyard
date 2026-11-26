@@ -126,8 +126,9 @@ Consequences of running as the VM user:
   containers config files and `REGISTRY_AUTH_FILE`. The guest uses its own `PATH`, `HOME`, `USER`,
   `LOGNAME` and `XDG_RUNTIME_DIR`, so a compose file that interpolates one renders differently.
 - **Terminal output.** What's relayed from the guest has its control sequences stripped
-  (`guestcompose.printable`). The client on your computer doesn't do that, so `fy logs` is cleaner
-  here than it is without the switch.
+  (`guestcompose.printable`). The client on your computer is relayed the same way
+  (`guestcompose.stream_here`), except for `compose exec`, `run` and `attach`, which need your
+  terminal.
 
 ### What changes for a project
 

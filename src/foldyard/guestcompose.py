@@ -27,7 +27,9 @@ on your computer don't reach it.
 What comes back is box-influenced data, like everything the engine answers: the compose files
 are the box's, and so is the VM user's home in the guest (anything a box can bind-mount). Callers
 use it only for the project they asked about, as they always have, and what is relayed to your
-terminal has its control sequences stripped (:func:`printable`).
+terminal has its control sequences stripped (:func:`printable`). The same relay serves what runs
+on your computer with output the box chose (:func:`stream_here`): the compose client when this
+switch is off, a build of the box's Dockerfile, a container of the box's image.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -275,17 +278,113 @@ def printable(line: str) -> str:
     return "".join(c for c in _strip_ansi(line) if c == "\t" or c.isprintable())
 
 
-def _relay(source: IO[bytes], sink: Callable[[str], None]) -> None:
-    for raw in source:
-        sink(printable(raw.decode(errors="replace").rstrip("\r\n")))
+# The most a relay reads before handing it on: output with no newline in it (the box chooses it)
+# can't make foldyard hold more than this.
+_LINE_CAP = 64 * 1024
+
+
+# How long, once the process has exited, a relay waits on a pipe with nothing coming before it
+# stops: a grandchild that outlives it (a detached client) can hold the pipe open for good. Time
+# spent writing to you (a pager on its first page) never counts: that output is all handed on.
+_DRAIN_PATIENCE = 5.0
+
+# How much a relay reads once the process has exited before it stops: only what was already in the
+# pipe (a pipe's capacity, and a line short of _LINE_CAP) can be the process's own, and a
+# grandchild still writing to the pipe it inherited never lets it go quiet.
+_DRAIN_BUDGET = 1024 * 1024
+
+
+class _Pump:
+    """One stream's relay thread: ``source`` handed to ``sink`` a line at a time
+    (:func:`printable`) until it ends, or until ``quit_``. A sink that raises (your end of the
+    pipe is gone: ``fy logs | head``) ends it too, recorded in ``failed``. Either way ``source``
+    is closed after: the child's next write fails, as it would have on a pipe it held itself,
+    rather than blocking on one nobody reads. It keeps count of the time it has spent waiting for
+    input, which is what tells a pipe a grandchild still holds from you not reading yet."""
+
+    def __init__(
+        self,
+        source: IO[bytes],
+        sink: Callable[[str], None],
+        quit_: threading.Event,
+        failed: list[BaseException],
+    ) -> None:
+        # Read by `drain` while the thread updates them: always both together, under the lock.
+        self._lock = threading.Lock()
+        self._waited = 0.0  # finished waits for input
+        self._since: float | None = None  # when the wait in progress began
+        self._read = 0  # bytes read
+        self.thread = threading.Thread(
+            target=self._run, args=(source, sink, quit_, failed), daemon=True
+        )
+        self.thread.start()
+
+    def progress(self) -> tuple[float, int]:
+        """Seconds spent waiting for input so far (the wait in progress included), and bytes
+        read."""
+        with self._lock:
+            since, waited, read = self._since, self._waited, self._read
+        return waited + (time.monotonic() - since if since is not None else 0.0), read
+
+    def _run(
+        self,
+        source: IO[bytes],
+        sink: Callable[[str], None],
+        quit_: threading.Event,
+        failed: list[BaseException],
+    ) -> None:
+        try:
+            while not quit_.is_set():
+                with self._lock:
+                    start = self._since = time.monotonic()
+                raw = source.readline(_LINE_CAP)
+                with self._lock:
+                    self._since = None
+                    self._waited += time.monotonic() - start
+                    self._read += len(raw)
+                if not raw:
+                    break
+                line = printable(raw.decode(errors="replace").rstrip("\r\n"))
+                if quit_.is_set():
+                    break
+                sink(line)
+        except Exception as e:
+            failed.append(e)
+        finally:
+            source.close()
+
+    def drain(self) -> None:
+        """Once the process has exited: wait while this relay has output to hand on, however
+        long you take to read it. Stop waiting on a pipe that stays open with nothing in it for
+        :data:`_DRAIN_PATIENCE` seconds, or that has given more than :data:`_DRAIN_BUDGET` bytes
+        since: either is a grandchild's, not the process's."""
+        waited, read = self.progress()
+        while self.thread.is_alive():
+            now_waited, now_read = self.progress()
+            if now_waited - waited >= _DRAIN_PATIENCE or now_read - read > _DRAIN_BUDGET:
+                return
+            self.thread.join(timeout=0.05)
 
 
 def _print_to(file_name: str) -> Callable[[str], None]:
     # Looked up on each line, not bound here: a redirected sys.stdout stays honoured.
     def sink(text: str) -> None:
-        print(text, file=getattr(sys, file_name), flush=True)
+        from .term import ColorStream
+
+        out = getattr(sys, file_name)
+        if isinstance(out, ColorStream):  # its ✓ and ✗ are the box's, not foldyard's own to paint
+            out = out.raw
+        # A terminal that isn't UTF-8 (LANG=C) can't take every character: escape the rest.
+        encoding = getattr(out, "encoding", None) or "utf-8"
+        print(text.encode(encoding, "backslashreplace").decode(encoding), file=out, flush=True)
 
     return sink
+
+
+def show(line: str, to: str = "stderr") -> None:
+    """One line the box chose (a build's tail, what the engine said about its image) on your
+    ``to`` stream, cleaned (:func:`printable`) and as it is: not painted as foldyard's own."""
+    _print_to(to)(printable(line))
 
 
 def stream(ctx, args: list[str], on_spawn: Callable[[subprocess.Popen], None] | None = None) -> int:
@@ -316,6 +415,36 @@ def _stream(
     return run_relayed(cmd, stdin, _print_to("stdout"), _print_to("stderr"), on_spawn=on_spawn)
 
 
+def stream_here(
+    cmd: list[str],
+    env: dict[str, str],
+    cwd: str | None = None,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
+) -> int:
+    """``cmd`` run on your computer, relayed like :func:`stream` (a line at a time to your stdout
+    and stderr, :func:`printable`): for a process whose output the box chose — the compose client
+    reading its compose files, a build of its Dockerfile, a container of its image. Its stdin is
+    empty, so a verb that needs your terminal (a shell, ``compose exec``) doesn't come here.
+    ``on_spawn`` gets the process, started in a process group of its own so the caller can stop
+    it; the terminal's Ctrl-C then doesn't reach it, so an interrupt here stops the group."""
+    from .devmode import stop_group
+
+    proc = subprocess.Popen(
+        cmd,
+        env=env,  # exactly: a compose client interpolates from it (see stack.resolve)
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        process_group=0 if on_spawn else None,
+    )
+    if on_spawn:
+        on_spawn(proc)
+    return relay(
+        proc, _print_to("stdout"), _print_to("stderr"), stop=stop_group if on_spawn else None
+    )
+
+
 def run_relayed(
     cmd: list[str],
     stdin: bytes,
@@ -336,7 +465,7 @@ def run_relayed(
     )
     if on_spawn:
         on_spawn(proc)
-    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    assert proc.stdin is not None
 
     def feed() -> None:
         assert proc.stdin is not None
@@ -346,21 +475,51 @@ def run_relayed(
         except OSError:  # ssh already gone: its exit code says why
             pass
 
-    threads = [
-        threading.Thread(target=feed, daemon=True),
-        threading.Thread(target=_relay, args=(proc.stdout, out), daemon=True),
-        threading.Thread(target=_relay, args=(proc.stderr, err), daemon=True),
-    ]
-    for t in threads:
-        t.start()
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
+    rc = relay(proc, out, err)
+    feeder.join(timeout=5)
+    return rc
+
+
+def relay(
+    proc: subprocess.Popen,
+    out: Callable[[str], None],
+    err: Callable[[str], None],
+    *,
+    stop: Callable[[subprocess.Popen], None] | None = None,
+) -> int:
+    """``proc``'s piped stdout and stderr handed to ``out`` and ``err`` a line at a time
+    (:func:`printable`) until it exits; its exit code. An interrupt here ends it before passing
+    on: ``stop`` (its process group, when it has one of its own), else a terminate. A sink that
+    failed (your end of the pipe gone) is raised once the process has ended: a
+    ``BrokenPipeError`` is the quiet exit the CLI gives a closed pipe."""
+    assert proc.stdout is not None and proc.stderr is not None
+    quit_ = threading.Event()
+    failed: list[BaseException] = []
+    pumps = [_Pump(proc.stdout, out, quit_, failed), _Pump(proc.stderr, err, quit_, failed)]
     try:
         rc = proc.wait()
     except BaseException:
-        proc.terminate()
-        proc.wait()
+        # Nothing more is printed, and the threads are done before this passes on: a daemon
+        # thread mid-print as the interpreter shuts down aborts it ("could not acquire lock for
+        # <stdout> at interpreter shutdown").
+        quit_.set()
+        try:
+            if stop is not None:
+                stop(proc)
+            else:
+                proc.terminate()
+                proc.wait()
+        finally:
+            for pump in pumps:
+                pump.thread.join(timeout=1)
         raise
-    for t in threads:
-        t.join(timeout=5)
+    for pump in pumps:
+        pump.drain()
+    quit_.set()  # one still waiting (a grandchild holds the pipe) prints nothing more
+    if failed:
+        raise failed[0]
     return rc
 
 

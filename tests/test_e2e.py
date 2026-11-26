@@ -96,22 +96,63 @@ def _foldyard(
     registers no podman connection either. Inherited, it reached the supervisor `fy up` starts
     and hid a reconcile that derived no socket of its own; the CLI must find the
     VM's socket itself. In a box it is the box's own engine selection, kept."""
-    env = _engine_env()
-    if not _IN_BOX:
-        env.pop("CONTAINER_HOST", None)
     return subprocess.run(
         [sys.executable, "-m", "foldyard", *args],
         cwd=str(repo),
-        env={
-            **env,
-            "FOLDYARD_REPO": str(repo),
-            "FOLDYARD_ENGINE": _engine(),
-            **(env_extra or {}),
-        },
+        env=_cli_env(repo, env_extra),
         capture_output=True,
         text=True,
         timeout=timeout,
     )
+
+
+def _cli_env(repo: Path, env_extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The real CLI's environment (see :func:`_foldyard`)."""
+    env = _engine_env()
+    if not _IN_BOX:
+        env.pop("CONTAINER_HOST", None)
+    return {**env, "FOLDYARD_REPO": str(repo), "FOLDYARD_ENGINE": _engine(), **(env_extra or {})}
+
+
+def _followed_logs(repo: Path) -> tuple[list[str], str, int]:
+    """`fy logs` (which follows) until it has relayed a line, then Ctrl-C as the terminal sends it
+    (to the whole foreground group): the lines it printed, its stderr and its exit code."""
+    import signal
+    import threading
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "foldyard", "logs"],
+        cwd=str(repo),
+        env=_cli_env(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    lines: list[str] = []
+    arrived = threading.Event()
+
+    def read() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            arrived.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        # Through a pipe, podman-compose's print()s sit in a block buffer unless it is told not to.
+        assert arrived.wait(120), "fy logs relayed nothing while it followed"
+    finally:
+        os.killpg(proc.pid, signal.SIGINT)
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            raise
+    reader.join(timeout=10)
+    return lines, proc.stderr.read(), proc.returncode
 
 
 def _adopt_on_host(repo: Path, env_extra: dict[str, str] | None = None) -> None:
@@ -181,6 +222,14 @@ def test_example_stack_up_serves_then_down(example_repo):
     # The config-hash drift check against labels a real `up` just wrote.
     state = _foldyard(["state"], example_repo, timeout=60)
     assert "match the rendered config" in state.stdout, state.stdout + state.stderr
+
+    # What the stack prints is relayed a line at a time with its control sequences stripped (its
+    # own colour too), and the terminal's Ctrl-C ends the follow without a traceback.
+    lines, err, rc = _followed_logs(example_repo)
+    assert not [line for line in lines if "\x1b" in line], lines
+    # Neither a traceback nor the interpreter aborting at shutdown under a relay still printing.
+    assert "Traceback" not in err and "Fatal Python error" not in err, err
+    assert rc >= 0, f"ended by signal {-rc}: {err}"
 
     down = _foldyard(["down"], example_repo, timeout=180)
     assert down.returncode == 0, down.stderr

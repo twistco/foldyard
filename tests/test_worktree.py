@@ -648,6 +648,15 @@ def _init_hook(monkeypatch, main, *, image: bool = True):
     monkeypatch.setattr(box, "image_exists", lambda *a: image)  # engine + image: yard_stub's
 
 
+def test_what_the_init_hook_says_reaches_your_terminal_through_the_cleaner(fake_main, monkeypatch):
+    # The script is a repo file the box can write: what it prints is relayed with its control
+    # sequences stripped, never handed your terminal.
+    _init_hook(monkeypatch, fake_main["main"])
+    assert worktree.add("feat") == 0
+    (run,) = [c for c in fake_main["calls"] if c[:2] == ["podman", "run"]]
+    assert run in fake_main["yard"]["relayed"]
+
+
 def test_add_runs_the_init_hook_in_a_container_not_on_the_host(fake_main, monkeypatch):
     # The init script is a REPO file whose only job is copying gitignored config between two
     # checkouts — both inside the mount — so it needs no host privileges, and running it on the host
@@ -686,6 +695,14 @@ def test_add_refuses_without_an_image_to_check_out_in(fake_main, monkeypatch, ca
     assert worktree_registry.checkouts(fake_main["main"]) == {}
     err = capsys.readouterr().err
     assert "fy box build && fy worktree add feat topic" in err
+
+
+def test_what_the_checkout_says_reaches_your_terminal_through_the_cleaner(fake_main):
+    # The container runs the filter drivers the box-writable .git names: what it prints is
+    # relayed with its control sequences stripped, never handed your terminal.
+    assert worktree.add("feat") == 0
+    (run,) = fake_main["yard"]["runs"]
+    assert fake_main["yard"]["relayed"] == [run]
 
 
 def test_the_checkout_runs_in_a_one_off_container_with_nothing_but_the_mount(fake_main):
@@ -1841,6 +1858,17 @@ def test_remove_refuses_when_the_yard_cannot_answer(fake_main, capsys):
     assert worktree.remove("feat", force=True) == 1
     assert not any("worktree" in c and "remove" in c for c in fake_main["calls"])
     assert "--discard" in capsys.readouterr().err
+
+
+def test_what_the_check_says_reaches_your_terminal_inert(fake_main, capsys):
+    # The check runs git over the box-writable worktree (its filters, its config): what it says on
+    # stderr is shown, as the failure line points at it, with its control sequences stripped.
+    _make_wt(fake_main)
+    fake_main["yard"].update(rc=3, err=b"\x1b]52;c;ZXZpbA==\x07\x1b[2K\xc2\x9bfatal: boom\n")
+    assert worktree.remove("feat", force=True) == 1
+    err = capsys.readouterr().err
+    assert "]52;c;ZXZpbA==fatal: boom\n" in err
+    assert "\x1b" not in err and "\x9b" not in err
 
 
 def _nest(fake_main, wt, rel=".claude/worktrees/quick"):

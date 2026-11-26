@@ -233,6 +233,15 @@ def fake(tmp_path, monkeypatch):
         return _Proc(0)
 
     monkeypatch.setattr(box.subprocess, "run", fake_run)
+    # What box relays to your terminal (a build, the bootstrap) reaches whatever stand-in engine is
+    # installed when it is asked (a test may wrap this one), recorded in `relayed`, never run.
+    relayed: list[list[str]] = []
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        relayed.append(cmd)
+        return box.subprocess.run(cmd, env=env, cwd=cwd).returncode
+
+    monkeypatch.setattr(box.guestcompose, "stream_here", stream_here)
     # down/ps gate on a reachable engine before resolving (never provision a VM to tear down);
     # the golden tests fake the engine, so the gate passes. The gating itself is tested below.
     monkeypatch.setattr(stack, "engine_reachable", lambda *a, **k: True)
@@ -250,6 +259,7 @@ def fake(tmp_path, monkeypatch):
         "hosted": hosted,
         "readiness": readiness,
         "mirror": mirror,
+        "relayed": relayed,
     }
 
 
@@ -659,6 +669,35 @@ def test_up_builds_image_when_absent_then_installs_and_warms(fake):
     assert any(c[2] == "-d" for c in execs)  # detached deps warm-up
 
 
+def test_what_the_box_chose_reaches_your_terminal_through_the_cleaner(fake):
+    # The build reads the box's Dockerfile (a consumer's own, or its [box].packages layer) and the
+    # bootstrap runs the box's tools and an in-box `foldyard doctor` from the checkout: what they
+    # print is relayed with its control sequences stripped, never handed your terminal.
+    assert box.main("up") == 0
+    builds = [c for c in fake["calls"] if c[1] == "build"]
+    bootstrap = [c for c in fake["calls"] if c[1] == "exec" and c[2] != "-d" and "-lc" in c]
+    bootstrap = [c for c in bootstrap if "foldyard" in c[-1] and "doctor" in c[-1]]
+    assert builds and bootstrap
+    assert all(c in fake["relayed"] for c in [*builds, *bootstrap])
+
+
+def test_a_failed_creates_engine_error_reaches_your_terminal_inert(fake, monkeypatch, capsys):
+    # The image is the box's (its entrypoint, its config): what the engine says about it on
+    # stderr is shown, cleaned, before foldyard's own line.
+    real = box.subprocess.run
+
+    def failing(cmd, **kw):
+        if cmd[1:3] == ["run", "-d"]:
+            return _Proc(125, "", "\x1b]52;c;ZXZpbA==\x07\x1b[2KError: crun: boom\n")
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(box.subprocess, "run", failing)
+    assert box.main("up") == 1
+    err = capsys.readouterr().err
+    assert "]52;c;ZXZpbA==Error: crun: boom\n✗ dev box create failed" in err
+    assert "\x1b" not in err
+
+
 def test_up_reuses_current_cached_image(fake):
     fake["state"].update(img=True, image_fingerprint="expected-fingerprint")
     assert box.main("up") == 0
@@ -700,6 +739,7 @@ def test_up_bakes_packages_into_a_layer_and_runs_it(fake, monkeypatch):
     assert box.main("up") == 0
     assert not _find(fake["calls"], has=["build", "-t", "img:tag"])  # the base was current
     (layer,) = _find(fake["calls"], has=["build", "-t", _LAYER])
+    assert layer in fake["relayed"]  # its output is the image's package manager's
     assert f"{boximage.FINGERPRINT_LABEL}={_layer_fp(fake)}" in layer
     (dockerfile,) = fake["state"]["dockerfiles"]
     assert dockerfile.startswith("FROM img:tag\n")

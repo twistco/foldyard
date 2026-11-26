@@ -761,7 +761,19 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
         compose += ["-f", str(p if p.is_absolute() else checkout / p)]
     for overlay in _compose_overlays(mode, base=checkout):
         compose += ["-f", overlay]
-    env = {**_host_passthrough(), **plain, **exported, **ports, **mode_env}
+    # podman-compose is Python, and its output is relayed through a pipe (guestcompose.stream_here),
+    # which it would block-buffer: `fy logs -f` would sit silent. Set here, in the env every
+    # compose call shares, not by the relay alone: compose interpolates its files from this env
+    # (`${PYTHONUNBUFFERED}`, a bare `environment:` entry), and a relayed `up` rendering them
+    # differently from the captured calls and the config-hash check would read as drift.
+    env = {
+        "PYTHONUNBUFFERED": "1",
+        **_host_passthrough(),
+        **plain,
+        **exported,
+        **ports,
+        **mode_env,
+    }
     if not config.in_box():  # again, last: `[ports]` and the mode env can name anything
         from . import registrylogins
 
@@ -780,6 +792,13 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
 # Compose subcommands that create containers or build images — where the client's host-side reads
 # (env_file, build contexts, include/extends files…) end up somewhere the box can see.
 _CREATES = frozenset({"up", "run", "create", "build"})
+
+# Compose subcommands that need your terminal: they attach it to a container (`fy shell`'s
+# `exec`), so they inherit stdio, as `fy box shell` does. Every other verb is one a person watches
+# (`up`, `ps`, `down`, `logs -f`), and the compose files, the images and the containers are the
+# box's: its output is relayed a line at a time with its control sequences stripped
+# (`guestcompose.stream_here`), as the VM path relays it.
+_INTERACTIVE = frozenset({"exec", "run", "attach"})
 
 
 def _compose_output(
@@ -889,7 +908,8 @@ def _compose(
     rendered: dict | None = None,
 ) -> int:
     """Run `<engine> compose -f … [args]` with the resolved env, echoing the command (the
-    SPIKE 'thin and echoing' rule). Inherits stdio so exec/logs stay interactive.
+    SPIKE 'thin and echoing' rule). Its output is relayed (``guestcompose.stream_here``), except
+    for the verbs that need your terminal (``_INTERACTIVE``), which inherit stdio.
     ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``); ``rendered``
     hands the path guard a render the caller already made."""
     if (
@@ -909,14 +929,13 @@ def _compose(
         if watch is None:
             return guestcompose.stream(ctx, full)
         return _watching(watch, _err, lambda spawned: guestcompose.stream(ctx, full, spawned))
+    cmd, cwd = [*ctx.compose, *full], str(ctx.main)
+    if args[:1] and args[0] in _INTERACTIVE:
+        return subprocess.run(cmd, env=ctx.env, cwd=cwd).returncode
     if watch is None:
-        return subprocess.run([*ctx.compose, *full], env=ctx.env, cwd=str(ctx.main)).returncode
+        return guestcompose.stream_here(cmd, ctx.env, cwd)
     return _watching(
-        watch,
-        _err,
-        lambda spawned: _wait_spawned(
-            _spawn_compose([*ctx.compose, *full], ctx.env, str(ctx.main)), spawned
-        ),
+        watch, _err, lambda spawned: guestcompose.stream_here(cmd, ctx.env, cwd, spawned)
     )
 
 
@@ -1047,19 +1066,6 @@ def _watch_for(ctx: Context, args: list[str], rendered: dict | None) -> _Depende
     if args[:1] != ["up"] or not (depended := _depended_on(rendered)):
         return None
     return _DependencyWatch(ctx, depended)
-
-
-def _spawn_compose(cmd: list[str], env: dict, cwd: str) -> subprocess.Popen:
-    return subprocess.Popen(cmd, env=env, cwd=cwd, stdin=subprocess.DEVNULL, process_group=0)
-
-
-def _wait_spawned(proc: subprocess.Popen, spawned: Callable[[subprocess.Popen], None]) -> int:
-    spawned(proc)
-    try:
-        return proc.wait()
-    except BaseException:  # its own process group: an interrupt here doesn't reach it
-        _stop_group(proc)
-        raise
 
 
 def _stop_group(proc: subprocess.Popen) -> None:
@@ -1301,8 +1307,11 @@ def _podman_build(
             log.flush()
             failed = ", ".join(f"{name} (exit {rc})" for name, rc in failures)
             _err(f"✗ build failed for {failed} — last 25 log lines:")
-            for line in log_path.read_text().splitlines()[-25:]:
-                _err("  " + line)
+            from . import guestcompose
+
+            # What the build printed: the Dockerfile and its context are the box's.
+            for line in log_path.read_text(errors="replace").splitlines()[-25:]:
+                guestcompose.show("  " + line)
             _err(f"  full log: cat {log_path}")
             _say_registry_logins()
             return failures[0][1]
@@ -1473,7 +1482,9 @@ def up() -> int:
     if devmode.read()["mode"].get("auth0") == "sim":
         sim = f"{ctx.project}-{config.auth0_sim_container()}"
         print(f"▶ bouncing the Auth0 sim ({sim}) so it re-syncs the harness + re-seeds the dump…")
-        subprocess.run([config.engine(), "restart", sim], env=ctx.env, cwd=str(ctx.main))
+        from . import guestcompose
+
+        guestcompose.stream_here([config.engine(), "restart", sim], ctx.env, str(ctx.main))
     _compose(ctx, ["ps"])  # published host ports are shown here (project/consumer-specific)
     print(f"✓ stack '{ctx.project}' is up (app service: {ctx.app}; published ports above).")
     print("  follow logs: foldyard logs    stop: foldyard down")
@@ -2350,13 +2361,20 @@ def _compose_captured(
         return _watching(
             watch, emit, lambda spawned: guestcompose.stream_to(ctx, full, emit, spawned)
         )
+
+    def cleaned(line: str) -> None:  # the box's compose files and containers: as the VM path's
+        if emit is _err:  # your terminal: the box's ✓ isn't foldyard's own to paint
+            guestcompose.show(line)
+        else:
+            emit(guestcompose.printable(line))
+
     if watch is None:
-        return devmode.run_stream([*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main))
+        return devmode.run_stream([*ctx.compose, *full], cleaned, env=ctx.env, cwd=str(ctx.main))
     return _watching(
         watch,
         emit,
         lambda spawned: devmode.run_stream(
-            [*ctx.compose, *full], emit, env=ctx.env, cwd=str(ctx.main), on_spawn=spawned
+            [*ctx.compose, *full], cleaned, env=ctx.env, cwd=str(ctx.main), on_spawn=spawned
         ),
     )
 
@@ -2557,7 +2575,9 @@ def remove_devbox_volumes(project: str | None = None) -> int:
     vols = [v for v in vols if v.startswith(prefix)]
     if vols:
         _err(f"+ {eng} volume rm " + " ".join(vols))
-        if subprocess.run([eng, "volume", "rm", *vols], env=ctx.env).returncode != 0:
+        from . import guestcompose
+
+        if guestcompose.stream_here([eng, "volume", "rm", *vols], ctx.env) != 0:
             return 0
     return len(vols)
 
@@ -2813,12 +2833,15 @@ def _project_reclaim(ctx: Context) -> None:
         print(f"  (dev box {name} not running — skipping its reclaim script {script})")
         return
     print(f"▶ running the project's reclaim script in {name} ({script})…")
-    # Login shell so PATH (pnpm/uv) matches an attached `fy box shell`.
-    proc = subprocess.run(
+    from . import guestcompose
+
+    # Login shell so PATH (pnpm/uv) matches an attached `fy box shell`. Relayed: the script is a
+    # repo file the box can write.
+    rc = guestcompose.stream_here(
         [eng, "exec", "-w", checkout, name, "bash", "-lc", shlex.join(_reclaim_argv(script))],
-        env=ctx.env,
+        ctx.env,
     )
-    _reclaim_failed(script, proc.returncode)
+    _reclaim_failed(script, rc)
 
 
 def reclaim_now() -> int:
@@ -2861,7 +2884,9 @@ def nuke() -> int:
         ).stdout.split()
         if vols:
             _err(f"+ {eng} volume rm " + " ".join(vols))
-            subprocess.run([eng, "volume", "rm", *vols], env=ctx.env)
+            from . import guestcompose
+
+            guestcompose.stream_here([eng, "volume", "rm", *vols], ctx.env)
         _remove_external_network(ctx)
         print(f"✓ worktree {ctx.worktree} nuked (shared pnpm/playwright caches kept)")
         return rc

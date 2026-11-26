@@ -477,6 +477,20 @@ class _FakeProc:
     stderr = ""
 
 
+@pytest.fixture(autouse=True)
+def relayed_through_run(monkeypatch):
+    """A relayed run (``guestcompose.stream_here``: the compose verbs a person watches) answered
+    by whatever ``subprocess.run`` stand-in the test installed, looked up when it is asked: the
+    golden tests pin command shapes, and a relay never spawns. The relay's own tests replace this
+    stand-in with theirs."""
+    from foldyard import guestcompose
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        return stack.subprocess.run(cmd, env=env, cwd=cwd).returncode
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
+
+
 @pytest.fixture
 def capture_run(monkeypatch):
     """Record every subprocess.run command and return success, so verbs run without a real
@@ -1230,6 +1244,32 @@ def test_podman_build_failure_tails_the_log_and_names_it(
     assert f"full log: cat {config.state_dir() / 'build-tangible-podman.log'}" in err
 
 
+def test_a_failed_builds_tail_reaches_your_terminal_inert(
+    fake_repo, monkeypatch, capsys, paths_unguarded
+):
+    # The Dockerfile is the box's, so is everything the build prints: a clipboard write, a line
+    # erase, a spoofed ✓, bytes that aren't UTF-8.
+    import types
+
+    cfg = json.dumps({"services": {"queue-worker": {"build": {"context": "/repo/data"}}}})
+
+    def fake_run(cmd, **kw):
+        if "config" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout=cfg, stderr="")
+        if len(cmd) >= 2 and cmd[1] == "build":
+            log = kw["stdout"]
+            log.flush()
+            os.write(log.fileno(), b"\x1b]52;c;ZXZpbA==\x07\x1b[2K\xc2\x9b\xff BOOM\n")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        return _FakeProc()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    assert stack.up() == 1
+    err = capsys.readouterr().err
+    [boom] = [line for line in err.splitlines() if "BOOM" in line]
+    assert boom == "  ]52;c;ZXZpbA==\ufffd BOOM"
+
+
 def test_up_warns_last_when_a_capability_is_degraded(fake_repo, capture_run, monkeypatch, capsys):
     # `fy up` under a lapsed credential chain must not finish looking healthy: the supervisor's
     # published probed-and-failing capability (the claim `fy mode` renders as DEGRADED) prints
@@ -1390,6 +1430,47 @@ def test_nuke_worktree_reaps_orphans(fake_repo, capture_run, monkeypatch):
     assert stack.nuke() == 0
     down = next(c for c in _composes(capture_run) if "down" in c)
     assert down[-2:] == ["down", "--remove-orphans"]
+
+
+def _relay_log(monkeypatch) -> list[list[str]]:
+    """``guestcompose.stream_here`` recorded, then answered by the installed ``subprocess.run``."""
+    from foldyard import guestcompose
+
+    relayed: list[list[str]] = []
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        relayed.append(cmd)
+        return stack.subprocess.run(cmd, env=env, cwd=cwd).returncode
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
+    return relayed
+
+
+def _volumes_listed(monkeypatch, names: str) -> list[list[str]]:
+    """The engine stand-in: `volume ls` answers ``names``, every call recorded."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        proc = _FakeProc()
+        if cmd[1:3] == ["volume", "ls"]:
+            proc.stdout = names
+        return proc
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    return calls
+
+
+def test_a_worktree_nukes_volume_rm_is_relayed(fake_repo, monkeypatch):
+    # What the engine says about the box's volumes reaches your terminal inert.
+    _worktree(fake_repo, "feat")
+    monkeypatch.setenv("WORKTREE", "feat")
+    monkeypatch.setattr(stack, "_offset", lambda name: 7)
+    calls = _volumes_listed(monkeypatch, "tangible-podman-feat_db\n")
+    relayed = _relay_log(monkeypatch)
+    assert stack.nuke() == 0
+    rm = next(c for c in calls if c[1:3] == ["volume", "rm"])
+    assert rm in relayed
 
 
 def test_up_ensures_external_network_before_compose(fake_repo, capture_run, monkeypatch):
@@ -1577,6 +1658,27 @@ def test_reclaim_runs_the_project_script_in_the_box(fake_repo, monkeypatch):
     assert shlex.split(hook[-1]) == stack._reclaim_argv("dev-stack/reclaim.sh")
     # After the engine sweeps, not before: a script that fails must not cost them.
     assert calls.index(hook) > calls.index(next(c for c in calls if "prune" in c))
+
+
+def test_what_the_reclaim_script_says_reaches_your_terminal_through_the_cleaner(
+    fake_repo, monkeypatch
+):
+    # The script is a repo file the box can write, run in the box: what it prints is relayed with
+    # its control sequences stripped, never handed your terminal.
+    from foldyard import guestcompose
+
+    monkeypatch.setattr(config, "reclaim_script", lambda: "dev-stack/reclaim.sh")
+    calls = _box_runs(monkeypatch, box_running=True)
+    relayed: list[list[str]] = []
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        relayed.append(cmd)
+        return stack.subprocess.run(cmd, env=env, cwd=cwd).returncode
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
+    stack.reclaim(stack.resolve())
+    hook = next(c for c in calls if c[:2] == ["podman", "exec"])
+    assert relayed == [hook]
 
 
 def test_reclaim_skips_the_project_script_when_the_box_is_down(fake_repo, monkeypatch, capsys):
@@ -1962,9 +2064,11 @@ def test_remove_devbox_volumes_drops_only_this_boxes_volumes(fake_repo, monkeypa
         return proc
 
     monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    relayed = _relay_log(monkeypatch)
     assert stack.remove_devbox_volumes() == 1  # returns how many were removed
     rm = next(c for c in calls if c[1:3] == ["volume", "rm"])
     assert rm == ["podman", "volume", "rm", "tangible-podman-feat-devbox-shadow-node_modules"]
+    assert relayed == [rm]  # what the engine says reaches your terminal inert
 
 
 def test_remove_devbox_volumes_project_override_skips_worktree_resolve(fake_repo, monkeypatch):
@@ -3168,16 +3272,113 @@ def _stuck_watch(monkeypatch, stopped: list[_HangingProc]) -> None:
 
 
 def test_a_hung_host_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys):
+    from foldyard import guestcompose
+
     proc = _HangingProc()
     stopped: list[_HangingProc] = []
     _stuck_watch(monkeypatch, stopped)
-    monkeypatch.setattr(stack, "_spawn_compose", lambda cmd, env, cwd: proc)
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        assert on_spawn is not None
+        on_spawn(proc)
+        return proc.wait()
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
     ctx = _fake_ctx(fake_repo, {})
     assert stack._compose(ctx, ["up", "-d"], rendered={}) == stack.DEPENDENCY_HANG
     assert stopped == [proc]
     err = capsys.readouterr().err
     assert "p-sim" in err
     assert "fy down && fy up" in err
+
+
+# ── what compose says on your computer reaches your terminal inert ──────────────────────
+
+
+def _relayed(monkeypatch) -> list[tuple]:
+    """``guestcompose.stream_here`` recorded and answered 3; any inherited-stdio run fails."""
+    from foldyard import guestcompose
+
+    seen: list[tuple] = []
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None):
+        seen.append((cmd, env, cwd, on_spawn))
+        return 3
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
+    monkeypatch.setattr(stack.subprocess, "run", _ran_with_your_terminal)
+    return seen
+
+
+def _ran_with_your_terminal(cmd, **kw):
+    raise AssertionError(f"ran with your terminal: {cmd}")
+
+
+@pytest.mark.parametrize(
+    "args", [["logs", "-f", "--tail", "50"], ["ps"], ["down", "--remove-orphans"], ["up", "-d"]]
+)
+def test_a_watched_compose_verb_is_relayed_through_the_cleaner(fake_repo, monkeypatch, args):
+    # The compose files, the images and the containers are the box's: what they print reaches
+    # your terminal a line at a time with its control sequences stripped, as on the VM path.
+    seen = _relayed(monkeypatch)
+    ctx = _fake_ctx(fake_repo, {"A": "1"})
+    assert stack._compose(ctx, args, rendered={}) == 3  # its exit code is the verb's
+    assert seen == [(["podman", "compose", *args], {"A": "1"}, str(fake_repo), None)]
+
+
+@pytest.mark.parametrize("verb", ["exec", "run", "attach"])
+def test_a_compose_verb_that_wants_your_terminal_keeps_it(fake_repo, monkeypatch, verb):
+    from foldyard import guestcompose
+
+    monkeypatch.setattr(stack, "_escapes", lambda *a, **k: [])  # `run` creates: not this test's
+    monkeypatch.setattr(guestcompose, "stream_here", _ran_with_your_terminal)
+    ran: list[tuple] = []
+    monkeypatch.setattr(
+        stack.subprocess, "run", lambda cmd, **kw: ran.append((cmd, kw)) or _FakeProc()
+    )
+    assert stack._compose(_fake_ctx(fake_repo, {}), [verb, "app", "bash"]) == 0
+    [(cmd, kw)] = ran
+    assert cmd == ["podman", "compose", verb, "app", "bash"]
+    assert not {"stdin", "stdout", "stderr"} & set(kw)  # your terminal, inherited
+
+
+def test_the_compose_env_has_a_python_client_write_unbuffered(fake_repo):
+    # podman-compose block-buffers a pipe, and its output is relayed through one: `fy logs -f`
+    # would sit silent. It is in the env every compose call shares (relayed, captured, the config
+    # hash check), never added by the relay alone, so they all interpolate the files alike.
+    assert stack.resolve().env["PYTHONUNBUFFERED"] == "1"
+
+
+def test_the_posture_reconciles_compose_output_reaches_you_inert(fake_repo, monkeypatch):
+    # `fy mode <set>` on your computer: what compose says goes to emit (stderr, or the TUI's log),
+    # as cleaned as the VM path's (`guestcompose.stream_to`), not only its colour codes gone.
+    def run_stream(cmd, on_line, **kw):
+        on_line("\x1b]52;c;ZXZpbA==\x07\x1b[2K\x9bok")
+        return 0
+
+    monkeypatch.setattr(devmode, "run_stream", run_stream)
+    lines: list[str] = []
+    assert stack._compose_captured(_fake_ctx(fake_repo, {}), ["ps"], lines.append) == 0
+    assert lines[-1] == "]52;c;ZXZpbA==ok"
+
+
+def test_the_posture_reconciles_compose_output_isnt_painted_as_foldyards(fake_repo, monkeypatch):
+    # On your terminal (the default sink, stderr), a box's "✓ …" must not come out in foldyard's
+    # own green, as if foldyard said it.
+    import io
+
+    from foldyard import term
+
+    raw = io.StringIO()
+    monkeypatch.setattr(stack.sys, "stderr", term.ColorStream(raw))
+
+    def run_stream(cmd, on_line, **kw):
+        on_line("✓ verify passed")
+        return 0
+
+    monkeypatch.setattr(devmode, "run_stream", run_stream)
+    assert stack._compose_captured(_fake_ctx(fake_repo, {}), ["ps"], stack._err) == 0
+    assert raw.getvalue().splitlines()[-1] == "✓ verify passed"
 
 
 def test_a_hung_guest_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys):

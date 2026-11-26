@@ -32,6 +32,7 @@ from pathlib import Path
 from . import (
     boxmounts,
     config,
+    guestcompose,
     machine,
     selfspawn,
     stack,
@@ -440,7 +441,8 @@ def _checkout_in_yard(
         cmd = _checkout_cmd(engine, image, main, wt_dir, oid)
         print(f"▶ checking the worktree out in the VM ({image}, commit {oid[:12]})…")
         print("  $ " + shlex.join(cmd))
-        rc = subprocess.run(cmd, env=env).returncode
+        # Relayed: the container runs the filter drivers the box-writable .git names.
+        rc = guestcompose.stream_here(cmd, env)
     if rc == 0 and _index_on_host(wt_dir):
         _say_lfs(main, oid)
         return 0
@@ -765,7 +767,10 @@ def _uncommitted_in_yard(
     shown = [*cmd[:script], "<foldyard's check>", *cmd[script + 1 :]]
     print(f"▶ checking '{name}' for uncommitted work in the VM ({image})…")
     print("  $ " + shlex.join(shown))
-    got = subprocess.run(cmd, env=env, stdout=subprocess.PIPE)
+    got = subprocess.run(cmd, env=env, capture_output=True)
+    # What git said there (over the box-writable worktree, its filters and config): shown inert.
+    for line in (got.stderr or b"").decode(errors="replace").splitlines():
+        guestcompose.show(line)
     verdict = _verdict(got.stdout or b"", save=save) if got.returncode == 0 else None
     if verdict is not None:
         return verdict
@@ -1604,7 +1609,8 @@ def _init_in_yard(main: Path, wt_dir: Path) -> int:
         str(main),
     ]
     print("  $ " + " ".join(cmd))
-    if subprocess.run(cmd, env=env).returncode != 0:
+    # Relayed: the script is a repo file the box can write.
+    if guestcompose.stream_here(cmd, env) != 0:
         print("  (worktree init reported problems — continuing)")
     return 0
 

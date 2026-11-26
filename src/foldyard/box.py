@@ -686,7 +686,8 @@ def _gated_build(
         _echo(stack._redact_build_args(full))
         if in_vm:
             return guestcompose.stream_podman(full[1:], env, context)
-        return subprocess.run(full, env=env, cwd=context).returncode
+        # Relayed, like the guest's: what a build prints is its Dockerfile's.
+        return guestcompose.stream_here(full, env, context)
 
     from . import buildgate
 
@@ -2791,7 +2792,18 @@ def _up(
     # ONLY the create goes through the runsc socket (the runtime is decided by the SOCKET a
     # container is created through, never by a flag the box could omit); probes, exec and the
     # build stay on the stack env — both services share the VM's one libpod store.
-    if subprocess.run(run, env=create_env, stdout=subprocess.DEVNULL).returncode != 0:
+    created = subprocess.run(
+        run,
+        env=create_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    # What the engine said about the box's image, cleaned (its stdout is only the new id).
+    for line in (created.stderr or "").splitlines():
+        guestcompose.show(line)
+    if created.returncode != 0:
         _err("✗ dev box create failed")
         return 1
     if gvisor and sandbox.RUNTIME not in (got := _oci_runtime(engine, box, env)):
@@ -2805,13 +2817,14 @@ def _up(
         return 1
 
     # One-time MONITORED install steps (core foldyard + Claude, plugins, consumer [[box.tools]]),
-    # then warm deps in the background. Output streams through so each step's ✓/⏭/✗ is visible.
+    # then warm deps in the background. Output streams through so each step's ✓/⏭/✗ is visible,
+    # relayed with its control sequences stripped: the steps run the box's tools and code.
     # foldyard self-install resolves its source host-side (vendored repo → editable; else a staged
     # wheel from an editable host install; else a PyPI version pin) so `fy` works even in a repo
     # that doesn't vendor foldyard (e.g. homelab) — never assumes an editable checkout on the mount.
-    subprocess.run(
+    guestcompose.stream_here(
         [engine, "exec", box, "bash", "-lc", _bootstrap_script(checkout, here, env, fy_subst)],
-        env=env,
+        env,
     )
     if not os.environ.get("DEVBOX_SKIP_DEPS") and config.box_warmup():
         print("▶ warming deps in background (log: /tmp/devbox-deps.log inside the box)…")
