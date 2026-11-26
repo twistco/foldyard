@@ -47,6 +47,13 @@ def printable(text: str) -> str:
     return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in text)
 
 
+def printable_lines(text: str) -> str:
+    """:func:`printable` for text that runs over lines — a log tail, a command's output, a panel's
+    markup: its line breaks and tabs are layout, so they stay; anything else is shown as its
+    escape. Every escape ends in a letter or digit, so a markup string stays the markup it was."""
+    return "".join(c if c.isprintable() or c in "\n\t" else ascii(c)[1:-1] for c in text)
+
+
 def paint(text: str) -> str:
     """``text`` with every status token wrapped in its ANSI color (reset after each)."""
     return _TOKEN.sub(lambda m: f"\x1b[{_COLORS[m.group(0)]}m{m.group(0)}\x1b[0m", text)

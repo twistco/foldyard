@@ -289,10 +289,12 @@ def _gcp_panel_data() -> PanelData:
                 escape(str(e.get("error", "")))[:50],
             )
         )
+    # The log's path names the worktree, which can be a directory the box made: escaped.
+    where = f"[dim]{escape(str(log))}[/dim]"
     summary = (
-        f"{len(entries)} token mints · {granted} granted · [dim]{log}[/dim]"
+        f"{len(entries)} token mints · {granted} granted · {where}"
         if entries
-        else f"no token mints yet — appears once the supervisor runs a gcp mode · [dim]{log}[/dim]"
+        else f"no token mints yet — appears once the supervisor runs a gcp mode · {where}"
     )
     return PanelData(summary=summary, rows=rows)
 

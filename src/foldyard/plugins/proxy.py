@@ -528,10 +528,10 @@ def _network_panel_tree() -> PanelTree:
     shown = f" ({len(groups)} shown)" if len(groups) < len(snap.hosts) else ""
     summary = (
         f"{snap.requests} requests across {len(snap.hosts)} hosts{shown} · {snap.injected} with "
-        f"injected Authorization{since} · [dim]{log}[/dim]"
+        f"injected Authorization{since} · [dim]{escape(str(log))}[/dim]"
         if groups
         else "no proxied traffic yet — the box routes through the always-on proxy; make a request "
-        f"(or check the supervisor: `fy host`) · [dim]{log}[/dim]"
+        f"(or check the supervisor: `fy host`) · [dim]{escape(str(log))}[/dim]"
     )
     return PanelTree(summary=summary, groups=groups)
 

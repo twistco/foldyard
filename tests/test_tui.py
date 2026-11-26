@@ -21,6 +21,8 @@ from datetime import timedelta
 from typing import cast
 
 import pytest
+from rich.text import Text
+from textual.content import Content
 
 from foldyard import config, configpin, devmode, plugins, tui
 
@@ -2007,7 +2009,7 @@ async def test_open_code_hidden_on_new_worktree_row():
 
 def test_workspace_card_shows_app_port():
     rendered = tui._render_ws(_two_workspaces()[1])
-    assert "http://localhost:3007" in rendered
+    assert "http://localhost:3007" in rendered.plain
 
 
 async def test_new_worktree_card_is_last_and_opens_modal():
@@ -3308,3 +3310,360 @@ async def test_highlighting_a_box_made_worktree_card_reads_mains_state(monkeypat
         assert app.is_running
         assert app.sub_title.startswith("bad name  ·  ")
         assert app.sub_title.endswith("/.foldyard/p/worktrees/bad name/dev-mode.json")
+
+
+# ── box-chosen text reaches the screen inert ─────────────────────────────────────────
+# The box can name a directory under the worktrees root (a card, unregistered), a branch, a
+# request path or User-Agent, an env var in its image, and every string of an adopted
+# foldyard.toml. On a markup surface `[@click=app.screenshot('rc','\x2fp')]` is a click that writes
+# a file at a path of the box's choosing; on any surface ESC / C1 / bidi controls drive the
+# terminal (OSC 52 writes the clipboard). Each test renders through the real widget, then reads
+# back what it shows: the literal text, no action span, nothing a terminal would act on.
+
+# Every class at once: an action tag, an OSC 52 clipboard write, a C1 CSI and a bidi override.
+_EVIL = "[@click=app.screenshot('rc','\\x2fp')]x\x1b]52;c;aGk=\x07\x9b2J\u202e"
+_EVIL_SHOWN = "[@click=app.screenshot('rc','\\x2fp')]x"  # what must read as text
+
+
+def _assert_inert(shown, literal: str = _EVIL_SHOWN) -> None:
+    """``shown`` (a Textual Content or a Rich Text) holds nothing a terminal acts on, no action
+    span, and still shows the box's text (``literal``) as it is."""
+    assert all(c.isprintable() or c in "\n\t" for c in shown.plain), repr(shown.plain)
+    assert not any("@" in str(span.style) for span in shown.spans), shown.spans
+    assert literal in shown.plain, shown.plain
+
+
+def _evil_workspaces():
+    ws = _two_workspaces()
+    ws[1].update(
+        name=_EVIL,
+        path=f"/repo-wt/{_EVIL}",
+        project=f"proj-{_EVIL}",
+        branch=f"wt/{_EVIL}",
+        devbox=True,
+    )
+    return ws
+
+
+async def test_a_box_made_worktree_name_shows_as_text_on_its_card_and_hint(monkeypatch):
+    monkeypatch.setattr(devmode, "workspaces", _evil_workspaces)
+    # Unstubbed, an unregistered card's config names the project after its directory, and
+    # `config.project()` refuses this one (SystemExit): a separate matter, not this test's.
+    monkeypatch.setattr(
+        devmode,
+        "worktree_config",
+        lambda wt: config.Config(repo_root=config.repo_root(), worktree=wt, toml={}),
+    )
+    # An env var name read from the box's image, in the drift hint under that card.
+    monkeypatch.setattr(
+        devmode, "_box_env_hint", lambda project=None: devmode._box_env_hint_text([_EVIL])
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.index = 1
+        await pilot.pause()
+        hint = app.query_one("#ws-hint", tui.Static)
+        _assert_inert(hint.render())  # "checking the devbox env…", named
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "out of date" in _text(hint)
+        _assert_inert(hint.render())
+        card = list(lv.query(tui.WorkspaceCard))[1]
+        _assert_inert(card.query_one(tui.Static).render())
+        assert app.sub_title.isprintable()
+
+
+async def test_a_box_made_worktree_name_and_output_show_as_text_in_notifications(monkeypatch):
+    monkeypatch.setattr(devmode, "workspaces", _evil_workspaces)
+    monkeypatch.setattr(devmode, "box_up", lambda name: (1, f"build said {_EVIL}"))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app._run_devbox(_evil_workspaces()[1], "up")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        shown = [
+            Content.from_markup(n.message) if n.markup else Content(n.message)
+            for n in app._notifications
+        ]
+    assert len(shown) == 2  # "starting …" and the failure, its output's last line included
+    for content in shown:
+        _assert_inert(content)
+    assert "build said" in shown[1].plain
+
+
+def _evil_net_tree():
+    """A Network Log host as the proxy plugin draws it, from requests the box sent: its path,
+    User-Agent and the upstream's error body. Markup is escaped plugin-side; nothing else is."""
+    from rich.markup import escape
+
+    from foldyard.plugins import proxy
+
+    rows = [
+        {"ts": "t1", "method": "GET", "host": _GCS, "path": "/" + _EVIL, "status": 200},
+        {"ts": "t2", "method": "GET", "host": _GCS, "path": "/x", "status": 502,
+         "error_body": _EVIL},
+        {"ts": "t3", "method": "GET", "host": _GCS, "path": "/y", "would_block": True,
+         "ua": _EVIL},
+    ]  # fmt: skip
+    return plugins.PanelTree(
+        summary=f"[b]1 host[/b] {escape(_EVIL)}",
+        groups=[
+            plugins.PanelGroup(
+                key=_GCS,
+                label=f"[b]{_GCS}[/b] {escape(_EVIL)}",
+                children=[proxy._net_leaf(r, escape) for r in rows],
+                rows=list(rows),
+            )
+        ],
+    )
+
+
+async def test_the_network_log_shows_a_requests_path_ua_and_error_as_text(monkeypatch):
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_evil_net_tree))
+    )
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.refresh_panels()
+        tree = app.query_one("#network-tree", tui.Tree)
+        host = tree.root.children[0]
+        _assert_inert(host.label)
+        assert len(host.children) == 3
+        for leaf in host.children:
+            _assert_inert(leaf.label)
+        _assert_inert(app.query_one("#network-summary", tui.Static).render())
+
+
+async def test_a_table_panels_cells_and_summary_show_as_text(monkeypatch):
+    from rich.markup import escape
+    from textual.widgets._data_table import default_cell_formatter
+
+    class _Evil(_PanelPlugin):
+        def tui_panels(self):
+            data = plugins.PanelData(f"sum {escape(_EVIL)}", [(escape(_EVIL), "1")])
+            return [plugins.TuiPanel("demo", "Demo", ("k", "v"), refresh=lambda: data)]
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_Evil()))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        table = app.query_one("#demo-table", tui.DataTable)
+        _assert_inert(cast(Text, default_cell_formatter(table.get_row_at(0)[0])))
+        _assert_inert(app.query_one("#demo-summary", tui.Static).render())
+
+
+async def test_a_recommended_hosts_why_shows_as_text_in_the_wall_pane(monkeypatch):
+    from textual.widgets._data_table import default_cell_formatter
+
+    monkeypatch.setattr(
+        tui, "registry", lambda: _panel_registry(_NetworkPanelPlugin(_blocked_tree))
+    )
+    _stub_wall(monkeypatch, pending=[{"host": "unpkg.com", "why": _EVIL}])
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.refresh_panels()
+        table = app.query_one("#network-manage", tui.DataTable)
+        _assert_inert(cast(Text, default_cell_formatter(table.get_row_at(0)[2])))
+        assert app._manage_keys == [("rec", "unpkg.com")]  # the key is the data, untouched
+
+
+@pytest.mark.parametrize("focused", [False, True])
+async def test_a_switch_blurb_from_config_shows_as_text_in_its_status(monkeypatch, focused):
+    # An [[inject]] row's label becomes its switch's blurb: adopted config, so the box's text.
+    real = devmode.mode_blurb
+
+    def blurbs():
+        return {**real(), ("github", "off"): _EVIL}
+
+    monkeypatch.setattr(devmode, "mode_blurb", blurbs)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        row = next(r for r in app.query(tui.AxisRow) if r.axis == "github")
+        if focused:  # the preview line, for the button under the cursor
+            row.query_one("#github-off", tui.Button).focus()
+            await pilot.pause()
+        app.refresh_mode()
+        _assert_inert(row.query_one(".axis-status", tui.Static).render())
+
+
+async def test_the_host_log_pane_shows_the_supervisor_log_as_text(monkeypatch, tmp_path):
+    # The supervisor logs box-chosen names (a worktree dir it saw) verbatim.
+    monkeypatch.setattr(devmode, "daemon_status", lambda mode: {})
+    monkeypatch.setattr(tui.config, "supervisor_log_file", lambda: tmp_path / "host-supervisor.log")
+    (tmp_path / "host-supervisor.log").write_text(f"[host] one\n[host] saw {_EVIL}\tend\n")
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        app._render_host_log()
+        shown = cast(Content, app.query_one("#host-log", tui.Static).render())
+    _assert_inert(shown)
+    assert "[host] one\n" in shown.plain and "\tend" in shown.plain  # lines and tabs are layout
+
+
+def test_the_doctor_and_its_command_log_show_osc_sequences_as_text():
+    # `_strip_ansi` takes CSI colour codes only; an OSC (or a C1 control) went through.
+    rows = [("fail", "worktrees", f"unregistered: {_EVIL}")]
+    _assert_inert(tui._doctor_text("deep", rows, 0))
+    entries = [{"cmd": f"git -C /wt/{_EVIL} status", "rc": 1, "out": f"fatal: {_EVIL}\nline 2"}]
+    _assert_inert(tui._cmd_log_text(entries))
+
+
+# Names Textual's own markup parser reads where Rich's `escape` doesn't reach — a space before the
+# action, a `[` inside the tag — and names it can't parse at all, which raised on mount and left
+# `fy tui` unusable while the directory existed. A trailing backslash showed doubled.
+_TEXTUAL_TRAPS = [
+    "[ @click=app.screenshot('pwn.svg','\\x2fp')]AAAA",
+    "[@click=app.screenshot('x[.svg','\\x2fp')]BBBB",
+    "x[/",
+    "[ a]",
+    "[ $a]",
+    "[@click=app.quit()[]",
+    "x\\",
+]
+
+
+@pytest.mark.parametrize("name", _TEXTUAL_TRAPS)
+async def test_a_worktree_name_textual_would_parse_shows_as_its_text(monkeypatch, name):
+    def spaces():
+        ws = _two_workspaces()
+        ws[1].update(name=name, path=f"/repo-wt/{name}", branch=name, devbox=True)
+        return ws
+
+    monkeypatch.setattr(devmode, "workspaces", spaces)
+    monkeypatch.setattr(
+        devmode,
+        "worktree_config",
+        lambda wt: config.Config(repo_root=config.repo_root(), worktree=wt, toml={}),
+    )
+    monkeypatch.setattr(
+        devmode, "_box_env_hint", lambda project=None: devmode._box_env_hint_text([name])
+    )
+    monkeypatch.setattr(devmode, "box_up", lambda _name: (1, f"failed at {name}"))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.index = 1
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        card = cast(Content, list(lv.query(tui.WorkspaceCard))[1].query_one(tui.Static).render())
+        _assert_inert(card, f"{name}  {name}\n")
+        assert card.plain.endswith(f"/repo-wt/{name}")
+        hint = cast(Content, app.query_one("#ws-hint", tui.Static).render())
+        _assert_inert(hint, f"{name}: ⚠ dev box env out of date ({name})")
+        app._run_devbox(spaces()[1], "up")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        toasts = list(app._notifications)
+    assert [n.markup for n in toasts] == [False, False]
+    assert f"for '{name}'" in toasts[0].message and f"failed at {name}" in toasts[1].message
+
+
+async def test_a_daemons_label_from_config_shows_as_text_in_the_host_status(monkeypatch):
+    # The egress proxy's label names each [[inject]] row by its label: adopted config.
+    label = "[ @click=app.screenshot('pwn.svg','\\x2fp')]tok\x1b]52;c;aGk=\x07 [/b]"
+    daemons = {"egress-proxy": {"up": True, "label": label, "port": 8088}}
+    async with tui.DevModeTui().run_test() as pilot:
+        app = cast(tui.DevModeTui, pilot.app)
+        app._render_host_status(daemons)
+        shown = cast(Content, app.query_one("#host-status", tui.Static).render())
+    _assert_inert(shown, "[ @click=app.screenshot('pwn.svg','\\x2fp')]tok\\x1b]52;c;aGk=")
+    assert "[/b] :8088 ● up" in shown.plain
+
+
+async def test_a_table_panel_takes_a_cell_that_isnt_a_string(monkeypatch):
+    # A third-party plugin's cell may be a number; the 1s timer must not raise on it.
+    class _Ints(_PanelPlugin):
+        def tui_panels(self):
+            data = plugins.PanelData("s", [cast("tuple[str, ...]", ("a", 3))])
+            return [plugins.TuiPanel("demo", "Demo", ("k", "v"), refresh=lambda: data)]
+
+    monkeypatch.setattr(tui, "registry", lambda: _panel_registry(_Ints()))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.refresh_panels()
+        assert app.query_one("#demo-table", tui.DataTable).get_row_at(0) == ["a", "3"]
+
+
+@pytest.mark.parametrize("label", _TEXTUAL_TRAPS)
+async def test_a_secrets_label_shows_as_text_when_the_entry_doesnt_match(label):
+    # A [[secret]] label is adopted config; a wrong-shaped paste names it in the dialog's hint.
+    from foldyard.plugins import Secret
+
+    secret = Secret(var="TOK", label=label, how="", pattern="ghp_*")
+    async with tui.DevModeTui().run_test() as pilot:
+        screen = tui.SecretScreen(secret)
+        pilot.app.push_screen(screen)
+        await pilot.pause()
+        for ch in "nope":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        hint = cast(Content, screen.query_one("#sec-hint", tui.Static).render())
+    _assert_inert(hint, f"✗ that doesn't look like {label} — nothing stored")
+
+
+@pytest.mark.parametrize("typed", _TEXTUAL_TRAPS)
+async def test_a_new_branch_name_shows_as_text_in_the_pickers_hint(monkeypatch, typed):
+    monkeypatch.setattr(devmode, "branches", lambda: ["main"])
+    async with tui.DevModeTui().run_test() as pilot:
+        screen = tui.NewWorktreeScreen()
+        pilot.app.push_screen(screen)
+        await pilot.pause()
+        screen._refilter(typed)
+        hint = cast(Content, screen.query_one("#wt-hint", tui.Static).render())
+    _assert_inert(hint, f"enter creates new branch {typed}")
+
+
+def _unregistered_feat():
+    ws = _two_workspaces()
+    ws[1]["registered"] = False  # a checkout dir the host has no record of: the box's
+    ws[1]["app_port"] = None
+    return ws
+
+
+async def test_an_unregistered_card_offers_no_launch_and_reads_nothing_from_it(monkeypatch):
+    monkeypatch.setattr(devmode, "workspaces", _unregistered_feat)
+    monkeypatch.setattr(
+        devmode,
+        "worktree_config",
+        lambda wt: config.Config(repo_root=config.repo_root(), worktree=wt, toml={}),
+    )
+    read: list = []
+    real = configpin.inspect
+
+    def spy(cfg):  # the doctor inspects main's config; feat's must never be read
+        if cfg.worktree == "feat":
+            read.append(cfg)
+        return real(cfg)
+
+    monkeypatch.setattr(configpin, "inspect", spy)
+    ups: list = []
+    monkeypatch.setattr(devmode, "box_up", lambda name: ups.append(name) or (0, ""))
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        lv = app.query_one("#workspaces", tui.WorkspaceList)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        for action in ("toggle_devbox", "recreate_devbox", "open_code", "open_browser"):
+            assert lv.check_action(action, ()) is False, action
+        assert lv.check_action("remove_worktree", ()) is True  # the CLI removes such a dir
+        await pilot.press("d")
+        await pilot.pause()
+        # The key is gone; a caller that gets past it is refused before anything is read.
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda msg, **_k: notes.append(str(msg)))
+        app._start_devbox(_unregistered_feat()[1])
+        await app.workers.wait_for_complete()
+    assert read == [] and ups == []
+    assert notes and "isn't registered with your computer" in notes[0]
+    assert "`fy worktree add feat`" in notes[0]

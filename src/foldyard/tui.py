@@ -52,7 +52,9 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
+from textual.notifications import SeverityLevel
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -78,6 +80,47 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 def _leaf_row(group: PanelGroup, i: int) -> object:
     """What leaf ``i`` of ``group`` stands for (:attr:`PanelGroup.rows`), or None."""
     return group.rows[i] if i < len(group.rows) else None
+
+
+def _shown(text: object) -> str:
+    """``text`` ready to sit in a RICH markup string (``Text.from_markup``, a ``DataTable`` str
+    cell, a tree label), for whatever the box can choose: a worktree's directory name, a branch, a
+    string of the adopted ``foldyard.toml``. Escaped for that parser —
+    ``[@click=app.screenshot(…)]`` is otherwise a click that writes a file where the box says — and
+    :func:`term.printable` for the terminal, since Textual passes ESC through (OSC 52 writes your
+    clipboard), C1 and bidi too.
+
+    Never for TEXTUAL's markup (``Static("…")``, ``.update("…")``, ``notify``): ``escape`` covers
+    only what Rich reads as a tag, and Textual's parser also takes ``[ @click=…]`` and a ``[``
+    inside the tag. There the box's text goes in as :class:`Content` (:func:`_content`), or the
+    toast has no markup at all (:meth:`DevModeTui._toast`)."""
+    return escape(term.printable(str(text)))
+
+
+def _content(*parts: str | tuple[str, str]) -> Content:
+    """Content assembled from plain parts — ``"text"`` or ``("text", "style")`` — none of them
+    parsed as markup, each made terminal-inert (:func:`term.printable_lines`). How box-chosen text
+    reaches a Textual widget: see :func:`_shown` for why not as an escaped markup string."""
+    return Content.assemble(
+        *(
+            (term.printable_lines(p[0]), p[1]) if isinstance(p, tuple) else term.printable_lines(p)
+            for p in parts
+        )
+    )
+
+
+def _panel_markup(markup: str) -> str:
+    """A plugin panel's markup string (a summary, a cell, a tree line) made terminal-inert. The
+    plugin escapes the box's text for the markup parser (:class:`PanelData`), but an ESC in a
+    request path the proxy logged would still reach the terminal: it is shown as its escape here,
+    whichever plugin drew the line."""
+    return term.printable_lines(markup)
+
+
+def _panel_text(markup: str) -> Text:
+    """A plugin panel's summary, parsed by RICH: plugins escape the box's text with Rich's
+    ``escape`` (:class:`PanelData`), which Textual's own parser doesn't honour (see _shown)."""
+    return Text.from_markup(_panel_markup(markup))
 
 
 def _build_only_grant(key: str) -> bool:
@@ -185,7 +228,9 @@ def _doctor_text(header: str, rows: list[tuple[str, str, str]], spin: int) -> Te
         text.append(name, style="bold")
         text.append("  ")
         if detail:
-            text.append(devmode._strip_ansi(detail))  # belt-and-suspenders for the display
+            # Colour codes dropped (belt-and-suspenders for the display); whatever else a terminal
+            # would act on — an OSC, a C1 control in a box-made directory's name — shown as text.
+            text.append(term.printable_lines(devmode._strip_ansi(detail)))
         elif status == "running":
             text.append("…", style="dim")
         text.append("\n")
@@ -202,31 +247,48 @@ def _cmd_log_text(entries: list[dict]) -> Text:
     for e in entries:
         ok = e.get("rc") == 0
         text.append("$ ", style="dim")
-        text.append(e.get("cmd", ""), style="bold" if ok else "bold red")
+        text.append(term.printable(e.get("cmd", "")), style="bold" if ok else "bold red")
         text.append(f"  (rc={e.get('rc')})\n", style="dim" if ok else "red")
-        out = devmode._strip_ansi(e.get("out", "")).strip()
+        out = term.printable_lines(devmode._strip_ansi(e.get("out", ""))).strip()
         if out:
             for line in out.splitlines():
                 text.append("    " + line + "\n", style="dim" if ok else "")
     return text
 
 
-def _render_ws(ws: dict) -> str:
+def _render_ws(ws: dict) -> Content:
     stack = (
         "engine unreachable"
         if ws["containers"] is None
         else (f"{ws['containers']} containers" if ws["containers"] else "stack down")
     )
     box = "▣ devbox" if ws["devbox"] else "□ no devbox"
-    app = (
-        f"\n[dim]app[/dim] http://localhost:{ws['app_port']}"
+    app: list[str | tuple[str, str]] = (
+        ["\n", ("app", "dim"), f" http://localhost:{ws['app_port']}"]
         if ws.get("app_port") is not None
-        else ""
+        else []
     )
-    return (
-        f"[b]{ws['name']}[/b]  [dim]{ws['branch']}[/dim]\n"
-        f"{stack} · {box}{app}\n[dim]{ws['path']}[/dim]"
+    # The name, its branch and its path are the box's to choose: a directory it made under the
+    # worktrees root is a card of its own (devmode.workspaces), and git lets a branch carry C1 and
+    # bidi controls. So the card is built as Content, never parsed from markup (see _shown).
+    return _content(
+        (ws["name"], "bold"),
+        "  ",
+        (ws["branch"], "dim"),
+        f"\n{stack} · {box}",
+        *app,
+        "\n",
+        (ws["path"], "dim"),
     )
+
+
+# The workspace list's actions that launch something on a checkout or read its config.
+_LAUNCHES = ("open_browser", "open_code", "toggle_devbox", "recreate_devbox")
+
+
+def _unregistered(item: object) -> bool:
+    """A card for a checkout dir your computer has no record of (``devmode.workspaces``)."""
+    return isinstance(item, WorkspaceCard) and not item.ws.get("registered", True)
 
 
 class WorkspaceCard(ListItem):
@@ -279,6 +341,10 @@ class WorkspaceList(ListView):
         if action in ("open_browser", "open_code", "toggle_devbox") and isinstance(
             self.highlighted_child, NewWorktreeCard
         ):
+            return False
+        # A checkout your computer never registered is the box's: nothing launches on it (its box,
+        # Code, its app) — each would read its config or open it here. Removing it stays.
+        if action in _LAUNCHES and _unregistered(self.highlighted_child):
             return False
         if (
             action == "open_browser"
@@ -742,6 +808,15 @@ class DevModeTui(App):
         self.set_interval(1.0, self.refresh_panels)
         self.set_interval(5.0, self.refresh_workspaces)
 
+    def _toast(
+        self, message: str, *, severity: SeverityLevel = "information", timeout: float | None = None
+    ) -> None:
+        """Every toast this app raises, as plain text. Most carry the box's text somewhere — a
+        worktree name, the last line a `fy` verb printed, a `[[secret]]` label — and none means
+        markup, so none is parsed (an escaped string isn't safe there: see _shown), and what a
+        terminal would act on is shown as its escape."""
+        self.notify(term.printable_lines(message), severity=severity, timeout=timeout, markup=False)
+
     # ── left column ──────────────────────────────────────────────────────────────
     def _workspace_list(self) -> WorkspaceList | None:
         """The left column, or ``None`` when it isn't in the active screen — during startup
@@ -824,13 +899,13 @@ class DevModeTui(App):
         if not result:
             return
         name, branch = result
-        self.notify(f"creating worktree '{name}' on branch '{branch}'…")
+        self._toast(f"creating worktree '{name}' on branch '{branch}'…")
 
         def work() -> None:
             rc, out = devmode.create_worktree(name, branch)
             tail = out.splitlines()[-1] if out else ""
             self.call_from_thread(
-                self.notify,
+                self._toast,
                 (f"✓ worktree '{name}' ready" if rc == 0 else f"✗ worktree failed: {tail}"),
                 severity=("information" if rc == 0 else "error"),
             )
@@ -847,13 +922,13 @@ class DevModeTui(App):
         if not confirmed:
             return
         name = ws["name"]
-        self.notify(f"removing worktree '{name}' (box + stack teardown)…")
+        self._toast(f"removing worktree '{name}' (box + stack teardown)…")
 
         def work() -> None:
             rc, out = devmode.remove_worktree(name)
             tail = out.splitlines()[-1] if out else ""
             self.call_from_thread(
-                self.notify,
+                self._toast,
                 (f"✓ worktree '{name}' removed" if rc == 0 else f"✗ remove failed: {tail}"),
                 severity=("information" if rc == 0 else "error"),
             )
@@ -862,28 +937,28 @@ class DevModeTui(App):
         self.run_worker(work, thread=True)
 
     def open_code(self, ws: dict) -> None:
-        self.notify(f"opening VS Code on '{ws['name']}'…")
+        self._toast(f"opening VS Code on '{ws['name']}'…")
 
         def work() -> None:
             rc, out = devmode.open_code(ws["name"])
             if rc != 0:
                 tail = out.splitlines()[-1] if out else ""
-                self.call_from_thread(self.notify, f"✗ fy code failed: {tail}", severity="error")
+                self.call_from_thread(self._toast, f"✗ fy code failed: {tail}", severity="error")
 
         self.run_worker(work, thread=True)
 
     def open_browser(self, ws: dict) -> None:
         port = ws.get("app_port")
         if not port:  # defensive: callers gate on this, but never emit localhost:None directly
-            self.notify("✗ no app port for this worktree", severity="error")
+            self._toast("✗ no app port for this worktree", severity="error")
             return
-        self.notify(f"opening http://localhost:{port}…")
+        self._toast(f"opening http://localhost:{port}…")
 
         def work() -> None:
             rc, out = devmode.open_browser(ws["name"])
             if rc != 0:
                 tail = out.splitlines()[-1] if out else ""
-                self.call_from_thread(self.notify, f"✗ fy open failed: {tail}", severity="error")
+                self.call_from_thread(self._toast, f"✗ fy open failed: {tail}", severity="error")
 
         self.run_worker(work, thread=True)
 
@@ -907,13 +982,13 @@ class DevModeTui(App):
             self._do_toggle_machine()
 
     def _do_toggle_machine(self) -> None:
-        self.notify("toggling the VM…")
+        self._toast("toggling the VM…")
 
         def work() -> None:
             rc, out = devmode.machine_toggle()
             tail = out.splitlines()[-1] if out else ""
             self.call_from_thread(
-                self.notify,
+                self._toast,
                 (f"✓ machine {devmode.machine_state()}" if rc == 0 else f"✗ {tail}"),
                 severity=("information" if rc == 0 else "error"),
             )
@@ -970,11 +1045,11 @@ class DevModeTui(App):
         it. A confirmed recreate goes the start's way, through the adopt question."""
         named = (
             f"\n\n[b]{len(live)} agent session(s) still running[/b] (`fy agent ls`): "
-            + ", ".join(escape(s.name) for s in live)
+            + ", ".join(_shown(s.name) for s in live)
             if live
             else ""
         )
-        box = f"[dim]{escape(ws['project'])}-devbox[/dim]"
+        box = f"[dim]{_shown(ws['project'])}-devbox[/dim]"
         killed = (
             "Anything running inside it — including a live `fy claude` / `fy codex` agent "
             "session — is killed; the stack's other containers keep running and login/CLI "
@@ -983,7 +1058,7 @@ class DevModeTui(App):
         if verb == "recreate":
             self.push_screen(
                 ConfirmScreen(
-                    title=f"Recreate the dev box for [b]{escape(ws['name'])}[/b]?",
+                    title=f"Recreate the dev box for [b]{_shown(ws['name'])}[/b]?",
                     body=(
                         f"Removes {box} and creates it again (`fy box recreate`), which picks up "
                         f"what is fixed at creation: env, mounts, foldyard, the image. {killed}"
@@ -996,7 +1071,7 @@ class DevModeTui(App):
             return
         self.push_screen(
             ConfirmScreen(
-                title=f"Stop the dev box for [b]{escape(ws['name'])}[/b]?",
+                title=f"Stop the dev box for [b]{_shown(ws['name'])}[/b]?",
                 body=(
                     f"Stops + removes {box}. {killed}"
                     f"{named}\n\nStart it again with [b]d[/b] (or `fy box up`)."
@@ -1018,11 +1093,20 @@ class DevModeTui(App):
         ADR-0022 closed (adopting is what lets `[proxy] passthrough` / `[[inject]].host` reach the
         host). First adoption is the most important one to see, not the least.
         """
+        if not ws.get("registered", True):
+            # Before anything is read from it: inspecting would read (and offer to adopt) the
+            # config a box planted there. `fy box up`'s gate refuses it too, in these words.
+            self._toast(
+                f"✗ worktree '{ws['name']}' isn't registered with your computer, so it won't run "
+                f"anything for it. Check it is yours, then `fy worktree add {ws['name']}`.",
+                severity="error",
+            )
+            return
         try:
             name = ws["name"]
             drift = configpin.inspect(devmode.worktree_config("" if name == "main" else name))
         except Exception as e:  # never let the gate's own failure block starting a box
-            self.notify(f"couldn't check the adopted config ({e})", severity="warning")
+            self._toast(f"couldn't check the adopted config ({e})", severity="warning")
             self._run_devbox(ws, verb)
             return
         if drift.pinned_exists and not drift.changed:
@@ -1034,7 +1118,7 @@ class DevModeTui(App):
             # comparison must not lose the question.
             baseline = configpin.main_baseline(drift) if not drift.pinned_exists else None
         except Exception as e:
-            self.notify(f"couldn't compare against main's config ({e})", severity="warning")
+            self._toast(f"couldn't compare against main's config ({e})", severity="warning")
             baseline = None
 
         def _after(answer: str | None) -> None:
@@ -1051,13 +1135,13 @@ class DevModeTui(App):
                     baseline=baseline.digest if baseline is not None else None,
                 )
             except configpin.ReviewStale as e:
-                self.notify(f"{e} — asking again", severity="warning")
+                self._toast(f"{e} — asking again", severity="warning")
                 self._start_devbox(ws, verb)
                 return
             except Exception as e:
-                self.notify(f"adopt failed: {e}", severity="error")
+                self._toast(f"adopt failed: {e}", severity="error")
                 return
-            self.notify(f"✓ adopted config for '{ws['name']}'")
+            self._toast(f"✓ adopted config for '{ws['name']}'")
             self._run_devbox(ws, verb)
 
         self.push_screen(AdoptConfigScreen(drift, baseline), _after)
@@ -1068,7 +1152,7 @@ class DevModeTui(App):
         # presses land there, so the check-then-add can't race) and cleared in the worker's
         # finally — success or failure, up or down — so a failed run never wedges the toggle.
         if name in self._devbox_busy:
-            self.notify(f"[{name}] a dev-box operation is already running…", severity="warning")
+            self._toast(f"[{name}] a dev-box operation is already running…", severity="warning")
             return
         self._devbox_busy.add(name)
         doing, done, run = {
@@ -1076,14 +1160,14 @@ class DevModeTui(App):
             "down": ("stopping", "stopped", devmode.box_down),
             "recreate": ("recreating", "recreated", devmode.box_recreate),
         }[verb]
-        self.notify(f"{doing} dev box for '{name}'…")
+        self._toast(f"{doing} dev box for '{name}'…")
 
         def work() -> None:
             try:
                 rc, out = run(name)
                 tail = out.splitlines()[-1] if out else ""
                 self.call_from_thread(
-                    self.notify,
+                    self._toast,
                     (
                         f"✓ [{name}] dev box {done}"
                         if rc == 0
@@ -1122,7 +1206,9 @@ class DevModeTui(App):
         # under this name; a re-check of the same one keeps it until the new answer lands.
         if self._ws_hint_for != name:
             self._ws_hint_for = name
-            self.query_one("#ws-hint", Static).update(f"[b]{name}[/b]: checking the devbox env…")
+            self.query_one("#ws-hint", Static).update(
+                _content((name, "bold"), ": checking the devbox env…")
+            )
         seq, project = self._ws_hint_seq, ws["project"]
         cfg = self._worktree_cfg()  # this workspace's own config, so the check reads the right one
 
@@ -1143,9 +1229,13 @@ class DevModeTui(App):
         if hint and name != "main":  # the recreate, aimed at THIS worktree's box
             wt = f"WORKTREE={name} "
             hint = hint.replace("fy box recreate", f"{wt}fy box recreate")
+        # The hint names env vars read from the box and its image: the box's text, like the name.
         hints.first(Static).update(
-            f"[b]{name}[/b]: "
-            + (hint or ("devbox env matches the config" if devbox else "no devbox running"))
+            _content(
+                (name, "bold"),
+                ": ",
+                hint or ("devbox env matches the config" if devbox else "no devbox running"),
+            )
         )
 
     # ── per-worktree binding (the selected workspace is the consumer) ──────────────
@@ -1217,11 +1307,15 @@ class DevModeTui(App):
                 # The cursor is on this row — describe the SELECTED mode, not the active
                 # one, so ↑/↓/←/→ previews what enter would switch to.
                 tag = "active" if selected == current else "enter to switch"
-                status = f"▸ {selected}: {blurb[(row.axis, selected)]}  [dim]({tag})[/dim]"
+                # A blurb can be an [[inject]] row's label: adopted config, the box's text. So
+                # the line is built as Content, never parsed from markup (see _shown).
+                status = _content(
+                    f"▸ {selected}: {blurb[(row.axis, selected)]}  ", (f"({tag})", "dim")
+                )
             else:
-                status = blurb[(row.axis, current)]
+                text = blurb[(row.axis, current)]
                 if row.axis in expires:
-                    status += f"   expires in {devmode._countdown(expires[row.axis])}"
+                    text += f"   expires in {devmode._countdown(expires[row.axis])}"
                 dn = spec_by_axis.get(row.axis)  # axis → daemon name; None ⇒ no daemon
                 daemon = daemons.get(dn) if dn else None
                 # Only flag an ACTIVE axis whose backing daemon isn't serving — an actionable
@@ -1229,13 +1323,14 @@ class DevModeTui(App):
                 # "{daemon} :{port} ● up" under every axis that shares the one egress-proxy (github,
                 # penpot, capture, claude, codex all do) was just duplicated noise.
                 if daemon and current != defaults[row.axis] and daemon.get("blocked"):
-                    # The reason is the supervisor's free text (an OSError's str, say) — escaped,
-                    # or a bracketed fragment reads as markup and an unmatched `[/x]` raises.
-                    status += f"\n{dn} :{daemon['port']} ○ BLOCKED — {escape(daemon['blocked'])}"
+                    # The reason is the supervisor's free text (an OSError's str, say): plain text
+                    # like the rest, or a bracketed fragment reads as markup and `[/x]` raises.
+                    text += f"\n{dn} :{daemon['port']} ○ BLOCKED — {daemon['blocked']}"
                 elif daemon and current != defaults[row.axis] and not daemon["up"]:
-                    status += f"\n{dn} :{daemon['port']} ○ DOWN — `fy host restart` (or `fy up`)"
+                    text += f"\n{dn} :{daemon['port']} ○ DOWN — `fy host restart` (or `fy up`)"
                 if scopes.get(row.axis):
-                    status += f"\nscope: {escape(scopes[row.axis])}"
+                    text += f"\nscope: {scopes[row.axis]}"
+                status = _content(text)
             row.query_one(".axis-status", Static).update(status)
         # The banner stacks every posture-level alarm: the emergency rung (as before) and any
         # probed-and-failing capability (the supervisor's published claim — same source as
@@ -1245,9 +1340,12 @@ class DevModeTui(App):
         if any(mode.get(a) in emergency_rungs.get(a, ()) for a in rungs):
             alarms.append("⚠ EMERGENCY user-credential mode is ON — auto-reverts at expiry")
         alarms += [f"⚠ {axis} capability DEGRADED — {detail}" for axis, detail in degraded]
-        self.query_one("#banner", Static).update("\n".join(alarms))
+        self.query_one("#banner", Static).update(_content("\n".join(alarms)))
         # A persistent header so a human always knows WHOSE posture is shown (and where stored).
-        self.sub_title = f"{self._active_worktree() or 'main'}  ·  {cfg.mode_file()}"
+        # Not markup, but not filtered for the terminal either: the worktree may be a box-made dir.
+        self.sub_title = term.printable(
+            f"{self._active_worktree() or 'main'}  ·  {cfg.mode_file()}"
+        )
         self._render_host_status(daemons, self._active_worktree())  # this worktree's daemons
         self._render_host_log()  # the ONE supervisor's combined log (global, unbound)
 
@@ -1304,24 +1402,24 @@ class DevModeTui(App):
 
         def _after(value: str | None) -> None:
             if value is None:
-                self.notify(f"[{ws_name}] {secret.label} not entered — mode unchanged.")
+                self._toast(f"[{ws_name}] {secret.label} not entered — mode unchanged.")
                 return
             if value:
                 try:
                     with config.using(cfg):
                         keyless.append_host_env(config.host_env_file(), secret.var, value)
                 except OSError as e:  # say so — never claim a 0600 store that didn't happen
-                    self.notify(
+                    self._toast(
                         f"[{ws_name}] couldn't store {secret.label} on the host: {e}",
                         severity="error",
                         timeout=10,
                     )
                     return
-                self.notify(f"[{ws_name}] stored {secret.label} on the host (0600).")
+                self._toast(f"[{ws_name}] stored {secret.label} on the host (0600).")
             else:
-                self.notify(
-                    f"[{ws_name}] {secret.label} skipped — that host gets no token until it's set "
-                    f"(`fy mode …` or `fy box up` on a TTY prompts again).",
+                self._toast(
+                    f"[{ws_name}] {secret.label} skipped — that host gets no token until it's "
+                    f"set (`fy mode …` or `fy box up` on a TTY prompts again).",
                     severity="warning",
                 )
             if rest:
@@ -1340,11 +1438,11 @@ class DevModeTui(App):
             try:
                 res = devmode.set_mode({axis: value}, reconcile=False)
             except SystemExit as e:  # a mode_issues error refused the combination — surface it
-                self.notify(str(e), severity="error", timeout=10)
+                self._toast(str(e), severity="error", timeout=10)
                 return
             is_emergency = value in devmode.emergency().get(axis, ())
         if is_emergency:
-            self.notify(
+            self._toast(
                 f"[{ws_name}] {axis}=user armed for {devmode.DEFAULT_TTL // 60} min "
                 f"(longer: `fy mode {axis}=user ttl=…`)",
                 severity="warning",
@@ -1364,7 +1462,7 @@ class DevModeTui(App):
         # Off-thread reconcile: capture the compose output through a sink (never the terminal fds)
         # and surface a start/finish notify as a lightweight spinner. The captured tail is shown so
         # a slow recreate is visible without the raw bleed.
-        self.notify(f"[{ws_name}] reconciling stack ({res['new_profiles'] or 'none'})…")
+        self._toast(f"[{ws_name}] reconciling stack ({res['new_profiles'] or 'none'})…")
 
         # Serialize reconciles PER WORKTREE: two quick toggles would otherwise run two
         # `docker compose` operations against the same stack concurrently (run_worker's
@@ -1393,7 +1491,7 @@ class DevModeTui(App):
                     severity = "error"
             except Exception as e:  # reconcile is best-effort — never crash the TUI
                 msg, severity = f"✗ [{ws_name}] reconcile failed: {e}", "error"
-            self.call_from_thread(self.notify, msg, severity=severity)
+            self.call_from_thread(self._toast, msg, severity=severity)
             self.call_from_thread(self.refresh_workspaces)
 
         self.run_worker(work, thread=True)
@@ -1465,7 +1563,7 @@ class DevModeTui(App):
                 # grants nothing, and never falls through to the picker's path grant.
                 targets = self._manage_follow.get(sel)
                 if not targets:
-                    self.notify(f"redirects from {sel_host} are already followed")
+                    self._toast(f"redirects from {sel_host} are already followed")
                     self.refresh_panels()
                     return
                 self.push_screen(
@@ -1492,7 +1590,7 @@ class DevModeTui(App):
                 self.push_screen(GrantScopeScreen(host, scopes), self._pick_level)
                 return
         if not isinstance(host, str) or not host:
-            self.notify(
+            self._toast(
                 "move the cursor onto a host or a request in the Network Log first, then press a",
                 severity="warning",
             )
@@ -1524,17 +1622,17 @@ class DevModeTui(App):
             payload = [c.data for c in node.children if isinstance(c.data, dict)]
             what = f"{len(payload)} request(s) to {data}"
         else:
-            self.notify("move the cursor onto a request or a host first, then press l")
+            self._toast("move the cursor onto a request or a host first, then press l")
             return
         self.copy_to_clipboard(json.dumps(payload, indent=2, sort_keys=True))
-        self.notify(f"copied {what} as JSON")
+        self._toast(f"copied {what} as JSON")
 
     def _typed_only(self, host: str) -> bool:
         """A local address (allowlist.local_key) is never granted from a keypress: it opens a
         service on your computer or its network to the box, so it takes the typed command."""
         if not allowlist.local_key(host):
             return False
-        self.notify(
+        self._toast(
             f"{host} is on your computer or its network — grant it by typing "
             f"`fy allow add {host}` if you mean to",
             severity="warning",
@@ -1544,7 +1642,7 @@ class DevModeTui(App):
     def _after_allow(self, host: str, level: str | None) -> None:
         if not level:
             return
-        self.notify(f"allowing {host} ({level})…")
+        self._toast(f"allowing {host} ({level})…")
 
         def work() -> None:
             try:
@@ -1552,7 +1650,7 @@ class DevModeTui(App):
                 ok, msg = True, f"✓ allowed {host} ({level})"
             except Exception as e:  # grant raises SystemExit (bad host/level/in-box) or OSError
                 ok, msg = False, f"✗ allow failed: {e}"
-            self.call_from_thread(self.notify, msg, severity=("information" if ok else "error"))
+            self.call_from_thread(self._toast, msg, severity=("information" if ok else "error"))
             self.call_from_thread(self.refresh_panels)  # the wall pane reflects the grant now
 
         self.run_worker(work, thread=True)
@@ -1560,7 +1658,7 @@ class DevModeTui(App):
     def _after_follow(self, source: str, targets: list[str], level: str | None) -> None:
         if not level:
             return
-        self.notify(f"following redirects from {source} ({level})…")
+        self._toast(f"following redirects from {source} ({level})…")
 
         def work() -> None:
             try:
@@ -1568,7 +1666,7 @@ class DevModeTui(App):
                 ok, msg = True, f"✓ following redirects from {source} ({level})"
             except Exception as e:  # SystemExit (bad source/target/in-box) or OSError
                 ok, msg = False, f"✗ follow failed: {e}"
-            self.call_from_thread(self.notify, msg, severity=("information" if ok else "error"))
+            self.call_from_thread(self._toast, msg, severity=("information" if ok else "error"))
             self.call_from_thread(self.refresh_panels)
 
         self.run_worker(work, thread=True)
@@ -1595,7 +1693,7 @@ class DevModeTui(App):
             return
         sel = self._manage_selection()
         if sel is None:
-            self.notify(
+            self._toast(
                 "focus a row in the allowlist pane below the log (tab / click), then press x",
                 severity="warning",
             )
@@ -1619,7 +1717,7 @@ class DevModeTui(App):
                 ok = True
             except Exception as e:  # SystemExit (in-box/bad host) or OSError
                 ok, msg = False, f"✗ failed: {e}"
-            self.call_from_thread(self.notify, msg, severity=("information" if ok else "error"))
+            self.call_from_thread(self._toast, msg, severity=("information" if ok else "error"))
             self.call_from_thread(self.refresh_panels)
 
         self.run_worker(work, thread=True)
@@ -1714,13 +1812,15 @@ class DevModeTui(App):
         lines = [head] + [
             f"  {d.get('label', name)} :{d.get('port')} "
             + (
-                f"○ BLOCKED — {escape(d['blocked'])}"
+                f"○ BLOCKED — {d['blocked']}"
                 if d.get("blocked")
                 else ("● up" if d.get("up") else "○ DOWN")
             )
             for name, d in sorted(daemons.items())
         ]
-        pane.first(Static).update("\n".join(lines))
+        # Plain text, never markup: a daemon's label carries an [[inject]] label (the box's text
+        # once adopted), and a BLOCKED reason is the supervisor's free text.
+        pane.first(Static).update(_content("\n".join(lines)))
 
     def _render_host_log(self) -> None:
         pane = self.query("#host-log")  # tolerate the pane being off-screen (see _render_doctor)
@@ -1739,7 +1839,9 @@ class DevModeTui(App):
         log_path = config.supervisor_log_file()
         tail = _tail_text(log_path, max_bytes=32 * 1024, max_lines=300)
         if tail:
-            pane.first(Static).update(Text(tail))
+            # A Text, so never markup; the supervisor logs what it saw verbatim (a box-made
+            # worktree's name), so what a terminal would act on is shown as its escape too.
+            pane.first(Static).update(Text(term.printable_lines(tail)))
         else:
             pane.first(Static).update(
                 Text(f"no supervisor log yet at {log_path} — start it with `fy up`", style="dim")
@@ -1770,7 +1872,7 @@ class DevModeTui(App):
                     continue
                 data = cast(PanelData, data)
                 table = self.query_one(f"#{panel.id}-table", DataTable)
-                self.query_one(f"#{panel.id}-summary", Static).update(data.summary)
+                self.query_one(f"#{panel.id}-summary", Static).update(_panel_text(data.summary))
             except NoMatches:
                 continue
             # The rows themselves, not their count: a row can change in place (a stamp gains its
@@ -1783,7 +1885,7 @@ class DevModeTui(App):
             at, top = table.cursor_row, table.scroll_y
             table.clear()
             for row in data.rows:
-                table.add_row(*row)
+                table.add_row(*(_panel_markup(str(cell)) for cell in row))
             if data.rows:
                 table.move_cursor(row=min(at, len(data.rows) - 1), scroll=False)
             table.call_after_refresh(table.scroll_to, y=top, animate=False)
@@ -1795,7 +1897,7 @@ class DevModeTui(App):
         rows change while its child count doesn't. A new order rebuilds, keeping the expanded
         groups open and the cursor on its group, both by key."""
         tree = self.query_one(f"#{panel.id}-tree", Tree)
-        self.query_one(f"#{panel.id}-summary", Static).update(data.summary)
+        self.query_one(f"#{panel.id}-summary", Static).update(_panel_text(data.summary))
         previous = self._tree_data.get(panel.id)
         if previous == data:
             return
@@ -1816,9 +1918,9 @@ class DevModeTui(App):
         tree.clear()
         tree.show_root = False
         for g in data.groups:
-            node = tree.root.add(Text.from_markup(g.label), data=g.key)
+            node = tree.root.add(Text.from_markup(_panel_markup(g.label)), data=g.key)
             for i, child in enumerate(g.children):
-                node.add_leaf(Text.from_markup(child), data=_leaf_row(g, i))
+                node.add_leaf(Text.from_markup(_panel_markup(child)), data=_leaf_row(g, i))
             if g.key in expanded:
                 node.expand()
         tree.root.expand()
@@ -1831,7 +1933,7 @@ class DevModeTui(App):
     def _update_group(node: TreeNode, old: PanelGroup, new: PanelGroup) -> None:
         """Bring one group's node from ``old`` to ``new`` without replacing the node."""
         if old.label != new.label:
-            node.set_label(Text.from_markup(new.label))
+            node.set_label(Text.from_markup(_panel_markup(new.label)))
         if old.children == new.children and old.rows == new.rows:
             return
         if len(old.children) == len(new.children):
@@ -1839,12 +1941,12 @@ class DevModeTui(App):
                 zip(node.children, old.children, new.children, strict=True)
             ):
                 if was != now:
-                    leaf.set_label(Text.from_markup(now))
+                    leaf.set_label(Text.from_markup(_panel_markup(now)))
                 leaf.data = _leaf_row(new, i)  # the row the line now stands for
             return
         node.remove_children()
         for i, child in enumerate(new.children):
-            node.add_leaf(Text.from_markup(child), data=_leaf_row(new, i))
+            node.add_leaf(Text.from_markup(_panel_markup(child)), data=_leaf_row(new, i))
 
     def _manage_data(self) -> tuple[str, list[tuple[str, str, str]], list[tuple[str, str]]]:
         """``(summary, rows, keys)`` for the wall pane — pending recommendation offers first (the
@@ -1939,7 +2041,9 @@ class DevModeTui(App):
         table = pane.first(DataTable)
         table.clear()
         for row in rows:
-            table.add_row(*row)
+            # A `why` is the adopted [proxy] recommend list's: the box's text. Only what's shown is
+            # escaped — `_manage_keys` keep the host as the data the actions use.
+            table.add_row(*map(_shown, row))
 
     # ── Doctor tab ───────────────────────────────────────────────────────────────
     # (No key bindings: the doctor runs deep on startup, and re-runs via the tab's own
@@ -2005,7 +2109,7 @@ class DevModeTui(App):
             if pane:
                 pane.first(Button).display = False
         self._render_cmd_log()
-        self.notify(f"running: {fix.label}…")
+        self._toast(f"running: {fix.label}…")
 
         def on_line(line: str) -> None:
             self.call_from_thread(self._fix_line, line)
@@ -2018,7 +2122,7 @@ class DevModeTui(App):
 
     def _fix_line(self, line: str) -> None:
         if self._fix_output is not None:
-            self._fix_output.append(line + "\n")
+            self._fix_output.append(term.printable(line) + "\n")
             self._render_cmd_log()
 
     def _finish_fix(self, fix: DoctorFix, rc: int) -> None:
@@ -2028,7 +2132,7 @@ class DevModeTui(App):
                 f"({'done' if ok else 'failed'} — rc={rc})\n", style="green" if ok else "red"
             )
         self._fixing = False
-        self.notify(
+        self._toast(
             f"{'✓' if rc == 0 else '✗'} {fix.label} (rc={rc})",
             severity="information" if rc == 0 else "error",
         )
@@ -2074,7 +2178,7 @@ class AxisRow(Vertical):
         self.emergency = emergency
 
     def compose(self) -> ComposeResult:
-        yield Static(self.axis.upper(), classes="axis-title")
+        yield Static(_content(self.axis.upper()), classes="axis-title")  # a config switch name
         with Horizontal():
             values = self.values or devmode.axes()[self.axis]
             emergency = self.emergency or devmode.emergency().get(self.axis, ())
@@ -2100,7 +2204,7 @@ class BranchItem(ListItem):
     `getattr(item, "branch", …)` when a row is chosen)."""
 
     def __init__(self, branch: str) -> None:
-        super().__init__(Static(escape(branch)))
+        super().__init__(Static(_content(branch)))  # a branch the box may have made
         self.branch = branch
 
 
@@ -2356,8 +2460,8 @@ class RemoveWorktreeScreen(ModalScreen):
         self.ws = ws
 
     def compose(self) -> ComposeResult:
-        name = escape(self.ws["name"])
-        project = escape(self.ws["project"])
+        name = _shown(self.ws["name"])
+        project = _shown(self.ws["project"])
         branch = self.ws.get("branch") or ""
         body = (
             "This [b]permanently[/b]:\n"
@@ -2368,7 +2472,7 @@ class RemoveWorktreeScreen(ModalScreen):
             "  • deletes the checkout directory (git worktree remove)"
         )
         if branch:
-            body += f"\n\nThe branch [b]{escape(branch)}[/b] is kept."
+            body += f"\n\nThe branch [b]{_shown(branch)}[/b] is kept."
         with Vertical(id="rm-dialog"):
             yield Static(Text.from_markup(f"Remove worktree [b]{name}[/b]?"), id="rm-title")
             yield Static(Text.from_markup(body), id="rm-body")
@@ -2410,11 +2514,11 @@ class SecretScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         sec = self._secret
         lines = [
-            f"[b]{escape(sec.label)}[/b] — stored on the host at 0600, never in the box or "
+            f"[b]{_shown(sec.label)}[/b] — stored on the host at 0600, never in the box or "
             "the repo."
         ]
         if sec.how:
-            lines.append(f"get it with: [i]{escape(sec.how)}[/i]")
+            lines.append(f"get it with: [i]{_shown(sec.how)}[/i]")
         if sec.b64:
             lines.append(
                 "give its file's full path (drag the file in, then press Enter — the field stays "
@@ -2423,7 +2527,7 @@ class SecretScreen(ModalScreen):
             )
         placeholder = "its file's path, or its base64 (hidden)" if sec.b64 else "paste it (hidden)"
         with Vertical(id="sec-dialog"):
-            yield Static(Text.from_markup(f"This mode needs {escape(sec.label)}"), id="sec-title")
+            yield Static(Text.from_markup(f"This mode needs {_shown(sec.label)}"), id="sec-title")
             yield Static(Text.from_markup("\n".join(lines)), id="sec-body")
             yield Input(placeholder=placeholder, password=True, id="sec-input")
             yield Static(
@@ -2458,8 +2562,9 @@ class SecretScreen(ModalScreen):
             return
         to_store, note = keyless.secret_entry(value, self._secret)
         if to_store is None:
+            # The note names the secret by its label: a [[secret]] label is adopted config.
             self.query_one("#sec-hint", Static).update(
-                f"✗ {escape(note)} — nothing stored; try again, or esc"
+                _content(f"✗ {note} — nothing stored; try again, or esc")
             )
             self.query_one("#sec-input", Input).value = ""
             return
@@ -2561,12 +2666,13 @@ class NewWorktreeScreen(ModalScreen):
             lv.append(BranchItem(branch))
         lv.index = 0 if matches else None
         typed = text.strip()
+        hint: str | Content
         if not typed:
             hint = f"{len(self._branches)} branches — type to filter, ↑/↓ to choose"
         elif matches:
             hint = f"{len(matches)} match — enter checks out the highlighted branch"
         else:
-            hint = f"no match — enter creates new branch [b]{escape(typed)}[/b]"
+            hint = _content("no match — enter creates new branch ", (typed, "bold"))
         self.query_one("#wt-hint", Static).update(hint)
 
     @staticmethod
