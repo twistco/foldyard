@@ -1883,7 +1883,11 @@ def test_claude_refuses_outside_box(monkeypatch, capsys):
     monkeypatch.delenv("IN_DEVBOX", raising=False)
     monkeypatch.delenv("DOCKER_HOST", raising=False)
     assert box.claude([]) == 1
-    assert "INSIDE the dev box" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "INSIDE the dev box" in err
+    # The one who typed it is at their computer, where a Claude of their own may be next: the box's
+    # sessions are archived into that Claude's history, so it says not to resume one there.
+    assert "--resume" in err and "--continue" in err and "box wrote" in err
 
 
 def test_claude_errors_when_not_installed(monkeypatch, capsys):

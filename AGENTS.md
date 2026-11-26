@@ -34,6 +34,7 @@ There's no bare `python` or `python3` in a dev box: use `uv run python`.
 | A workflow, a shard, or the host-tier substrate (`tests/e2e_host.py`) | [docs/dev/ci.md](docs/dev/ci.md) |
 | The wall, guest provisioning, the proxy, minters, box mounts, the gVisor socket, anything that runs on the host | [docs/dev/invariants.md](docs/dev/invariants.md) |
 | VM lifecycle, stack verbs, disk reclaim, port offsets, config caches, Lima calls | [docs/dev/gotchas.md](docs/dev/gotchas.md) |
+| Anything on the host that prints text, reads a checkout's files or runs a child process, or a review of such a change | [docs/dev/security.md](docs/dev/security.md) |
 | The host-tier rig on an Apple M3+ | [docs/nested-virt.md](docs/nested-virt.md) |
 | The host tier from a Claude Code cloud session | [.claude/skills/cloud-host/SKILL.md](.claude/skills/cloud-host/SKILL.md) |
 
@@ -102,6 +103,10 @@ The reasoning, and the rules for one area of the code, are in
   reads go through `devmode.worktree_config()` or the ambient `config.X()` readers, which read the
   adopted copy. Never `config.resolve(repo=…)`, `config._tree_toml` or a direct `tomllib` read of a
   checkout file for anything with a host consequence (ADR-0022).
+- **Text the box chose reaches your terminal inert.** A name, a config string, a log line or a
+  child's output that a box can shape goes through `term.printable` or a relay. In the TUI it goes
+  in as `Content`, or escaped (`tui._shown`) inside Rich markup: never raw, and never in Textual
+  markup ([docs/dev/security.md](docs/dev/security.md)).
 - **No host-executed code from the repo mount, and no command strings from config** (ADR-0023). A
   new mechanism is a new credential kind or an entry-point plugin. foldyard's own children go
   through `selfspawn.python_m`, never `[sys.executable, "-m", …]`. Consumer scripts run in a

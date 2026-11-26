@@ -1771,6 +1771,12 @@ def claude(args: list[str] | None = None) -> int:
     if not _in_box():
         _err("✗ fy claude runs INSIDE the dev box ('fy box shell' first).")
         _err("  It skips permission prompts and trusts the rootless-machine boundary.")
+        # The box's sessions are archived into this computer's Claude history (`transcripts`), so a
+        # `claude --resume` here offers them, and `--continue` takes the latest unasked: text the box
+        # wrote, read as this Claude's own past.
+        _err("  Running `claude` on your computer instead? Don't resume a box's session there")
+        _err("  (`--resume`, `--continue`, `/resume`): the box wrote it, and that Claude would act")
+        _err("  on it as its own, with your access.")
         return 1
     if not shutil.which("claude"):
         _err("✗ claude not on PATH — add a [claude] table to foldyard.toml, then `fy box up`.")

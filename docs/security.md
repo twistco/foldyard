@@ -131,6 +131,12 @@ Three channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-rep
   `fy config widenings` lists all three. They are adopted like the rest of the file — but adopting
   means a person reading a diff, which is weaker than "can't happen".
 
+**Don't resume a box's Claude session with Claude on your computer.** foldyard archives the box's
+sessions into your computer's Claude history for that checkout, so `claude --resume`, `--continue`
+and `/resume` there offer them. The box wrote that transcript, and a Claude on your computer would
+take it as its own history and act on it with your access. Resume a box's session in the box
+(`fy agent resume`, or `fy claude --resume`).
+
 foldyard itself is installed on your computer as a uv tool (`uv tool install foldyard`), a frozen
 copy the repo mount can't change ([ADR-0020](./adrs/0020-post-extraction-consumption-model.md)). The
 exception is developing foldyard itself with an editable install: if that source checkout is also
