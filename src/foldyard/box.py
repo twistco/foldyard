@@ -3051,7 +3051,14 @@ def _exec(engine: str, box: str, ctx, env: dict, args: list[str]) -> int:
             return 0
         _err(f"dev box {box} not running — {_start_it(ctx.worktree)}")
         return 1
-    # Login shell so PATH (pnpm/node/uv) matches an attached `fy box shell`.
-    return subprocess.run(
-        [engine, "exec", "-w", os.getcwd(), box, "bash", "-lc", script], env=env
-    ).returncode
+    # Login shell so PATH (pnpm/node/uv) matches an attached `fy box shell`. Relayed: the git hooks
+    # run this during a `git commit` on your computer, and what a hook prints is the box's. Only
+    # what goes to your terminal is cleaned: a file or a pipe gets the bytes as they are, since that
+    # output is data (`> dump.sql`, `| xargs -0`). Nothing changes for the command: with no `-i`
+    # its stdin was never yours, and with no `-t` its output was already a pipe in the box. Its exit
+    # code is the hook's, so a failing one still blocks the commit.
+    return guestcompose.stream_here(
+        [engine, "exec", "-w", os.getcwd(), box, "bash", "-lc", script],
+        env,
+        clean_only_terminals=True,
+    )

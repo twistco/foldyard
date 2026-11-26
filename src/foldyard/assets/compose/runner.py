@@ -88,11 +88,15 @@ def _die_with_the_session() -> None:
 
 
 def _settle(argv: list[str]) -> None:
+    # Only the leading `-f` pairs name compose files (your computer puts them first): a `-f` after
+    # the command is its own flag (`logs -f`, follow), and waiting on what follows it as a file
+    # held every followed log back by the whole settle time.
     deadline = time.monotonic() + _SETTLE
-    for i, arg in enumerate(argv[:-1]):
-        if arg in ("-f", "--file"):
-            while not os.path.exists(argv[i + 1]) and time.monotonic() < deadline:
-                time.sleep(0.1)
+    i = 0
+    while i + 1 < len(argv) and argv[i] in ("-f", "--file"):
+        while not os.path.exists(argv[i + 1]) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        i += 2
 
 
 def _compose(argv: list[str]) -> int:
@@ -140,6 +144,10 @@ def _one_file(path: str) -> dict[str, list[str]] | None:
 
 def main(request: dict) -> int:
     _die_with_the_session()
+    # stdout is the ssh pipe, which Python block-buffers, and podman-compose print()s each line of
+    # `logs -f` without a flush: a followed log would arrive in 8 KB lumps. The env's
+    # PYTHONUNBUFFERED can't help here (`-I` ignores it, and the request's env is set after start).
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     op = request.get("op")
     argv = [str(a) for a in request.get("argv") or []]
     env = _environ(request)

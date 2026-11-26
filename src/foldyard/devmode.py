@@ -1288,20 +1288,54 @@ def _run_stream_fed(
     return rc
 
 
-def stop_group(proc: subprocess.Popen) -> None:
-    """End a process started in a process group of its own, with what it started."""
-    import signal
+# How long a process group gets to end on its SIGTERM before it is killed (`stop_group`).
+_STOP_GRACE = 10.0
 
-    for sig, patience in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
-        try:
-            os.killpg(proc.pid, sig)
-        except OSError:
-            return
-        try:
-            proc.wait(patience)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+
+def stop_group(proc: subprocess.Popen) -> None:
+    """End a process started in a process group of its own, with what it started: a SIGTERM, then
+    a SIGKILL for whatever is still in the group after :data:`_STOP_GRACE` seconds, or at once on
+    a second interrupt (Ctrl-C again). The group outlives its leader when a member ignores the
+    SIGTERM, and its id can't be reused while it has one, so it is still the group asked about."""
+    import contextlib
+    import signal
+    import time
+
+    group = proc.pid
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except OSError:  # no member left
+        return
+    # A stopped group (Ctrl-Z, a debugger) only runs its SIGTERM handlers once continued.
+    with contextlib.suppress(OSError):
+        os.killpg(group, signal.SIGCONT)
+    deadline = time.monotonic() + _STOP_GRACE
+    try:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(_STOP_GRACE)
+        while _has_members(group) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    except (KeyboardInterrupt, SystemExit):  # asked again: the interrupt already on its way
+        pass
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except OSError:  # all gone
+        return
+    deadline = time.monotonic() + 5.0  # for whoever adopted an orphan to reap it
+    with contextlib.suppress(subprocess.TimeoutExpired, KeyboardInterrupt, SystemExit):
+        proc.wait(5.0)
+        while _has_members(group) and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+
+def _has_members(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # one we may not signal (EPERM) is still a member
+        return True
+    return True
 
 
 def host_command() -> list[str]:

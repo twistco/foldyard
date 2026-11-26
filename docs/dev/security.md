@@ -53,9 +53,20 @@ anything a person might need to read exactly uses `printable`.
   is enough there; a `Text` or `Content` cell needs nothing.
 - **Inherit stdio only where the user asked for a terminal**: `fy shell`, `fy box shell`,
   `fy agent attach`, and the compose verbs in `stack._INTERACTIVE`. Anything else that runs on your
-  computer and prints what the box shaped (compose, a build, a checkout container) is relayed.
-  `fy box exec` still inherits stdio, and the git hooks run it during a `git commit` on your
-  computer, so what a hook prints there reaches the terminal raw: a known gap.
+  computer and prints what the box shaped (compose, a build, a checkout container, `fy box exec`,
+  which the git hooks run during a `git commit` on your computer) is relayed. `fy box exec` cleans
+  only what goes to a terminal: piped or redirected, its output is data and passes byte for byte. So
+  a hook that captures it and prints it itself
+  (`out=$(fy box exec 'pnpm lint') || { echo "$out"; exit 1; }`) puts the raw bytes on your
+  terminal, since fy's own output there isn't a terminal. A hook that lets fy write to the terminal
+  itself is cleaned (lefthook gives it a pty; git runs hooks with stdout on stderr). A process
+  `guestcompose.stream_here` relays gets neither your stdin nor your Ctrl-C: it runs in a process
+  group of its own, and foldyard stops relaying before it stops the group (on Ctrl-C, and on a
+  SIGHUP, SIGTERM or SIGQUIT that ends foldyard), so what the process says about an interrupt (a
+  traceback) never reaches you. That stops what it started on your computer only: a command
+  `podman exec` started in a container runs on. The other relays (`run_relayed` and `stream_to` on
+  the VM path, `devmode.run_stream`) keep the terminal's process group unless they are given an
+  `on_spawn`.
 - **Escape only the copy you print, never the data.** A hostname the proxy matches, a path that is
   opened and a branch that is checked out stay as they were.
 - **Escape display-only config strings when they are parsed** (a `why`, a `label`, a `how`). Refuse

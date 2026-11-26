@@ -35,17 +35,19 @@ switch is off, a build of the box's Dockerfile, a container of the box's image.
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
 import hashlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import IO, Any
 
@@ -420,29 +422,92 @@ def stream_here(
     env: dict[str, str],
     cwd: str | None = None,
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
+    *,
+    clean_only_terminals: bool = False,
 ) -> int:
     """``cmd`` run on your computer, relayed like :func:`stream` (a line at a time to your stdout
     and stderr, :func:`printable`): for a process whose output the box chose — the compose client
     reading its compose files, a build of its Dockerfile, a container of its image. Its stdin is
     empty, so a verb that needs your terminal (a shell, ``compose exec``) doesn't come here.
-    ``on_spawn`` gets the process, started in a process group of its own so the caller can stop
-    it; the terminal's Ctrl-C then doesn't reach it, so an interrupt here stops the group."""
+    ``clean_only_terminals``: a stream that isn't going to a terminal (a file, a pipe) gets the
+    process's bytes as they are, for output that is data (``fy box exec 'pg_dump' > dump.sql``).
+
+    It runs in a process group of its own, so the terminal's Ctrl-C reaches foldyard alone: the
+    relay stops printing, then stops the group (the process and what it started on your computer;
+    a command a ``podman exec`` started in a container runs on). What it would say about an
+    interrupt (podman-compose's KeyboardInterrupt traceback) never reaches you. A SIGHUP, SIGTERM
+    or SIGQUIT that would end foldyard stops the group too (:func:`_ending_signals_raise`). Ctrl-Z
+    stops foldyard and not the group, which runs on (until a pipe foldyard no longer reads fills).
+    ``on_spawn`` gets the process, so the caller can stop it too."""
     from .devmode import stop_group
 
-    proc = subprocess.Popen(
-        cmd,
-        env=env,  # exactly: a compose client interpolates from it (see stack.resolve)
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        process_group=0 if on_spawn else None,
-    )
-    if on_spawn:
-        on_spawn(proc)
-    return relay(
-        proc, _print_to("stdout"), _print_to("stderr"), stop=stop_group if on_spawn else None
-    )
+    pipe = subprocess.PIPE
+    stopped: list[subprocess.Popen] = []
+
+    def stop(spawned: subprocess.Popen) -> None:
+        if not stopped:
+            stop_group(spawned)
+            # Only once it is done: a signal that cut it short leaves it to be done again.
+            stopped.append(spawned)
+
+    proc: subprocess.Popen | None = None
+    with _ending_signals_raise():
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,  # exactly: a compose client interpolates from it (see stack.resolve)
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=pipe if not clean_only_terminals or _terminal(1) else None,
+                stderr=pipe if not clean_only_terminals or _terminal(2) else None,
+                process_group=0,
+            )
+            if on_spawn:
+                on_spawn(proc)
+            return relay(proc, _print_to("stdout"), _print_to("stderr"), stop=stop)
+        except BaseException:
+            # relay stopped it already, unless this came before relay started or another signal
+            # cut its stop short. Then it is done here, again for each signal that cuts it short,
+            # and foldyard ends on the last of them.
+            later: BaseException | None = None
+            while proc is not None and not stopped:
+                try:
+                    stop(proc)
+                except (KeyboardInterrupt, SystemExit) as e:
+                    later = e
+            if later is not None:
+                raise later  # the first is its context
+            raise
+
+
+def _terminal(fd: int) -> bool:
+    try:
+        return os.isatty(fd)
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def _ending_signals_raise() -> Iterator[None]:
+    """While it lasts, a SIGHUP (the terminal closed), SIGTERM (``kill``, ``timeout``) or SIGQUIT
+    that would end foldyard raises ``SystemExit(128 + signal)`` instead, so a relay stops its
+    process group on the way out: that group gets no signal from your terminal or shell. Only a
+    signal left at its default, and only in the main thread (the one Python delivers them to); one
+    you ignore (``nohup``) stays ignored."""
+    taken: dict[signal.Signals, Any] = {}
+
+    def ended(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT):
+            if signal.getsignal(sig) == signal.SIG_DFL:
+                taken[sig] = signal.signal(sig, ended)
+    try:
+        yield
+    finally:
+        for sig, previous in taken.items():
+            signal.signal(sig, previous)
 
 
 def run_relayed(
@@ -489,17 +554,22 @@ def relay(
     *,
     stop: Callable[[subprocess.Popen], None] | None = None,
 ) -> int:
-    """``proc``'s piped stdout and stderr handed to ``out`` and ``err`` a line at a time
-    (:func:`printable`) until it exits; its exit code. An interrupt here ends it before passing
-    on: ``stop`` (its process group, when it has one of its own), else a terminate. A sink that
-    failed (your end of the pipe gone) is raised once the process has ended: a
-    ``BrokenPipeError`` is the quiet exit the CLI gives a closed pipe."""
-    assert proc.stdout is not None and proc.stderr is not None
+    """``proc``'s piped stdout and stderr (whichever is piped) handed to ``out`` and ``err`` a line
+    at a time (:func:`printable`) until it exits; its exit code. An interrupt here, even once it
+    has exited and what it left behind is being drained, ends it before passing on: ``stop`` (its
+    process group, when it has one of its own), else a terminate. A sink that failed (your end of
+    the pipe gone) is raised once the process has ended: a ``BrokenPipeError`` is the quiet exit
+    the CLI gives a closed pipe."""
     quit_ = threading.Event()
     failed: list[BaseException] = []
-    pumps = [_Pump(proc.stdout, out, quit_, failed), _Pump(proc.stderr, err, quit_, failed)]
+    pumps: list[_Pump] = []
     try:
+        for source, sink in ((proc.stdout, out), (proc.stderr, err)):
+            if source is not None:
+                pumps.append(_Pump(source, sink, quit_, failed))
         rc = proc.wait()
+        for pump in pumps:
+            pump.drain()
     except BaseException:
         # Nothing more is printed, and the threads are done before this passes on: a daemon
         # thread mid-print as the interpreter shuts down aborts it ("could not acquire lock for
@@ -515,8 +585,6 @@ def relay(
             for pump in pumps:
                 pump.thread.join(timeout=1)
         raise
-    for pump in pumps:
-        pump.drain()
     quit_.set()  # one still waiting (a grandchild holds the pipe) prints nothing more
     if failed:
         raise failed[0]

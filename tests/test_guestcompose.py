@@ -15,7 +15,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+import types
 import zipfile
 from pathlib import Path
 
@@ -577,6 +579,37 @@ def test_the_runner_waits_out_a_long_form_file_flag_too(checkout):
     assert proc.stdout.split() == [b"web"]
 
 
+def _runner():
+    """The guest runner, imported here from its file (the guest imports it from the zip)."""
+    import importlib.util
+
+    path = Path(guestcompose.__file__).parent / "assets" / "compose" / "runner.py"
+    spec = importlib.util.spec_from_file_location("fy_compose_runner_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_runner_waits_only_for_the_compose_files(checkout, monkeypatch):
+    # `fy logs` sends `-f <file>… logs -f --tail 50`: the `-f` after the command is "follow", and
+    # waiting for a file called `--tail` held every followed log back by the whole settle time.
+    runner = _runner()
+
+    class Waited(Exception):
+        pass
+
+    def sleep(_seconds: float) -> None:
+        raise Waited
+
+    # Its own `time`, not the shared module's `sleep`: the runner was imported for this test alone.
+    clock = types.SimpleNamespace(monotonic=time.monotonic, sleep=sleep)
+    monkeypatch.setattr(runner, "time", clock)
+    runner._settle(["-f", str(checkout / "stack.yml"), "logs", "-f", "--tail", "50", "web"])
+    with pytest.raises(Waited):  # a compose file that isn't there yet is still waited for
+        runner._settle(["-f", str(checkout / "stack.yml"), "--file", str(checkout / "late.yml")])
+
+
 def test_the_guests_podman_carries_no_registry_logins(checkout):
     """Parity with the clamp on your computer: a `podman login` in the VM would otherwise ride
     along with every guest build. The request can't widen it either."""
@@ -602,6 +635,48 @@ def test_the_services_op_parses_each_file_and_says_which_it_couldnt(checkout):
         str(bad): None,
         "/nonexistent.yml": None,
     }
+
+
+def test_the_guests_client_hands_on_each_line_as_it_comes(checkout):
+    """`fy logs -f` with compose in the VM: podman-compose print()s each log line, and the runner's
+    stdout is the ssh pipe, where Python block-buffers unless told otherwise (``-I`` ignores a
+    PYTHONUNBUFFERED in the env, and the request's env is set after start anyway). The second line
+    only comes once the first has arrived here."""
+    seen = checkout / "seen"
+    (checkout / "bin" / "podman").write_text(
+        f"#!{sys.executable} -I\n"
+        "import os, sys, time\n"
+        "if sys.argv[1] != 'logs':\n"  # podman-compose asks `podman --version` first
+        "    print('podman version 5.8.4')\n"
+        "    sys.exit(0)\n"
+        "print('first', flush=True)\n"
+        "deadline = time.monotonic() + 10\n"
+        f"while not os.path.exists({str(seen)!r}):\n"
+        "    if time.monotonic() > deadline:\n"
+        "        sys.exit(0)\n"
+        "    time.sleep(0.01)\n"
+        "print('second', flush=True)\n"
+    )
+    argv = ["-f", str(checkout / "stack.yml"), "logs", "-f", "--tail", "50", "web"]  # `fy logs`'s
+    request = {"op": "compose", "argv": argv, "env": {}, "cwd": str(checkout), "socket": ""}
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": str(checkout / "bin"), "HOME": str(checkout)},
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    proc.stdin.write(guestcompose.bootstrap(request))
+    proc.stdin.close()
+    lines = []
+    try:
+        for raw in proc.stdout:
+            lines.append(guestcompose.printable(raw.decode().rstrip("\n")))
+            seen.touch()
+    finally:
+        assert proc.wait(timeout=30) == 0
+    assert [line.split("|", 1)[-1].strip() for line in lines] == ["first", "second"], lines
 
 
 def test_the_guests_client_dies_with_the_ssh_session(checkout):
@@ -1047,6 +1122,286 @@ def test_ctrl_c_during_busy_output_ends_as_an_interrupt_not_an_abort(tmp_path, r
     said = err.read_text(errors="replace")
     assert "Fatal Python error" not in said, said
     assert rc == 130, said
+
+
+# A child that says its pid, then sleeps: Python's own Ctrl-C, a KeyboardInterrupt traceback on its
+# stderr, is what podman-compose prints when the terminal's Ctrl-C reaches it.
+_SAYS_ITS_PID = "import os, time\nprint('pid', os.getpid(), flush=True)\ntime.sleep(60)\n"
+
+
+def test_ctrl_c_reaches_foldyard_alone_and_ends_the_relayed_process_quietly(tmp_path):
+    # `fy logs`, Ctrl-C: the relayed process isn't the terminal's to interrupt, so what it would
+    # say about an interrupt (podman-compose's traceback) never reaches you. foldyard stops it, and
+    # it is gone (no orphan) by the time foldyard exits, promptly and with the interrupt's code.
+    code = (
+        "import os, sys\n"
+        "from foldyard import guestcompose\n"
+        f"child = [sys.executable, '-c', {_SAYS_ITS_PID!r}]\n"
+        "try:\n"
+        "    guestcompose.stream_here(child, dict(os.environ))\n"
+        "except KeyboardInterrupt:\n"
+        "    sys.exit(130)\n"
+    )
+    proc, err = _spawn_harness(code, tmp_path)
+    assert proc.stdout is not None
+    said = proc.stdout.readline().split()
+    assert said[:1] == [b"pid"], said
+    child = int(said[1])
+    started = time.monotonic()
+    os.killpg(proc.pid, signal.SIGINT)  # the terminal's Ctrl-C: the whole foreground group
+    rc = _ended(proc)
+    elapsed = time.monotonic() - started
+    stderr = err.read_text(errors="replace")
+    assert rc == 130, stderr
+    assert "Traceback" not in stderr and "KeyboardInterrupt" not in stderr, stderr
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+    assert elapsed < 5, f"took {elapsed:.1f}s to end"
+
+
+@pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGTERM, signal.SIGQUIT])
+def test_a_signal_that_ends_foldyard_ends_the_relayed_process_too(tmp_path, sig):
+    # The terminal closed (SIGHUP), `kill %1` or `timeout` (SIGTERM), Ctrl-\ (SIGQUIT): the relayed
+    # process is in a group of its own, so nothing else would reach it, and it would run on.
+    code = (
+        "import os, sys\n"
+        "from foldyard import guestcompose\n"
+        f"child = [sys.executable, '-c', {_SAYS_ITS_PID!r}]\n"
+        "guestcompose.stream_here(child, dict(os.environ))\n"
+    )
+    proc, err = _spawn_harness(code, tmp_path)
+    assert proc.stdout is not None
+    said = proc.stdout.readline().split()
+    assert said[:1] == [b"pid"], said
+    child = int(said[1])
+    os.kill(proc.pid, sig)  # foldyard alone: the child would get nothing from it otherwise
+    rc = _ended(proc)
+    assert rc == 128 + sig, err.read_text(errors="replace")
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
+
+
+def _main_interrupted_after(seconds: float) -> threading.Timer:
+    """A real SIGINT to the main thread in ``seconds``, as the terminal's Ctrl-C would land."""
+    main = threading.main_thread().ident
+    assert main is not None
+    timer = threading.Timer(seconds, signal.pthread_kill, (main, signal.SIGINT))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+# A child that leaves a grandchild in its group holding its pipes (it marks a file when SIGTERM
+# reaches it), says the grandchild's pid and exits: the relay is then draining.
+def _leaves_a_marking_grandchild(mark: Path) -> str:
+    grandchild = (
+        "import signal, sys, time\n"
+        f"signal.signal(signal.SIGTERM, lambda *_: (open({str(mark)!r}, 'w').close(), sys.exit(0)))\n"
+        "time.sleep(60)\n"
+    )
+    return (
+        "import subprocess, sys\n"
+        f"g = subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "print(g.pid, flush=True)\n"
+    )
+
+
+def test_an_interrupt_while_the_relay_drains_stops_the_group(monkeypatch, tmp_path):
+    # The process has exited, but what it started is still in its group, holding the pipe.
+    monkeypatch.setattr(guestcompose, "_DRAIN_PATIENCE", 30.0)
+    got = _sinks(monkeypatch)
+    mark = tmp_path / "stopped"
+    cmd = [sys.executable, "-I", "-c", _leaves_a_marking_grandchild(mark)]
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    timer = _main_interrupted_after(1.5)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            guestcompose.stream_here(cmd, {})
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+        for pid in got["stdout"]:
+            with contextlib.suppress(OSError):
+                os.kill(int(pid), signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while not mark.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert mark.exists(), "the grandchild left in the group was never stopped"
+
+
+def test_an_interrupt_in_on_spawn_still_stops_the_process():
+    spawned: list[subprocess.Popen] = []
+
+    def interrupted(proc: subprocess.Popen) -> None:
+        spawned.append(proc)
+        raise KeyboardInterrupt
+
+    cmd = [sys.executable, "-I", "-c", _SAYS_ITS_PID]
+    with pytest.raises(KeyboardInterrupt):
+        guestcompose.stream_here(cmd, {}, on_spawn=interrupted)
+    assert spawned[0].poll() is not None
+
+
+def _sleeper_in_its_own_group(on_term: str) -> subprocess.Popen:
+    """A process in a group of its own whose SIGTERM handler is ``on_term``."""
+    prog = (
+        "import signal, sys, time\n"
+        f"signal.signal(signal.SIGTERM, {on_term})\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-c", prog], stdout=subprocess.PIPE, process_group=0
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline() == b"ready\n"
+    return proc
+
+
+def test_stop_group_ends_a_stopped_group_with_its_sigterm():
+    # Ctrl-Z'd, or stopped by a debugger: a SIGTERM that a handler catches (podman's does) waits
+    # for a SIGCONT, and without one the group sat out the whole grace before the SIGKILL.
+    from foldyard import devmode
+
+    proc = _sleeper_in_its_own_group("lambda *_: sys.exit(42)")
+    os.killpg(proc.pid, signal.SIGSTOP)
+    try:
+        devmode.stop_group(proc)
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    assert proc.returncode == 42  # its handler ran: it ended on the SIGTERM
+
+
+# A leader that ends on SIGTERM, leaving a member of its group that ignores it.
+_LEADER_LEAVES_A_STUBBORN_MEMBER = (
+    "import subprocess, sys, time\n"
+    "member = 'import signal, time\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+    "print(1, flush=True)\\ntime.sleep(60)\\n'\n"
+    "g = subprocess.Popen([sys.executable, '-c', member], stdout=subprocess.PIPE)\n"
+    "g.stdout.readline()\n"
+    "print(g.pid, flush=True)\n"
+    "time.sleep(60)\n"
+)
+
+
+def _gone(pid: int, within: float = 10.0) -> bool:
+    """Whether ``pid`` is gone within ``within`` seconds (an orphan is reaped by whoever adopts it)."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_stop_group_kills_a_member_that_outlives_its_leader(monkeypatch):
+    # The leader is reaped at once, and with it the wait ended: a member that ignores SIGTERM got
+    # nothing more. While the group has a member its id can't be reused, so it is still the one.
+    from foldyard import devmode
+
+    monkeypatch.setattr(devmode, "_STOP_GRACE", 1.0, raising=False)
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-c", _LEADER_LEAVES_A_STUBBORN_MEMBER],
+        stdout=subprocess.PIPE,
+        process_group=0,
+    )
+    assert proc.stdout is not None
+    member = int(proc.stdout.readline())
+    try:
+        devmode.stop_group(proc)
+        assert _gone(member), "the member that ignored SIGTERM outlived the stop"
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(member, signal.SIGKILL)
+
+
+def test_a_stop_cut_short_by_another_signal_is_done_again(monkeypatch):
+    # A second signal mid-stop (between its SIGTERM and its SIGCONT, say) raises out of it: the
+    # stop isn't done, so the way out does it again rather than leave the group with a SIGTERM.
+    from foldyard import devmode
+
+    real_stop = devmode.stop_group
+    calls: list[subprocess.Popen] = []
+
+    def cut_short_once(proc: subprocess.Popen) -> None:
+        calls.append(proc)
+        if len(calls) == 1:
+            raise SystemExit(143)
+        real_stop(proc)
+
+    monkeypatch.setattr(devmode, "stop_group", cut_short_once)
+    spawned: list[subprocess.Popen] = []
+
+    def interrupted(proc: subprocess.Popen) -> None:
+        spawned.append(proc)
+        raise KeyboardInterrupt
+
+    with pytest.raises(SystemExit):
+        guestcompose.stream_here(
+            [sys.executable, "-I", "-c", _SAYS_ITS_PID], {}, on_spawn=interrupted
+        )
+    assert len(calls) == 2
+    assert spawned[0].poll() is not None
+
+
+def test_a_second_interrupt_while_stopping_a_group_kills_it_at_once():
+    # Ctrl-C again during the SIGTERM grace: the group still goes, at once, with no new raise.
+    from foldyard import devmode
+
+    proc = _sleeper_in_its_own_group("signal.SIG_IGN")
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    timer = _main_interrupted_after(0.5)
+    started = time.monotonic()
+    raised = False
+    try:
+        devmode.stop_group(proc)
+    except KeyboardInterrupt:
+        raised = True
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    assert not raised, "the second interrupt left the group without its SIGKILL"
+    assert proc.returncode == -signal.SIGKILL
+    assert time.monotonic() - started < 5
+
+
+# What `fy box exec` may be asked for as data: a NUL, a carriage return, bytes that aren't UTF-8,
+# and no newline at the end.
+_DATA = b"a\x00b\r\n\xff\xfe\x1b[31mred"
+
+
+def test_a_stream_not_going_to_a_terminal_is_handed_over_byte_for_byte(tmp_path):
+    # `fy box exec 'pg_dump' > dump.sql`, `fy box exec 'git ls-files -z' | xargs -0`.
+    prog = (
+        f"import sys; sys.stdout.buffer.write({_DATA!r}); sys.stderr.buffer.write({_DATA!r}); "
+        "sys.exit(3)"
+    )
+    code = (
+        "import os, sys\n"
+        "from foldyard import guestcompose\n"
+        f"cmd = [sys.executable, '-c', {prog!r}]\n"
+        "sys.exit(guestcompose.stream_here(cmd, dict(os.environ), clean_only_terminals=True))\n"
+    )
+    proc, err = _spawn_harness(code, tmp_path)
+    assert proc.stdout is not None
+    out = proc.stdout.read()
+    assert _ended(proc) == 3
+    assert out == _DATA
+    assert err.read_bytes() == _DATA
+
+
+def test_a_stream_going_to_a_terminal_is_cleaned(monkeypatch):
+    monkeypatch.setattr(guestcompose, "_terminal", lambda fd: fd == 1)
+    got = _sinks(monkeypatch)
+    prog = "import sys; print('\\x1b]52;c;ZXZpbA==\\x07out'); sys.exit(3)"
+    cmd = [sys.executable, "-I", "-c", prog]
+    assert guestcompose.stream_here(cmd, {}, clean_only_terminals=True) == 3
+    assert got["stdout"] == ["]52;c;ZXZpbA==out"]
 
 
 def _interrupt_on(word: str):

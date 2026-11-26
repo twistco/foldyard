@@ -237,7 +237,7 @@ def fake(tmp_path, monkeypatch):
     # installed when it is asked (a test may wrap this one), recorded in `relayed`, never run.
     relayed: list[list[str]] = []
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, *, clean_only_terminals=False):
         relayed.append(cmd)
         return box.subprocess.run(cmd, env=env, cwd=cwd).returncode
 
@@ -2432,6 +2432,26 @@ def test_exec_runs_command_when_running(fake):
     assert box.main("exec", ["pnpm lint"]) == 0
     ex = _find(fake["calls"], has=["exec", "-w", "tangible-podman-devbox", "bash", "-lc"])
     assert ex and ex[0][-1] == "pnpm lint"  # the shell string runs verbatim in the box
+
+
+def test_exec_relays_what_the_box_prints_and_keeps_its_exit_code(fake, monkeypatch):
+    # The git hooks run it during a `git commit` on your computer: what a hook or linter in the box
+    # prints reaches your terminal through the cleaner, and its exit code still blocks the commit.
+    # Output that isn't going to a terminal (`> dump.sql`, `| xargs -0`) is data: handed over as is.
+    fake["state"]["running"] = True
+    seen: list[tuple] = []
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None, *, clean_only_terminals=False):
+        assert clean_only_terminals
+        seen.append((cmd, env, cwd))
+        return 3
+
+    monkeypatch.setattr(box.guestcompose, "stream_here", stream_here)
+    assert box.main("exec", ["pnpm lint"]) == 3
+    [(cmd, env, cwd)] = seen
+    devbox = "tangible-podman-devbox"
+    assert cmd == ["podman", "exec", "-w", os.getcwd(), devbox, "bash", "-lc", "pnpm lint"]
+    assert env == fake["ctx"].env and cwd is None
 
 
 def test_exec_requires_a_command(fake, capsys):

@@ -17,7 +17,6 @@ under the example's own 'fyex' project, so it never collides with a host project
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -156,31 +155,6 @@ def _followed_logs(repo: Path) -> tuple[list[str], str, int]:
     return lines, proc.stderr.read(), proc.returncode
 
 
-_SGR = re.compile(r"\x1b\[[0-9;]*m")  # Python 3.13+ colours a traceback under FORCE_COLOR
-_TRACEBACK = "Traceback (most recent call last):"
-# How a compose client ends when the terminal's Ctrl-C reaches it: its own business, relayed.
-_INTERRUPTED = ("KeyboardInterrupt", "asyncio.exceptions.CancelledError")
-
-
-def _unexpected_tracebacks(err: str) -> list[str]:
-    """The tracebacks in ``err`` that aren't a compose client ending on Ctrl-C: any with a frame in
-    foldyard's own code (``fy`` runs as ``-m foldyard``, so one of its own always has its
-    ``__main__`` at least), and any whose exception isn't an interrupt."""
-    import foldyard
-
-    here = Path(foldyard.__file__).parent
-    ours = tuple({f'File "{d}{os.sep}' for d in (here, here.resolve())})
-    found = []
-    for block in _SGR.sub("", err).split(_TRACEBACK)[1:]:
-        lines = block.splitlines()
-        own = any(line.lstrip().startswith(ours) for line in lines)
-        # The exception is the first line after the frames that isn't indented.
-        raised = next((line for line in lines[1:] if line and not line[0].isspace()), "")
-        if own or not raised.startswith(_INTERRUPTED):
-            found.append(_TRACEBACK + block)
-    return found
-
-
 def _adopt_on_host(repo: Path, env_extra: dict[str, str] | None = None) -> None:
     """What an operator does before the first `up` on a checkout: read the config, then
     `fy config adopt` it (ADR-0022). The launch gate REFUSES an unadopted checkout when there is
@@ -250,14 +224,13 @@ def test_example_stack_up_serves_then_down(example_repo):
     assert "match the rendered config" in state.stdout, state.stdout + state.stderr
 
     # What the stack prints is relayed a line at a time with its control sequences stripped (its
-    # own colour too), and the terminal's Ctrl-C ends the follow without a traceback of fy's own.
+    # own colour too), and the terminal's Ctrl-C ends the follow without a traceback: not fy's, and
+    # not the compose client's (it runs in a process group of its own, so the Ctrl-C reaches fy
+    # alone, which stops relaying before it stops the client).
     lines, err, rc = _followed_logs(example_repo)
     assert not [line for line in lines if "\x1b" in line], lines
-    # Nor the interpreter aborting at shutdown under a relay still printing. The Ctrl-C reaches the
-    # compose client too, and podman-compose prints a traceback of ITS own as it ends (relayed, like
-    # the rest of what it says): that one is allowed, a broken pipe or the like is not.
-    assert "Fatal Python error" not in err, err
-    assert not _unexpected_tracebacks(err), err
+    # Nor the interpreter aborting at shutdown under a relay still printing.
+    assert "Traceback" not in err and "Fatal Python error" not in err, err
     assert rc >= 0, f"ended by signal {-rc}: {err}"
 
     down = _foldyard(["down"], example_repo, timeout=180)
