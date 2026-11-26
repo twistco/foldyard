@@ -707,10 +707,13 @@ def workspaces() -> list[dict]:
         )
     items[1:] = sorted(items[1:], key=lambda i: i["name"])
     rows = ps_labels(timeout=5)
+    from . import worktree  # lazy: devmode is on the hot path
+
+    listing = worktree._listing_once(repo, _CARD_GIT_TIMEOUT)  # one per refresh, not per card
     for item in items:
         wt = "" if item["name"] == "main" else item["name"]
         if item["registered"]:
-            _describe_checkout(item, wt)
+            _describe_checkout(item, wt, listing)
         if rows is None:
             item["containers"] = None
             item["devbox"] = False
@@ -722,8 +725,16 @@ def workspaces() -> list[dict]:
     return items
 
 
-def _describe_checkout(item: dict[str, Any], wt: str) -> None:
-    """A registered card's app port (from its adopted config) and branch (``git rev-parse``)."""
+# `fy tui` refreshes the cards on its event loop: no git asked for one may take longer than this.
+_CARD_GIT_TIMEOUT = 3
+
+
+def _describe_checkout(
+    item: dict[str, Any], wt: str, listing: Callable[[], str | None] | None = None
+) -> None:
+    """A registered card's app port (from its adopted config) and branch: main's from git, a
+    worktree's read from main's ``.git`` on your computer (``worktree._branch_shown``, sharing the
+    refresh's ``listing``). Each git asked waits :data:`_CARD_GIT_TIMEOUT` at most."""
     try:
         with config.using(worktree_config(wt)):
             from . import stack  # lazy: devmode is on the hot path
@@ -736,12 +747,14 @@ def _describe_checkout(item: dict[str, Any], wt: str) -> None:
         # the config error when invoked rather than taking down the whole TUI refresh.
         item["app_port"] = None
     try:
-        item["branch"] = subprocess.run(
-            ["git", "-C", item["path"], "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        ).stdout.strip()
+        from . import worktree  # lazy: devmode is on the hot path
+
+        path = Path(item["path"])
+        item["branch"] = (
+            worktree._branch_shown(main_repo(), path, listing=listing, timeout=_CARD_GIT_TIMEOUT)
+            if wt
+            else worktree._branch_of(path, timeout=_CARD_GIT_TIMEOUT)
+        )
     except Exception:
         item["branch"] = ""
 
@@ -751,7 +764,12 @@ def main_repo() -> Path:
     dir's parent, so it is main even when that checkout is a worktree, which is what
     ``FOLDYARD_REPO`` names when a consumer's recipe runs in one. Everything keyed "per project"
     anchors here — the worktree registry above all: ``fy worktree add`` records a worktree under
-    main, so a lookup from inside the worktree must land on main too. Outside git, the checkout."""
+    main, so a lookup from inside the worktree must land on main too. Outside git, the checkout.
+    A bound worktree config on your computer carries its main (``Config.main``): git there would
+    read the ``.git`` file the box can write."""
+    bound = config.bound_config()
+    if bound is not None and bound.main is not None:
+        return bound.main
     return _main_checkout(config.repo_root())
 
 
@@ -940,12 +958,18 @@ def worktree_config(wt: str) -> config.Config:
             worktree=wt,
             toml={},
             identity=config.stray_identity(main),
+            main=main,
         )
-    cfg = configpin.effective(config.resolve(worktree=wt, repo=path))
+    # Its main is the one whose registry it's in: never asked of git there (Config.main).
+    cfg = dataclasses.replace(
+        configpin.effective(config.resolve(worktree=wt, repo=path)), main=main
+    )
     if cfg.toml:
         return cfg
     # Nothing adopted for it: it still runs nothing, but it is still the PROJECT's worktree — its
-    # state dir, port band and machine are main's, not ones named after its directory.
+    # state dir, port band and machine are main's, not ones named after its directory. (Under a
+    # main that declares no name, a worktree is named after its directory, adopted or not: the
+    # name `fy worktree add` gave it, which the registry vouches for — unlike a stray's.)
     return dataclasses.replace(cfg, identity=config.identity_from(main, path))
 
 

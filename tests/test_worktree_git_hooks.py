@@ -149,6 +149,107 @@ def test_worktree_add_runs_none_of_the_repos_hooks(real_add, capsys):
     assert "skipped the repo's git hooks (post-checkout, reference-transaction)" in out
 
 
+def test_a_registered_worktrees_branch_is_never_asked_of_the_git_dir_its_git_file_names(
+    real_add, tmp_path, monkeypatch, capsys, fifos
+):
+    # Registered on your computer, but its `.git` file is the box's to rewrite: pointed at a git
+    # dir the box built, git run in the checkout reads that dir's HEAD and config — its branch
+    # name, and an include on a FIFO, which blocks every git that reads it. `list` and the TUI's
+    # card read the branch from main's `.git/worktrees/<name>` instead, and nothing runs there.
+    from foldyard import devmode
+
+    monkeypatch.setattr(devmode, "main_repo", lambda: real_add["main"])
+    assert worktree.add("feat") == 0
+    wt = real_add["wt_root"] / "feat"
+
+    def shown() -> tuple[str, str, str]:
+        capsys.readouterr()
+        assert worktree.list_() == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines() if " feat " in ln)
+        card: dict = {"path": str(wt)}
+        devmode._describe_checkout(card, "feat")
+        main_card: dict = {"path": str(real_add["main"])}
+        devmode._describe_checkout(main_card, "")
+        return line.split()[1], card["branch"], main_card["branch"]
+
+    # As git says it, while the `.git` file is git's.
+    assert shown() == ("wt/feat", "wt/feat", "main")
+
+    planted = tmp_path / "planted"
+    subprocess.run(["git", "init", "-q", "-b", "planted", str(planted)], check=True)
+    _git(planted, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+         "-m", "x")  # fmt: skip
+    _git(planted, "config", "include.path", str(fifos.plant(tmp_path / "planted.cfg")))
+    (wt / ".git").write_text(f"gitdir: {planted / '.git'}\n")
+
+    returned, got = fifos.returns_within(30, shown)
+    assert returned, "a git read the box's FIFO"
+    listed, card, main = got
+    assert "planted" not in (listed, card) and card == "" and main == "main"
+    assert not real_add["marker"].exists()
+
+
+@pytest.mark.parametrize("fifo", ["gitdir", "config-include"])
+def test_a_fifo_in_mains_git_cannot_hang_the_branch_read(
+    real_add, monkeypatch, capsys, fifos, fifo
+):
+    # Main's `.git/worktrees/<id>` is the box's to write too. With a reftable placeholder for HEAD
+    # the branch comes from main's `git worktree list`, and that git blocks on a FIFO in its
+    # records (the worktree's `gitdir`) or in main's config (an include). `fy tui` asks on its
+    # event loop every 5 s, and `fy worktree list` once: each is bounded, and reads as no branch.
+    from foldyard import devmode
+
+    main = real_add["main"]
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    monkeypatch.setattr(worktree, "_LISTING_TIMEOUT", 1)
+    assert worktree.add("feat") == 0
+    wt = real_add["wt_root"] / "feat"
+    admin = main / ".git" / "worktrees" / "feat"
+    (admin / "HEAD").write_text("ref: refs/heads/.invalid\n")
+    if fifo == "gitdir":
+        fifos.plant(admin / "gitdir")
+    else:
+        _git(main, "config", "include.path", str(fifos.plant(main / ".git" / "planted.cfg")))
+    capsys.readouterr()
+
+    returned, got = fifos.returns_within(10, lambda: worktree._branch_shown(main, wt, timeout=1))
+    assert returned and got == ""
+    if fifo == "gitdir":  # one in main's config blocks every git in main: `fy` finds main by one
+        returned, _ = fifos.returns_within(10, worktree.list_)
+        assert returned
+
+
+def test_mains_branch_read_is_bounded_on_a_git_that_scans_the_config_first(
+    hooked_repo, monkeypatch, fifos, capsys
+):
+    # On a git older than 2.44, `_git_read` scans every config file for a promisor remote before
+    # it runs — `git config`, which blocks on a FIFO include like any git. The TUI's main card asks
+    # with a timeout, and the scan keeps to it: refused, said, and read as no branch.
+    main = hooked_repo["main"]
+    monkeypatch.setattr(worktree, "_git_can_refuse_lazy_fetch", lambda: False)
+    _git(main, "config", "include.path", str(fifos.plant(main / ".git" / "planted.cfg")))
+    returned, got = fifos.returns_within(10, lambda: worktree._branch_of(main, timeout=1))
+    assert returned and got == ""
+    err = capsys.readouterr().err
+    # Said as what it is — git didn't answer in time — not as a config it couldn't check for hooks
+    # (on a busy machine there is nothing to fix in it).
+    assert "git didn't answer within 1s" in err
+    assert "hooks" not in err and "Fix or remove that include" not in err
+
+
+def test_host_git_gives_up_on_a_fifo_in_mains_records(hooked_repo, tmp_path, fifos, capsys):
+    # `git worktree remove` reads the worktree's record in main's `.git/worktrees`, which the box
+    # can make a FIFO: bounded, a failed run, said.
+    main, wt = hooked_repo["main"], tmp_path / "on"
+    assert _git(main, "worktree", "add", "-q", "-b", "on", str(wt)).returncode == 0
+    fifos.plant(main / ".git" / "worktrees" / "on" / "gitdir")
+    returned, got = fifos.returns_within(
+        10, lambda: worktree._host_git(main, "worktree", "remove", "--force", str(wt), timeout=1)
+    )
+    assert returned and got.returncode != 0
+    assert "git didn't answer within 1s" in capsys.readouterr().err
+
+
 def test_worktree_add_says_nothing_about_hooks_when_there_are_none(real_add, capsys):
     main = real_add["main"]
     for event in ("post-checkout", "reference-transaction"):
@@ -302,3 +403,44 @@ def test_parking_refuses_a_config_it_cannot_check_for_hooks(hooked_repo):
     _git(main, "config", "include.path", "not-there.cfg")
     with pytest.raises(worktree.HookScanError, match=r"not-there\.cfg"):
         worktree._hookless_env(main)
+
+
+@pytest.mark.parametrize("ref_format", ["files", "reftable"])
+def test_a_linked_worktrees_branch_reads_as_git_says_it(tmp_path, ref_format):
+    # On your computer a linked worktree's branch is read from main's `.git/worktrees`, never asked
+    # of git in it: what it reads must be what `git rev-parse --abbrev-ref HEAD` said there — on a
+    # branch and detached, and in a reftable repo (git 2.45+), whose admin HEAD is a placeholder.
+    main = tmp_path / "main"
+    made = subprocess.run(
+        ["git", "init", "-q", f"--ref-format={ref_format}", "-b", "main", str(main)],
+        capture_output=True,
+    )
+    if made.returncode != 0:
+        pytest.skip(f"this git can't make a {ref_format} repo")
+    _git(main, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+         "-m", "x")  # fmt: skip
+    _git(main, "worktree", "add", "-q", "-b", "wt/on", str(tmp_path / "on"))
+    _git(main, "worktree", "add", "-q", "--detach", str(tmp_path / "off"))
+    for wt, said in ((tmp_path / "on", "wt/on"), (tmp_path / "off", "HEAD")):
+        assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == said
+        assert worktree._branch_read(main, wt) == said
+
+
+def test_a_relative_git_file_reads_through_a_symlinked_worktrees_root(tmp_path):
+    # `worktree.useRelativePaths` (git 2.48+) writes the `.git` file relative to the checkout's
+    # REAL directory. A worktrees root named through a symlink (`[machine].worktrees_root`,
+    # `FOLDYARD_WORKTREES_ROOT`) at another depth must still find main's record, as git does.
+    main = tmp_path / "main"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+    _git(main, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+         "-m", "x")  # fmt: skip
+    real_root = tmp_path / "deep" / "er" / "trees"
+    real_root.mkdir(parents=True)
+    linked_root = tmp_path / "trees"
+    linked_root.symlink_to(real_root)
+    _git(main, "-c", "worktree.useRelativePaths=true", "worktree", "add", "-q", "-b", "wt/on",
+         str(real_root / "on"))  # fmt: skip
+    if (real_root / "on" / ".git").read_text().strip().startswith("gitdir: /"):
+        pytest.skip("this git writes no relative worktree paths (git 2.48+)")
+    assert _git(linked_root / "on", "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "wt/on"
+    assert worktree._branch_read(main, linked_root / "on") == "wt/on"

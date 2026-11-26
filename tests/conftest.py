@@ -784,3 +784,15 @@ def isolated_state(tmp_path, monkeypatch, full_config_bound):
     monkeypatch.setattr(devmode, "in_box", lambda: False)
     monkeypatch.setenv("FOLDYARD_STATE_DIR", str(tmp_path))  # log_dir/state_dir → tmp
     return {"auth": auth, "mirror": mirror, "host_env": host_env, "dir": tmp_path}
+
+
+@pytest.fixture
+def fifos(monkeypatch):
+    """A FIFO where git expects a file, and a bounded call that may block on it (tests/fifo.py).
+    Released — and every call finished — before ``monkeypatch`` (a dependency, so torn down after
+    this) undoes anything."""
+    from fifo import Fifos
+
+    planted = Fifos()
+    yield planted
+    planted.release()

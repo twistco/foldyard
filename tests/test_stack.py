@@ -425,6 +425,37 @@ def test_pin_filemode_reads_the_repo_local_value_only(real_repo, monkeypatch, tm
     assert _git(real_repo, "config", "--local", "--get", "core.fileMode") == "false"
 
 
+def test_pin_filemode_cannot_hang_on_a_fifo_the_config_includes(
+    real_repo, monkeypatch, fifos, capsys
+):
+    # `.git/config` is the box's to write, and git blocks on a FIFO it includes — this runs for
+    # every stack verb. Bounded, and failing safe: no write it couldn't read first, said.
+
+    monkeypatch.setattr(stack, "_PIN_FILEMODE_TIMEOUT", 1)
+    _git(real_repo, "config", "include.path", str(fifos.plant(real_repo / ".git" / "planted.cfg")))
+    returned, _ = fifos.returns_within(10, lambda: stack.pin_filemode(real_repo))
+    assert returned
+    assert "core.fileMode" in capsys.readouterr().err
+
+
+def test_finding_main_cannot_hang_on_a_fifo_the_config_includes(
+    real_repo, monkeypatch, fifos, capsys
+):
+    # Every verb finds main through git first, in a `.git/config` the box can write: on your
+    # computer that is bounded too, read as "no repository there", and said.
+    monkeypatch.setattr(stack, "_FIND_MAIN_TIMEOUT", 1)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    _git(real_repo, "config", "include.path", str(fifos.plant(real_repo / ".git" / "planted.cfg")))
+    monkeypatch.chdir(real_repo)
+    stack.main_checkout_of.cache_clear()
+    returned, found = fifos.returns_within(10, stack.find_main_repo)
+    assert returned and found is None
+    returned, found = fifos.returns_within(10, lambda: stack.main_checkout_of(real_repo))
+    assert returned and found is None
+    assert "git didn't answer within 1s" in capsys.readouterr().err
+    stack.main_checkout_of.cache_clear()
+
+
 def test_context_pins_filemode_through_the_helper(fake_repo, monkeypatch):
     seen: list[Path] = []
     monkeypatch.setattr(stack, "pin_filemode", lambda main: seen.append(main))

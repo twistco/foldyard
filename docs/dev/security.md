@@ -89,7 +89,18 @@ anything a person might need to read exactly uses `printable`.
   them. Git that can check out, update a ref or refresh the index goes through `worktree._host_git`:
   no hooks, no fsmonitor, no fetch, and no run at all when the config can't be scanned for hooks.
   Git that only reads goes through `worktree._git_read`. A worktree's `.git` file is the box's too,
-  even for one your computer registered.
+  even for one your computer registered, so git doesn't run in a linked worktree for what main
+  knows. Its branch is read from main's `.git/worktrees` (`worktree._branch_read`). Its bound config
+  carries main (`Config.main`, set by `devmode.worktree_config`): code that needs "this checkout's
+  main" takes it from there (`devmode.main_repo`, the `[ports]` pools).
+- **Waiting on git**: git blocks for good on a FIFO it finds in `.git` (an include, a
+  `.git/worktrees/<id>` record). These take a timeout, and read running out as "git can't say", said
+  as that rather than as a config problem (`worktree.GitTimeout`): finding main
+  (`stack.find_main_repo`, `stack.main_checkout_of`, on your computer), `stack.pin_filemode`,
+  `worktree._worktree_listing`, the TUI cards' branches (`devmode._CARD_GIT_TIMEOUT`, which
+  `_git_read`'s config scan keeps to), and `git worktree add`/`remove`/`prune`
+  (`_host_git(timeout=)`). `fy worktree remove` asks for the listing before anything is torn down,
+  and refuses when it runs out. A new git a UI or every verb waits on belongs in this list.
 - **A checkout your computer didn't register**: nothing runs in it, git included (not even
   `rev-parse`), since its `.git` file can name a gitdir, and with it a config, that the box built.
   Read what you need the way `worktree._branch_read` does:
@@ -97,6 +108,7 @@ anything a person might need to read exactly uses `printable`.
   - Open it with `O_NOFOLLOW | O_NONBLOCK`, check `S_ISREG`, and cap the size.
   - Only return a value of the shape you expect.
   - Name it from main's adopted config (`config.stray_identity`), not from the directory.
+  - Find its main the way a registered one's is found (`Config.main`), never from git in it.
 - **Engine listings**: read `ps --format json` and act only on the engine's own `Id`
   (`stack._project_services`). In a `--format` template with one line per container, a label holding
   a newline starts a line of its own, and its first word reads as an id.

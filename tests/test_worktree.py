@@ -71,6 +71,7 @@ def fake_main(tmp_path, monkeypatch):
         "origin_head": None,
         "registered": set(),
         "list_rc": 0,  # what `worktree list` exits with
+        "list_hangs": False,  # `worktree list` blocks (a FIFO in main's records) until its timeout
         "listed_branch": {},  # path → the branch `worktree list` names for it (default: none)
     }
     teardown: list[str] = []  # records the box+stack teardown remove() drives
@@ -111,6 +112,8 @@ def fake_main(tmp_path, monkeypatch):
             state["registered"].add(str(wt_dir))
             return _Proc(0)
         if g and "worktree" in cmd and "list" in cmd:  # registration probe (orphan detection)
+            if state["list_hangs"]:
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout") or 0)
             # Porcelain, as git writes it: each path verbatim, newlines and all.
             listing = "".join(
                 f"worktree {p}\nHEAD {BRANCH_OID}\n"
@@ -1376,11 +1379,28 @@ def test_list_runs_no_git_in_a_checkout_it_has_no_record_of(fake_main, capsys):
     assert "wt/boxed" in line  # read from its HEAD in main's .git, not asked of git
 
 
-def test_list_asks_git_for_a_registered_checkouts_branch(fake_main, capsys):
+def test_list_runs_no_git_in_a_registered_checkout_either(fake_main, capsys):
+    # Its `.git` file is the box's to rewrite all the same: git run there reads whatever git dir
+    # (and config) that names. Its HEAD in main's `.git/worktrees` says the branch.
     assert worktree.add("feat") == 0
+    wt = fake_main["wt_root"] / "feat"
+    (fake_main["main"] / ".git" / "worktrees" / "feat" / "HEAD").write_text(
+        "ref: refs/heads/wt/feat\n"
+    )
     capsys.readouterr()
     assert worktree.list_() == 0
-    assert _git_ran_in(fake_main["calls"], fake_main["wt_root"] / "feat")
+    assert not _git_ran_in(fake_main["calls"], wt)
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if " feat " in ln)
+    assert "wt/feat" in line
+
+
+def test_list_reads_mains_branch_with_git_that_cannot_fetch(fake_main):
+    # Main's `.git/config` is the box's too: the read goes through `_git_read`.
+    assert worktree.list_() == 0
+    asked = next(c for c in fake_main["calls"] if "--abbrev-ref" in c)
+    assert "protocol.allow=never" in asked and asked[asked.index("-C") + 1] == str(
+        fake_main["main"]
+    )
 
 
 def test_a_detached_head_reads_as_git_would_say_it(fake_main, capsys):
@@ -1495,6 +1515,25 @@ def test_a_reftable_repos_placeholder_head_is_no_branch(fake_main, capsys):
     assert not _git_ran_in(fake_main["calls"], wt)
     assert worktree.list_() == 0
     assert ".invalid" not in capsys.readouterr().out
+
+
+def test_in_a_box_a_branch_is_asked_of_its_own_git_plainly(fake_main, monkeypatch):
+    # The box's git and `.git` are its own: nothing to keep from it, and `_git_read`'s probe (and,
+    # on an old git, its config scan) would run through the box's slow index-split shim per card.
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert worktree._branch_of(fake_main["main"]) == "main"
+    asked = next(c for c in fake_main["calls"] if "--abbrev-ref" in c)
+    assert asked == ["git", "-C", str(fake_main["main"]), "rev-parse", "--abbrev-ref", "HEAD"]
+
+
+def test_list_asks_git_for_the_listing_once_however_many_worktrees_need_it(fake_main):
+    # Each reftable worktree's branch comes from main's `git worktree list`: one listing a pass,
+    # not one a worktree (the TUI asks every 5 s, and each may wait out its timeout).
+    for name in ("a", "b", "c"):
+        _box_made_checkout(fake_main, name, "ref: refs/heads/.invalid\n")
+    fake_main["calls"].clear()
+    assert worktree.list_() == 0
+    assert sum(1 for c in fake_main["calls"] if c[-3:] == ["worktree", "list", "--porcelain"]) == 1
 
 
 def test_a_relative_git_file_is_read(fake_main):
@@ -1929,6 +1968,38 @@ def test_remove_discard_goes_on_when_git_cannot_list_worktrees(fake_main):
     _make_wt(fake_main)
     fake_main["state"]["list_rc"] = 128
     assert worktree.remove("feat", discard=True, assume_yes=True) == 0
+
+
+def test_remove_refuses_before_any_teardown_when_git_cannot_list_in_time_even_discarding(
+    fake_main, capsys
+):
+    # A listing that times out is git blocked on main's records (a FIFO the box put there):
+    # `git worktree remove` would block on the same, after the box and stack were gone.
+    _make_wt(fake_main)
+    fake_main["state"]["list_hangs"] = True
+    assert worktree.remove("feat", discard=True, assume_yes=True) == 1
+    assert fake_main["teardown"] == []
+    err = capsys.readouterr().err
+    assert "didn't answer" in err and "NOT removed" in err
+
+
+def test_the_worktree_add_remove_and_prune_gits_are_bounded(fake_main, monkeypatch):
+    timeouts: dict[str, object] = {}
+    fake_run = worktree.subprocess.run
+
+    def run(cmd, **kw):
+        if cmd[:1] == ["git"] and "worktree" in cmd:
+            verb = cmd[cmd.index("worktree") + 1]
+            if verb in ("add", "remove", "prune"):
+                timeouts[verb] = kw.get("timeout")
+        return fake_run(cmd, **kw)
+
+    monkeypatch.setattr(worktree.subprocess, "run", run)
+    assert worktree.add("feat") == 0
+    assert worktree.remove("feat", assume_yes=True) == 0
+    _make_wt(fake_main, name="gone", registered=False)
+    assert worktree.remove("gone", force=True) == 0
+    assert timeouts == dict.fromkeys(("add", "remove", "prune"), worktree._WORKTREE_GIT_TIMEOUT)
 
 
 def test_a_worktree_made_inside_during_the_teardown_is_not_deleted(fake_main, monkeypatch, capsys):

@@ -25,6 +25,7 @@ from foldyard import config, configpin, devmode, stack, worktree_registry
 # Captured at import, before conftest's autouse seams replace them.
 _REAL_HOST_TOML = config._host_toml
 _REAL_PIN_DIR = configpin.pin_dir
+_REAL_MAIN_REPO = devmode.main_repo
 
 MAIN_TOML = (
     '[project]\nname = "acme"\nprefix = "ac"\n\n'
@@ -196,6 +197,73 @@ def test_nothing_is_read_from_a_box_made_worktree_dir(project, monkeypatch, tmp_
     assert cfg.project() == "acme" and cfg.toml == {}
     assert project["main"] in asked  # main's adoption names it…
     assert not {link, other} & set(asked)  # …and the dir, and where it points, are never looked up
+
+
+def test_nothing_asks_git_of_a_box_made_dir_while_its_config_is_bound(project, monkeypatch):
+    # While a box-made dir's config is bound (its TUI card highlighted, a mode flip on it), the
+    # readers that find "this checkout's main" asked git in its repo_root — which follows the `.git`
+    # file the box wrote to a git dir (and a common dir, so a "main") of the box's choosing. Main
+    # is known when the config is made, so they take it from there.
+    (project["main"] / "foldyard.toml").write_text(
+        MAIN_TOML + '\n[ports]\nAPP_PORT = { base = 3000, worktrees = "3001-3002" }\n'
+    )
+    _adopt(project["main"])
+    path = _box_made(project, "stray")
+    cfg = devmode.worktree_config("stray")
+    monkeypatch.setattr(devmode, "main_repo", _REAL_MAIN_REPO)  # the fixture's stub answers anyway
+    devmode._main_checkout.cache_clear()
+    stack.main_checkout_of.cache_clear()
+    asked: list = []
+    real_run = subprocess.run
+
+    def run(cmd, *a, **kw):
+        if any(str(path) in str(arg) for arg in [*cmd, kw.get("cwd", "")]):
+            asked.append(cmd)
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with config.using(cfg):
+        assert devmode.main_repo() == project["main"]
+        assert config.port_pools() == {"APP_PORT": range(3001, 3003)}  # main's, as for any worktree
+        assert config.port_pool_problems() == []
+        assert devmode.worktree_keys() == ["", "feat"]
+    assert asked == []
+
+
+@pytest.mark.parametrize("adopted", [False, True])
+def test_nothing_asks_git_of_a_registered_worktree_while_its_config_is_bound(
+    project, monkeypatch, adopted
+):
+    # The host registered it, but its `.git` file is the box's to rewrite all the same: git asked
+    # which main it belongs to there (the TUI card's port, `fy mode` on it) read a git dir — and a
+    # common dir, so a "main" whose `[ports]` pools then applied — of the box's choosing, or blocked
+    # on a FIFO in it. The host knows its main: it found it in main's registry.
+    pools = '\n[ports]\nAPP_PORT = { base = 3000, worktrees = "3001-3002" }\n'
+    (project["main"] / "foldyard.toml").write_text(MAIN_TOML + pools)
+    _adopt(project["main"])
+    wt = project["wt"]
+    if adopted:
+        (wt / "foldyard.toml").write_text('[project]\nname = "acme"\n')
+        _adopt(wt)
+    (wt / ".git").write_text("gitdir: /nowhere\n")
+    cfg = devmode.worktree_config("feat")
+    assert bool(cfg.toml) is adopted
+    monkeypatch.setattr(devmode, "main_repo", _REAL_MAIN_REPO)
+    devmode._main_checkout.cache_clear()
+    stack.main_checkout_of.cache_clear()
+    asked: list = []
+    real_run = subprocess.run
+
+    def run(cmd, *a, **kw):
+        if any(str(wt) in str(arg) for arg in [*cmd, kw.get("cwd", "")]):
+            asked.append(cmd)
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with config.using(cfg):
+        assert devmode.main_repo() == project["main"]
+        assert config.port_pools() == {"APP_PORT": range(3001, 3003)}
+    assert asked == []
 
 
 def test_nothing_is_inherited_when_main_is_not_adopted(project, tmp_path):

@@ -27,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from . import (
@@ -91,6 +92,15 @@ class LazyFetchError(HookScanError):
     """A partial clone, on a git that can't be told not to fetch its missing objects."""
 
 
+class GitTimeout(HookScanError):
+    """Git didn't answer within the caller's timeout while the config was read to be checked: a
+    busy machine, or a file the config includes that never finishes reading (a FIFO)."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"git didn't answer within {seconds:g}s")
+        self.seconds = seconds
+
+
 @functools.cache
 def _git_can_refuse_lazy_fetch() -> bool:
     """Whether this git honours ``GIT_NO_LAZY_FETCH`` — it came with ``git --no-lazy-fetch``
@@ -129,15 +139,16 @@ def _lazy_fetch_error(fetchy: set[str]) -> LazyFetchError:
     )
 
 
-def _check_fetch(repo: Path) -> None:
+def _check_fetch(repo: Path, timeout: float | None = None) -> None:
     """Raise unless git can run in ``repo`` here without risking a fetch: on a git older than
     2.44 (no ``GIT_NO_LAZY_FETCH``, so a remote helper no transport policy names stays reachable),
     a repo whose config — every file and include git could read, whatever the include's condition
     (:func:`_scan_config`) — names a promisor remote raises :class:`LazyFetchError`, and one that
-    can't be checked :class:`HookScanError`. Free on a newer git."""
+    can't be checked :class:`HookScanError` — as is one git can't read within ``timeout`` seconds
+    (each ``git config`` it runs). Free on a newer git."""
     if _git_can_refuse_lazy_fetch():
         return
-    _, fetchy = _scan_config(repo)
+    _, fetchy = _scan_config(repo, timeout)
     if fetchy:
         raise _lazy_fetch_error(fetchy)
 
@@ -149,9 +160,9 @@ def _no_fetch_env(base: dict[str, str] | None = None) -> dict[str, str]:
 def _git_read(repo: Path, *args: str, **kw) -> subprocess.CompletedProcess:
     """``git -C repo args…`` for a READ here (a ref, an object, config): no fetch
     (:data:`_NO_FETCH_CONFIG`). A repo this git can't keep from fetching (:func:`_check_fetch`)
-    runs nothing: a failed run (1), the reason said."""
+    runs nothing: a failed run (1), the reason said. A ``timeout`` bounds that check too."""
     try:
-        _check_fetch(repo)
+        _check_fetch(repo, kw.get("timeout"))
     except HookScanError as e:
         _refuse_unscanned(e)
         return subprocess.CompletedProcess(args, 1, "", "")
@@ -164,10 +175,16 @@ _MAX_INCLUDE_DEPTH = 10  # git's own: deeper than this, git itself refuses the c
 _REPO_SCOPES = ("local", "worktree")  # the config files in the repo's .git, which the box writes
 
 
-def _git_config_lines(*args: str) -> list[str]:
+def _git_config_lines(*args: str, timeout: float | None = None) -> list[str]:
     """``git config -z <args…> --list``'s NUL-separated fields. Plain ``git config`` runs nothing
-    from the config it reads. Raises :class:`HookScanError` when git can't read it."""
-    got = subprocess.run(["git", *args, "-z", "--list"], capture_output=True, text=True)
+    from the config it reads — but it blocks on a FIFO it includes, like any git. Raises
+    :class:`HookScanError` when git can't read it, or not within ``timeout`` seconds."""
+    try:
+        got = subprocess.run(
+            ["git", *args, "-z", "--list"], capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as e:
+        raise GitTimeout(timeout or 0) from e
     if got.returncode != 0:
         raise HookScanError(got.stderr.strip() or f"`git {' '.join(args)} --list` failed")
     return got.stdout.split("\0")
@@ -201,6 +218,7 @@ def _scan_file(
     seen: set[str],
     depth: int = 0,
     fetchy: set[str] | None = None,
+    timeout: float | None = None,
 ) -> None:
     """``path``'s hooks into ``hooks`` (and its fetch-enabling keys into ``fetchy``,
     :func:`_note_fetchy`), then every file it includes, WHATEVER the include's
@@ -218,7 +236,7 @@ def _scan_file(
             raise HookScanError(f"the repo's git config includes {path}, which can't be read")
         return
     seen.add(real)
-    for entry in _git_config_lines("config", "-f", str(path), "--no-includes"):
+    for entry in _git_config_lines("config", "-f", str(path), "--no-includes", timeout=timeout):
         key, _, value = entry.partition("\n")
         _add_hook(hooks, key, value)
         if fetchy is not None:
@@ -231,32 +249,38 @@ def _scan_file(
                 if repo_scope:
                     raise HookScanError(f"the repo's git config includes {value!r}, from {path}")
                 continue
-            _scan_file(target, repo_scope, hooks, seen, depth + 1, fetchy)
+            _scan_file(target, repo_scope, hooks, seen, depth + 1, fetchy, timeout)
 
 
-def _config_hooks(repo: Path) -> dict[str, set[str]]:
+def _config_hooks(repo: Path, timeout: float | None = None) -> dict[str, set[str]]:
     """Every config-defined hook git could run for ``repo`` — in its own git, or in a child git it
     starts in another context (``git worktree add``'s, in the new worktree): name → the events
     it is set for (:func:`_scan_config`). Raises :class:`HookScanError` rather than miss one.
     Empty on a git without config hooks — and harmless to over-count: disabling a name that never
     runs changes nothing. A repo this git can't keep from fetching raises :class:`LazyFetchError`
     (:func:`_check_fetch`): every git run on this scan is refused."""
-    hooks, fetchy = _scan_config(repo)
+    hooks, fetchy = _scan_config(repo, timeout)
     if fetchy and not _git_can_refuse_lazy_fetch():
         raise _lazy_fetch_error(fetchy)
     return hooks
 
 
-def _scan_config(repo: Path) -> tuple[dict[str, set[str]], set[str]]:
+def _scan_config(repo: Path, timeout: float | None = None) -> tuple[dict[str, set[str]], set[str]]:
     """``(hooks, fetch-enabling keys)`` from each config file git reads for ``repo``
     (``--show-origin``), then every include target in them whatever its condition
     (:func:`_scan_file`). Raises :class:`HookScanError` when one can't be read."""
     try:
         fields = _git_config_lines(
-            "-C", str(repo), "config", "--show-scope", "--show-origin", "--name-only"
+            "-C",
+            str(repo),
+            "config",
+            "--show-scope",
+            "--show-origin",
+            "--name-only",
+            timeout=timeout,
         )
     except HookScanError as e:
-        if "show-scope" not in str(e):
+        if "show-scope" not in str(e) or isinstance(e, GitTimeout):
             raise
         raise HookScanError(
             "this git can't say which config files it reads (`--show-scope`), so they can't be "
@@ -273,11 +297,13 @@ def _scan_config(repo: Path) -> tuple[dict[str, set[str]], set[str]]:
     seen: set[str] = set()
     fetchy: set[str] = set()
     for path, repo_scope in files.items():
-        _scan_file(path, repo_scope, hooks, seen, fetchy=fetchy)
+        _scan_file(path, repo_scope, hooks, seen, fetchy=fetchy, timeout=timeout)
     return hooks, fetchy
 
 
-def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[str, str]:
+def _hookless_env(
+    repo: Path, hooks: dict[str, set[str]] | None = None, timeout: float | None = None
+) -> dict[str, str]:
     """The environment for a host git run in ``repo`` with each of its config hooks disabled —
     appended after any GIT_CONFIG_COUNT entries the caller's own environment already carries.
     Children inherit it, so a hook only a child would see is off there too — and so is a fetch
@@ -285,7 +311,7 @@ def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[
     env = _no_fetch_env()
     count = env.get("GIT_CONFIG_COUNT", "")
     n = int(count) if count.isdigit() else 0
-    for name in sorted(_config_hooks(repo) if hooks is None else hooks):
+    for name in sorted(_config_hooks(repo, timeout) if hooks is None else hooks):
         env[f"GIT_CONFIG_KEY_{n}"] = f"hook.{name}.enabled"
         env[f"GIT_CONFIG_VALUE_{n}"] = "false"
         n += 1
@@ -294,24 +320,50 @@ def _hookless_env(repo: Path, hooks: dict[str, set[str]] | None = None) -> dict[
 
 
 def _host_git(
-    repo: Path, *args: str, env: dict[str, str] | None = None, **kw
+    repo: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    **kw,
 ) -> subprocess.CompletedProcess:
     """``git -C repo args…`` with none of the repo's hooks or fsmonitor run, and no fetch (see
     above). For every host-side git here that can reach one: a checkout, a ref update, an index
     refresh. ``env`` defaults to :func:`_hookless_env`; a caller passing its own builds it from
     that (the no-fetch variables are set on it whatever it holds). When the repo's config can't be
-    checked for hooks, git doesn't run: a failed run (1), the reason said."""
+    checked for hooks, git doesn't run: a failed run (1), the reason said. So too when git (or
+    that check) doesn't answer within ``timeout`` seconds: git waits for good on a FIFO the box
+    put in ``.git``."""
     if env is None:
         try:
-            env = _hookless_env(repo)
+            env = _hookless_env(repo, timeout=timeout)
         except HookScanError as e:
             _refuse_unscanned(e)
             return subprocess.CompletedProcess(args, 1, "", "")
     cmd = ["git", *_NO_REPO_CODE, "-C", str(repo), *args]
-    return subprocess.run(cmd, env=_no_fetch_env(env), **kw)
+    try:
+        return subprocess.run(cmd, env=_no_fetch_env(env), timeout=timeout, **kw)
+    except subprocess.TimeoutExpired:
+        _err(
+            f"✗ git didn't answer within {timeout:g}s, so `git {shlex.join(args[:2])}` was stopped."
+        )
+        _err(
+            "  If it never answers, a file under .git/worktrees/, or one .git/config includes, may"
+        )
+        _err("  not be a regular file.")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+
+# `git worktree add/remove/prune` read main's `.git/worktrees` records, which the box can make a
+# FIFO. Generous — `remove` deletes the whole checkout — since it only has to end a wait for good.
+_WORKTREE_GIT_TIMEOUT = 600
 
 
 def _refuse_unscanned(e: HookScanError) -> None:
+    if isinstance(e, GitTimeout):  # nothing wrong with the config, necessarily: said as it is
+        _err(f"✗ {e} reading this repo's config, which foldyard checks before running git on")
+        _err("  your computer, so none ran. If it never answers, a file .git/config includes may")
+        _err("  not be a regular file.")
+        return
     _err(f"✗ not running git on your computer: {e}.")
     if isinstance(e, LazyFetchError):
         _err(
@@ -359,7 +411,9 @@ def _git_worktree_add(main: Path, argv: list[str]) -> int:
         _refuse_unscanned(e)
         return 1
     skipped = _hooks_skipped(main, ("post-checkout", "reference-transaction"), hooks)
-    rc = _host_git(main, *argv, env=_hookless_env(main, hooks)).returncode
+    rc = _host_git(
+        main, *argv, env=_hookless_env(main, hooks), timeout=_WORKTREE_GIT_TIMEOUT
+    ).returncode
     if rc == 0 and skipped:
         print(
             f"  skipped the repo's git hooks ({', '.join(skipped)}): they live in the .git every "
@@ -552,7 +606,9 @@ def _admin_dir(wt_dir: Path) -> Path | None:
         text = os.read(fd, 4096).decode(errors="replace")
     finally:
         os.close(fd)
-    return wt_dir / Path(text.removeprefix("gitdir:").strip())  # `/` keeps an absolute one as is
+    # `/` keeps an absolute one as is. A relative one (`worktree.useRelativePaths`) is from the
+    # checkout's REAL dir, as git takes it: under a symlinked worktrees root, `..` is the target's.
+    return Path(os.path.realpath(wt_dir)) / Path(text.removeprefix("gitdir:").strip())
 
 
 def _index_on_host(wt_dir: Path) -> bool:
@@ -566,7 +622,12 @@ def _undo_add(main: Path, wt_dir: Path, branch: str, made_at: str) -> None:
     """Drop the worktree the metadata step made — ``--force``, which skips the dirty check (a
     ``git status``, which would hash files) — and the branch it made, while that is still where it
     was made (``made_at``). Says what it couldn't."""
-    if _host_git(main, "worktree", "remove", "--force", str(wt_dir)).returncode != 0:
+    if (
+        _host_git(
+            main, "worktree", "remove", "--force", str(wt_dir), timeout=_WORKTREE_GIT_TIMEOUT
+        ).returncode
+        != 0
+    ):
         _err("  ✗ couldn't remove the half-made worktree:")
         _err(f"    git -C {main} worktree remove --force {wt_dir}")
     if not made_at:
@@ -605,16 +666,41 @@ def _registered_worktree(main: Path, wt_dir: Path) -> bool:
     return any(f"\nworktree {p}\n" in listing for p in {str(wt_dir), str(wt_dir.resolve())})
 
 
-def _worktree_listing(main: Path) -> str | None:
+# `git worktree list` reads main's config and each `.git/worktrees/<id>` record, all of which a box
+# can write — and git blocks for good on a FIFO it finds there. So a listing is bounded: one that
+# runs out is one git couldn't give.
+_LISTING_TIMEOUT = 10
+
+
+def _worktree_listing(main: Path, timeout: float | None = None) -> str | None:
     """``git worktree list --porcelain`` for ``main``, a newline in front, None when git can't
-    say. Git writes each path verbatim (only ``-z``, git 2.36+, delimits them), so a path is
-    matched in this text as ``\nworktree <path>…`` rather than split into lines, which would cut
-    a path holding a newline. The paths come from the shared ``.git``, which a box writes: data to
-    compare and show, never to act on."""
-    out = subprocess.run(
-        ["git", "-C", str(main), "worktree", "list", "--porcelain"], capture_output=True
-    )
+    say — within ``timeout`` seconds (:data:`_LISTING_TIMEOUT` by default). Git writes each path
+    verbatim (only ``-z``, git 2.36+, delimits them), so a path is matched in this text as
+    ``\nworktree <path>…`` rather than split into lines, which would cut a path holding a newline.
+    The paths come from the shared ``.git``, which a box writes: data to compare and show, never
+    to act on."""
+    try:
+        out = _list_worktrees(main, timeout)
+    except subprocess.TimeoutExpired:
+        return None
     return None if out.returncode != 0 else "\n" + os.fsdecode(out.stdout)
+
+
+def _list_worktrees(main: Path, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """The ``git worktree list --porcelain`` behind :func:`_worktree_listing`, raising
+    ``TimeoutExpired`` for a caller that must tell running out from git saying no."""
+    return subprocess.run(
+        ["git", "-C", str(main), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        timeout=_LISTING_TIMEOUT if timeout is None else timeout,
+    )
+
+
+def _listing_once(main: Path, timeout: float | None = None) -> Callable[[], str | None]:
+    """:func:`_worktree_listing`, asked of git the first time it's called and kept: one listing
+    for a pass over the worktrees, not one per worktree — nor one wait per worktree when git
+    can't give it."""
+    return functools.cache(lambda: _worktree_listing(main, timeout))
 
 
 def _nested_worktrees(main: Path, wt_dir: Path) -> list[str] | None:
@@ -892,7 +978,9 @@ def _remove_checkout(
         if ref:
             _say_parked(name, ref)
     print(f"▶ git worktree remove --force {wt_dir}…")
-    rc = _host_git(main, "worktree", "remove", "--force", str(wt_dir), env=quiet).returncode
+    rc = _host_git(
+        main, "worktree", "remove", "--force", str(wt_dir), env=quiet, timeout=_WORKTREE_GIT_TIMEOUT
+    ).returncode
     if rc != 0:
         _err("✗ git worktree remove failed (above).")
     return rc, ref
@@ -902,12 +990,21 @@ def _git_has_ref(repo: Path, ref: str) -> bool:
     return _git_read(repo, "show-ref", "--verify", "--quiet", ref).returncode == 0
 
 
-def _branch_of(path: Path) -> str:
-    out = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True,
-        text=True,
-    )
+def _branch_of(path: Path, timeout: float | None = None) -> str:
+    """``path``'s branch, asked of git there — ``""`` when git can't say within ``timeout``
+    seconds. Main's on your computer, through :func:`_git_read`: its ``.git`` is the shared one,
+    which git reads for every command here. Any checkout's in a box, plainly: the box's git and
+    ``.git`` are its own. Never a linked worktree's on your computer: :func:`_branch_read`'s."""
+    args = ("rev-parse", "--abbrev-ref", "HEAD")
+    try:
+        if config.in_box():
+            out = subprocess.run(
+                ["git", "-C", str(path), *args], capture_output=True, text=True, timeout=timeout
+            )
+        else:
+            out = _git_read(path, *args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return ""
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
@@ -915,7 +1012,7 @@ def _own_admin_dir(main: Path, wt_dir: Path) -> Path | None:
     """``wt_dir``'s admin dir (:func:`_admin_dir`), only where that is one directory directly under
     ``main``'s ``.git/worktrees`` (its ``.git`` file is box-written), and named from there: the
     path returned is ``main/.git/worktrees/<name>`` whatever the file said. A relative ``gitdir``
-    (``worktree.useRelativePaths``, git 2.48+) is resolved from the checkout first."""
+    (``worktree.useRelativePaths``, git 2.48+) is resolved from the checkout's real dir first."""
     if (admin := _admin_dir(wt_dir)) is None:
         return None
     admin = Path(os.path.normpath(admin))
@@ -930,20 +1027,23 @@ def _own_admin_dir(main: Path, wt_dir: Path) -> Path | None:
 _REFTABLE_HEAD = "refs/heads/.invalid"
 
 
-def _branch_read(main: Path, wt_dir: Path) -> str:
+def _branch_read(main: Path, wt_dir: Path, listing: Callable[[], str | None] | None = None) -> str:
     """``wt_dir``'s branch as ``git rev-parse --abbrev-ref HEAD`` would say it (``HEAD`` when
     detached, ``""`` when it can't tell), READ from its HEAD in ``main``'s ``.git/worktrees``
-    rather than asked of git there. For a checkout your computer has no record of: the box made the
-    dir and wrote its ``.git`` file, which can name a git dir — and with it a config — the box
-    built, so nothing runs in it (:func:`devmode.workspaces`). The admin dir and its HEAD are
+    rather than asked of git there. For every linked checkout on your computer, registered or not:
+    its ``.git`` file is the box's to write, and can name a git dir — and with it a config — the
+    box built, so nothing runs in it (:func:`devmode.workspaces`). The admin dir and its HEAD are
     opened without following a link or blocking. A reftable repo's placeholder is answered from
-    ``main``'s own ``git worktree list`` (:func:`_listed_branch`). Only a name git would take as a
-    branch is returned: it is printed, and pasted into commands."""
+    ``main``'s own ``git worktree list`` (:func:`_listed_branch`) — ``listing``, when a caller
+    reading several shares one (:func:`_listing_once`). Only a name git would take as a branch is
+    returned: it is printed, and pasted into commands."""
     if (admin := _own_admin_dir(main, wt_dir)) is None:
         return ""
     head = _read_head(admin)
     if head == f"ref: {_REFTABLE_HEAD}":
-        branch = _listed_branch(main, wt_dir)
+        listed = (listing or _listing_once(main))()
+        if (branch := _listed_branch(listed, wt_dir)) == "HEAD":  # listed detached: no branch name
+            return branch
     elif head.startswith("ref: refs/heads/"):
         branch = head.removeprefix("ref: refs/heads/")
     else:
@@ -974,10 +1074,11 @@ def _read_head(admin: Path) -> str:
         os.close(fd)
 
 
-def _listed_branch(main: Path, wt_dir: Path) -> str:
-    """The branch ``main``'s ``git worktree list`` names for ``wt_dir`` (:func:`_worktree_listing`:
-    git runs in main, never in the checkout), ``""`` when it names none."""
-    if (listing := _worktree_listing(main)) is None:
+def _listed_branch(listing: str | None, wt_dir: Path) -> str:
+    """The branch main's ``git worktree list`` (``listing``, :func:`_worktree_listing`: git runs in
+    main, never in the checkout) names for ``wt_dir`` — ``HEAD`` when it lists it detached, as
+    ``rev-parse`` says it — ``""`` when it names none, or git couldn't list them."""
+    if listing is None:
         return ""
     for path in dict.fromkeys((str(wt_dir), os.path.realpath(wt_dir))):
         at = listing.find(f"\nworktree {path}\n")
@@ -987,17 +1088,26 @@ def _listed_branch(main: Path, wt_dir: Path) -> str:
         for line in entry.split("\n")[1:]:
             if line.startswith("branch refs/heads/"):
                 return line.removeprefix("branch refs/heads/")
+            if line == "detached":
+                return "HEAD"
         return ""
     return ""
 
 
-def _branch_shown(main: Path, wt_dir: Path) -> str:
-    """``wt_dir``'s branch, for display: git's answer in a box or for a checkout your computer
-    registered, :func:`_branch_read` for any other dir under the worktrees root."""
+def _branch_shown(
+    main: Path,
+    wt_dir: Path,
+    *,
+    listing: Callable[[], str | None] | None = None,
+    timeout: float | None = None,
+) -> str:
+    """``wt_dir``'s branch, for display: git's answer in a box, :func:`_branch_read` on your
+    computer — even for a checkout it registered, whose ``.git`` file the box can rewrite. Within
+    ``timeout`` seconds wherever git is asked (``fy tui`` asks on its event loop); ``listing``
+    shares main's worktree listing across a pass (:func:`_listing_once`)."""
     if config.in_box():
-        return _branch_of(wt_dir)
-    known = {os.path.realpath(p) for p in worktree_registry.checkouts(main).values()}
-    return _branch_of(wt_dir) if os.path.realpath(wt_dir) in known else _branch_read(main, wt_dir)
+        return _branch_of(wt_dir, timeout=timeout)
+    return _branch_read(main, wt_dir, listing or _listing_once(main, timeout))
 
 
 def _local_state_roots() -> tuple[Path, ...]:
@@ -1678,6 +1788,17 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         _err(f"✗ no worktree named '{name}' under {wt_root}")
         return 1
 
+    # Git that can't list main's worktrees in time is blocked on main's records (a FIFO the box put
+    # there), and `git worktree remove` would block on the same — after the box and stack were
+    # gone. So that is asked first, and refused, `--discard` or not.
+    try:
+        _list_worktrees(main)
+    except subprocess.TimeoutExpired:
+        _err(f"✗ git didn't answer within {_LISTING_TIMEOUT}s listing {main}'s worktrees, so")
+        _err(f"  '{name}' was NOT removed, and nothing was torn down. On a busy machine, retry; if")
+        _err("  it never answers, a file under .git/worktrees/, or one .git/config includes, may")
+        _err("  not be a regular file.")
+        return 1
     project = f"{config.project_prefix()}-{name}"
     branch = printable(_branch_shown(main, wt_dir))  # display only: the branch is kept
     orphaned = not _registered_worktree(main, wt_dir)
@@ -1774,7 +1895,7 @@ def remove(name: str, force: bool = False, assume_yes: bool = False, discard: bo
         except OSError as e:
             _err(f"✗ couldn't delete {wt_dir}: {e}")
             return 1
-        rc = _host_git(main, "worktree", "prune").returncode
+        rc = _host_git(main, "worktree", "prune", timeout=_WORKTREE_GIT_TIMEOUT).returncode
         if rc != 0:
             _err("✗ git worktree prune failed — the checkout dir was deleted, but stale")
             _err(f"  worktree metadata may remain (re-run: git -C {main} worktree prune).")
@@ -1820,8 +1941,10 @@ def list_() -> int:
     made_here = set(boxworktree.names(main)) - known
     published = worktree_published.read(main) if config.in_box() else None
     # Names and branches here come from dirs and a .git the box writes: each shown inert.
-    print(f"  {'main':<18} {printable(_branch_of(main)):<28} {main}")
+    main_branch = _branch_of(main, timeout=_LISTING_TIMEOUT)
+    print(f"  {'main':<18} {printable(main_branch):<28} {main}")
     if wt_root.is_dir():
+        listing = _listing_once(main)
         for d in sorted(wt_root.iterdir()):
             if d.is_dir() and (d / ".git").exists():
                 if config.in_box():
@@ -1832,7 +1955,7 @@ def list_() -> int:
                     note = "  (made in a box)"
                 else:
                     note = "  (not registered)"
-                branch = _branch_shown(main, d)
+                branch = _branch_shown(main, d, listing=listing)
                 print(
                     f"  {printable(d.name):<18} {printable(branch):<28} {printable(str(d))}{note}"
                 )

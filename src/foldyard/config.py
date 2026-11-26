@@ -93,6 +93,11 @@ class Config:
     # identity keys (:func:`identity_from`), never config; for a worktree dir the host has no
     # record of, main's (:func:`stray_identity`). Empty for every other checkout.
     identity: dict = field(default_factory=dict)
+    # The main checkout, for a worktree on your computer (registered or not): known when the
+    # config is made, so nothing asks git in ``repo_root`` — whose ``.git`` file the box can write,
+    # naming a git dir (and a "main") of its choosing — which main it belongs to. None for main's
+    # own config, and in the box.
+    main: Path | None = None
 
     def has_table(self, name: str) -> bool:
         """Does this config DECLARE the top-level table ``name`` (even empty)? The opt-in
@@ -1039,7 +1044,11 @@ def _project_ports() -> dict:
     from . import stack  # lazy: stack imports config at module load
 
     root = repo_root()
-    main = stack.main_checkout_of(Path(root))
+    bound = _BOUND.get()
+    if bound is not None and bound.main is not None:  # a box-made dir: never ask git there
+        main = Path(os.path.realpath(bound.main))
+    else:
+        main = stack.main_checkout_of(Path(root))
     if main is None or main == Path(os.path.realpath(root)):
         return _table("ports")
     toml = _tree_toml(main) if in_box() else (_host_toml(main) or {})

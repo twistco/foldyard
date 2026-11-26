@@ -77,14 +77,41 @@ def main_repo() -> Path:
     return found
 
 
+# Git blocks for good on a FIFO in the `.git/config` a box can write (an include), and every verb
+# finds main through the two below first: on your computer each git is bounded, and running out
+# is said. Not in a box: nothing there to keep from it, and its git (the index-split shim) is slow.
+_FIND_MAIN_TIMEOUT = 10
+
+
+def _ask_git(cmd: list[str], where: Path | str, **kw) -> subprocess.CompletedProcess | None:
+    """``_run(cmd)`` — or None, said, when git didn't answer within :data:`_FIND_MAIN_TIMEOUT` on
+    your computer (``where`` names the checkout it was asked in)."""
+    from .term import printable  # lazy: stack is on every verb's path
+
+    try:
+        return _run(cmd, timeout=None if config.in_box() else _FIND_MAIN_TIMEOUT, **kw)
+    except subprocess.TimeoutExpired:
+        _err(
+            f"! git didn't answer within {_FIND_MAIN_TIMEOUT}s in {printable(str(where))}, so it "
+            "is read as no repository. If it never answers, a file its .git/config includes may "
+            "not be a regular file."
+        )
+        return None
+
+
 def find_main_repo() -> Path | None:
     """:func:`main_repo` for a caller that only wants to know: ``None`` outside a git repo, and
-    nothing printed (the CLI's up-front worktree pin runs before every verb, `--help` included)."""
-    out = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    nothing printed (the CLI's up-front worktree pin runs before every verb, `--help` included)
+    — unless git didn't answer (:func:`_ask_git`)."""
+    out = _ask_git(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], "the current directory"
+    )
+    if out is None:
+        return None
     if out.returncode == 0 and out.stdout.strip():
         return Path(out.stdout.strip()).parent
-    out = _run(["git", "rev-parse", "--show-toplevel"])
-    return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+    out = _ask_git(["git", "rev-parse", "--show-toplevel"], "the current directory")
+    return Path(out.stdout.strip()) if out and out.returncode == 0 and out.stdout.strip() else None
 
 
 @lru_cache(maxsize=64)
@@ -92,14 +119,15 @@ def main_checkout_of(path: Path) -> Path | None:
     """The main checkout of the git checkout at ``path`` (itself, for main), by real path; ``None``
     outside git. :func:`main_repo` asks the working directory; this asks a given checkout — the one
     whose config is being read (``config._project_ports``). Memoized like it: the TUI asks every
-    second, and which repo a path belongs to doesn't change under a process."""
+    second, and which repo a path belongs to doesn't change under a process — nor does a git that
+    didn't answer (:func:`_ask_git`): None, for the process."""
     from .hostgit import REPO_ENV  # lazy: stack is on every verb's path
 
     # Without git's location variables, which beat `-C`: an inherited GIT_DIR named another main.
     env = {k: v for k, v in os.environ.items() if k not in REPO_ENV}
     cmd = ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"]
-    out = _run(cmd, env=env)
-    if out.returncode != 0 or not out.stdout.strip():
+    out = _ask_git(cmd, path, env=env)
+    if out is None or out.returncode != 0 or not out.stdout.strip():
         return None
     return Path(os.path.realpath(Path(out.stdout.strip()).parent))
 
@@ -424,6 +452,11 @@ def _docker_host(
     raise SystemExit(1)
 
 
+# `.git/config` is box-writable, and git blocks for good on a FIFO it includes: the pin runs on
+# every stack verb, so each git it asks is bounded.
+_PIN_FILEMODE_TIMEOUT = 10
+
+
 def pin_filemode(main: Path) -> None:
     """``core.fileMode=false`` in the MAIN checkout's ``.git/config`` — exec-bit churn on the
     shared mount must not read as a modification — written READ-FIRST, so the file is touched
@@ -436,17 +469,27 @@ def pin_filemode(main: Path) -> None:
     unchanged value — so an unconditional write made foldyard the file's most frequent writer and
     a lost update once left a consumer's config as the 25-byte ``[core] fileMode = false``
     (issue #6). ``--local`` on the read: an operator's global ``fileMode=false`` must not skip
-    the write the box side (no such global) still needs."""
-    got = subprocess.run(
-        ["git", "-C", str(main), "config", "--local", "--get", "core.fileMode"],
-        capture_output=True,
-        text=True,
-    )
-    if got.returncode == 0 and got.stdout.strip().lower() == "false":
-        return
-    subprocess.run(
-        ["git", "-C", str(main), "config", "core.fileMode", "false"], capture_output=True
-    )
+    the write the box side (no such global) still needs. A git that doesn't answer within
+    :data:`_PIN_FILEMODE_TIMEOUT` leaves the file as it is, and says so: no write unread."""
+    try:
+        got = subprocess.run(
+            ["git", "-C", str(main), "config", "--local", "--get", "core.fileMode"],
+            capture_output=True,
+            text=True,
+            timeout=_PIN_FILEMODE_TIMEOUT,
+        )
+        if got.returncode == 0 and got.stdout.strip().lower() == "false":
+            return
+        subprocess.run(
+            ["git", "-C", str(main), "config", "core.fileMode", "false"],
+            capture_output=True,
+            timeout=_PIN_FILEMODE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        _err(
+            f"! git took over {_PIN_FILEMODE_TIMEOUT}s to read {main}/.git/config: core.fileMode "
+            "left as it is (does the config include a file that isn't one?)"
+        )
 
 
 def _context(
