@@ -15,14 +15,17 @@ shrunk counterexample as an @example so it stays pinned.
 
 from __future__ import annotations
 
+import io
+import re
+import sys
 from unittest import mock
 
 import pytest
-from hypothesis import example, given
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
-from foldyard import config, devmode, ports, supervisor
-from pbt import capability_maps, inject_worlds, worlds
+from foldyard import config, devmode, guestcompose, ports, supervisor
+from pbt import capability_maps, inject_worlds, scaled_examples, worlds
 
 # ── supervisor.capability_edges — the probe-diff semantics ───────────────────────────────
 # Validated red against: dropping the first-observation-failing branch (prev_ok is None), and
@@ -365,3 +368,108 @@ def test_no_operation_sequence_reaches_overlapping_rules(world, data, tmp_path, 
                 # satisfy the invariant below on its own).
                 devmode.set_mode(updates, reconcile=False)
         assert not world.overlaps(devmode.read()["mode"])
+
+
+# ── a relayed compose line: foldyard's colours, never the box's ────────────────────────────
+# Validated against: guestcompose.printable keeping ESC, and term._sgr dropping its reset.
+
+
+class _Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+# Every escape foldyard may add to a compose line: SGR codes of its own fixed set, and the reset.
+_OWN_COLOURS = {"2", "31", "33", "34", "35", "36", "94", "95", "96"}
+
+
+def _spans(shown: str) -> list[tuple[str | None, str]]:
+    """``shown`` as ``(colour, text)`` pieces, asserting each escape is one of foldyard's own, each
+    span closed before the next opens, and the line ending with none open."""
+    pieces: list[tuple[str | None, str]] = []
+    colour: str | None = None
+    for i, part in enumerate(re.split(r"(\x1b\[[0-9;]*m)", shown)):
+        if i % 2 == 0:
+            assert "\x1b" not in part, repr(shown)
+            pieces.append((colour, part))
+        elif part == "\x1b[0m":
+            assert colour is not None, repr(shown)  # a reset closes a span foldyard opened
+            colour = None
+        else:
+            assert colour is None and part[2:-1] in _OWN_COLOURS, repr(shown)
+            colour = part[2:-1]
+    assert colour is None, repr(shown)
+    return pieces
+
+
+_PREFIXES = st.sampled_from(["", "[web]   | ", "web-1  | ", "[api.v2] |", "ERROR | ", "[✓] | "])
+_STAMPS = st.sampled_from(
+    [
+        "",
+        "2026-11-26T10:00:00.123456789Z ",
+        "2026-11-26T10:00:00+01:00 ",
+        "0123456789ab 2026-11-26T10:00:00Z ",
+    ]
+)
+
+
+@settings(max_examples=scaled_examples(300), deadline=None)
+@given(
+    prefix=_PREFIXES,
+    stamp=_STAMPS,
+    body=st.one_of(
+        st.binary(max_size=120),
+        st.lists(
+            st.sampled_from(
+                [
+                    "ERROR",
+                    "WARN",
+                    " ",
+                    "\x1b[32m",
+                    "\x1b]52;c;ZXZpbA==\x07",
+                    "\x9b",
+                    "\u202e",
+                    "✓",
+                    "\x1b[0m",
+                    "FATAL:",
+                    "\r",
+                    "\x1b[2m",
+                    "x",
+                ]
+            ),
+            max_size=12,
+        ).map(lambda parts: "".join(parts).encode()),
+    ),
+    stamps=st.booleans(),
+)
+def test_only_foldyards_own_escapes_reach_your_terminal(prefix, stamp, body, stamps):
+    """Whatever bytes the child sent, a relayed compose line reaches your terminal with no escape
+    but foldyard's own fixed set, each span closed, its glyphs never painted, and its words the
+    child's: on a terminal with no colour (``NO_COLOR``), the very same text. Into a file or a pipe,
+    exactly the cleaned line, nothing added or taken away."""
+    raw = (prefix + stamp).encode() + body
+    line = guestcompose.printable(raw.decode(errors="replace").rstrip("\r\n"))
+    style = guestcompose.compose_style(stamps=stamps)
+    shown = {}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("TERM", "xterm-256color")
+        for name, out, no_color in (
+            ("colour", _Terminal(), None),
+            ("plain", _Terminal(), "1"),
+            ("pipe", io.StringIO(), None),
+        ):
+            if no_color:
+                mp.setenv("NO_COLOR", no_color)
+            else:
+                mp.delenv("NO_COLOR", raising=False)
+            mp.setattr(sys, "stdout", out)
+            guestcompose._print_to("stdout", style)(line)
+            shown[name] = out.getvalue()
+    pieces = _spans(shown["colour"])
+    assert "\x1b" not in shown["plain"]
+    assert "".join(text for _, text in pieces) == shown["plain"]
+    assert shown["pipe"] == line + "\n"
+    for colour, text in pieces:
+        if colour is not None:
+            assert not set(text) & set("✓●✗⚠○▶ℹ"), repr(shown["colour"])
+    assert all(c.isprintable() or c == "\t" for c in shown["plain"].removesuffix("\n"))

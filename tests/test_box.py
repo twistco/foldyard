@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -237,7 +238,7 @@ def fake(tmp_path, monkeypatch):
     # installed when it is asked (a test may wrap this one), recorded in `relayed`, never run.
     relayed: list[list[str]] = []
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None, *, clean_only_terminals=False):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, *, clean_only_terminals=False, **_):
         relayed.append(cmd)
         return box.subprocess.run(cmd, env=env, cwd=cwd).returncode
 
@@ -848,6 +849,70 @@ def test_box_build_rebuilds_the_packages_layer(fake, monkeypatch, capsys):
     assert _find(fake["calls"], has=["build", "-t", "img:tag"])
     assert _find(fake["calls"], has=["build", "-t", _LAYER])
     assert f"✓ built {_LAYER}" in capsys.readouterr().out
+
+
+def _build_prints(monkeypatch, lines: list[str], rc: int = 0) -> None:
+    """Each build prints ``lines`` (what the relay hands its sink) and ends with ``rc``; anything
+    else goes to the fixture's stand-in as before."""
+    inner = box.guestcompose.stream_here
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None, *, to=None, **kw):
+        if cmd[1] != "build":
+            return inner(cmd, env, cwd, on_spawn, **kw)
+        assert to is not None, "a build's output went to your terminal, not its log"
+        inner(cmd, env, cwd)  # recorded, as the fixture records every run
+        for line in lines:
+            to(line)
+        return rc
+
+    monkeypatch.setattr(box.guestcompose, "stream_here", stream_here)
+
+
+_BOX_LOG_LINE = re.compile(r"\d{4}-\d\d-\d\dT[\d:.]+\+00:00 (.*)")
+
+
+def test_box_build_output_goes_to_its_log_and_your_terminal_gets_the_path(
+    fake, monkeypatch, capsys
+):
+    _build_prints(monkeypatch, ["STEP 1/3: FROM debian", "\x1b]52;c;ZXZpbA==\x07\x1b[2K✓ ok"])
+    assert box.main("build") == 0
+    out, err = capsys.readouterr()
+    log = stack.build_log_path("box-build")
+    assert "STEP 1/3" not in out + err
+    assert f"▶ build output → {log}" in err
+    assert f"✓ box image build done (log: {log})" in err
+    lines = [_BOX_LOG_LINE.fullmatch(line) for line in log.read_text().splitlines()]
+    assert all(lines), log.read_text()  # every line stamped
+    said = [m.group(1) for m in lines if m]
+    assert said[0].startswith("+ podman build ") and said[1:] == [
+        "STEP 1/3: FROM debian",
+        "]52;c;ZXZpbA==✓ ok",
+    ]  # cleaned: `cat` on it later plays none of the box's escapes
+
+
+def test_a_failed_box_build_shows_its_logs_tail_and_where_it_is(fake, monkeypatch, capsys):
+    _build_prints(monkeypatch, ["STEP 1/2: fine", "BOOM: no space left on device"], rc=1)
+    assert box.main("build") == 1
+    err = capsys.readouterr().err
+    assert "✗ box image build failed (exit 1) — last 3 log lines:" in err
+    assert "  BOOM: no space left on device\n" in err
+    assert f"  full log: cat {stack.build_log_path('box-build')}" in err
+
+
+def test_the_packages_layer_logs_apart_from_the_image(fake, monkeypatch):
+    _with_packages(fake, monkeypatch)
+    _build_prints(monkeypatch, ["a build line"])
+    assert box.main("build") == 0
+    assert "a build line" in stack.build_log_path("box-build").read_text()
+    assert _LAYER in stack.build_log_path("box-packages-build").read_text()
+
+
+def test_verbose_shows_the_box_build_as_it_comes(fake, monkeypatch, capsys):
+    monkeypatch.setattr(stack, "_builds_live", True)
+    _build_prints(monkeypatch, ["STEP 1/3: \x1b[1mFROM debian"])
+    assert box.main("build") == 0
+    assert "STEP 1/3: FROM debian\n" in capsys.readouterr().err
+    assert "STEP 1/3: FROM debian" in stack.build_log_path("box-build").read_text()
 
 
 @pytest.mark.parametrize(
@@ -2441,7 +2506,7 @@ def test_exec_relays_what_the_box_prints_and_keeps_its_exit_code(fake, monkeypat
     fake["state"]["running"] = True
     seen: list[tuple] = []
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None, *, clean_only_terminals=False):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, *, clean_only_terminals=False, **_):
         assert clean_only_terminals
         seen.append((cmd, env, cwd))
         return 3

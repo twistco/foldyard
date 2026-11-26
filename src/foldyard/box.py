@@ -668,9 +668,10 @@ def _from_base_image(engine: str, img: str, expected: str, env: dict) -> bool:
 
 
 def _gated_build(
-    cmd: list, tail: list, env: dict, context: str, what: str, *, in_vm: bool = False
+    cmd: list, tail: list, env: dict, context: str, what: str, *, log: str, in_vm: bool = False
 ) -> int:
-    """Run one ``build`` through the build gate (``buildgate``), proxy build-args in between.
+    """Run one ``build`` through the build gate (``buildgate``), proxy build-args in between, its
+    output into the build log ``log`` (``stack.BuildLog``), emptied by each attempt.
     ``in_vm``: the client runs in the guest (:mod:`foldyard.guestcompose`), where ``context`` must
     be visible, so it packs what the VM sees."""
 
@@ -683,11 +684,16 @@ def _gated_build(
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy") if proxy_url else ():
             proxy_args += ["--build-arg", f"{key}={proxy_url}"]
         full = [*cmd, *proxy_args, *tail]
-        _echo(stack._redact_build_args(full))
-        if in_vm:
-            return guestcompose.stream_podman(full[1:], env, context)
-        # Relayed, like the guest's: what a build prints is its Dockerfile's.
-        return guestcompose.stream_here(full, env, context)
+        shown = stack._redact_build_args(full)
+        _echo(shown)
+
+        def into(line: Callable[[str], None]) -> int:
+            if in_vm:
+                return guestcompose.stream_podman(full[1:], env, context, to=line)
+            # Relayed, like the guest's: what a build prints is its Dockerfile's.
+            return guestcompose.stream_here(full, env, context, to=line)
+
+        return stack.run_build_logged(log, what, "+ " + shlex.join(shown), into)
 
     from . import buildgate
 
@@ -705,7 +711,7 @@ def _build_img(engine: str, main: Path, env: dict) -> int:
     # packaged one's is foldyard's own files, which the VM can't see and the box can't write.
     packaged = img["dockerfile"] == config.packaged_box_image(img["tag"])["dockerfile"]
     in_vm = guestcompose.wanted() and not packaged
-    rc = _gated_build(cmd, tail, env, context, "box image build", in_vm=in_vm)
+    rc = _gated_build(cmd, tail, env, context, "box image build", log="box-build", in_vm=in_vm)
     if rc != 0:
         stack._say_registry_logins()
     return rc
@@ -834,9 +840,11 @@ def _ensure_packages_layer(
         dockerfile.write_text(_packages_dockerfile(img, user, packages))
         spec = {"dockerfile": str(dockerfile), "tag": layer}
         cmd, tail = boximage.build_parts(engine, spec, fingerprint, context)
-        rc = _gated_build(cmd, tail, env, context, f"{_PACKAGES_LABEL} build")
+        rc = _gated_build(
+            cmd, tail, env, context, f"{_PACKAGES_LABEL} build", log="box-packages-build"
+        )
     if rc != 0:
-        _err(f"✗ {_PACKAGES_LABEL} build failed (output above) — the box was not started.")
+        _err(f"✗ {_PACKAGES_LABEL} build failed (see above) — the box was not started.")
     return rc, layer
 
 

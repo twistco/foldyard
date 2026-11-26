@@ -38,6 +38,7 @@ logs or shows goes through one of these:
 | One value on a line: a config string, a name, a path | `term.printable` (`monitorlog.printable` is the same rule): each non-printable shown as its escape, so it stays visible |
 | Text over several lines: a log tail, a command's output | `term.printable_lines`: the same, keeping `\n` and `\t` |
 | A child process whose output a box can shape | `guestcompose.stream_here` / `relay` on your computer, `stream` / `stream_to` / `run_relayed` from the VM: each line through `guestcompose.printable`, which strips ANSI and drops the rest. One such line on its own: `guestcompose.show` |
+| A child's output into a log file (an image build's) | `stack.BuildLog.line`: each line through `guestcompose.printable`, then stamped, so `cat` on the file later plays none of it |
 | A log file read back (`fy host logs`) | `supervisor._inert` |
 | A Textual widget | `tui._content(...)`: `Content` built from plain parts, never parsed as markup. Toasts go through `DevModeTui._toast` (`markup=False`) |
 | Rich markup: a `DataTable` `str` cell, a plugin panel | `tui._shown` (`escape` of the printable text) for each piece the box chose. A panel's markup has its pieces escaped by the plugin (`PanelData`), and `tui._panel_markup` makes the whole inert |
@@ -67,6 +68,11 @@ anything a person might need to read exactly uses `printable`.
   `podman exec` started in a container runs on. The other relays (`run_relayed` and `stream_to` on
   the VM path, `devmode.run_stream`) keep the terminal's process group unless they are given an
   `on_spawn`.
+- **Colour on relayed text is foldyard's, from what the text says.** The box's own escapes are
+  stripped, since coloured text could draw a `✓` line that looks like foldyard's. A relay that
+  colours (`guestcompose.compose_style`, through `term.compose_line`) adds codes from a fixed set
+  only, after cleaning, to the service prefix, the level words and a stamp, closes each span, and
+  never paints a glyph. Only on a terminal (`term.color_enabled`), never into a file or a pipe.
 - **Escape only the copy you print, never the data.** A hostname the proxy matches, a path that is
   opened and a branch that is checked out stay as they were.
 - **Escape display-only config strings when they are parsed** (a `why`, a `label`, a `how`). Refuse

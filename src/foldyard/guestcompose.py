@@ -368,14 +368,30 @@ class _Pump:
             self.thread.join(timeout=0.05)
 
 
-def _print_to(file_name: str) -> Callable[[str], None]:
+# How a relay restyles a cleaned line: ``(line, to a terminal?, colour wanted?) -> line``.
+Style = Callable[[str, bool, bool], str]
+
+
+def compose_style(*, stamps: bool = False) -> Style:
+    """What compose prints, restyled by what it says (``term.compose_line``): the box picks the
+    words, foldyard alone picks the colours. ``stamps``: the lines carry ``--timestamps``."""
+    from .term import compose_line
+
+    return lambda line, terminal, color: compose_line(
+        line, terminal=terminal, color=color, stamps=stamps
+    )
+
+
+def _print_to(file_name: str, style: Style | None = None) -> Callable[[str], None]:
     # Looked up on each line, not bound here: a redirected sys.stdout stays honoured.
     def sink(text: str) -> None:
-        from .term import ColorStream
+        from .term import ColorStream, color_enabled, is_terminal
 
         out = getattr(sys, file_name)
         if isinstance(out, ColorStream):  # its ✓ and ✗ are the box's, not foldyard's own to paint
             out = out.raw
+        if style is not None:  # restyled only on a terminal: never into a file or a pipe
+            text = style(text, is_terminal(out), color_enabled(out))
         # A terminal that isn't UTF-8 (LANG=C) can't take every character: escape the rest.
         encoding = getattr(out, "encoding", None) or "utf-8"
         print(text.encode(encoding, "backslashreplace").decode(encoding), file=out, flush=True)
@@ -389,17 +405,27 @@ def show(line: str, to: str = "stderr") -> None:
     _print_to(to)(printable(line))
 
 
-def stream(ctx, args: list[str], on_spawn: Callable[[subprocess.Popen], None] | None = None) -> int:
+def stream(
+    ctx,
+    args: list[str],
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
+    *,
+    style: Style | None = None,
+) -> int:
     """Like :func:`compose`, its output relayed live to your stdout and stderr (a line at a time,
     :func:`printable`). For the verbs a person watches: ``up``, ``down``, ``ps``, ``logs -f``.
-    ``on_spawn``: as :func:`run_relayed`'s."""
-    return _stream("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main), on_spawn)
+    ``on_spawn``: as :func:`run_relayed`'s. ``style``: as :func:`stream_here`'s."""
+    return _stream(
+        "compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main), on_spawn, style=style
+    )
 
 
-def stream_podman(argv: list[str], env: dict[str, str], cwd: str) -> int:
+def stream_podman(
+    argv: list[str], env: dict[str, str], cwd: str, *, to: Callable[[str], None] | None = None
+) -> int:
     """``podman <argv>`` in the guest, relayed like :func:`stream`: a project's own box image, whose
-    build context is the repo."""
-    return _stream("podman", argv, env, cwd)
+    build context is the repo. ``to``: as :func:`stream_here`'s."""
+    return _stream("podman", argv, env, cwd, to=to)
 
 
 def _stream(
@@ -408,13 +434,17 @@ def _stream(
     env: dict[str, str],
     cwd: str,
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
+    *,
+    style: Style | None = None,
+    to: Callable[[str], None] | None = None,
 ) -> int:
     command = _command(op, argv, env, cwd)
     if command is None:
         print(f"✗ {_no_route()}", file=sys.stderr)
         return NO_ROUTE
     cmd, stdin = command
-    return run_relayed(cmd, stdin, _print_to("stdout"), _print_to("stderr"), on_spawn=on_spawn)
+    out, err = (to, to) if to else (_print_to("stdout", style), _print_to("stderr", style))
+    return run_relayed(cmd, stdin, out, err, on_spawn=on_spawn)
 
 
 def stream_here(
@@ -424,6 +454,8 @@ def stream_here(
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
     *,
     clean_only_terminals: bool = False,
+    style: Style | None = None,
+    to: Callable[[str], None] | None = None,
 ) -> int:
     """``cmd`` run on your computer, relayed like :func:`stream` (a line at a time to your stdout
     and stderr, :func:`printable`): for a process whose output the box chose — the compose client
@@ -431,6 +463,8 @@ def stream_here(
     empty, so a verb that needs your terminal (a shell, ``compose exec``) doesn't come here.
     ``clean_only_terminals``: a stream that isn't going to a terminal (a file, a pipe) gets the
     process's bytes as they are, for output that is data (``fy box exec 'pg_dump' > dump.sql``).
+    ``style``: each cleaned line restyled on its way to you (:func:`compose_style`). ``to``: both
+    streams' cleaned lines go there instead of to you (a build's log, ``stack.BuildLog``).
 
     It runs in a process group of its own, so the terminal's Ctrl-C reaches foldyard alone: the
     relay stops printing, then stops the group (the process and what it started on your computer;
@@ -464,7 +498,9 @@ def stream_here(
             )
             if on_spawn:
                 on_spawn(proc)
-            return relay(proc, _print_to("stdout"), _print_to("stderr"), stop=stop)
+            if to:
+                return relay(proc, to, to, stop=stop)
+            return relay(proc, _print_to("stdout", style), _print_to("stderr", style), stop=stop)
         except BaseException:
             # relay stopped it already, unless this came before relay started or another signal
             # cut its stop short. Then it is done here, again for each signal that cuts it short,
@@ -589,6 +625,30 @@ def relay(
     if failed:
         raise failed[0]
     return rc
+
+
+@contextlib.contextmanager
+def pipe_to(sink: Callable[[str], None]) -> Iterator[IO[str]]:
+    """A file to hand processes as their ``stdout`` (and ``stderr=STDOUT``), each line written to
+    it handed to ``sink`` cleaned (:func:`printable`): for output several processes share (the
+    stack's builds, into one log). Line-buffered, so what foldyard writes to it itself (an echoed
+    command) keeps its place among theirs. On the way out it waits for what is left in the pipe as
+    :func:`relay` does, and no longer: a grandchild still holding it can't keep foldyard here. A
+    sink that failed (your end of the pipe gone) is raised then, as :func:`relay` raises it: the
+    processes it fed had their next write fail, and their exit codes alone wouldn't say why."""
+    read, write = os.pipe()
+    quit_ = threading.Event()
+    failed: list[BaseException] = []
+    pump = _Pump(os.fdopen(read, "rb"), sink, quit_, failed)
+    writer = os.fdopen(write, "w", buffering=1, encoding="utf-8", errors="replace")
+    try:
+        yield writer
+    finally:
+        writer.close()
+        pump.drain()
+        quit_.set()
+    if failed:
+        raise failed[0]
 
 
 def stream_to(

@@ -70,6 +70,35 @@ def test_build_routes_services_and_profiles(monkeypatch):
     assert calls == [(["e2e-app"], ["e2e"])]
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [["up"], ["build"], ["box", "build"], ["box", "up"], ["box", "recreate"]],
+)
+def test_verbose_shows_image_builds_as_they_come(monkeypatch, argv):
+    from foldyard import box, stack
+
+    monkeypatch.setattr(stack, "_builds_live", False)
+    monkeypatch.setattr(stack, "up", lambda: 0)
+    monkeypatch.setattr(stack, "build", lambda services, *, extra_profiles=None: 0)
+    monkeypatch.setattr(box, "main", lambda cmd, args=None: 0)
+    assert runner.invoke(cli.app, argv).exit_code == 0
+    assert stack._builds_live is False  # by default, into the log alone
+    assert runner.invoke(cli.app, [*argv, "--verbose"]).exit_code == 0
+    assert stack._builds_live is True
+
+
+def test_logs_shows_compose_stamps_unless_asked_not_to(monkeypatch):
+    from foldyard import stack
+
+    asked: list[tuple] = []
+    monkeypatch.setattr(
+        stack, "logs", lambda svc, *, timestamps: asked.append((svc, timestamps)) or 0
+    )
+    assert runner.invoke(cli.app, ["logs", "web"]).exit_code == 0
+    assert runner.invoke(cli.app, ["logs", "--no-timestamps"]).exit_code == 0
+    assert asked == [(["web"], True), ([], False)]
+
+
 def test_reclaim_routes_to_the_unconditional_sweep(monkeypatch):
     from foldyard import stack
 

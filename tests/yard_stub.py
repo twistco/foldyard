@@ -122,7 +122,7 @@ def install(monkeypatch, *, mode: str = "local") -> dict:
 
     monkeypatch.setattr(subprocess, "run", run)
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, **_):
         yard["relayed"].append(list(cmd))
         kw = {"cwd": cwd} if cwd is not None else {}
         return subprocess.run(cmd, env=env, **kw).returncode

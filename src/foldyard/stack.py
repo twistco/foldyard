@@ -25,13 +25,16 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from shutil import which
+from typing import IO
 
 from . import config, devmode, machine, mountwrite
 
@@ -994,10 +997,13 @@ def _compose(
     *,
     extra_profiles: list[str] | None = None,
     rendered: dict | None = None,
+    stamps: bool = False,
 ) -> int:
     """Run `<engine> compose -f … [args]` with the resolved env, echoing the command (the
     SPIKE 'thin and echoing' rule). Its output is relayed (``guestcompose.stream_here``), except
-    for the verbs that need your terminal (``_INTERACTIVE``), which inherit stdio.
+    for the verbs that need your terminal (``_INTERACTIVE``), which inherit stdio. What is relayed
+    is restyled by what it says (``guestcompose.compose_style``: a colour per service prefix, the
+    level words); ``stamps``: its lines carry ``--timestamps``, shown in your time.
     ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``); ``rendered``
     hands the path guard a render the caller already made."""
     from . import guestcompose
@@ -1017,17 +1023,22 @@ def _compose(
     full = [*_profile_flags(ctx, extra_profiles), *args]
     _err(_shown(ctx, full))
     watch = _watch_for(ctx, args, rendered)
+    style = guestcompose.compose_style(stamps=stamps)
     if guestcompose.wanted():
         if watch is None:
-            return guestcompose.stream(ctx, full)
-        return _watching(watch, _err, lambda spawned: guestcompose.stream(ctx, full, spawned))
+            return guestcompose.stream(ctx, full, style=style)
+        return _watching(
+            watch, _err, lambda spawned: guestcompose.stream(ctx, full, spawned, style=style)
+        )
     cmd, cwd = [*ctx.compose, *full], str(ctx.main)
     if args[:1] and args[0] in _INTERACTIVE:
         return subprocess.run(cmd, env=ctx.env, cwd=cwd).returncode
     if watch is None:
-        return guestcompose.stream_here(cmd, ctx.env, cwd)
+        return guestcompose.stream_here(cmd, ctx.env, cwd, style=style)
     return _watching(
-        watch, _err, lambda spawned: guestcompose.stream_here(cmd, ctx.env, cwd, spawned)
+        watch,
+        _err,
+        lambda spawned: guestcompose.stream_here(cmd, ctx.env, cwd, spawned, style=style),
     )
 
 
@@ -1206,14 +1217,248 @@ def _redact_build_args(cmd: list[str]) -> list[str]:
     return shown
 
 
-# How often a running podman build says it is still going. Its output goes to the build log, not
-# the terminal, so without this a cold build is minutes of silence that reads as a hang.
+# ── build logs ─────────────────────────────────────────────────────────────────────────────
+# An image build prints hundreds of lines (layers, package installs), and a warm one scrolled them
+# past the lines that matter. So each kind of build writes to one log per project under the state
+# dir (`config.state_dir`, which no box mounts), overwritten by its next build so the logs don't
+# build up: the stack's (`build-<compose project>.log`, `_podman_build`), the dev box image's
+# (`box-build.log`) and its `[box].packages` layer's (`box-packages-build.log`, both
+# `box._gated_build`). The base VM's bake (`boximage.build_packaged_image`) has no project, and
+# builds foldyard's own Dockerfile in front of you.
+#
+# The Dockerfile and its context are the box's, so everything a build prints is too: each line is
+# cleaned on its way into the file (`guestcompose.printable`), so `cat` on the log later never
+# plays the box's escape sequences, and stamped with when it came (ISO 8601 UTC, as the
+# supervisor's log is). You see where the log is as the build starts, a heartbeat while it runs,
+# and at the end one line naming the log or, when it failed, its last BUILD_TAIL_LINES lines and
+# its path. `--verbose` on the verbs that build shows each line live as well.
+
+# The lines of a failed build's log shown on your terminal: kept as they come, so a log that stopped
+# taking lines, or lines too long to read back cheaply, still give the whole of each.
+BUILD_TAIL_LINES = 25
+# How often a running build says it is still going. Its output goes to the build log, not the
+# terminal, so without this a cold build is minutes of silence that reads as a hang.
 _BUILD_HEARTBEAT = 30.0
+
+_builds_live = False
+
+
+def stream_builds_live(on: bool = True) -> None:
+    """Show image build output as it comes, as well as logging it (``--verbose``)."""
+    global _builds_live
+    _builds_live = on
+
+
+def build_log_path(name: str) -> Path:
+    """Where the build log ``name`` lives: ``<state_dir>/<name>.log``."""
+    return config.state_dir() / f"{name}.log"
 
 
 def _mmss(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m}:{s:02d}"
+
+
+def _grew(new: int) -> str:
+    """How much a log grew since the last heartbeat: "no new output" is how a build that really
+    is stuck shows itself."""
+    if new <= 0:
+        return "no new output"
+    return f"log +{new} B" if new < 1024 else f"log +{new // 1024} KB"
+
+
+class BuildLog:
+    """One build's log, open for the build (:func:`open_build_log`). :meth:`line` is safe from
+    several threads at once (a relay's two streams, concurrent builds).
+
+    ``live``: each line is shown on your terminal too (``--verbose``, or a log that couldn't be
+    opened). A log that stops taking lines part way (a full disk) turns live from there, and says
+    so; a terminal that stops taking them (``| head`` gone) leaves the build to the log, and the
+    log says so."""
+
+    def __init__(self, where: Path, file: IO[bytes] | None, *, live: bool) -> None:
+        self.path = where
+        self.live = live
+        self._file = file
+        self._lock = threading.Lock()
+        self._tail: deque[str] = deque(maxlen=BUILD_TAIL_LINES)
+        self._stopped: str | None = None  # why the file stopped taking lines part way
+
+    @property
+    def written(self) -> bool:
+        """Whether the build's output reaches the file (not when it couldn't be opened)."""
+        return self._file is not None
+
+    def line(self, text: str) -> None:
+        """One line of the build's output: cleaned, stamped, into the file; on your terminal too
+        when live. Never raises: neither a log nor a terminal that stops taking lines fails a
+        build."""
+        from . import guestcompose
+
+        text = guestcompose.printable(text)
+        stamp = datetime.now(UTC).isoformat(timespec="milliseconds")
+        with self._lock:
+            self._tail.append(text)
+            if self._file is not None and self._stopped is None:
+                try:
+                    self._file.write(f"{stamp} {text}\n".encode(errors="backslashreplace"))
+                    self._file.flush()
+                except OSError as e:
+                    self._stopped = e.strerror or str(e)
+                    self.live = True
+                    _err(
+                        f"⚠ the build log {guestcompose.printable(str(self.path))} stopped taking "
+                        f"lines ({self._stopped}): the rest of the build is shown here instead"
+                    )
+                except ValueError:  # closed while a late line came in
+                    return
+            if self.live:
+                try:
+                    guestcompose.show(text)
+                except OSError:  # your end of the terminal's pipe is gone: the log has it all
+                    self.live = False
+                    if self._file is not None and self._stopped is None:
+                        note = "(foldyard: your terminal stopped taking the build's output)"
+                        with suppress(OSError, ValueError):
+                            self._file.write(f"{stamp} {note}\n".encode())
+                            self._file.flush()
+
+    def tail(self) -> list[str]:
+        """The build's last :data:`BUILD_TAIL_LINES` lines, cleaned, without stamps."""
+        with self._lock:
+            return list(self._tail)
+
+    def size(self) -> int:
+        try:
+            return os.stat(self.path).st_size
+        except OSError:
+            return 0
+
+    def pipe(self) -> AbstractContextManager[IO[str]]:
+        """A file processes can write to (``stdout=``), each line of it handed to :meth:`line`."""
+        from . import guestcompose
+
+        return guestcompose.pipe_to(self.line)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._file is not None:
+                with suppress(OSError):
+                    self._file.close()
+                self._file = None
+
+    def failed(self, header: str) -> None:
+        """A failed build on your terminal: ``header`` (``✗ … failed (exit N)``), then what you
+        haven't seen of its output, and where its log is."""
+        from . import guestcompose
+
+        lines = self.tail()
+        if self.live:
+            _err(f"{header}: its output {'since then ' if self._stopped else ''}is above")
+        elif not lines:
+            _err(f"{header}, and printed nothing")
+        else:
+            _err(f"{header} — last {len(lines)} log lines:")
+            for text in lines:
+                guestcompose.show("  " + text)  # what the build printed: the box's
+        if self._stopped:
+            _err(f"  the log up to then: cat {self.path}")
+        elif self.written:
+            _err(f"  full log: cat {self.path}")
+
+    def said(self, rc: int, what: str) -> None:
+        """How the build ended, on your terminal: the log's path, and on failure :meth:`failed`."""
+        if rc == 0:
+            if self.written and not self._stopped:
+                _err(f"✓ {what} done (log: {self.path})")
+            return
+        self.failed(f"✗ {what} failed (exit {rc})")
+
+
+def _open_build_log_file(where: Path) -> IO[bytes]:
+    """``where`` opened to be written from its start: never through a link, and only a regular
+    file (a FIFO would hold the build until something reads it)."""
+    where.parent.mkdir(parents=True, exist_ok=True)
+    # Write-only and non-blocking: a FIFO with no reader is refused (ENXIO), never waited on.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(where, flags, 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{where} isn't a regular file")
+        os.ftruncate(fd, 0)  # after the check: never truncate what isn't a regular file
+        return os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def open_build_log(name: str) -> BuildLog:
+    """The build log ``name``, emptied for this build, its path said on your terminal. One that
+    can't be opened is said too, and the build is shown live instead."""
+    where = build_log_path(name)
+    try:
+        file = _open_build_log_file(where)
+    except OSError as e:
+        from .term import printable
+
+        _err(
+            f"⚠ can't write the build log {printable(str(where))} ({e.strerror or e}): the build's "
+            "output is shown here instead"
+        )
+        return BuildLog(where, None, live=True)
+    log = BuildLog(where, file, live=_builds_live)
+    how = (
+        "and shown here as it comes" if log.live else "tail -f to watch; shown here only on failure"
+    )
+    _err(f"▶ build output → {where} ({how})")
+    return log
+
+
+@contextmanager
+def build_heartbeat(what: str, log: BuildLog, every: float | None = None) -> Iterator[None]:
+    """While it lasts, a line every :data:`_BUILD_HEARTBEAT` seconds saying ``what`` is still
+    building and whether its log grew; nothing when its output is shown live."""
+    if log.live:
+        yield
+        return
+    period = _BUILD_HEARTBEAT if every is None else every
+    done = threading.Event()
+    start = time.monotonic()
+
+    def beat() -> None:
+        seen = log.size()
+        while not done.wait(period):
+            size = log.size()
+            if not log.live:  # turned live part way: its lines say it is still going
+                _err(
+                    f"… the {what} is still running — {_mmss(time.monotonic() - start)} elapsed "
+                    f"({_grew(size - seen)})"
+                )
+            seen = size
+
+    ticker = threading.Thread(target=beat, daemon=True)
+    ticker.start()
+    try:
+        yield
+    finally:
+        done.set()
+        ticker.join(timeout=1)
+
+
+def run_build_logged(
+    name: str, what: str, echoed: str, build: Callable[[Callable[[str], None]], int]
+) -> int:
+    """One build into the build log ``name``: ``echoed`` (its command line, as shown) first, then
+    what ``build`` hands the sink it is given, a line at a time. Its exit code."""
+    log = open_build_log(name)
+    try:
+        log.line(echoed)
+        with build_heartbeat(what, log):
+            rc = build(log.line)
+        log.said(rc, what)
+        return rc
+    finally:
+        log.close()
 
 
 def _await_builds(futures: dict[Future, str], log_path: Path) -> list[tuple[str, int]]:
@@ -1234,14 +1479,7 @@ def _await_builds(futures: dict[Future, str], log_path: Path) -> list[tuple[str,
             size = log_path.stat().st_size
         except OSError:
             size = seen
-        new = size - seen
-        grew = (
-            "no new output"
-            if new <= 0
-            else f"log +{new} B"
-            if new < 1024
-            else f"log +{new // 1024} KB"
-        )
+        grew = _grew(size - seen)
         seen = size
         running = ", ".join(sorted(futures[f] for f in pending))
         finished = len(futures) - len(pending)
@@ -1313,12 +1551,12 @@ def _podman_build(
     ]
     if not to_build:
         return 0
-    # Build output goes to a per-stack log, not the terminal — a warm `fy up` used to scroll
-    # hundreds of layer/apt lines past the summaries that matter. The echoed `+ <engine> build …`
-    # lines stay (the "thin and echoing" rule), and a failure prints the log tail + path.
-    log_path = config.state_dir() / f"build-{project}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    _err(f"▶ build output → {log_path} (tail -f to watch; shown here only on failure)")
+    # Build output goes to a per-stack log, not the terminal (BuildLog) — a warm `fy up` used to
+    # scroll hundreds of layer/apt lines past the summaries that matter. The echoed
+    # `+ <engine> build …` lines stay (the "thin and echoing" rule), and a failure prints the log
+    # tail + path.
+    build_log = open_build_log(f"build-{project}")
+    log_path = build_log.path
 
     def image_for(name: str, svc: dict) -> str:
         return svc.get("image") or f"{project}_{name}"
@@ -1385,28 +1623,31 @@ def _podman_build(
     images = {image_for(name, svc) for name, svc in to_build}
     before = {image: _image_id(engine, image, ctx.env) for image in images}
 
-    with log_path.open("w") as log:
-        # Match podman-compose 1.6's build semantics: independent specs build concurrently. Services
-        # with an identical normalized build mapping share one build and receive alias tags above.
-        groups: dict[str, list[tuple[str, dict]]] = {}
-        for name, svc in to_build:
-            key = json.dumps([svc["build"], platform_for(svc)], sort_keys=True)
-            groups.setdefault(key, []).append((name, svc))
-        with ThreadPoolExecutor(max_workers=len(groups)) as pool:
-            futures = {pool.submit(build_one, g, log): g[0][0] for g in groups.values()}
-            failures = _await_builds(futures, log_path)
+    try:
+        # Each line the builds print reaches the log cleaned and stamped (BuildLog.line).
+        with build_log.pipe() as log:
+            # Match podman-compose 1.6's build semantics: independent specs build concurrently.
+            # Services with an identical normalized build mapping share one build and receive
+            # alias tags above.
+            groups: dict[str, list[tuple[str, dict]]] = {}
+            for name, svc in to_build:
+                key = json.dumps([svc["build"], platform_for(svc)], sort_keys=True)
+                groups.setdefault(key, []).append((name, svc))
+            with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+                futures = {pool.submit(build_one, g, log): g[0][0] for g in groups.values()}
+                failures = (
+                    _await_builds(futures, log_path)
+                    if not build_log.live
+                    else [r for f in futures if (r := f.result())[1]]
+                )
         if failures:
-            log.flush()
             failed = ", ".join(f"{name} (exit {rc})" for name, rc in failures)
-            _err(f"✗ build failed for {failed} — last 25 log lines:")
-            from . import guestcompose
-
-            # What the build printed: the Dockerfile and its context are the box's.
-            for line in log_path.read_text(errors="replace").splitlines()[-25:]:
-                guestcompose.show("  " + line)
-            _err(f"  full log: cat {log_path}")
+            build_log.failed(f"✗ build failed for {failed}")
             _say_registry_logins()
             return failures[0][1]
+        build_log.said(0, "stack build")
+    finally:
+        build_log.close()
     if superseded is not None:
         after = {image: _image_id(engine, image, ctx.env) for image in images}
         superseded += sorted(
@@ -2599,14 +2840,18 @@ def ps() -> int:
     return _compose(resolve(), ["ps"])
 
 
-def logs(svc: list[str]) -> int:
+def logs(svc: list[str], *, timestamps: bool = True) -> int:
+    """``fy logs``. ``timestamps``: compose's own (``--timestamps``), each shown in your time in
+    front of its service: the 50-line tails of several services arrive interleaved however their
+    clients read them, and the stamp is what orders them."""
     if (rc := stack_declared("logs", None)) is not None:
         return rc
     if not engine_reachable("follow"):
         return 0
     # `--tail`, not `-n`: podman-compose reads `-n` as its value-less --names, which made the 50 a
     # service name.
-    return _compose(resolve(), ["logs", "-f", "--tail", "50", *svc])
+    stamped = ["--timestamps"] if timestamps else []
+    return _compose(resolve(), ["logs", "-f", "--tail", "50", *stamped, *svc], stamps=timestamps)
 
 
 def shell() -> int:

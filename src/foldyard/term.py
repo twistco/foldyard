@@ -12,6 +12,11 @@ Strictly cosmetic and strictly gated: only when the stream is a real TTY — so
 supervisor's redirected log, and pytest capture all stay byte-clean — honoring ``NO_COLOR``
 and ``TERM=dumb``, and any chunk already carrying an escape sequence (the Textual TUI's
 frames, a child's colored output echoed through) passes through untouched.
+
+What a box's compose prints is never painted that way (the relay writes past the wrapper), and
+its own colour codes are stripped: coloured text would let it draw a ✓ line that looks like
+foldyard's. :func:`compose_line` gives it colour back from what the line says instead, from a
+fixed set foldyard chooses: a colour per service prefix, the level words, a dimmed stamp.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import zlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
@@ -96,17 +102,91 @@ def paint_diff(rows: Iterable[tuple[DiffKind, str]], *, color: bool) -> str:
     return "\n".join(f"\x1b[{_DIFF_ANSI[diff_style(kind)]}m{text}\x1b[0m" for kind, text in rows)
 
 
+_YELLOW = "33"
+
+# A compose service's prefix colour, as compose gives each service one. Never red, green or
+# yellow: those say broken, done and warning, in foldyard's own lines and in the level words.
+_SERVICE_COLORS = ("36", "35", "34", "96", "95", "94")
+_LEVEL_COLORS = {
+    "ERROR": _RED,
+    "FATAL": _RED,
+    "CRITICAL": _RED,
+    "WARNING": _YELLOW,
+    "WARN": _YELLOW,
+}
+_LEVEL = re.compile(r"\b(?:ERROR|FATAL|CRITICAL|WARNING|WARN)\b")
+# A compose log line's service prefix: podman-compose's `[web]   | `, compose's `web-1  | `. The
+# name only from compose's own service-name alphabet.
+_SERVICE = re.compile(r"(\[[A-Za-z0-9._-]+\]|[A-Za-z0-9][A-Za-z0-9._-]*)( *\|)( ?)")
+# What `logs --timestamps` puts first: RFC 3339, to the nanosecond from podman, `Z` or an offset.
+# A scaled service's lines name their container first (podman's 12-character short id).
+_LOG_STAMP = re.compile(
+    r"((?:[0-9a-f]{12} )?)(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?(Z|[+-]\d\d:\d\d) "
+)
+
+
+def _sgr(code: str, text: str) -> str:
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def service_color(name: str) -> str:
+    """The colour code of a compose service's prefix: chosen by a hash of its name (not Python's
+    ``hash``, which changes per process), so a service keeps its colour from one run to the
+    next."""
+    return _SERVICE_COLORS[zlib.crc32(name.encode()) % len(_SERVICE_COLORS)]
+
+
+def compose_line(
+    text: str, *, terminal: bool, color: bool, stamps: bool = False, now: datetime | None = None
+) -> str:
+    """One line of what compose printed, already cleaned (``guestcompose.printable``: no control
+    character is left), as foldyard shows it. Not to a ``terminal`` (a file, a pipe), exactly as
+    compose printed it: ``fy logs > file`` keeps the whole stamp.
+
+    ``stamps``: the line came from ``logs --timestamps``, so on a terminal the stamp after the
+    service prefix (and a scaled service's container id) is moved in front of it, in your time
+    (:func:`stamp`). With ``color`` (a terminal that wants it), foldyard adds its own
+    colour from what the line says, never from what it carried: the stamp dimmed, the service
+    prefix in its colour (:func:`service_color`), and each whole ``ERROR``/``FATAL``/``CRITICAL``
+    word red, ``WARN``/``WARNING`` yellow. Each span is closed where it ends, and the ✓ ✗ ⚠ glyphs
+    are never painted: a box line must not look like one of foldyard's own. Without ``color``,
+    the same text with no escape at all."""
+    if not terminal:
+        return text
+    rest = text
+    name = bar = gap = ""
+    if m := _SERVICE.match(text):
+        name, bar, gap = m.groups()
+        rest = text[m.end() :]
+    when = ""
+    if stamps and name and (s := _LOG_STAMP.match(rest)):
+        when = stamp(s.group(2) + s.group(3).replace("Z", "+00:00"), now)
+        rest = s.group(1) + rest[s.end() :]
+    if not color:
+        return (f"{when} " if when else "") + (f"{name}{bar}{gap}" if name else "") + rest
+    painted = _LEVEL.sub(lambda w: _sgr(_LEVEL_COLORS[w.group(0)], w.group(0)), rest)
+    if not name:
+        return painted
+    shown = _sgr(service_color(name.strip("[]")), name + bar) + gap + painted
+    return f"{_sgr(_DIM, when)} {shown}" if when else shown
+
+
+def is_terminal(stream=None) -> bool:
+    """Is ``stream`` (default stdout) a real TTY, as opposed to a file or a pipe?"""
+    stream = stream or sys.stdout
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def color_enabled(stream=None) -> bool:
     """Is color wanted on ``stream`` (default stdout)? The same gate :func:`install` applies —
     honour ``NO_COLOR``/``TERM=dumb`` and require a real TTY — exposed so a call site that renders
     its own color (the config diff) can't drift from the glyph painter's rules."""
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return False
-    stream = stream or sys.stdout
-    try:
-        return bool(stream.isatty())
-    except (AttributeError, OSError, ValueError):
-        return False
+    return is_terminal(stream)
 
 
 class ColorStream:

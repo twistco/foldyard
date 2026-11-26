@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Callable
@@ -516,7 +517,7 @@ def relayed_through_run(monkeypatch):
     stand-in with theirs."""
     from foldyard import guestcompose
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, **_):
         return stack.subprocess.run(cmd, env=env, cwd=cwd).returncode
 
     monkeypatch.setattr(guestcompose, "stream_here", stream_here)
@@ -882,6 +883,10 @@ def test_logs_follows_with_service(fake_repo, capture_run):
     # the value-less --names, so `-n 50` made "50" a service name there (see the argv contract
     # tests at the end of this file).
     stack.logs(["postgres"])
+    assert _composes(capture_run)[-1][-6:] == [
+        "logs", "-f", "--tail", "50", "--timestamps", "postgres"
+    ]  # fmt: skip
+    stack.logs(["postgres"], timestamps=False)
     assert _composes(capture_run)[-1][-5:] == ["logs", "-f", "--tail", "50", "postgres"]
 
 
@@ -1299,6 +1304,37 @@ def test_a_failed_builds_tail_reaches_your_terminal_inert(
     err = capsys.readouterr().err
     [boom] = [line for line in err.splitlines() if "BOOM" in line]
     assert boom == "  ]52;c;ZXZpbA==\ufffd BOOM"
+    # The log holds it cleaned too, and stamped: `cat` on it later plays none of it.
+    [logged] = (config.state_dir() / "build-tangible-podman.log").read_text().splitlines()[1:]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT[\d:.]+\+00:00 \]52;c;ZXZpbA==\ufffd BOOM", logged)
+
+
+def test_a_relayed_compose_verb_is_restyled_by_what_it_says(fake_repo, monkeypatch):
+    # The box picks the words; foldyard picks the colours (term.compose_line): never off, and
+    # `fy logs` asks for compose's stamps and shows them in your time.
+    from foldyard import guestcompose
+
+    styles: list = []
+
+    def stream_here(cmd, env, cwd=None, on_spawn=None, *, style=None, **_):
+        styles.append(style)
+        return 0
+
+    monkeypatch.setattr(guestcompose, "stream_here", stream_here)
+    ctx = _fake_ctx(fake_repo, {})
+    assert stack._compose(ctx, ["ps"]) == 0
+    assert stack._compose(ctx, ["logs", "-f", "--timestamps"], stamps=True) == 0
+    plain, stamped = styles
+    line = "[web] | 2026-11-26T10:00:00Z ERROR hi"
+    assert plain(line, False, False) == stamped(line, False, False) == line  # a file, a pipe
+    assert plain(line, True, True) != line  # coloured on a terminal
+    assert re.fullmatch(r"\d\d:\d\d:\d\d \[web\] \| ERROR hi", stamped(line, True, False))
+    asked: list = []
+    monkeypatch.setattr(stack, "_compose", lambda ctx, args, **kw: asked.append((args, kw)) or 0)
+    monkeypatch.setattr(stack, "resolve", lambda **kw: ctx)
+    monkeypatch.setattr(stack, "engine_reachable", lambda *a, **k: True)
+    assert stack.logs([]) == 0
+    assert asked == [(["logs", "-f", "--tail", "50", "--timestamps"], {"stamps": True})]
 
 
 def test_up_warns_last_when_a_capability_is_degraded(fake_repo, capture_run, monkeypatch, capsys):
@@ -1469,7 +1505,7 @@ def _relay_log(monkeypatch) -> list[list[str]]:
 
     relayed: list[list[str]] = []
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, **_):
         relayed.append(cmd)
         return stack.subprocess.run(cmd, env=env, cwd=cwd).returncode
 
@@ -1702,7 +1738,7 @@ def test_what_the_reclaim_script_says_reaches_your_terminal_through_the_cleaner(
     calls = _box_runs(monkeypatch, box_running=True)
     relayed: list[list[str]] = []
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, **_):
         relayed.append(cmd)
         return stack.subprocess.run(cmd, env=env, cwd=cwd).returncode
 
@@ -3518,7 +3554,7 @@ def test_a_hung_host_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys)
     stopped: list[_HangingProc] = []
     _stuck_watch(monkeypatch, stopped)
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, **_):
         assert on_spawn is not None
         on_spawn(proc)
         return proc.wait()
@@ -3541,7 +3577,7 @@ def _relayed(monkeypatch) -> list[tuple]:
 
     seen: list[tuple] = []
 
-    def stream_here(cmd, env, cwd=None, on_spawn=None):
+    def stream_here(cmd, env, cwd=None, on_spawn=None, **_):
         seen.append((cmd, env, cwd, on_spawn))
         return 3
 
@@ -3629,7 +3665,7 @@ def test_a_hung_guest_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys
     _stuck_watch(monkeypatch, stopped)
     monkeypatch.setattr(guestcompose, "wanted", lambda: True)
 
-    def stream(ctx, args, on_spawn=None):
+    def stream(ctx, args, on_spawn=None, **_):
         assert on_spawn is not None
         on_spawn(proc)
         return proc.wait()

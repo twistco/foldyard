@@ -322,11 +322,25 @@ def prereq(
     raise typer.Exit(prereq_mod.run(fetch=fetch))
 
 
+def _verbose_option():
+    return typer.Option(
+        False, "--verbose", "-v", help="show image build output as it comes, not only its log"
+    )
+
+
+def _builds_shown(verbose: bool) -> None:
+    if verbose:
+        from . import stack
+
+        stack.stream_builds_live()
+
+
 @app.command()
-def up() -> None:
+def up(verbose: bool = _verbose_option()) -> None:
     """Build + start the whole stack; show status."""
     from . import stack
 
+    _builds_shown(verbose)
     raise typer.Exit(stack.up())
 
 
@@ -336,10 +350,12 @@ def build(
     profile: list[str] = typer.Option(
         None, "--profile", "-p", help="compose profile(s) to include"
     ),
+    verbose: bool = _verbose_option(),
 ) -> None:
     """Build compose services with native Podman locally or Docker Compose in CI."""
     from . import stack
 
+    _builds_shown(verbose)
     raise typer.Exit(stack.build(service or [], extra_profiles=profile or None))
 
 
@@ -378,11 +394,16 @@ def ps() -> None:
 
 
 @app.command()
-def logs(svc: list[str] = typer.Argument(None, help="service name(s) to narrow to")) -> None:
+def logs(
+    svc: list[str] = typer.Argument(None, help="service name(s) to narrow to"),
+    timestamps: bool = typer.Option(
+        True, "--timestamps/--no-timestamps", help="each line's time, in front of its service"
+    ),
+) -> None:
     """Follow stack logs (optionally a single service)."""
     from . import stack
 
-    raise typer.Exit(stack.logs(svc or []))
+    raise typer.Exit(stack.logs(svc or [], timestamps=timestamps))
 
 
 @app.command()
@@ -1212,18 +1233,20 @@ def _box_version_nudge(ctx: typer.Context) -> None:
 
 
 @box_app.command("build")
-def box_build() -> None:
+def box_build(verbose: bool = _verbose_option()) -> None:
     """Build the dev-box base image (from `[box].image`)."""
     from . import box
 
+    _builds_shown(verbose)
     raise typer.Exit(box.main("build"))
 
 
 @box_app.command("up")
-def box_up() -> None:
+def box_up(verbose: bool = _verbose_option()) -> None:
     """Create + start the dev box (idempotent); install agent tooling; warm deps."""
     from . import box
 
+    _builds_shown(verbose)
     raise typer.Exit(box.main("up"))
 
 
@@ -1233,6 +1256,7 @@ def box_recreate(
     yes: bool = typer.Option(
         False, "--yes", "-y", help="don't ask before stopping agents still running in the box"
     ),
+    verbose: bool = _verbose_option(),
 ) -> None:
     """Recreate the dev box: `fy box down`, then `fy box up`.
 
@@ -1241,6 +1265,7 @@ def box_recreate(
     are named first, as by `down`."""
     from . import box
 
+    _builds_shown(verbose)
     raise typer.Exit(box.main("recreate", ["--yes"] if yes else []))
 
 

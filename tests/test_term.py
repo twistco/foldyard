@@ -182,3 +182,109 @@ def test_stamp_takes_today_from_the_clock_not_the_events_offset():
     # that event's own +00:00, "now" would be 23:30 on the 29th — the event's day, so no date.
     assert term.stamp("2026-03-29T00:30:00+00:00") == "2026-03-29 00:30:00"
     assert term.stamp("2026-03-29T23:15:00+00:00") == "00:15:00"  # 00:15 BST on the 30th: today
+
+
+# ── what compose prints, recoloured from what it says ─────────────────────────────────────
+
+_NOON = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
+
+
+def test_a_services_prefix_gets_a_colour_of_its_own_that_stays_from_run_to_run():
+    shown = term.compose_line("[web]   | listening", terminal=True, color=True)
+    code = term.service_color("web")
+    assert shown == f"\x1b[{code}m[web]   |\x1b[0m listening"
+    assert term.compose_line("web-1  | up", terminal=True, color=True).startswith(
+        f"\x1b[{term.service_color('web-1')}mweb-1  |\x1b[0m"
+    )
+
+
+def test_a_services_colour_is_the_same_in_every_process():
+    # Not Python's `hash`, which is salted per process: `fy logs` today and tomorrow agree.
+    import os
+    import subprocess
+
+    prog = "from foldyard import term; print(term.service_color('web'), term.service_color('db'))"
+    seen = {
+        subprocess.run(
+            [sys.executable, "-c", prog],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("1", "2", "3")
+    }
+    assert seen == {f"{term.service_color('web')} {term.service_color('db')}\n"}
+
+
+def test_a_prefix_is_never_red_green_or_yellow_which_say_broken_done_and_warning():
+    assert not {"31", "32", "33"} & set(term._SERVICE_COLORS)
+    assert len({term.service_color(f"svc{i}") for i in range(50)}) > 1  # services differ
+
+
+def test_level_words_are_painted_alone_and_only_when_whole():
+    shown = term.compose_line(
+        "[api] | ERROR: boom, then WARN and WARNING", terminal=True, color=True
+    )
+    assert "\x1b[31mERROR\x1b[0m: boom" in shown
+    assert "\x1b[33mWARN\x1b[0m and \x1b[33mWARNING\x1b[0m" in shown
+    for word in ("FATAL", "CRITICAL"):
+        assert f"\x1b[31m{word}\x1b[0m" in term.compose_line(f"{word} x", terminal=True, color=True)
+    for not_a_word in ("ERRORS", "MY_ERROR", "WARNED", "error", "xFATAL"):
+        assert term.compose_line(not_a_word, terminal=True, color=True) == not_a_word
+
+
+def test_logs_stamp_moves_in_front_of_its_service_in_your_time():
+    here = timezone(timedelta(hours=1))
+    now = _NOON.astimezone(here)
+    line = "[web]   | 2026-11-26T11:59:58.123456789Z listening"
+    assert term.compose_line(line, terminal=True, color=False, stamps=True, now=now) == (
+        "12:59:58 [web]   | listening"
+    )
+    shown = term.compose_line(line, terminal=True, color=True, stamps=True, now=now)
+    assert shown.startswith("\x1b[2m12:59:58\x1b[0m \x1b[")
+    # From another day, the date too (term.stamp's rule); an offset is honoured.
+    old = "web-1  | 2026-11-25T08:00:00+01:00 hello"
+    assert term.compose_line(old, terminal=True, color=False, stamps=True, now=now) == (
+        "2026-11-25 08:00:00 web-1  | hello"
+    )
+
+
+def test_a_stamp_is_read_only_after_a_service_prefix_and_only_when_asked():
+    line = "[web] | 2026-11-26T11:59:58Z hi"
+    assert (
+        term.compose_line(line, terminal=True, color=False) == line
+    )  # no --timestamps: the box's text
+    bare = "2026-11-26T11:59:58Z hi"
+    assert term.compose_line(bare, terminal=True, color=False, stamps=True, now=_NOON) == bare
+
+
+def test_without_colour_a_compose_line_carries_no_escape_at_all():
+    for line in ("[web] | ERROR x", "ERROR y", "plain ✓ text"):
+        assert "\x1b" not in term.compose_line(line, terminal=True, color=False)
+
+
+def test_a_glyph_in_a_compose_line_is_never_painted_as_foldyards_own():
+    for line in ("✓ verify passed", "[web] | ✓ verify passed", "✗ ⚠ DEGRADED"):
+        shown = term.compose_line(line, terminal=True, color=True)
+        assert all(f"m{glyph}" not in shown for glyph in term._COLORS)
+
+
+def test_a_scaled_services_stamp_comes_after_its_container_id_and_is_shortened_too():
+    # podman logs names the container first when a service has several (`--scale`).
+    line = "[web]   | 0123456789ab 2026-11-26T11:59:58.5Z listening"
+    assert term.compose_line(line, terminal=True, color=False, stamps=True, now=_NOON) == (
+        "11:59:58 [web]   | 0123456789ab listening"
+    )
+
+
+def test_into_a_file_or_a_pipe_a_compose_line_is_exactly_what_compose_printed():
+    # `fy logs > file` keeps compose's full stamp: nothing is shortened away where no one reads
+    # it as it comes.
+    for line in (
+        "[web]   | 2026-11-26T11:59:58.123456789Z ERROR listening",
+        "[web]   | 0123456789ab 2026-11-26T11:59:58Z hi",
+        "plain WARN",
+    ):
+        for stamps in (False, True):
+            assert term.compose_line(line, terminal=False, color=False, stamps=stamps) == line

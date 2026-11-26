@@ -9,6 +9,7 @@ without a VM. The live check is the spike's (docs/compose-in-vm-scope.md, phase 
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -355,15 +356,57 @@ def test_off_the_path_guard_still_refuses(tmp_path, monkeypatch):
 
 def test_up_and_down_stream_from_the_guest(no_host_client, tmp_path, monkeypatch):
     seen = []
-    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args: seen.append(args) or 0)
+    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args, **_: seen.append(args) or 0)
     ctx = _ctx(tmp_path)
     assert stack._compose(ctx, ["up", "-d", "--no-build"], rendered={"services": {}}) == 0
     assert stack._compose(ctx, ["down", "--remove-orphans"]) == 0
     assert seen == [["up", "-d", "--no-build"], ["down", "--remove-orphans"]]
 
 
+def test_what_the_guests_compose_prints_is_restyled_too(no_host_client, tmp_path, monkeypatch):
+    styles = []
+    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args, **kw: styles.append(kw) or 0)
+    assert stack._compose(_ctx(tmp_path), ["logs", "-f", "--timestamps"], stamps=True) == 0
+    [kw] = styles
+    assert kw["style"]("[web] | 2026-11-26T10:00:00Z hi", True, False).endswith(" [web] | hi")
+
+
+def test_stream_here_restyles_each_cleaned_line_for_a_terminal_only(monkeypatch):
+    from foldyard import term
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    prog = "print('[web]   | \\x1b[32mERROR\\x1b[0m boom', flush=True)"
+    cmd = [sys.executable, "-I", "-c", prog]
+    style = guestcompose.compose_style()
+    for out, want in (
+        (
+            _Terminal(),
+            f"\x1b[{term.service_color('web')}m[web]   |\x1b[0m \x1b[31mERROR\x1b[0m boom\n",
+        ),
+        (io.StringIO(), "[web]   | ERROR boom\n"),  # a file or a pipe: no colour
+    ):
+        monkeypatch.setattr(sys, "stdout", out)
+        assert guestcompose.stream_here(cmd, dict(os.environ), style=style) == 0
+        assert out.getvalue() == want
+
+
+def test_a_pipes_sink_that_fails_is_raised_once_its_writers_are_done():
+    # `fy up -v 2>&1 | head`: the sink fails as your end of the pipe goes; that is said (as the
+    # relay says it: raised once the process has ended), never lost to an exit code alone.
+    def sink(line):
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+    with pytest.raises(BrokenPipeError):
+        with guestcompose.pipe_to(sink) as out:
+            out.write("first\n")
+            subprocess.run(
+                [sys.executable, "-c", "print('second')"], stdout=out, stderr=subprocess.DEVNULL
+            )
+
+
 def test_a_failing_stream_is_the_verbs_exit_code(no_host_client, tmp_path, monkeypatch):
-    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args: 7)
+    monkeypatch.setattr(guestcompose, "stream", lambda ctx, args, **_: 7)
     assert stack._compose(_ctx(tmp_path), ["logs", "-f"]) == 7
 
 
@@ -750,7 +793,8 @@ def test_a_projects_own_box_image_builds_in_the_guest(vm, tmp_path, monkeypatch)
     monkeypatch.setattr(box.subprocess, "run", _never)
     seen = []
 
-    def stream(argv, env, cwd):
+    def stream(argv, env, cwd, *, to=None):
+        assert to is not None  # into the build's log, not your terminal
         seen.append((argv, cwd))
         return 0
 
@@ -771,7 +815,9 @@ def test_the_packaged_box_image_stays_here(vm, tmp_path, monkeypatch):
     monkeypatch.setattr(guestcompose, "stream_podman", _never)
     monkeypatch.setattr(box.subprocess, "run", _never)
     ran = []
-    monkeypatch.setattr(guestcompose, "stream_here", lambda cmd, env, cwd: ran.append(cmd) or 0)
+    monkeypatch.setattr(
+        guestcompose, "stream_here", lambda cmd, env, cwd, **_: ran.append(cmd) or 0
+    )
     assert box._build_img("podman", tmp_path, {}) == 0
     assert ran[0][:2] == ["podman", "build"]
 
@@ -804,7 +850,7 @@ def test_run_relayed_keeps_the_streams_apart_and_cleans_them():
 def _sinks(monkeypatch) -> dict[str, list[str]]:
     """Where :func:`guestcompose.stream_here` prints, recorded a line at a time."""
     got: dict[str, list[str]] = {"stdout": [], "stderr": []}
-    monkeypatch.setattr(guestcompose, "_print_to", lambda name: got[name].append)
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name, style=None: got[name].append)
     return got
 
 
@@ -858,7 +904,7 @@ def test_stream_here_relays_an_unbuffered_python_clients_lines_as_they_come(monk
         lines.append(line)
         seen.touch()
 
-    monkeypatch.setattr(guestcompose, "_print_to", lambda name: sink)
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name, style=None: sink)
     cmd = [sys.executable, "-s", "-c", _UNFLUSHED, str(seen)]
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONUNBUFFERED": "1"}
     assert guestcompose.stream_here(cmd, env) == 0
@@ -965,6 +1011,11 @@ def test_a_relayed_line_is_not_painted_as_foldyards_own(monkeypatch):
     assert raw.getvalue() == "✓ verify passed\n"
 
 
+class _Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 _TWENTY_THOUSAND = "import sys\nfor i in range(20000):\n    print('line', i)\n"
 
 
@@ -1036,7 +1087,7 @@ def test_a_grandchild_that_never_stops_writing_doesnt_keep_the_relay_going(monke
         if line.startswith("pid "):
             pids.append(int(line.split()[1]))
 
-    monkeypatch.setattr(guestcompose, "_print_to", lambda name: sink)
+    monkeypatch.setattr(guestcompose, "_print_to", lambda name, style=None: sink)
     finished: list[int] = []
     cmd = [sys.executable, "-I", "-c", _chatty_grandchild(stream)]
     t = threading.Thread(target=lambda: finished.append(guestcompose.stream_here(cmd, {})))
@@ -1425,7 +1476,9 @@ def test_an_interrupted_watched_stream_here_stops_its_process_group(monkeypatch)
     # reach what it started too (a compose client's podman children), so the group is stopped.
     from foldyard import devmode
 
-    monkeypatch.setattr(guestcompose, "_print_to", lambda name: _interrupt_on("started"))
+    monkeypatch.setattr(
+        guestcompose, "_print_to", lambda name, style=None: _interrupt_on("started")
+    )
     stopped: list[subprocess.Popen] = []
     real_stop = devmode.stop_group
     monkeypatch.setattr(devmode, "stop_group", lambda p: stopped.append(p) or real_stop(p))
