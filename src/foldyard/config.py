@@ -88,7 +88,8 @@ class Config:
     worktree: str  # "" = the main checkout; otherwise the worktree dir name
     toml: dict
     # What NAMES the project for a registered worktree with nothing adopted: main's adopted
-    # identity keys (:func:`identity_from`), never config. Empty for every other checkout.
+    # identity keys (:func:`identity_from`), never config; for a worktree dir the host has no
+    # record of, main's (:func:`stray_identity`). Empty for every other checkout.
     identity: dict = field(default_factory=dict)
 
     def has_table(self, name: str) -> bool:
@@ -560,6 +561,12 @@ def identity_from(main: Path, root: Path) -> dict:
         return {}
     if _host_toml(root) is not None:
         return {}
+    return _adopted_identity(main)
+
+
+def _adopted_identity(main: Path) -> dict:
+    """The identity keys (:data:`_IDENTITY`) ``main``'s ADOPTED config declares (``{}`` when
+    nothing is adopted)."""
     adopted = _host_toml(main) or {}
     got: dict[str, dict] = {}
     for table, keys in _IDENTITY.items():
@@ -567,6 +574,22 @@ def identity_from(main: Path, root: Path) -> dict:
         if isinstance(source, dict):
             if picked := {k: source[k] for k in keys if k in source}:
                 got[table] = picked
+    return got
+
+
+def stray_identity(main: Path) -> dict:
+    """The identity a directory under ``main``'s worktrees root that the host has NO record of
+    (one the box made) is named by: main's own — its adopted keys, and its directory's name when it
+    declares no ``[project].name`` (what main itself resolves to on your computer). Nothing comes
+    from the directory, and nothing is named after it: its name is the box's choice, and named
+    after it, its card's state dir was ``~/.foldyard/<that name>/`` (another project's, should the
+    box pick one), a port band was allocated for it, and a name that isn't a plain one raised on
+    every read of it — the TUI's highlight among them."""
+    main = Path(main).resolve()
+    got = _adopted_identity(main)
+    project = got.setdefault("project", {})
+    if not project.get("name"):  # an empty one too: project() would fall back to the directory's
+        project["name"] = main.name.lower()
     return got
 
 

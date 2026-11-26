@@ -3268,3 +3268,43 @@ async def test_refresh_panels_survives_a_partly_detached_wall_pane(monkeypatch):
         # present, so the early-out doesn't fire, and the next line used to explode.
         assert app.query("#network-manage")
         app.refresh_panels()
+
+
+# ── a worktree dir the box made: listed, highlighted, never the TUI's end ─────
+
+
+async def test_highlighting_a_box_made_worktree_card_reads_mains_state(monkeypatch, tmp_path):
+    """A directory the box made under the worktrees root is a card (unregistered: shown, never
+    read). Highlighting it binds its config for the Mode tab and the panels, and that config named
+    the project after the DIRECTORY — so a name that isn't a plain one raised SystemExit out of the
+    highlight and took the TUI down, and a plain one pointed the card at `~/.foldyard/<that name>/`
+    (another project's, if the box picked one). It is named for main now, whatever it is called."""
+    main = tmp_path / "repo"
+    main.mkdir()
+    (main / "foldyard.toml").write_text('[project]\nname = "p"\n')
+    stray = tmp_path / "repo-worktrees" / "bad name"
+    stray.mkdir(parents=True)
+    (stray / ".git").write_text("gitdir: /nowhere\n")
+    monkeypatch.setattr(devmode, "main_repo", lambda: main)
+    monkeypatch.setattr(devmode, "in_box", lambda: False)
+    monkeypatch.setattr(config, "worktrees_root", lambda _base: tmp_path / "repo-worktrees")
+    monkeypatch.setattr(devmode, "probe", lambda port: False)
+    monkeypatch.delenv("FOLDYARD_STATE_DIR", raising=False)
+    monkeypatch.delenv("FOLDYARD_MODE_FILE", raising=False)
+    cards = [
+        {**_two_workspaces()[0], "project": "p", "path": str(main)},
+        {"name": "bad name", "path": str(stray), "project": "p-bad name", "registered": False,
+         "branch": "", "app_port": None, "containers": 0, "devbox": False},
+    ]  # fmt: skip
+    monkeypatch.setattr(devmode, "workspaces", lambda: cards)
+    async with tui.DevModeTui().run_test() as pilot:
+        await pilot.pause()
+        app = cast(tui.DevModeTui, pilot.app)
+        app.query_one("#workspaces", tui.WorkspaceList).index = 1
+        await pilot.pause()
+        app.refresh_mode()
+        app.refresh_panels()
+        await pilot.pause()
+        assert app.is_running
+        assert app.sub_title.startswith("bad name  ·  ")
+        assert app.sub_title.endswith("/.foldyard/p/worktrees/bad name/dev-mode.json")

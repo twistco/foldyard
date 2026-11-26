@@ -934,7 +934,13 @@ def worktree_config(wt: str) -> config.Config:
     if path is None:
         # Not a worktree the host recorded: read NOTHING from it. Resolving its path would follow a
         # box-made symlink to another checkout — and hand this worktree that checkout's adoption.
-        return config.Config(repo_root=config.worktrees_root(main) / wt, worktree=wt, toml={})
+        # Named for main (config.stray_identity), never after the directory the box chose.
+        return config.Config(
+            repo_root=config.worktrees_root(main) / wt,
+            worktree=wt,
+            toml={},
+            identity=config.stray_identity(main),
+        )
     cfg = configpin.effective(config.resolve(worktree=wt, repo=path))
     if cfg.toml:
         return cfg
