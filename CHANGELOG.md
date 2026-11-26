@@ -6,6 +6,114 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.15.0 — 2026-11-26
+
+A security release: upgrade, then `fy host restart`. Text a box can choose (worktree, branch and
+transcript names, the strings of a `foldyard.toml` it wrote, the adoption diff, container and build
+output, the proxy's request log) reached your terminal, and `fy tui`, as it was: control sequences
+in it could write your clipboard or fake a line of output, and in the TUI a box-made worktree name
+could become a click that wrote a file on your computer. All of it is now shown as text.
+
+### Security
+
+- **The version window in `foldyard.toml` is printed as text.** `min_foldyard_version`,
+  `recommended_foldyard_version` and the `foldyard_version_reasons` ledger reach your terminal
+  through the version gate. Any terminal control characters in them are now shown as visible escapes
+  instead of being sent to the terminal. The file can be written from the box, so a value could
+  otherwise write to your clipboard or erase the gate's own message. A version keeps ordering as it
+  did, so a floor still holds.
+- **What `foldyard.toml` says at a consent prompt or in a report is printed as text.** A
+  `[proxy] recommend` entry's `why`, an `[[inject]]` row's `label`, a `[[secret]]` row's `label` and
+  `how`, a `[[require]]` row's `reason` and `message`, and a `[machine] firewall_allow` entry's
+  `why` now show any terminal control characters in them as visible escapes, as does everything
+  `fy config widenings` prints. The file can be written from the box, so these could otherwise write
+  to your clipboard, or erase the host you are being asked to allow or the line of the report that
+  names a widening. A recommended host carrying such characters is no longer offered:
+  `fy config widenings` lists it as ignored. An `[[inject]]` or `[[require]]` row whose names (a
+  switch, a host, a header, a level) hold such characters is refused, like any other malformed row,
+  with the value shown as text.
+- **Names a box chooses no longer reach your terminal as they are.** A box can name directories in
+  your worktrees and in its transcripts, set a container's service label and write a branch name.
+  `fy worktree list`, `fy doctor`, `fy mode workspaces`, `fy state`, `fy transcripts`,
+  `fy worktree remove`, `fy up` and the supervisor's log printed those names unchanged, so control
+  sequences in them reached your terminal: they could write your clipboard, or fake a line of the
+  output. They are now shown as escapes. `fy host logs` also removes control sequences from every
+  line, including lines older versions wrote and the output of the daemons it runs.
+- **`fy worktree list`, and `fy worktree add` or `remove` on a worktree your computer hasn't
+  registered, no longer run git in it.** A box makes those directories and writes the `.git` file
+  that points git at its repository data, so git there read files the box chose. The branch is now
+  read from the main checkout's own record of that worktree.
+- **A folder the box makes beside your worktrees is now filed under your project, not under its own
+  name.** `fy tui` lists such a folder without reading it, but selecting it named a project after
+  the folder: a name like `bad name` took the TUI down, and any other name pointed the card at
+  `~/.foldyard/<that name>/`, another project's state if the box picked one, and claimed a daemon
+  port range for it on your computer. Its card now reads your project's state, under its own
+  worktree entry, and still runs nothing.
+- **The `foldyard.toml` diff you review before adopting no longer passes the file's text to your
+  terminal as it is.** The box can write that file, and control sequences in it reached your
+  terminal at the very prompt that decides the adoption, on `fy up`, `fy box up` and `fy host`, in
+  `fy config diff` and in `fy tui`: they could erase or fake a line of the diff, or reorder one with
+  a bidi override, which valid TOML allows. They are now shown as escapes (`\x1b`, `\x9b`), so you
+  can see that something odd is there.
+- **A `foldyard.toml` or `foldyard.local.toml` that doesn't parse is no longer adopted, or reviewed
+  as a comment edit.** TOML refuses a control character even in a comment, and foldyard reads a file
+  that doesn't parse as empty. So one byte in a `# note` could drop your whole
+  `foldyard.local.toml`, the narrowing in it too, while the review said "only blank/comment lines
+  changed". The review now says the file doesn't parse, and adopting it is refused until it does. If
+  a copy adopted before this release doesn't parse, a fix that makes it parse is shown as the change
+  it is, not as a comment edit. The worktree name in these messages is shown as escapes too.
+- **`fy tui` shows what the box chose as text, never as markup or terminal control.** A directory
+  the box makes under the worktrees root gets a card of its own, and a name like
+  `[@click=app.screenshot(…)]` turned that card's title into a click that wrote a file on your
+  computer, at a path the box picked; a name the TUI couldn't parse, like `x[/`, stopped it from
+  starting at all. Worktree names, branches, paths and the output of the verbs the TUI runs are now
+  shown as plain text wherever it shows them, and so are a `[proxy] recommend` reason and an
+  `[[inject]]` or `[[secret]]` label from your `foldyard.toml`.
+- **Control characters the box sends no longer reach your terminal through the TUI.** An escape
+  sequence in a request path, a User-Agent or an error body in the Network Log, in the supervisor's
+  log, or in the Doctor tab could write your clipboard (OSC 52) or redraw the screen while the TUI
+  was open. They are now shown as escapes, like `\x1b`.
+- **What your stack, your builds and your box print no longer reaches your terminal as it is.** The
+  compose files, Dockerfiles, images and scripts behind `fy up`, `fy ps`, `fy logs`, `fy down`,
+  `fy mode`, `fy box up`, `fy reclaim` and `fy worktree add`/`remove` are the box's to write, and
+  control sequences in their output could write to your clipboard, erase lines or fake a ✓. Their
+  output now has those sequences stripped, as it already had with `[machine] compose = "vm"`, so it
+  is no longer in colour. `fy shell`, `fy box shell` and `fy box exec` still hand over your
+  terminal. Compose now runs with `PYTHONUNBUFFERED=1` in its environment, so `fy logs` keeps up as
+  lines arrive; a compose file that names it sees that value.
+
+### Changed
+
+- **`fy box down` is refused in a box.** Run by an agent, it removed the box the agent was running
+  in, and without a terminal it didn't ask. With `WORKTREE=<name>` it removed another worktree's
+  box, and any session in it. Run it on your computer, as `fy box recreate` already had to be.
+
+### Added
+
+- **A monitor hook's file can be compressed and rotated.**
+  `fy monitor hook add NAME --to-box --gzip --max-mb 512` compresses each signed line (some 15–20
+  times smaller) and moves a full file aside, each piece still verifiable with `fy monitor check`.
+  The file had no limit: one reached 25 GB. And `fy monitor check` reads a line at a time, where it
+  took some 50 GB of memory for that file.
+- **The guest monitor can record containers' file changes.** `[machine] monitor = "observe-files"`
+  (experimental) records what `"observe"` does, plus writes, renames, deletions, `chmod`, truncation
+  and hard links by containers under `/etc/`, `/usr/local/`, `/opt/` and `/root/`: the path and the
+  process, never the content. A container's `chroot` is recorded too, since paths after one aren't
+  what they say. Changes other than writes are recorded as attempts, refused or not.
+- **`fy config features` shows what foldyard can do and what your config uses.** It lists features
+  by the release that added them, newest first, so a project set up under an older foldyard can see
+  what arrived since. The releases at or below `[project] recommended_foldyard_version` sit under a
+  line. Then it lists the keys foldyard won't act on as written: an unknown key, with the nearest
+  real one (a typo used to be silent), a removed or renamed key, and an old default written out. It
+  exits 1 on an unknown or removed key. `fy ls --features` shows every project side by side.
+
+### Fixed
+
+- **The TUI's mode buttons work for a switch with a hyphen in its name.** Pressing a level button
+  for a switch such as `sanity-editor` was refused as "sanity mode 'editor-off'": the button's id
+  was split at its first hyphen to find the switch and level. Each button now carries both itself.
+  `fy mode sanity-editor=off` was never affected.
+
 ## 0.14.0 — 2026-11-24
 
 ### Security
