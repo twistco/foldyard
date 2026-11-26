@@ -175,6 +175,12 @@ def _parse(data: bytes | None) -> dict:
     """One pinned file's bytes → its TOML table. Mirrors ``config._read_toml``: absent or
     malformed contributes ``{}`` rather than raising, so a damaged pin degrades to "this consumer
     declares nothing" (no proxy table ⇒ no injectors) instead of crashing the reconcile loop."""
+    return _load(data) or {}
+
+
+def _load(data: bytes | None) -> dict | None:
+    """:func:`_parse`, but ``None`` when ``data`` has content that doesn't parse — the case every
+    reader silently turns into ``{}``, which :func:`unparseable` exists to say out loud."""
     if not data:
         return {}
     try:
@@ -183,8 +189,49 @@ def _parse(data: bytes | None) -> dict:
         return {}
     try:
         return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return {}
+    except (UnicodeDecodeError, ValueError, RecursionError):  # tomllib recurses per nesting level
+        return None
+
+
+def unparseable(
+    files: dict[str, bytes | None], against: dict[str, bytes | None] | None = None
+) -> list[str]:
+    """The pinned files in ``files`` that have content but don't parse as TOML — with
+    ``against``, only those that differ from it: a file the host already reads as empty, left as
+    it is, is read as empty after adopting too, so it has nothing to say about the change.
+
+    Every reader takes such a file as EMPTY (:func:`_parse`, ``config._read_toml``), and that is
+    not a small change: TOML refuses a control character even in a comment, so one byte in a
+    `# note` drops a whole ``foldyard.local.toml``, the narrowing it holds with it — while the
+    line-based diff filter, seeing a comment, reports nothing. So the diff, the summary and the
+    first-adoption headline say it, and :func:`adopt` refuses it (:class:`Unparseable`).
+
+    The ADOPTED side can be broken too (a pin made before that refusal): the host has been reading
+    it as empty, so a "comment" edit that makes it parse again starts it running."""
+    return [
+        name
+        for name in PINNED_FILES
+        if (against is None or files.get(name) != against.get(name))
+        and _load(files.get(name)) is None
+    ]
+
+
+def _unparseable_note(names: list[str]) -> str:
+    """The words every surface uses for :func:`unparseable` files."""
+    verb, it = ("doesn't", "it") if len(names) == 1 else ("don't", "them")
+    return (
+        f"{' and '.join(names)} {verb} parse as TOML, so foldyard would read {it} as EMPTY — "
+        f"not adoptable until fixed"
+    )
+
+
+def _read_as_empty_note(names: list[str], where: str) -> str:
+    """The words for an ADOPTED copy (:func:`unparseable`) that doesn't parse."""
+    verb = "doesn't" if len(names) == 1 else "don't"
+    return (
+        f"{where} {' and '.join(names)} {verb} parse, so the host has been reading it as EMPTY — "
+        "adopting this changes that"
+    )
 
 
 def merged_toml(files: dict[str, bytes | None]) -> dict:
@@ -221,7 +268,9 @@ class Drift:
 
     @property
     def label(self) -> str:
-        return f"worktree {self.cfg.worktree}" if self.cfg.worktree else "main"
+        """For display only. Printable (:func:`foldyard.term.printable`): a worktree's name can
+        be a directory the box made, and every surface that names the checkout prints this."""
+        return f"worktree {term.printable(self.cfg.worktree)}" if self.cfg.worktree else "main"
 
     @property
     def pinned_exists(self) -> bool:
@@ -254,6 +303,12 @@ class Drift:
         but nothing meaningful did, it says so rather than reporting a confusing ``0, 0``."""
         added, removed = _tally(self.diff())
         files = ", ".join(n for n in PINNED_FILES if self.pinned.get(n) != self.tree.get(n))
+        # Never "only comment lines" when either side is read as empty, whatever its lines say.
+        if broken := unparseable(self.tree, self.pinned):
+            return f"{_unparseable_note(broken)} ({added} line(s) added, {removed} removed)"
+        if broken := unparseable(self.pinned, self.tree):
+            note = _read_as_empty_note(broken, "the adopted")
+            return f"{note} ({added} line(s) added, {removed} removed)"
         if not (added or removed):
             return f"only blank/comment lines changed in {files}"
         return f"{added} line(s) added, {removed} removed in {files} (blank/comment lines ignored)"
@@ -283,11 +338,18 @@ def diff_files(
 
     Decoded with ``replace`` (never raise on a file someone made non-UTF-8). Plain text:
     color is applied at the print site (``term.paint_diff``), where the stream is known.
+    Printable, too (:func:`foldyard.term.printable`): the lines are the box's to write, and this
+    is where every surface that shows them gets them — the launch gate, ``fy config diff``, the
+    TUI's adopt modal. A control character is shown as its escape, so an ESC, a C1 control or a
+    bidi override can't erase or reorder a line under review, and the reviewer sees it is there.
+    Only the text changes: whether there IS a difference stays a byte comparison.
 
     The one thing it can hide: a line INSIDE a multi-line string that looks like a comment or
     is blank (the filter is line-based, not a TOML parse). That can never make a difference
     silent — the callers compare BYTES to decide whether there is one, and report an empty diff
-    as "only blank/comment lines changed" rather than as no change.
+    as "only blank/comment lines changed" rather than as no change. Nor can it pass off a file
+    that doesn't parse as a comment edit: that file is read as EMPTY, so it is listed, named as
+    such, whatever its lines say (:func:`unparseable`).
 
     Shared by the two comparisons that matter, so neither can render differently from the other:
     adopted → tree (:meth:`Drift.diff`) and main's adopted copy → a worktree's tree
@@ -298,12 +360,31 @@ def diff_files(
         if before == after:
             continue
         body = _changed_lines(_significant(_text(before)), _significant(_text(after)))
-        if not body:
+        # A side that doesn't parse is read as EMPTY, so its lines aren't what the host would run:
+        # say so on its header, and show the file even when only a "comment" changed (one control
+        # byte in a comment is what breaks it — see :func:`unparseable`).
+        bad_before, bad_after = (_load(data) is None for data in (before, after))
+        if not body and not (bad_before or bad_after):
             continue
-        lines.append(f"--- {old}/{name}" + ("  (absent)" if before is None else ""))
-        lines.append(f"+++ {new}/{name}" + ("  (absent)" if after is None else ""))
-        lines.extend(body)
+        lines.append(f"--- {old}/{name}" + _state(before, bad_before))
+        lines.append(f"+++ {new}/{name}" + _state(after, bad_after))
+        # After the sign, so a line's role (`term.diff_style` reads the first character) is ours.
+        lines.extend(_shown(line) for line in body)
     return "\n".join(lines)
+
+
+def _state(data: bytes | None, broken: bool) -> str:
+    """A diff header's note on one side's file: absent, or there but read as empty."""
+    if data is None:
+        return "  (absent)"
+    return "  (doesn't parse: read as EMPTY)" if broken else ""
+
+
+def _shown(line: str) -> str:
+    """One diff line as it may reach a terminal: :func:`foldyard.term.printable`, but a tab kept
+    as a tab. A tab can't erase or reorder anything, and a tab-indented config shown as ``\\t``
+    on every line would bury the escape that matters."""
+    return "\t".join(term.printable(part) for part in line.split("\t"))
 
 
 def _tally(body: str) -> tuple[int, int]:
@@ -372,6 +453,17 @@ def _open_multiline_after(line: str, open_delim: str | None) -> str | None:
     return open_delim
 
 
+def _toml_lines(text: str) -> list[str]:
+    """``text``'s lines as TOML counts them, not as ``splitlines()`` does: that also breaks on
+    NEL (a C1 control) and U+2028/9, which TOML allows inside a string — one value would read as
+    two config lines, and the character would vanish into the break instead of being shown
+    (:func:`diff_files`). A bare CR isn't a TOML newline either; a file using them doesn't parse,
+    and :func:`unparseable` says so."""
+    if not text:
+        return []
+    return [ln.removesuffix("\r") for ln in text.removesuffix("\n").split("\n")]
+
+
 def _significant(text: str) -> list[tuple[str, str]]:
     """``text``'s config-carrying lines as ``(enclosing table, line)``.
 
@@ -386,7 +478,7 @@ def _significant(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     section = ""
     open_delim: str | None = None
-    for raw in text.splitlines():
+    for raw in _toml_lines(text):
         if open_delim:
             line = raw
         else:
@@ -430,7 +522,7 @@ def size(drift: Drift) -> str:
     """How big the thing being adopted is, for the first-adoption line — the floor under the
     report when there is no reviewed baseline to diff against (:func:`main_baseline`)."""
     files = [n for n in PINNED_FILES if drift.tree.get(n) is not None]
-    lines = sum(len(_text(drift.tree.get(n)).splitlines()) for n in files)
+    lines = sum(len(_toml_lines(_text(drift.tree.get(n)))) for n in files)
     return f"{lines} lines across {', '.join(files)}" if files else "no config files at all"
 
 
@@ -505,6 +597,9 @@ class Baseline:
     digest: str  # main's adopted fingerprint — WHICH reviewed config this was measured against
     body: str  # the changed lines (:func:`diff_files`); ``""`` when nothing meaningful differs
     identical: bool  # byte-for-byte the same file set as main's adopted copy
+    # Main's adopted files that don't parse (and differ from this tree): read as EMPTY for main,
+    # so nothing about this tree is "already granted" there (:func:`unparseable`).
+    main_unparseable: tuple[str, ...] = ()
 
     def summary(self) -> str:
         """``N added, M removed`` — the size of what this branch declares on top of main."""
@@ -534,6 +629,7 @@ def main_baseline(drift: Drift) -> Baseline | None:
             digest=digest(main.pinned),
             body=diff_files(main.pinned, drift.tree, old="main-adopted", new="tree"),
             identical=main.pinned == drift.tree,
+            main_unparseable=tuple(unparseable(main.pinned, drift.tree)),
         )
     except Exception:  # defensive: a baseline must never be what blocks a launch verb
         return None
@@ -550,6 +646,13 @@ def first_adoption_headline(drift: Drift, base: Baseline | None) -> str:
     the point: "190 lines across foldyard.toml" is a measurement, not a review, and the comment
     stripping is what makes the real thing short enough to read at a prompt (a typical consumer
     config is ~40% config-carrying lines)."""
+    # Ahead of everything below: "declares nothing" or "grants nothing new" would both be read
+    # off a file the host would take as empty, here or in main's adopted copy.
+    if broken := unparseable(drift.tree, drift.pinned):
+        return f"{_unparseable_note(broken)}. What it says:"
+    if base is not None and base.main_unparseable:
+        note = _read_as_empty_note(list(base.main_unparseable), "main's adopted")
+        return f"Against the config the host runs for main (adopted {base.digest}): {note}."
     if base is None:
         if not drift.diff():
             return "It declares nothing the host would read — no config lines at all."
@@ -660,6 +763,34 @@ class NeedsNewerFoldyard(RuntimeError):
     there is no upgrade (2026-11-19)."""
 
 
+class Unparseable(RuntimeError):
+    """The tree carries a pinned file with content that doesn't parse as TOML. Adopting it would
+    hand the host an EMPTY file in its place — for ``foldyard.local.toml``, every narrowing it
+    holds dropped — on the strength of a diff that can't show that (:func:`unparseable`)."""
+
+
+def _refuse_unparseable(tree: dict[str, bytes | None], pinned: dict[str, bytes | None]) -> None:
+    """Raise :class:`Unparseable` when a file in ``tree`` that differs from the ``pinned`` copy
+    doesn't parse, saying where. Only those: one the host already reads as empty, left as it is,
+    is read as empty after adopting too, and mustn't block adopting an edit beside it."""
+    broken = unparseable(tree, pinned)
+    if not broken:
+        return
+    import tomllib
+
+    where = []
+    for name in broken:
+        try:
+            tomllib.loads((tree[name] or b"").decode("utf-8"))
+        except UnicodeDecodeError:
+            where.append(f"{name}: not UTF-8")
+        except RecursionError:
+            where.append(f"{name}: nested too deep to read")
+        except ValueError as e:
+            where.append(f"{name}: {term.printable(str(e))}")
+    raise Unparseable(f"{_unparseable_note(broken)} ({'; '.join(where)}) — nothing adopted")
+
+
 def _refuse_unmet_floor(tree: dict[str, bytes | None]) -> None:
     """Raise :class:`NeedsNewerFoldyard` when ``tree`` declares a floor this fy doesn't meet."""
     from . import __version__, compat
@@ -720,6 +851,7 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
                 f"the config the host runs for main changed since this was measured against it "
                 f"({baseline} → {now}) — nothing adopted; review the new comparison"
             )
+    _refuse_unparseable(drift.tree, drift.pinned)
     _refuse_unmet_floor(drift.tree)
     target = pin_dir(cfg)
     gens = target / GENERATIONS
@@ -883,6 +1015,9 @@ def resolve(
         keep running the adopted copy, resolve later on a host terminal.
       - ``"unadopted"`` — NOTHING adopted yet and no TTY: nothing was adopted, and there is no
         reviewed copy to fall back on either. :func:`gate` refuses the launch verb on this one.
+      - ``"refused"`` — NOTHING adopted yet, the operator said adopt, and :func:`adopt` refused
+        (it changed since it was shown, it needs a newer foldyard, or it doesn't parse). Refused
+        at the launch like ``"unadopted"``, but there WAS a terminal, so it says so.
 
     Pure but for the injected ``prompt``/``echo``, like ``keyless.ensure_cred`` — tests drive it
     with no real stdin."""
@@ -935,9 +1070,9 @@ def resolve(
                 reviewed=drift.tree_digest(),
                 baseline=base.digest if base is not None else None,
             )
-        except (ReviewStale, NeedsNewerFoldyard) as e:
+        except (ReviewStale, NeedsNewerFoldyard, Unparseable) as e:
             echo(f"✗ {e}")
-            return "unadopted"
+            return "refused"
         echo("✓ adopted — later edits need `fy config adopt` (`fy up`/`fy host restart` ask).")
         return "pinned"
     if not drift.changed:
@@ -969,7 +1104,7 @@ def resolve(
     if answer in ("a", "adopt"):
         try:
             adopt(cfg, reviewed=drift.tree_digest())
-        except (ReviewStale, NeedsNewerFoldyard) as e:
+        except (ReviewStale, NeedsNewerFoldyard, Unparseable) as e:
             echo(f"✗ {e}")
             return "unresolved"
         echo("✓ adopted — the host now runs the working tree's config.")
@@ -1011,7 +1146,8 @@ def gate(verb: str) -> str:
     Best-effort about ITS OWN failures: a broken gate must never be what stops the yard starting —
     the supervisor still reconciles from the pin either way, so failing here loses the prompt, not
     the boundary. The deliberate exceptions: nothing adopted — ``"unadopted"`` (no terminal to adopt
-    on) or ``"declined"`` (the operator said no) — and a worktree the host has no record of. Each is
+    on), ``"declined"`` (the operator said no) or ``"refused"`` (:func:`adopt` said no) — and a
+    worktree the host has no record of. Each is
     REFUSED rather than waved through: the host would run nothing for that checkout, so starting
     its box would only produce one with no proxy. The fix is one command, and it is in the
     message."""
@@ -1042,6 +1178,13 @@ def gate(verb: str) -> str:
                 f"✗ {verb}: this checkout's foldyard.toml has never been adopted, and there is no "
                 "terminal here to adopt it on.\n"
                 "  Run `fy config adopt` on your computer (`fy config diff` first), then retry."
+            )
+        if status == "refused":
+            raise SystemExit(
+                f"✗ {verb}: not started — adopting this checkout's config was refused (the ✗ "
+                "above says why), and nothing is adopted for it.\n"
+                "  Once that's dealt with: `fy config diff`, then `fy config adopt` — or retry and "
+                "adopt at the prompt."
             )
         if status == "declined":
             raise SystemExit(

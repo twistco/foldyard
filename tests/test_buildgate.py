@@ -712,3 +712,20 @@ def test_a_successful_build_reads_no_report_after_it(env, monkeypatch, capsys):
     assert buildgate.run(_Build(env["log"], [(0, [])]), what="build", interactive=False) == 0
     assert reads == [1]  # the mark only
     assert "skipped the proxy" not in capsys.readouterr().out
+
+
+def test_a_refused_readoption_is_reported_not_raised(env, capsys, monkeypatch):
+    """The re-adoption after writing the recommend lines can be refused like any other (a file
+    that doesn't parse, a version floor): the lines are written, and it says it didn't adopt."""
+    from foldyard import configpin
+
+    configpin.adopt(config.current())
+
+    def refused(*_a, **_k):
+        raise configpin.Unparseable("foldyard.local.toml doesn't parse")
+
+    monkeypatch.setattr(configpin, "adopt", refused)
+    build = _Build(env["log"], [(1, [_row("storage.googleapis.com", ua="node")]), (0, [])])
+    prompt, _ = _answers("s", "y")
+    assert buildgate.run(build, what="box image", interactive=True, prompt=prompt) == 0
+    assert "not adopted: foldyard.local.toml doesn't parse" in capsys.readouterr().out

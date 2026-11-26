@@ -2114,3 +2114,20 @@ def test_a_private_copy_never_writes_through_a_worktree_dir_the_box_replaced(fak
     wt.symlink_to(elsewhere)
     worktree.init_config("feat")
     assert list(elsewhere.iterdir()) == []
+
+
+def test_add_reviews_a_config_main_adopted_before_it_had_to_parse(fake_main, monkeypatch, capsys):
+    """Main's adopted copy predates the refusal of a file that doesn't parse, and the branch's is
+    the same bytes: adopting it on main's say-so is refused, and the review explains why rather
+    than the add reporting it couldn't offer the config at all."""
+    from foldyard import configpin
+
+    with monkeypatch.context() as m:
+        m.setattr(configpin, "_refuse_unparseable", lambda *_a: None)
+        _adopt_main(fake_main, "# team \x01\n" + TOML)
+
+    assert worktree.add("feat") == 0
+    assert not _wt_adopted("feat")
+    err = capsys.readouterr().err
+    assert "doesn't parse" in err
+    assert "couldn't offer" not in err

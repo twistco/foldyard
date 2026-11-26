@@ -435,7 +435,7 @@ def _share(shared: list[dict], prompt: Callable[[str], str], echo: Callable[[str
                 + note
             )
             return True
-        except configpin.NeedsNewerFoldyard as e:
+        except (configpin.NeedsNewerFoldyard, configpin.Unparseable) as e:
             echo(f"  ✓ added to foldyard.toml, but not adopted: {e} {note}")
             return True
         echo(f"  ✓ added to foldyard.toml and adopted (the change is yours); {note}")

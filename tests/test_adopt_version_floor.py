@@ -102,7 +102,7 @@ def test_the_launch_gate_refuses_a_first_adoption_the_same_way(host_checkout):
     status = configpin.resolve(
         _cfg(host_checkout), interactive=True, prompt=lambda _: "", echo=said.append
     )
-    assert status == "unadopted"
+    assert status == "refused"  # at a terminal: refused, not "no terminal"
     assert any("99.0.0" in line for line in said)
     assert configpin.adopted_toml(host_checkout) is None
 

@@ -1808,7 +1808,7 @@ def config_adopt() -> None:
 
     try:
         drift = configpin.adopt(_active_config())
-    except configpin.NeedsNewerFoldyard as e:
+    except (configpin.NeedsNewerFoldyard, configpin.Unparseable) as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
     print(f"✓ adopted [{drift.label}] ({drift.tree_digest()}) — the supervisor picks it up live.")

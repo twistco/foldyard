@@ -9,14 +9,16 @@ silent.
 
 from __future__ import annotations
 
+import re
 import shutil
+import tomllib
 import types
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from foldyard import config, configpin, devmode, plugins, supervisor
+from foldyard import config, configpin, devmode, plugins, supervisor, term
 
 TOML = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["trusted.example"]\n'
 EDITED = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["trusted.example", "evil.example"]\n'
@@ -990,7 +992,7 @@ def test_a_first_adoption_never_adopts_what_changed_while_it_was_open(checkout):
 
     status = configpin.resolve(checkout, interactive=True, prompt=prompt, echo=lines.append)
 
-    assert status == "unadopted"
+    assert status == "refused"
     assert not configpin.inspect(checkout).pinned_exists
     assert any("changed again" in line for line in lines), lines
 
@@ -1068,7 +1070,7 @@ def test_the_first_adoption_prompt_rechecks_the_baseline_it_showed(checkout, wor
 
     status = configpin.resolve(worktree, interactive=True, prompt=prompt, echo=lines.append)
 
-    assert status == "unadopted"
+    assert status == "refused"
     assert not configpin.inspect(worktree).pinned_exists
     assert any("main changed" in line for line in lines), lines
 
@@ -1113,3 +1115,337 @@ def test_drop_refuses_anything_outside_the_adoption_root(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         configpin.drop(stray)
     assert stray.is_dir()
+
+
+# ── the diff is box-written text: every surface shows it inert ─────────────────────────
+
+
+def _inert(text: str) -> bool:
+    """Nothing a terminal would act on: every character printable, newlines aside."""
+    return all(c.isprintable() for c in text.replace("\n", ""))
+
+
+def _three_sinks(cfg, monkeypatch) -> dict[str, str]:
+    """The adoption diff as each surface that shows it renders it: the launch gate's prompt, `fy
+    config diff`, and the TUI's adopt modal (its markup, rendered to the plain text on screen).
+    The gate is answered with something other than adopt, so nothing here adopts."""
+    from rich.text import Text
+    from typer.testing import CliRunner
+
+    from foldyard import cli, tui
+
+    prompt, echo, lines = _prompted("i")
+    configpin.resolve(cfg, interactive=True, prompt=prompt, echo=echo)
+    monkeypatch.setattr(cli, "_active_config", lambda: cfg)
+    shown = CliRunner().invoke(cli.app, ["config", "diff"]).output
+    modal = Text.from_markup(tui._diff_markup(configpin.inspect(cfg).diff())).plain
+    return {"gate": "\n".join(lines), "fy config diff": shown, "tui": modal}
+
+
+def test_a_terminal_escape_in_the_tree_is_shown_as_text_even_when_the_file_does_not_parse(
+    checkout, monkeypatch
+):
+    """Whether to show a diff is a BYTE comparison, so a tree no TOML parser accepts is still
+    printed — and a raw ESC in it reached the operator's terminal at the very prompt that decides
+    the adoption: an OSC 52 clipboard write, or an erase over the line above. Shown as its escape
+    instead, so the reviewer sees something odd is there; the color around it is still ours."""
+    configpin.adopt(checkout)
+    osc52, erase = "\x1b]52;c;ZXZpbA==\x07", "\x1b[1A\x1b[2K"
+    (checkout.repo_root / "foldyard.toml").write_text(EDITED + f'note = "{osc52}{erase}"\n')
+    with pytest.raises(tomllib.TOMLDecodeError):
+        tomllib.loads((checkout.repo_root / "foldyard.toml").read_text())
+    monkeypatch.setattr(term, "color_enabled", lambda stream=None: True)
+
+    prompt, echo, lines = _prompted("i")
+    configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo)
+
+    shown = "\n".join(lines)
+    ours = re.sub(r"\x1b\[\d+m", "", shown)  # the diff's own colors out…
+    assert _inert(ours), ascii(ours)  # …and nothing the file wrote is left to act on
+    assert r'+note = "\x1b]52;c;ZXZpbA==\x07\x1b[1A\x1b[2K"' in ours
+    # Colored after it was made printable: the line's role (an addition) is still read off it.
+    assert '\x1b[32m+passthrough = ["trusted.example", "evil.example"]\x1b[0m' in shown
+    assert '\x1b[32m+note = "\\x1b]52' in shown
+
+
+def test_c1_controls_and_bidi_overrides_in_valid_toml_are_shown_on_every_surface(
+    checkout, monkeypatch
+):
+    """TOML refuses ASCII controls but not C1 (U+0080–009F) or the bidi controls, so a file that
+    parses, and can be adopted, carries them. On a terminal honouring 8-bit C1 (xterm), `\\x9b` is
+    a CSI: erase the line, move the cursor up, over the `+passthrough` line under review. A
+    right-to-left override reorders what follows it. Every surface shows them as text."""
+    configpin.adopt(checkout)
+    sneaky = (
+        '[project]\nname = "acme\u2066\x9d"\n\n[proxy]\n'
+        'passthrough = ["trusted.example", "evil.example"]  # \x9b2K\x9bA\u202eelpmaxe.live\u202c\n'
+    )
+    tomllib.loads(sneaky)  # valid TOML: adopting it would work
+    (checkout.repo_root / "foldyard.toml").write_text(sneaky)
+
+    for sink, shown in _three_sinks(checkout, monkeypatch).items():
+        assert _inert(shown), (sink, ascii(shown))
+        assert r'+name = "acme\u2066\x9d"' in shown, sink
+        assert (
+            r'+passthrough = ["trusted.example", "evil.example"]  # \x9b2K\x9bA\u202eelpmaxe.live'
+            r"\u202c" in shown
+        ), sink
+
+
+def test_a_first_adoptions_listing_is_shown_inert_too(checkout, monkeypatch):
+    """Nothing adopted yet: the review is the config itself (or its diff from main), and it reaches
+    every surface by the same path."""
+    (checkout.repo_root / "foldyard.toml").write_text(TOML + 'note = "\x1b]52;c;eA==\x07\x9b2K"\n')
+
+    for sink, shown in _three_sinks(checkout, monkeypatch).items():
+        assert _inert(shown), (sink, ascii(shown))
+        assert r'+note = "\x1b]52;c;eA==\x07\x9b2K"' in shown, sink
+    assert not configpin.inspect(checkout).pinned_exists  # declined at the gate: nothing adopted
+
+
+@pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
+def test_a_line_break_toml_does_not_have_is_shown_not_taken(checkout, sep):
+    """Python's ``splitlines()`` also breaks on NEL (a C1 control) and the Unicode line and
+    paragraph separators; TOML breaks only on LF and CRLF. Split Python's way, one string value
+    read as two config lines, the second a passthrough nobody declared, and the character itself
+    went into the break, so it couldn't be shown."""
+    configpin.adopt(checkout)
+    line = f'note = "ok{sep}passthrough = [\\"evil.example\\"]"'
+    (checkout.repo_root / "foldyard.toml").write_text(TOML + line + "\n")
+    assert "passthrough" in tomllib.loads(TOML + line)["proxy"]["note"]  # one value, valid TOML
+
+    assert configpin.inspect(checkout).diff().splitlines() == [
+        "--- adopted/foldyard.toml",
+        "+++ tree/foldyard.toml",
+        "@@ [proxy] @@",
+        "+" + line.replace(sep, ascii(sep)[1:-1]),
+    ]
+
+
+def test_a_crlf_file_diffs_like_its_lf_twin(checkout):
+    """TOML's other line ending: no `\\r` shown, in a multiline string or out of one."""
+    added = '\n[claude]\nprompt = """\nBe brief.\n"""\n'
+    configpin.adopt(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text(TOML + added)
+    lf = configpin.inspect(checkout).diff()
+    (checkout.repo_root / "foldyard.toml").write_bytes(
+        (TOML + added).replace("\n", "\r\n").encode()
+    )
+
+    assert configpin.inspect(checkout).diff() == lf
+    assert "+Be brief." in lf.splitlines()
+
+
+# ── a file that doesn't parse is read as EMPTY: never shown as a comment-only change ────
+
+SHARED = '[project]\nname = "acme"\n\n[proxy]\npassthrough = ["evil.example"]\n'
+NARROWING = "# my narrowing\n[proxy]\ndisabled = true\n"
+
+
+def _narrowed(checkout):
+    """A shared config widening egress, narrowed back by an ADOPTED local overlay."""
+    (checkout.repo_root / "foldyard.toml").write_text(SHARED)
+    (checkout.repo_root / "foldyard.local.toml").write_text(NARROWING)
+    configpin.adopt(checkout)
+    assert "proxy" not in configpin.effective(checkout).toml
+
+
+def test_a_comment_edit_that_breaks_the_file_is_never_comment_only(checkout, monkeypatch):
+    """TOML bans control characters in comments, so one in `# my narrowing` makes the WHOLE file
+    unparseable, and every reader takes it as empty. The diff filter dropped the line as a
+    comment: an empty diff, "only blank/comment lines changed", and adopting it threw away the
+    overlay, the `[proxy] disabled = true` with it. Widened egress, reviewed as nothing."""
+    _narrowed(checkout)
+    (checkout.repo_root / "foldyard.local.toml").write_text(NARROWING.replace("ing", "ing \x01"))
+
+    drift = configpin.inspect(checkout)
+    assert "only blank/comment" not in drift.summary()
+    assert "foldyard.local.toml doesn't parse" in drift.summary()
+    for sink, shown in _three_sinks(checkout, monkeypatch).items():
+        assert "foldyard.local.toml" in shown and "doesn't parse" in shown, (sink, shown)
+        assert "nothing the host reads would change" not in shown, sink
+
+    with pytest.raises(configpin.Unparseable, match=r"foldyard\.local\.toml"):
+        configpin.adopt(checkout)
+    prompt, echo, lines = _prompted("a")
+    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "unresolved"
+    assert any(line.startswith("✗") and "doesn't parse" in line for line in lines), lines
+    assert "proxy" not in configpin.effective(checkout).toml  # the narrowing still holds
+
+
+def test_fy_config_adopt_refuses_a_file_that_does_not_parse(checkout, monkeypatch):
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    _narrowed(checkout)
+    (checkout.repo_root / "foldyard.local.toml").write_text(NARROWING + "x = \x01\n")
+    monkeypatch.setattr(cli, "_active_config", lambda: checkout)
+
+    result = CliRunner().invoke(cli.app, ["config", "adopt"])
+
+    assert result.exit_code == 1
+    assert "doesn't parse" in result.output and _inert(result.output)
+    assert "proxy" not in configpin.effective(checkout).toml
+
+
+def test_a_cr_only_file_is_not_read_as_one_comment(checkout):
+    """TOML's newline is LF or CRLF; a file using bare CRs is ONE line to the diff, and one that
+    starts with `#` read as a single comment. It doesn't parse either, so that's what's said."""
+    configpin.adopt(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text("# header\r" + EDITED.replace("\n", "\r"))
+
+    drift = configpin.inspect(checkout)
+    assert "foldyard.toml doesn't parse" in drift.summary()
+    assert "doesn't parse" in drift.diff()
+    with pytest.raises(configpin.Unparseable):
+        configpin.adopt(checkout)
+
+
+def test_a_first_adoption_of_a_file_that_does_not_parse_is_refused(checkout):
+    """Nothing adopted yet, and the tree doesn't parse: the review says so, and Enter (which
+    adopts at first sight) adopts nothing."""
+    (checkout.repo_root / "foldyard.toml").write_text("# all of it is \x01 a comment\n")
+
+    prompt, echo, lines = _prompted("")
+    assert configpin.resolve(checkout, interactive=True, prompt=prompt, echo=echo) == "refused"
+    drift = configpin.inspect(checkout)
+    assert not drift.pinned_exists
+    assert any("doesn't parse" in line for line in lines), lines
+    assert not any("declares nothing" in line for line in lines), lines
+    headline = configpin.first_adoption_headline(drift, None)
+    assert headline.startswith("foldyard.toml doesn't parse"), headline
+
+
+def test_tabs_in_the_diff_are_kept(checkout):
+    """A tab can't erase or reorder anything, so a tab-indented config keeps its tabs; only what
+    a terminal acts on is shown as an escape."""
+    configpin.adopt(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text(
+        EDITED.replace("passthrough", "\tpassthrough")
+    )
+    (checkout.repo_root / "foldyard.toml").write_text(
+        (checkout.repo_root / "foldyard.toml").read_text().replace('"]\n', '"]\t# \x1b\n')
+    )
+
+    lines = configpin.inspect(checkout).diff().splitlines()
+    assert '+\tpassthrough = ["trusted.example", "evil.example"]\t# \\x1b' in lines, lines
+
+
+def test_size_counts_toml_lines(checkout):
+    """The first-adoption line count agrees with what the diff calls a line."""
+    for sep in ("\x85", chr(0x2028)):
+        (checkout.repo_root / "foldyard.toml").write_text(f'[project]\nname = "a{sep}b"\n')
+        drift = configpin.inspect(checkout)
+        assert configpin.size(drift) == "2 lines across foldyard.toml", ascii(sep)
+
+
+def test_a_box_made_worktree_name_is_shown_inert(checkout, monkeypatch):
+    """Worktree names can be made in the box (a directory under the worktrees root), and the
+    gate, `fy config diff`/`status` and the TUI's adopt modal all print the drift's label."""
+    import dataclasses
+
+    from typer.testing import CliRunner
+
+    from foldyard import cli
+
+    named = dataclasses.replace(checkout, worktree="x\x1b]52;c;eA==\x07\x9b2K")
+    drift = configpin.inspect(named)
+    assert drift.label == "worktree x\\x1b]52;c;eA==\\x07\\x9b2K"
+
+    prompt, echo, lines = _prompted("q")
+    configpin.resolve(named, interactive=True, prompt=prompt, echo=echo)
+    assert _inert("\n".join(lines))
+    monkeypatch.setattr(cli, "_active_config", lambda: named)
+    for verb in ("diff", "status"):
+        assert _inert(CliRunner().invoke(cli.app, ["config", verb]).output), verb
+
+
+# ── the mirror case: an ADOPTED copy that doesn't parse (a pin made before the refusal) ──
+
+BROKEN_TEAM = "# team \x01\n" + EDITED  # the host has been reading this as EMPTY
+
+
+def _old_pin(cfg, monkeypatch, files: dict[str, str]) -> None:
+    """Adopt ``files`` the way foldyard did before it refused a file that doesn't parse."""
+    for name, text in files.items():
+        (cfg.repo_root / name).write_text(text)
+    with monkeypatch.context() as m:
+        m.setattr(configpin, "_refuse_unparseable", lambda *_a: None)
+        configpin.adopt(cfg)
+
+
+def test_an_adopted_copy_that_does_not_parse_is_never_a_comment_only_change(checkout, monkeypatch):
+    """Removing the control byte from the comment makes the file parse again: the host goes
+    from reading it as EMPTY to running its passthrough. That is the opposite of comment-only."""
+    _old_pin(checkout, monkeypatch, {"foldyard.toml": BROKEN_TEAM})
+    assert "proxy" not in configpin.effective(checkout).toml
+    (checkout.repo_root / "foldyard.toml").write_text(BROKEN_TEAM.replace(" \x01", ""))
+
+    drift = configpin.inspect(checkout)
+    assert "only blank/comment" not in drift.summary()
+    assert "reading it as EMPTY" in drift.summary(), drift.summary()
+    assert "--- adopted/foldyard.toml  (doesn't parse: read as EMPTY)" in drift.diff().splitlines()
+    for sink, shown in _three_sinks(checkout, monkeypatch).items():
+        assert "doesn't parse" in shown, (sink, shown)
+        assert "nothing the host reads would change" not in shown, sink
+
+
+def test_mains_adopted_copy_that_does_not_parse_is_no_baseline_of_nothing_new(
+    checkout, worktree, monkeypatch
+):
+    """Same gap against main: its adopted copy reads as EMPTY, so a worktree whose copy parses
+    grants what it says, however few "comment" lines differ."""
+    _old_pin(checkout, monkeypatch, {"foldyard.toml": BROKEN_TEAM})
+    (worktree.repo_root / "foldyard.toml").write_text(BROKEN_TEAM.replace(" \x01", ""))
+
+    drift = configpin.inspect(worktree)
+    base = configpin.main_baseline(drift)
+    assert base is not None and base.body
+    headline = configpin.first_adoption_headline(drift, base)
+    assert "grants nothing new" not in headline
+    assert "reading it as EMPTY" in headline, headline
+
+
+def test_a_file_nested_too_deep_for_the_parser_does_not_parse(checkout, monkeypatch):
+    """tomllib recurses per level: a box-written `a = [[[[…]]]]` deep enough raises
+    RecursionError, which every surface that parses the tree must take as "doesn't parse"."""
+    configpin.adopt(checkout)
+    (checkout.repo_root / "foldyard.toml").write_text(TOML + "a = " + "[" * 50000 + "]" * 50000)
+
+    assert "foldyard.toml doesn't parse" in configpin.inspect(checkout).summary()
+    for sink, shown in _three_sinks(checkout, monkeypatch).items():
+        assert "doesn't parse" in shown, sink
+    with pytest.raises(configpin.Unparseable, match="too deep"):
+        configpin.adopt(checkout)
+
+
+def test_the_launch_gate_says_adopting_was_refused_not_that_there_is_no_terminal(
+    checkout, monkeypatch
+):
+    """At a terminal, a first adoption that adopt() refuses is its own status: telling the
+    operator who just pressed Enter there is "no terminal here" sends them looking for one."""
+    (checkout.repo_root / "foldyard.toml").write_text("# all of it is \x01 a comment\n")
+    monkeypatch.setattr(configpin.config, "in_box", lambda: False)
+    monkeypatch.setattr(configpin.config, "active_worktree", lambda: "")
+    monkeypatch.setattr(devmode, "worktree_config", lambda _wt: checkout)
+    monkeypatch.setattr(configpin.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _q="": "")
+
+    with pytest.raises(SystemExit) as stopped:
+        configpin.gate("fy up")
+    assert "no terminal" not in str(stopped.value)
+    assert "refused" in str(stopped.value)
+    assert not configpin.inspect(checkout).pinned_exists
+
+
+def test_an_unchanged_local_file_that_does_not_parse_blocks_nothing(checkout, monkeypatch):
+    """Only a file the adoption CHANGES is refused: one the host already reads as empty, left
+    as it is, is read as empty after adopting too, and mustn't hold up a foldyard.toml edit."""
+    _old_pin(checkout, monkeypatch, {"foldyard.toml": TOML, "foldyard.local.toml": "x = \x01\n"})
+    (checkout.repo_root / "foldyard.toml").write_text(EDITED)
+
+    drift = configpin.inspect(checkout)
+    assert "doesn't parse" not in drift.summary()
+    configpin.adopt(checkout)
+    assert configpin.effective(checkout).toml["proxy"]["passthrough"][-1] == "evil.example"
