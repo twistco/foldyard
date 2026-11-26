@@ -225,6 +225,55 @@ def test_gate_never_becomes_the_thing_that_breaks_fy(repo_declaring, monkeypatch
     assert capsys.readouterr().err == ""
 
 
+# ── what the checkout declares is shown, never obeyed by the terminal ────────────────────────
+
+# TOML escapes for: write the clipboard (OSC 52, ended by BEL), then erase the line.
+TOML_ESC = r"\u001b]52;c;eA==\u0007\u001b[2K"
+
+
+def _controls(text: str) -> bool:
+    return "\x1b" in text or "\x07" in text
+
+
+def test_a_declared_version_carrying_escapes_reads_as_text_and_still_orders(fresh_config, tmp_path):
+    # foldyard.toml is box-writable: a version can start with digits and carry anything after.
+    (tmp_path / "foldyard.toml").write_text(
+        f'[project]\nname = "p"\nmin_foldyard_version = "99{TOML_ESC}"\n'
+        f'recommended_foldyard_version = "98{TOML_ESC}"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    floor, want = config.min_foldyard_version(), config.recommended_foldyard_version()
+    assert floor is not None and want is not None
+    assert floor.isprintable() and want.isprintable() and "\\x1b]52" in floor
+    assert compat._parse(floor) == (99, 0, 0)  # escaping keeps the floor a floor
+
+
+def test_the_gate_prints_a_declared_versions_escapes_as_text(repo_declaring, capsys):
+    root = repo_declaring()
+    (root / "foldyard.toml").write_text(
+        f'[project]\nname = "p"\nmin_foldyard_version = "99{TOML_ESC}"\n'
+    )
+    config.clear_caches()
+    with pytest.raises(SystemExit):
+        compat.gate_or_abort()
+    err = capsys.readouterr().err
+    assert "99" in err and not _controls(err)
+
+
+def test_the_reasons_ledger_is_read_as_text(repo_declaring, capsys):
+    root = repo_declaring()
+    (root / "foldyard.toml").write_text(
+        f'[project]\nname = "p"\nrecommended_foldyard_version = "99.0.0"\n'
+        f'[project.foldyard_version_reasons]\n"99.0.0{TOML_ESC}" = "why{TOML_ESC}"\n'
+    )
+    config.clear_caches()
+    reasons = config.foldyard_version_reasons()
+    assert all(str(k).isprintable() and str(v).isprintable() for k, v in reasons.items())
+    compat.gate_or_abort("up")
+    err = capsys.readouterr().err
+    assert "why" in err and not _controls(err)
+
+
 def test_version_flag_still_answers_under_an_unmet_floor(repo_declaring):
     # The one question that must keep working when you are being told to upgrade is
     # "what have I got?" — --version is eager, so it exits before the callback body.
