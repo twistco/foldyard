@@ -6,6 +6,216 @@ break config or CLI shape, and say so here. What is merged but not yet released 
 [`.changes/`](./.changes/), one file per change, until the release folds it in here. How a
 release is cut: [docs/releasing.md](./docs/releasing.md).
 
+## 0.16.0 — 2026-11-27
+
+### Security
+
+- **`fy claude` run on your computer now warns you not to resume a box's session there.** A box's
+  Claude sessions are archived into your computer's Claude history, so `claude --resume`,
+  `--continue` and `/resume` there offer them. A resumed session is text the box wrote, and that
+  Claude would act on it as its own history, with your access.
+- **A mode change removes only the stack containers it meant to.** After `fy mode`, a switch in
+  `fy tui`, or an emergency level expiring, foldyard removes the project's containers whose service
+  has left your compose config, and the mode services whose level dropped. It read each container's
+  service label as a line of text. Anyone on the engine can set that label, the box included, and a
+  label holding a line break could add other container names, or `--all`, to the removal. The labels
+  are now read as structured data, and only the engine's own container ids are removed.
+- **`fy tui` no longer exits over a switch's name.** An `[[inject]]` switch named like `api.v2`, or
+  with a `[` or a space in it, is accepted config, but `fy tui` built its buttons' ids from the name
+  and exited on start. A switch named `fix` took it down when its button was pressed. The name is
+  now kept as the button's data, never in its id.
+- **The adoption diff colours and counts each line as the change it is.** `fy config diff`, the
+  launch prompt and the adopt dialog in `fy tui` styled a line by what its text said. A changed line
+  whose text starts with `--` or `++` (a key like `--x`, or a line in a multi-line string, in a
+  `foldyard.toml` the box can write) reads like a file header once its `-` or `+` is in front. It
+  was then shown dimmed as a header and left out of the count, so a real change could be summed up
+  as "only blank/comment lines changed". The text of the diff is unchanged.
+- **A `foldyard.toml` nested too deep to read is treated like any other that doesn't parse, and the
+  same everywhere.** About 500 nested `[` made Python's TOML reader fail in a way foldyard didn't
+  expect, so reading the checkout's config stopped with a traceback instead of reading the file as
+  empty, and so did adding a package or a recommended host to it and `fy init --private`. Where the
+  limit fell also depended on what was reading the file: a `foldyard.local.toml` could be adopted at
+  the launch prompt, then read as empty by what runs on your computer, dropping the narrowings it
+  holds. Every reader now gives one answer for the same file. `fy --version` on an editable install
+  no longer fails on a `pyproject.toml` nested that deep either.
+- **What `fy box exec` prints to your terminal now has its control sequences stripped.** The git
+  hooks run it during a `git commit` on your computer, where in-box tools (a linter, a formatter, a
+  package manager) print what the checkout leads them to. Escape sequences in that output could
+  write to your clipboard or rewrite lines already on your screen. This protects a hook you trust
+  that runs tools you don't: the box can also write `.git/hooks`, `lefthook.yml` and `.git/config`,
+  so a hook it wrote can still print whatever it likes. Only output going to your terminal is
+  cleaned. Piped or redirected (`fy box exec 'pg_dump' > dump.sql`), it passes byte for byte as
+  before, and the exit code still decides whether the commit goes ahead. So a hook that captures the
+  output and prints it itself (`out=$(fy box exec 'pnpm lint') || { echo "$out"; exit 1; }`) still
+  prints it raw: let `fy box exec` write to the terminal instead, as lefthook and a plain
+  `fy box exec` line in a hook do.
+- **`fy tui`, `fy worktree list` and `fy worktree remove` no longer run git inside a worktree.** A
+  worktree's branch is now read from your main checkout's `.git`, and its main checkout is the one
+  your computer recorded it under. A box can rewrite a worktree's `.git` file, even for one you made
+  with `fy worktree add`. Git run inside the worktree then read a git directory and config the box
+  built: a file there that never finishes reading froze `fy tui`, and it could make foldyard take
+  another checkout as that worktree's main.
+- **The git that finds your main checkout and checks its `core.fileMode`, the git behind `fy tui`'s
+  cards and `fy worktree list`, and `fy worktree add` and `remove` now give up when git doesn't
+  answer.** The box can write your main checkout's `.git` too, and git waits for good on a file
+  there that never finishes reading, which froze `fy tui` and every verb. Now a branch is shown
+  blank, `core.fileMode` is left as it is, and the rest say git didn't answer: a checkout is then
+  read as no repository, and `fy worktree remove` removes nothing and tears nothing down, even with
+  `--discard`.
+- **A file the box swaps for a pipe or a device no longer stops `fy host`'s background loop, and
+  foldyard reads only regular files from the checkout.** The box can write the checkout, so it could
+  put a named pipe where foldyard reads a file (a worktree's `.git` or `HEAD`, `foldyard.toml`, a
+  compose file, the Dockerfile), or one it keeps writing to, or a link to `/dev/zero`. Opening a
+  pipe waits for a writer that never comes, and the others never end. In `fy host`'s background loop
+  that stopped everything after it, so a mode with a time limit stayed on past it. foldyard now
+  reads only regular files there, up to 16 MiB (a link to `/dev/null` still reads as empty), and
+  says which file it couldn't read and why. A compose file that isn't a regular file is refused,
+  with that reason, before compose runs on your computer (a `.env` that isn't one is left to
+  compose, which skips it). When a mode change updates a running stack, compose gets at most 10
+  minutes, and running out is reported as a skipped update, never a done one. `fy host` makes that
+  update too when a time limit running out also turns off a switch that can't work without the
+  expired one.
+- **A `foldyard.toml` or `foldyard.local.toml` that can't be read is never adopted as missing.** The
+  diff, the launch prompt, the adopt dialog in `fy tui`, `fy config status`, `fy doctor` and the
+  `fy host` log say which file isn't read and why. Where adopting would drop what the adopted copy
+  holds (the narrowings in a `foldyard.local.toml`), adopting isn't offered until it's fixed.
+- **`fy init` no longer writes through a link at `.gitignore` or `foldyard.local.toml.example`.**
+  The checkout may be one a box can write, and a link it planted there to a file on your computer
+  had `fy init` add foldyard's ignore block to that file, write the template into it, or create it.
+  Both are now written by replacing the name, and a rewritten `.gitignore` keeps its permissions. A
+  link at either is left as it is, and `fy init` says so: `fy init` and `fy init --private` alike
+  (which failed on one) list what to ignore instead, since git doesn't read a `.gitignore` that's a
+  link, and doctor no longer warns about one. A `.gitignore` that isn't UTF-8 no longer stops
+  `fy init` with a traceback, and one it can't read is named as the file it couldn't write, not
+  `foldyard.toml`.
+- **`fy up` accepts a project `.env`, an `env_file:` or a `label_file:` that is `/dev/null`.** They
+  were refused as paths outside the checkout, though people link a `.env` there so compose loads
+  nothing, and there's nothing of yours to read. Anything else outside the checkout is still
+  refused, another device included, and so is a path through a process's own descriptors
+  (`/dev/stdout`, `/proc/self/fd/1`), which can read as `/dev/null` to foldyard but not to compose.
+
+### Changed
+
+- **Image builds write to a log, and your terminal shows only where it is unless the build fails.**
+  `fy up`, `fy build` and the dev box image builds of `fy box build`, `fy box up` and
+  `fy box recreate` each keep one log per kind of build in `~/.foldyard/<project>/`, replaced by the
+  next build, so a warm build no longer scrolls hundreds of lines past the ones that matter. A long
+  build says every 30 seconds that it is still going. A failed one shows the log's last 25 lines and
+  its path. If the disk fills part way, the rest is shown on your terminal and fy says so. Each line
+  in the log has a timestamp, and the box's escape sequences are removed, so `cat` on it later is
+  safe. `--verbose` (`-v`) shows the output as it comes, as before.
+- **What the stack prints, `fy logs` above all, has colour again, chosen by foldyard.** Since 0.15.0
+  the stack's output reaches your terminal with every escape sequence removed, because coloured text
+  would let the box draw a line that looks like one of foldyard's own. foldyard now adds its own
+  colour from what each line says: a colour per service prefix that stays the same from run to run,
+  and `ERROR`, `FATAL` and `CRITICAL` in red, `WARN` and `WARNING` in yellow. It does this only on a
+  terminal, and never into a file or a pipe.
+- **`fy logs` shows when each line was written,** dimmed and in your time, in front of its service:
+  the tails of several services arrive mixed together, and the time is what puts them in order. Into
+  a file or a pipe, the line keeps compose's full timestamp. `fy logs --no-timestamps` leaves it
+  out.
+- **Compose always runs in the VM now, never on your computer.** The compose files are editable from
+  the box, so the client that reads them runs where the stack does: an `env_file:`, a build context
+  or an `include:` reads the VM, which holds nothing of yours but the checkout. This was
+  `[machine] compose = "vm"`, experimental since 0.9.0, and it replaces the check that refused
+  compose files naming paths outside the checkout, which could only narrow that channel. Your
+  stack's images are built in the VM too. `fy shell` enters the container through the engine. What
+  changes for a project that didn't set `compose = "vm"`:
+  - The VM must mount the checkout. A VM `fy machine ensure` created from it does; one created from
+    another checkout refuses, naming `fy machine recreate`. A worktree's stack needs the VM's
+    worktrees root too, which a VM from before worktree support lacks (`fy machine ensure` warns of
+    it, naming the same fix). Nothing needs recreating otherwise, VM or box.
+  - `${HOME}`, `~` and `$USER` in a compose file are the VM's, not your computer's. A bind mount of
+    a path on your computer found nothing in the VM before, and still doesn't.
+  - Registry logins have no route into the VM: `FY_REGISTRY_AUTH_FILE` in `[project] compose_env`
+    reached only the client on your computer, and does nothing now (`fy doctor` says so). Pull a
+    private image into the VM once yourself (`fy docs stack`, Private images).
+  - `[machine] compose = "vm"` still works and changes nothing. `compose = "host"` and
+    `MACHINE_COMPOSE=host` are ignored, and `fy doctor`, `fy config features` and the stack verbs
+    say so: delete the line.
+  - Your own recipes that run `"$ENGINE" compose` after `eval "$(fy shellenv)"` are still a client
+    on your computer.
+- **A `[ports]` key must be a port's name: upper case with `PORT` as a word in it.** `APP_PORT`,
+  `SUPABASE_DB_PORT` and `PORT` work as before. Any other key is ignored and `fy doctor` names it,
+  so a project with one sees it reported and its value no longer set. `[ports]` keys are exported by
+  `fy shellenv`, which recipes eval before running `fy up`, git or anything else, and passed into
+  the box: `PYTHONPATH`, `BASH_ENV` or `IN_DEVBOX` there would have run what the box wrote on your
+  computer. A port's name foldyard reads itself (`FY_PROXY_PORT`, `DOCKER_*`, …) is ignored too, and
+  a port can no longer override one of foldyard's own variables.
+- **A worktree is always in its main checkout's project, so it shares main's state, ports and VM.**
+  Its project and machine names now come from main's adopted config, adopted or not: under a main
+  with no `[project].name` a worktree was named after its own directory, and one whose branch
+  declared another `[project].name` became a project of its own, with its own `~/.foldyard/` folder
+  and VM. What a worktree's own `foldyard.toml` says for those keys isn't read, and the review at
+  its adoption and `fy doctor`'s `adopted config` row say so; a branch that renames the project
+  takes effect once main adopts the rename. A box is given the names when it's made, so it names its
+  stacks as your computer does: `fy box up` asks once for `fy box recreate` on a box made before. A
+  worktree that was a project of its own leaves that VM and folder behind: `fy ls` lists them as
+  left over, for you to delete.
+- **Worktrees made with plain `git worktree add` aren't fy worktrees, and nor are Claude Code's
+  under `.claude/worktrees/`.** You can go on using one with git, but on your computer every `fy`
+  project verb run in it now refuses and names your main checkout, and `fy worktree add` won't make
+  a worktree on a branch one has checked out. `fy box exec` still runs from one inside your main
+  checkout, in main's box, so a commit there keeps running the git hooks that check it in the box.
+  Move one into the worktrees root (`git worktree move`) and `fy worktree add <name>` registers it.
+  A checkout made from a bare repository (a `.bare/` directory and `git worktree add main`) is
+  refused the same way, saying so: use a normal clone as your main checkout.
+- **Your computer decides which project a directory belongs to from its own records, never from git
+  or a `foldyard.toml` there**: the mains you adopted, their registered worktrees and their
+  worktrees roots. The box can write `.git` and `foldyard.toml`, and with them it could steer which
+  project a verb on your computer acted on, and where its state went. Now what it writes can only
+  make `fy` refuse, saying why: a registered worktree whose `.git` was deleted or made a repository
+  of its own (`git worktree repair` mends it), a repository or `foldyard.toml` inside a checkout,
+  the worktrees root itself, a directory two projects' roots share, and a path reached through a
+  link that leads somewhere else.
+- **A project, or its worktrees root, can no longer lie inside another one's checkout or worktrees
+  root.** The outer project's box could write the inner one's files, and the inner one's box what
+  the outer one reads, so neither wall held. `fy init` and `fy config adopt` refuse there, and
+  around an adopted project; one adopted inside another's checkout before is skipped, named by
+  `fy doctor` and refused where it is. A worktrees root on or around another project's checkout or
+  root claims nothing and isn't mounted: that project's stack and box verbs and
+  `fy machine recreate` refuse until it's changed, and `fy doctor` says what to change (a VM made
+  before keeps its mount until `fy machine recreate`; `fy machine stop` stops what it runs). Two
+  projects can no longer share one worktrees root: give each its own (`~/worktrees/<project>` is
+  fine). To keep a nested project, move it out of the other one's checkout. A project in a
+  subdirectory of a repository that isn't a fy project (`mono/svc`) works as before.
+
+### Fixed
+
+- **Ctrl-C on `fy logs` ends it without the compose client's traceback.** The interrupt now reaches
+  foldyard alone, which stops relaying and then stops the compose client and what it started. The
+  same happens when the terminal closes or foldyard is stopped with `kill` (SIGHUP, SIGTERM,
+  SIGQUIT).
+- **`fy logs` starts straight away and shows each line as it arrives.** With the compose client in
+  the VM (the experimental `[machine] compose = "vm"`, the only way since this release) it used to
+  wait six seconds before starting, then delivered lines in batches.
+- **Leaving a level removes the services only it wanted, and `fy up` does too.** Switching gcp off
+  (or letting `gcp=user` run out) left the metadata emulator running while the stack was up, because
+  re-rendering kept every running profile as if you'd started it. A running service whose profiles
+  are all ones a level adds (`metadata`, or `cloudsql` from storage=staging) now goes once no level
+  enables them, in the same run, after the services that pointed at it have been recreated without
+  that setting, and never when that run fails. Your own profiles, such as `data` workers, are
+  untouched. A Cloud SQL proxy you start by hand in the `cloudsql` profile goes at the next mode
+  change or `fy up` that doesn't enable it.
+- **When an emergency level runs out under a running stack, you're told how to bring the stack in
+  line.** The supervisor stopped the level's token service and switched it off, but a running stack
+  kept what the level set up, and nothing said so. You now get a notification naming the level that
+  ran out (and any switch lowered with it) and saying that `fy up` brings a running stack in line,
+  and `fy doctor` says so on your computer and in the box for as long as the stack still differs
+  from the mode. The supervisor still doesn't run compose itself: that could hold up its other work
+  long enough to get it restarted.
+- **A mode change made just after a level ran out reconciles the stack for that level too.**
+  `fy mode` and `fy tui` compared the new mode with one where the level had already run out, so a
+  change made before the supervisor noticed the expiry didn't count the expired level as part of the
+  change. A switch that can't work without the expired level is lowered with it, and `fy mode` says
+  so, unless the same command turns the level back on.
+- **Compose profiles from two plugins both apply.** When two switches' levels each enabled a compose
+  profile, only the last plugin's took effect, so the other level's services weren't started and the
+  stack could be re-rendered without them.
+- **`fy state` in a worktree checks that worktree's stack.** It compared main's containers with the
+  worktree's mode, so it could call a worktree's stack in line, or down, while main's was the one it
+  looked at.
+
 ## 0.15.0 — 2026-11-26
 
 A security release: upgrade, then `fy host restart`. Text a box can choose (worktree, branch and

@@ -26,7 +26,7 @@ prefix = "foldyard"
 # `[box].packages`, and 0.7.0 is a security release. When the recommendation moves past it,
 # raise the floor to meet it once everyone has moved.
 min_foldyard_version = "0.7.0"
-recommended_foldyard_version = "0.15.0"
+recommended_foldyard_version = "0.16.0"
 # A compose stack to drive alongside the box — uncomment when you have one (step 3), add
 # its host ports under [ports] below, and extend [claude].system_prompt with the stack
 # paragraph parked beside it (an agent that knows the box but not the stack is half-lost).
@@ -53,6 +53,7 @@ recommended_foldyard_version = "0.15.0"
 "0.13.1" = "with a `[ports]` pool, `fy shellenv` (and recipes that eval it) works in a worktree a box made; the guest monitor no longer misses, misnames or stays silent about a step out of a container that it judged late — `fy host restart`, then `fy box recreate` so the box has the new foldyard"
 "0.14.0" = "a running box works with a worktree registered since it was made, and removes any worktree your computer never registered (and says why when it won't); the egress proxy re-issues a request refused with a 401, and a reinstall no longer restarts it; `fy monitor` shows the box's text as text and keeps the minute either side of a step out of a container — `fy host restart`, then `fy box recreate` so the box has the new foldyard"
 "0.15.0" = "security release: text a box can choose (worktree, branch and transcript names, `foldyard.toml` strings, the adoption diff, container and build output, the proxy log) reaches your terminal and `fy tui` as text, never as escape sequences or TUI markup; a config file that doesn't parse is never adopted; adds `fy config features` (what your config uses, and what it ignores) and the experimental `observe-files` monitor level — `fy host restart`"
+"0.16.0" = "compose runs only in the VM (private-registry logins have no route yet, #233); your computer's records alone decide which project a directory is in: worktrees always share main's project, and plain `git worktree add` worktrees (Claude Code's included) and projects nested inside another are refused, though `fy box exec` from one inside main still works; when an emergency level lapses under a running stack you're told, and leaving a level removes the services only it wanted; `[ports]` keys must be port names; relayed output in fy's colours, build logs shown on failure, `fy logs` timestamps — `fy host restart`, then `fy box recreate` where `fy box up` asks"
 
 [machine]
 # A rootless Lima VM that mounts ONLY this repo, with an in-VM egress FIREWALL: fail-closed,
