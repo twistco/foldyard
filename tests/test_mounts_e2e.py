@@ -146,8 +146,8 @@ def _seed() -> os.stat_result:
 
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("mounts"))
+def repo():
+    r = example_copy()
     _adopt_on_host(r)
     ensure_vm(r)
     row = next(i for i in lima_list(VM) if i.get("name") == VM)

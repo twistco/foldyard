@@ -1,4 +1,5 @@
-"""`[machine] compose = "vm"` on this host's real VM — the spike of docs/compose-in-vm-scope.md.
+"""The compose client in the guest, on this host's real VM — the spike of docs/compose-in-vm-scope.md,
+kept as the proof of the only way compose runs from your computer since 0.16.0.
 
 The guest runs foldyard's own podman-compose, sent over the backend's ssh route on each call
 (:mod:`foldyard.guestcompose`). This module drives that code in-process against the example's
@@ -7,21 +8,20 @@ VM and checks what the scope doc's phase 0 asks:
 - the payload runs on the guest's ``/usr/bin/python3`` (PyYAML on its pure-Python parser);
 - **what one call costs** — the ssh round trip plus the payload, measured, printed, and written to
   the run's step summary in CI, where the hosts differ (vz, qemu/9p, WSL2);
-- the guest's config hash is the one the host's child computes (``fy state``'s verdict unchanged);
+- the guest's config hash is the one the box's child computes (``fy state``'s verdict alike);
 - **a compose file can't read your computer from there**: an ``env_file:`` (read at create) and an
-  ``include:`` (read at render) naming files that exist only on your computer are read by the
-  host's client (the red-first controls: today's channel, the one the path guard clamps) and not
-  by the guest's;
+  ``include:`` (read at render) naming files that exist only on your computer are read by a client
+  on your computer (the red-first controls: the channel a client here opened, which foldyard's
+  path guard only narrowed until 0.16.0) and not by the guest's;
 - a build with ``additional_contexts`` works through the guest's own podman — a client of the
   server's own version (a podman-remote 5.4 client against a 5.8 server refused the flag);
 - **the premise**: whatever the VM user can read among the guest's sensitive paths, a rootless
   container (anything a box can create through the engine socket) can read too. The table is
   printed either way.
 
-The second half is the whole flow with ``[machine] compose = "vm"`` adopted: the module RECREATES
-the VM from its own example copy, since the client now reads the checkout in the VM (the other
-modules' stacks ship their build context over the socket from your computer). A logging ``podman``
-first on the CLI's PATH makes "no compose client ran on your computer" an assertion over what ran.
+The second half is the whole flow with nothing set: the module RECREATES the VM from the host
+tier's one checkout, fresh. A logging ``podman`` first on the CLI's PATH makes "no compose client
+ran on your computer" an assertion over what ran.
 
 Host tier (tests/e2e_host.py). The spike works in a scratch dir inside one of the VM's writable
 mounts. The VM is left running and un-walled.
@@ -76,10 +76,17 @@ services:
 
 
 @pytest.fixture(scope="module")
-def shared(tmp_path_factory):
-    """A writable VM mount at the same path on both sides, and a fresh scratch dir in it."""
+def copy():
+    """The module's one example copy: the spike's scratch dir lives in it, and the flow runs in
+    it. One copy, so no fixture empties another's (example_copy refills the one path in place)."""
+    return example_copy()
+
+
+@pytest.fixture(scope="module")
+def shared(copy):
+    """A fresh scratch dir in the copy, which the VM mounts at the same path on both sides."""
     if "Running" not in lima_status():
-        ensure_vm(example_copy(tmp_path_factory.mktemp("guestcompose")))
+        ensure_vm(copy)
     export_vm_socket()  # the tests' own engine calls: ensure_vm only does this when it ran
     mounts = lima_list(VM)[0].get("config", {}).get("mounts") or []
     roots = [
@@ -87,11 +94,9 @@ def shared(tmp_path_factory):
         for m in mounts
         if m.get("writable") and m.get("mountPoint") in (None, m["location"])
     ]
-    # A mount can outlive what it shares here: pytest deletes the copies of its earlier sessions.
-    roots = [r for r in roots if r.is_dir()]
-    if not roots:
-        pytest.skip(f"{VM} has no writable mount at the same path on both sides")
-    scratch = roots[0] / f".fy-guestcompose-{int(time.time())}"
+    if not any(copy.is_relative_to(r) for r in roots):
+        pytest.skip(f"{VM} doesn't mount {copy}: `fy machine recreate` from it")
+    scratch = copy / f".fy-guestcompose-{int(time.time())}"
     scratch.mkdir()
     (scratch / "compose.yml").write_text(COMPOSE)
     yield scratch, [Path(m["location"]).expanduser() for m in mounts]
@@ -105,7 +110,6 @@ def bound(monkeypatch):
     from foldyard import config, machine, machine_backend
 
     monkeypatch.setattr(config, "in_box", lambda: False)
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
     monkeypatch.setattr(machine, "MACHINE", VM)
     monkeypatch.setattr(machine, "BACKEND", machine_backend.LimaBackend())
 
@@ -189,17 +193,17 @@ def test_ps_answers_json(shared, bound):
     assert stack._compose_ps_rows(proc.stdout) == []  # nothing of this project runs
 
 
-def test_the_guests_config_hash_is_the_hosts(shared, bound, monkeypatch):
-    from foldyard import confighash
+def test_the_guests_config_hash_is_the_box_childs(shared, bound, monkeypatch):
+    from foldyard import config, confighash
 
     scratch, _ = shared
     ctx = _ctx(scratch, A_VAR="v1")
     guest, why = confighash.desired(ctx)
     assert guest, why
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+    monkeypatch.setattr(config, "in_box", lambda: True)  # the child, as the box runs it
     here, why = confighash.desired(ctx)
     assert here == guest, why
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
+    monkeypatch.setattr(config, "in_box", lambda: False)
     changed, _ = confighash.desired(_ctx(scratch, A_VAR="v2"))
     assert changed and changed["web"] != guest["web"]
 
@@ -219,8 +223,8 @@ def host_only(shared, tmp_path_factory):
 
 
 def _host_client(ctx, args: list[str]) -> subprocess.CompletedProcess:
-    """The compose client on your computer, asked directly: `fy up` would refuse these files with
-    the path guard, and this is what the guard stands in front of."""
+    """A compose client on your computer, asked directly: foldyard never runs one (until 0.16.0 it
+    did, behind a path guard), and this is the channel one opens."""
     from foldyard import stack
 
     env = {**stack._host_passthrough(), **ctx.env, "CONTAINER_HOST": f"unix://{LIMA_SOCK}"}
@@ -370,24 +374,15 @@ def test_the_vm_user_reads_nothing_a_box_cant(shared, bound):
     assert not widened, f"the VM user reads what a box can't: {widened}"
 
 
-# ── the whole flow, with `[machine] compose = "vm"` adopted ───────────────────────────────
+# ── the whole flow, with nothing set ──────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="module")
-def flow(tmp_path_factory):
-    """``(repo, env)``: an example copy that turned it on, the VM recreated to mount it, and a
+def flow(copy, tmp_path_factory):
+    """``(repo, env)``: the module's copy with nothing set, the VM recreated from it, and a
     ``podman`` on the CLI's PATH that logs every argv before running the real one."""
     base = tmp_path_factory.mktemp("flow")
-    repo = example_copy(base)
-    toml = repo / "foldyard.toml"
-    text = toml.read_text()
-    assert text.count("\n[machine]\n") == 1
-    toml.write_text(text.replace("\n[machine]\n", '\n[machine]\ncompose = "vm"\n'))
-    subprocess.run(
-        ["git", "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qam", "vm"],
-        cwd=str(repo),
-        check=True,
-    )
+    repo = copy
     shim = base / "bin"
     shim.mkdir()
     log = base / "podman.log"
@@ -422,7 +417,7 @@ def test_flow_doctor_has_no_failing_row(flow):
     repo, env, _ = flow
     doctor = fy(["doctor"], repo, timeout=300, env_extra=env)
     assert doctor.rc == 0, doctor.out
-    assert '[machine] compose = "vm"' in doctor.out  # the experimental row: never forgotten
+    assert "IGNORED" not in doctor.out  # nothing asked compose anywhere else
 
 
 def test_flow_fy_shell_enters_the_running_container(flow):
@@ -502,8 +497,9 @@ def _with_env_file(repo: Path, env_file: str):
 
 @pytest.mark.parametrize("kind", ["absolute", "planted link"])
 def test_flow_a_host_file_never_reaches_a_container(flow, host_only, kind):
-    """The channel the path guard narrows, against the real verb. The planted link is what the
-    guard can't close (the client re-opens each path after the check): in the VM it dangles."""
+    """The channel the path guard only narrowed (until 0.16.0), against the real verb. The planted
+    link is what a guard can't close (the client re-opens each path after the check): in the VM it
+    dangles."""
     repo, env, _ = flow
     secret = host_only / "secret.env"
     secret.write_text(f"FY_HOST_ONLY={SECRET}\n")

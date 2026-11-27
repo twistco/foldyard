@@ -58,7 +58,10 @@ REGISTER: tuple[Feature, ...] = (
         unproven=(
             "no maintainer runs a project under it day to day yet, and CI can't (it needs nested "
             "virtualisation); the box's runtime strip has been seen to matter only once, on a "
-            "podman 6 guest"
+            "podman 6 guest. Compose runs in the VM under it since 0.16.0: the premise that the VM "
+            "user reads nothing a box can't was checked by hand on the x86 rig, but no test "
+            "probes it through the filtered socket yet (#236), and on Linux a box can't create "
+            "files on the checkout when your user's primary gid differs from the VM user's (#234)"
         ),
         graduates_when=(
             "a maintainer has run a real project under it day to day for a month, with nothing "
@@ -131,27 +134,6 @@ REGISTER: tuple[Feature, ...] = (
             "builds included — with nothing filed against it in that time still open"
         ),
         doc_mark="- **`attribution`** *(experimental)*",
-    ),
-    Feature(
-        key="machine.compose",
-        value="vm",
-        reader="machine_compose",
-        kinds=(MAY_CHANGE, UNPROVEN),
-        unproven=(
-            "every compose call and a project's own box image run in the VM, and its own e2e "
-            "module passes on vz, Linux and WSL2 hosts, but the other host-tier modules have run "
-            "with it on under vz only, it hasn't run under gVisor, and "
-            "no maintainer uses it day to day yet. Registry logins on your computer don't reach "
-            "the VM, and a box that writes the VM user's ~/.bashrc can read a build's gate token "
-            "before the runner starts (docs/compose-in-vm-scope.md)"
-        ),
-        graduates_when=(
-            "the host tiers pass with it on in CI on Linux and WSL2, a maintainer has run a real "
-            "project on it day to day for a month with nothing filed against it in that time "
-            "still open, and it becomes the default with the host path and composeguard deleted "
-            "(phase 4 of docs/compose-in-vm-scope.md)"
-        ),
-        doc_mark="- **`compose`** *(experimental)*",
     ),
 )
 

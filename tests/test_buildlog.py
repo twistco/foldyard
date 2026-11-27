@@ -268,3 +268,12 @@ def test_when_your_terminal_goes_away_a_live_build_carries_on_into_its_log(monke
     logged = buildlog.build_log_path("box-build").read_text()
     assert "STEP 1/2" in logged and "STEP 2/2" in logged
     assert "your terminal stopped taking the build's output" in logged
+
+
+def test_a_failed_builds_header_reaches_you_inert(capsys):
+    # The stack's header names the services that failed: the render's, the box's to choose.
+    log = buildlog.open_build_log("build-p")
+    log.failed(f"✗ build failed for {_HOSTILE} (exit 1)")
+    log.close()
+    err = capsys.readouterr().err
+    assert "build failed for" in err and "\x1b" not in err and "\x9b" not in err

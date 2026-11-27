@@ -42,6 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import config, configpin
+from .registrylogins import OPT_IN
 from .term import printable
 
 # Well-known hosts that serve git over HTTPS. The proxy refuses a git push by its URL
@@ -81,9 +82,38 @@ IGNORED_KEYS: dict[str, str] = {
     ),
 }
 
+# Config VALUES foldyard once honoured and now ignores, with what to say: the key itself is still
+# read (a `[machine] compose = "vm"` says what happens anyway, so it is never reported), only these
+# values do nothing. Kept for good, as IGNORED_KEYS is.
+IGNORED_VALUES: dict[str, str] = {
+    "machine.compose": (
+        "since 0.16.0 the compose client always runs in the VM, never on your computer: a value "
+        'other than "vm" is ignored, so delete the line'
+    ),
+    "project.compose_env.FY_REGISTRY_AUTH_FILE": (
+        "since 0.16.0 the compose client and the stack's builds run in the VM, where the auth "
+        "file you export under this name doesn't reach, so it hands no login to anything: drop "
+        "the name, and pull a private image into the VM once yourself (`fy docs stack`, Private "
+        "images)"
+    ),
+    "ports": (
+        "a [ports] key is exported to your recipes and passed into the box, so it must be a "
+        "port's name: upper case with PORT as a word in it (APP_PORT, PG_PORT), and not one "
+        "foldyard or the engine reads itself (FY_*, DOCKER_*, …). Any other (PYTHONPATH, "
+        "IN_DEVBOX, …) could change what runs on your computer, so it's ignored, never exported "
+        "or passed into the box: rename it"
+    ),
+}
+
 # Config that runs code in the YARD, not on the host. Listed by name in the report's footer so its
 # absence from the widenings above reads as a decision rather than an oversight.
-BOX_SCOPED = ("[[box.tools]]", "[box].bootstrap", "[box].warmup", "[project].compose", "[ports]")
+BOX_SCOPED = (
+    "[[box.tools]]",
+    "[box].bootstrap",
+    "[box].warmup",
+    "[project].compose",
+    "[ports] *_PORT numbers",  # what's passed; any other key is ignored and reported (`_ignored`)
+)
 
 
 # Which FILE a widening came from. The distinction is load-bearing for the question every reader
@@ -157,7 +187,7 @@ class Exposure:
     # decision, not a surprise `fy verify` row.
     vscode_origin: str | None = None
     # (names, origin) for `[project] compose_env`: host variables handed to the compose client,
-    # which runs on the operator's computer over box-writable compose files. None = not declared.
+    # which runs in the VM over box-writable compose files. None = not declared.
     compose_env: tuple[list[str], str] | None = None
     # (network, port, why) from `[machine] firewall_allow`: direct, so no proxy, log or allowlist.
     openings: list[tuple[str, int, str]] = field(default_factory=list)
@@ -489,6 +519,36 @@ def _ignored(
                 _origin(shared, local, "plugins", "github"),
             )
         )
+    machine = cfg.toml.get("machine")
+    compose = machine.get("compose") if isinstance(machine, dict) else None
+    if compose is not None and str(compose).strip().lower() != "vm":
+        found.append(
+            (
+                "[machine] compose",
+                [printable(repr(compose))],
+                IGNORED_VALUES["machine.compose"],
+                _origin(shared, local, "machine", "compose"),
+            )
+        )
+    if OPT_IN in config.compose_env():
+        found.append(
+            (
+                f"{OPT_IN} in [project] compose_env",
+                [OPT_IN],
+                IGNORED_VALUES[f"project.compose_env.{OPT_IN}"],
+                _origin(shared, local, "project", "compose_env"),
+            )
+        )
+    ports = cfg.toml.get("ports")
+    if isinstance(ports, dict) and (reserved := config.ignored_port_keys(ports)):
+        found.append(
+            (
+                "[ports]",
+                [printable(k) for k in reserved],
+                IGNORED_VALUES["ports"],
+                _origin(shared, local, "ports"),
+            )
+        )
     inject_origin = _origin(shared, local, "inject")
     for key in ("minter", "token_env"):
         rows = [e for e in config.inject_specs() if e.get(key)]
@@ -740,9 +800,7 @@ def render(exp: Exposure) -> list[str]:
         names, origin = exp.compose_env
         out.append(f"  host environment   [project] compose_env{_shared_note(origin)}")
         out.append(f"    {', '.join(names)}")
-        out.append(
-            "    Passed to the compose client, which runs on your computer: a `${NAME}` in any"
-        )
+        out.append("    Passed to the compose client, which runs in the VM: a `${NAME}` in any")
         out.append(
             "    compose file hands the value to a container — readable from the box, which can "
             "edit them."

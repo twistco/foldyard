@@ -790,3 +790,17 @@ def test_the_tier_runs_with_cis_settings():
     assert "FY_BASE_VM_NAME" in RUN_TIER
     assert "FY_E2E_MODULES" in RUN_TIER
     assert "machine base bake" in RUN_TIER
+
+
+def test_the_tier_creates_its_vm_from_the_host_tiers_one_checkout():
+    # As CI's jobs do (test_e2e_workflow.py): the compose client runs in the VM, which mounts only
+    # the checkout it was created from, and every module's copy is made at this one path. A VM made
+    # from anywhere else refuses every compose call of a module that doesn't recreate it.
+    from test_e2e import HOST_TIER
+
+    created = RUN_TIER[
+        RUN_TIER.index('say "creating the machine"') : RUN_TIER.index("export CONTAINER_HOST")
+    ]
+    checkout = f'"$HOME/{HOST_TIER}/example"'
+    assert f'cp -r "$src/example" {checkout}' in created
+    assert f"cd {checkout}" in created and "machine ensure" in created

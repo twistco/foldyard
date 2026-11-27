@@ -76,6 +76,16 @@ def test_each_shard_hands_its_module_list_to_pytest_and_the_substrate(job):
 
 
 @pytest.mark.parametrize("job", HOST_JOBS)
+def test_each_job_creates_its_vm_from_the_host_tiers_one_checkout(job):
+    # The compose client runs in the VM, which mounts only the checkout it was created from: a
+    # first VM made from anywhere else would leave every module that doesn't recreate it reading a
+    # checkout the VM can't see.
+    [create] = [s["run"] for s in _jobs()[job]["steps"] if "machine ensure" in s.get("run", "")]
+    assert f'dst="$HOME/{e2e_host.HOST_TIER}/example"' in create
+    assert str(e2e_host.CHECKOUT).endswith(f"/{e2e_host.HOST_TIER}/example")
+
+
+@pytest.mark.parametrize("job", HOST_JOBS)
 def test_each_shard_sizes_its_vm_at_two_cpus(job):
     # Measured, not a default: 4 vCPUs made the WSL2 tier slower and flakier, and Linux no
     # faster (docs/dev/ci.md). Set explicitly so the create step's assert proves the env

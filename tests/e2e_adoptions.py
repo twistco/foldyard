@@ -11,6 +11,10 @@ So `test_e2e._adopt_on_host` records the folder each copy sits in, and conftest'
 worktrees'. A supervisor still running from the copy then logs that nothing is adopted and runs
 nothing; the next module's `fy up` replaces it.
 
+The host tier makes every copy at one path (tests/e2e_host.py), so what your computer keys by that
+path (adoptions, the worktree registry) is cleared before each new copy as well
+(:func:`forget_checkout_state`).
+
 This reads the real root itself: conftest's `isolated_config_pin` points `configpin.pin_dir` at a
 per-test folder in this process, live modules included.
 """
@@ -75,3 +79,36 @@ def forget_recorded(root: Path | None = None) -> list[Path]:
             _drop(pin)
             dropped.append(pin)
     return dropped
+
+
+def forget_checkout_state(checkout: Path, root: Path | None = None) -> list[Path]:
+    """Everything your computer keys by ``checkout``'s path, gone: its adoptions and its
+    worktrees' (under ``root``, the real adoption root by default), and its worktree registry with
+    the offsets and pooled ports recorded beside it. For a copy made where an earlier one was (the
+    host tier's one checkout, tests/e2e_host.py): that state outlives the files, so a later module's
+    `fy worktree add feat` found an earlier module's `feat` already registered. Nothing keyed by
+    another path is touched. Returns what went."""
+    from foldyard import worktree_registry
+
+    worktrees = Path(f"{checkout}-worktrees").resolve()
+    mine = checkout.resolve()
+    gone: list[Path] = []
+    try:
+        pins = sorted((root or configpin._pin_root()).iterdir())
+    except OSError:
+        pins = []
+    for pin in pins:
+        found = _checkout(pin)
+        if found is not None and (found == mine or found.is_relative_to(worktrees)):
+            _drop(pin)
+            gone.append(pin)
+    store = worktree_registry.store_file(checkout)
+    try:
+        beside = sorted(store.parent.iterdir())
+    except OSError:
+        beside = []
+    for path in beside:  # the registry, and its .offsets / .ports / lock files: one checkout's
+        if path.name == store.name or path.name.startswith(f"{store.stem}."):
+            path.unlink(missing_ok=True)
+            gone.append(path)
+    return gone

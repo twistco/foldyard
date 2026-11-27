@@ -43,7 +43,7 @@ project = "acme-staging"
 
 
 @pytest.fixture
-def fake_repo(tmp_path, monkeypatch):
+def fake_repo(tmp_path, monkeypatch, guest_here):
     main = tmp_path / "repo"
     (main / "dev-stack").mkdir(parents=True)
     (main / "foldyard.toml").write_text(_FAKE_TOML)
@@ -157,7 +157,6 @@ def test_a_compose_provider_arriving_in_the_mode_env_is_refused_too(fake_repo, m
 def test_a_compose_provider_is_refused_with_the_client_in_the_vm_too(fake_repo, monkeypatch):
     # The guest never reads this name (it runs foldyard's own), so this refusal is the only one.
     monkeypatch.delenv("IN_DEVBOX", raising=False)
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
     monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/usr/libexec/docker/docker-compose")
     with pytest.raises(stack.config.EngineRefused, match="PODMAN_COMPOSE_PROVIDER"):
         stack.resolve(no_machine=True)
@@ -177,6 +176,33 @@ def test_the_box_keeps_its_docker_config_for_compose(fake_repo, monkeypatch):
     monkeypatch.setenv("IN_DEVBOX", "1")
     monkeypatch.setenv("DOCKER_CONFIG", "/home/box/.docker-fy")
     assert stack._host_passthrough()["DOCKER_CONFIG"] == "/home/box/.docker-fy"
+
+
+def test_a_port_named_in_devbox_is_never_exported(fake_repo, capsys):
+    # A recipe runs `eval "$(fy shellenv)"`, then perhaps `fy up`: an exported IN_DEVBOX=1 would put
+    # that `fy up` on the in-box path, on your computer.
+    toml = fake_repo / "foldyard.toml"
+    toml.write_text(
+        toml.read_text().replace("[ports]\n", "[ports]\nIN_DEVBOX = 1\nDOCKER_HOST = 2\n")
+    )
+    config.clear_caches()
+    assert stack.shellenv() == 0
+    out = capsys.readouterr().out
+    assert "IN_DEVBOX" not in out and "DOCKER_HOST=2" not in out
+    assert "APP_PORT=3000" in out
+    assert "IN_DEVBOX" not in stack.resolve().env
+
+
+def test_a_port_never_overrides_foldyards_own_vars(fake_repo, capsys, monkeypatch):
+    # Belt and braces behind the [ports] allow-list: whatever the ports hold, foldyard's own
+    # resolved vars win, in the shell `fy shellenv` sets up and in the compose env.
+    monkeypatch.setattr(
+        stack, "_published_ports", lambda wt: {"MAIN_REPO": "/elsewhere", "APP_PORT": "3000"}
+    )
+    assert stack.shellenv() == 0
+    exports = [ln for ln in capsys.readouterr().out.splitlines() if "MAIN_REPO=" in ln]
+    assert exports[-1] == f"export MAIN_REPO={fake_repo}"  # the shell keeps the last one
+    assert stack.resolve().env["MAIN_REPO"] == str(fake_repo)
 
 
 def test_shellenv_preserves_explicit_compose_provider(fake_repo, capsys, monkeypatch):
@@ -538,14 +564,6 @@ def capture_run(monkeypatch):
     return calls
 
 
-@pytest.fixture
-def paths_unguarded(monkeypatch):
-    """For golden tests whose fake render uses stand-in paths (``/repo/data``) outside the fixture
-    checkout: they pin command SHAPES, and the path guard would (rightly) refuse the stand-ins.
-    The guard itself is tested in test_composeguard.py and its wiring below."""
-    monkeypatch.setattr(stack, "_escapes", lambda *a, **k: [])
-
-
 def _composes(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if "compose" in c]
 
@@ -891,7 +909,9 @@ def test_logs_follows_with_service(fake_repo, capture_run):
     assert _composes(capture_run)[-1][-5:] == ["logs", "-f", "--tail", "50", "postgres"]
 
 
-def test_shell_execs_app_bash(fake_repo, capture_run):
+def test_shell_execs_app_bash_in_the_box(fake_repo, capture_run, monkeypatch):
+    # On your computer `fy shell` is the engine's own exec (test_guestcompose.py).
+    monkeypatch.setattr(config, "in_box", lambda: True)
     stack.shell()
     assert _composes(capture_run)[-1][-3:] == ["exec", "platform-frontend", "bash"]
 
@@ -926,7 +946,7 @@ def _run_returning(monkeypatch, config_yaml: str):
     return calls
 
 
-def test_up_podman_builds_additional_contexts_natively(fake_repo, monkeypatch, paths_unguarded):
+def test_up_podman_builds_additional_contexts_natively(fake_repo, monkeypatch):
     # The core fix: on the podman engine a service with compose `additional_contexts` is built with
     # native `podman build --build-context` (buildah) — NOT `compose --build`, which podman forces
     # onto the classic builder that rejects additional contexts. Tag = `<project>_<service>` so the
@@ -964,7 +984,7 @@ def test_up_podman_builds_additional_contexts_natively(fake_repo, monkeypatch, p
     assert up[-1] == "--no-build"
 
 
-def test_podman_builds_services_concurrently(fake_repo, monkeypatch, paths_unguarded):
+def test_podman_builds_services_concurrently(fake_repo, monkeypatch):
     import threading
     import types
 
@@ -992,9 +1012,7 @@ def test_podman_builds_services_concurrently(fake_repo, monkeypatch, paths_ungua
     assert set(built) == {"/repo/a", "/repo/b"}
 
 
-def test_podman_build_deduplicates_identical_specs_and_tags_each_service(
-    fake_repo, monkeypatch, paths_unguarded
-):
+def test_podman_build_deduplicates_identical_specs_and_tags_each_service(fake_repo, monkeypatch):
     cfg = json.dumps(
         {
             "services": {
@@ -1013,9 +1031,7 @@ def test_podman_build_deduplicates_identical_specs_and_tags_each_service(
     assert tags == [["podman", "tag", "tangible-podman_svc-a", "tangible-podman_svc-b"]]
 
 
-def test_podman_build_splits_identical_specs_with_distinct_platforms(
-    fake_repo, monkeypatch, paths_unguarded
-):
+def test_podman_build_splits_identical_specs_with_distinct_platforms(fake_repo, monkeypatch):
     # Two services share one normalized build mapping but declare different service-level
     # `platform` targets (no build.platforms): they must NOT share a build — each gets its own
     # `podman build --platform <target>`, and no alias tag crosses architectures.
@@ -1046,9 +1062,7 @@ def test_podman_build_splits_identical_specs_with_distinct_platforms(
     }
 
 
-def test_podman_build_redacts_build_arg_values_in_echo_and_log(
-    fake_repo, monkeypatch, capsys, paths_unguarded
-):
+def test_podman_build_redacts_build_arg_values_in_echo_and_log(fake_repo, monkeypatch, capsys):
     # Resolved build args can carry secrets. The argv handed to the engine keeps the real value;
     # the echoed `+ podman build …` line and the persistent build log both show `K=<redacted>`.
     cfg = json.dumps(
@@ -1076,7 +1090,29 @@ def test_podman_build_redacts_build_arg_values_in_echo_and_log(
         assert "PLAIN" in surface  # a valueless (env-passthrough) arg has nothing to redact
 
 
-def test_walled_stack_build_is_a_trusted_build(fake_repo, monkeypatch, paths_unguarded):
+def test_a_build_line_the_render_shaped_reaches_you_inert(fake_repo, monkeypatch, capsys):
+    # The render is the guest's answer over the box's compose files: its contexts, targets, args and
+    # image names are the box's to choose, and the echoed `+ podman build …` line carries them.
+    shaped = "x\x1b]52;c;ZXZpbA==\x07\x1b[2J"
+    cfg = json.dumps(
+        {
+            "services": {
+                "app": {"build": {"context": f"/repo/{shaped}", "target": shaped}},
+                "worker": {
+                    "build": {"context": f"/repo/{shaped}", "target": shaped},
+                    "image": f"w{shaped}",
+                },
+            }
+        }
+    )
+    _run_returning(monkeypatch, cfg)
+    assert stack.build([]) == 0
+    err = capsys.readouterr().err
+    assert "podman build" in err and "podman tag" in err
+    assert "\x1b" not in err
+
+
+def test_walled_stack_build_is_a_trusted_build(fake_repo, monkeypatch):
     # Same concession as `fy box build` (ADR-0029's amendment): a stack image build has no proxy
     # CA either, so it reaches the proxy with the build marker — tunnelled, still walled. Before
     # the service's own args, so a service that sets a proxy arg wins.
@@ -1097,7 +1133,7 @@ def test_walled_stack_build_is_a_trusted_build(fake_repo, monkeypatch, paths_ung
     assert args[-1] == "HTTPS_PROXY=mine"
 
 
-def test_unwalled_stack_build_gets_no_proxy_args(fake_repo, monkeypatch, paths_unguarded):
+def test_unwalled_stack_build_gets_no_proxy_args(fake_repo, monkeypatch):
     monkeypatch.setattr(config, "machine_wall", lambda: False)
     calls = _run_returning(
         monkeypatch, json.dumps({"services": {"app": {"build": {"context": "/a"}}}})
@@ -1107,7 +1143,7 @@ def test_unwalled_stack_build_gets_no_proxy_args(fake_repo, monkeypatch, paths_u
     assert "--build-arg" not in build
 
 
-def test_stack_builds_run_under_the_build_gate(fake_repo, monkeypatch, paths_unguarded):
+def test_stack_builds_run_under_the_build_gate(fake_repo, monkeypatch):
     # Both entry points — `fy build` and `fy up` — hand their build to the gate, which reports
     # and offers what the wall refused, then retries.
     from foldyard import buildgate
@@ -1124,9 +1160,7 @@ def test_stack_builds_run_under_the_build_gate(fake_repo, monkeypatch, paths_ung
     assert gated == ["stack build"]
 
 
-def test_build_podman_uses_native_builder_for_requested_profile_service(
-    fake_repo, monkeypatch, paths_unguarded
-):
+def test_build_podman_uses_native_builder_for_requested_profile_service(fake_repo, monkeypatch):
     cfg = json.dumps(
         {
             "services": {
@@ -1177,9 +1211,7 @@ def test_build_rejects_unknown_podman_service(fake_repo, monkeypatch, capsys):
     assert "unknown compose service(s): missing" in capsys.readouterr().err
 
 
-def test_podman_build_success_keeps_build_output_off_the_terminal(
-    fake_repo, monkeypatch, capsys, paths_unguarded
-):
+def test_podman_build_success_keeps_build_output_off_the_terminal(fake_repo, monkeypatch, capsys):
     # A warm `fy up` used to scroll hundreds of layer/apt lines past the summaries that matter:
     # build output now streams to <state_dir>/build-<project>.log; the terminal keeps only the
     # echoed `+ podman build …` command and a one-time pointer at the log.
@@ -1202,15 +1234,14 @@ def test_podman_build_success_keeps_build_output_off_the_terminal(
     captured = capsys.readouterr()
     assert "hundreds of layer lines" not in captured.out + captured.err
     assert "still building" not in captured.err  # a quick build finishes before any heartbeat
-    assert "+ podman build" in captured.err  # the command echo survives (thin-and-echoing rule)
+    # The command echo survives (thin-and-echoing rule), saying where it runs.
+    assert "+ (in the VM) podman build" in captured.err
     log_path = config.state_dir() / "build-tangible-podman.log"
     assert f"build output → {log_path}" in captured.err
     assert "hundreds of layer lines" in log_path.read_text()
 
 
-def test_podman_build_reports_progress_while_it_runs(
-    fake_repo, monkeypatch, capsys, paths_unguarded
-):
+def test_podman_build_reports_progress_while_it_runs(fake_repo, monkeypatch, capsys):
     # The build's output goes to the log, so a long build would be silent on the terminal: every
     # heartbeat with nothing finished names what is still building and whether the log grew.
     import re
@@ -1258,9 +1289,7 @@ def test_podman_build_reports_progress_while_it_runs(
     assert any("(log +" in b for b in beats)  # an earlier beat saw the slow build's output
 
 
-def test_podman_build_failure_tails_the_log_and_names_it(
-    fake_repo, monkeypatch, capsys, paths_unguarded
-):
+def test_podman_build_failure_tails_the_log_and_names_it(fake_repo, monkeypatch, capsys):
     import types
 
     cfg = json.dumps({"services": {"queue-worker": {"build": {"context": "/repo/data"}}}})
@@ -1281,9 +1310,7 @@ def test_podman_build_failure_tails_the_log_and_names_it(
     assert f"full log: cat {config.state_dir() / 'build-tangible-podman.log'}" in err
 
 
-def test_a_failed_builds_tail_reaches_your_terminal_inert(
-    fake_repo, monkeypatch, capsys, paths_unguarded
-):
+def test_a_failed_builds_tail_reaches_your_terminal_inert(fake_repo, monkeypatch, capsys):
     # The Dockerfile is the box's, so is everything the build prints: a clipboard write, a line
     # erase, a spoofed ✓, bytes that aren't UTF-8.
     import types
@@ -1882,7 +1909,7 @@ def _build_then_up_runs(
 _ONE_BUILD_SERVICE = json.dumps({"services": {"app": {"build": {"context": "/repo/app"}}}})
 
 
-def test_up_removes_the_image_its_build_superseded(fake_repo, monkeypatch, paths_unguarded):
+def test_up_removes_the_image_its_build_superseded(fake_repo, monkeypatch):
     # A rebuild retags `<project>_app`; the image it replaced is untagged, childless and OURS —
     # provably not another session's build in flight, which is what the age guard on the
     # dangling sweep exists for. So it needs no guard: remove it once `up` has moved the
@@ -1900,7 +1927,7 @@ def test_up_removes_the_image_its_build_superseded(fake_repo, monkeypatch, paths
     assert calls.index(rmi) > up_idx  # after the containers were recreated onto the new image
 
 
-def test_up_keeps_an_image_the_build_left_unchanged(fake_repo, monkeypatch, paths_unguarded):
+def test_up_keeps_an_image_the_build_left_unchanged(fake_repo, monkeypatch):
     # A fully cached build yields the same id — nothing was superseded.
     calls = _build_then_up_runs(
         monkeypatch, _ONE_BUILD_SERVICE, {"tangible-podman_app": ["sha256:same"]}
@@ -1919,7 +1946,7 @@ _TWO_SERVICES_ONE_SPEC = json.dumps(
 )
 
 
-def test_up_keeps_a_superseded_id_another_tag_still_names(fake_repo, monkeypatch, paths_unguarded):
+def test_up_keeps_a_superseded_id_another_tag_still_names(fake_repo, monkeypatch):
     # `app` and `worker` share one build spec, so one id carries both tags. An `up` without the
     # `jobs` profile rebuilds only `app`: the old id is superseded FOR THAT TAG but is still
     # `<project>_worker`'s image — and with no worker container holding it, a bare `rmi <id>`
@@ -1946,9 +1973,7 @@ def test_up_keeps_a_superseded_id_another_tag_still_names(fake_repo, monkeypatch
     assert [c for c in calls if c[:2] == ["podman", "rmi"]] == [["podman", "rmi", "sha256:shared"]]
 
 
-def test_up_keeps_a_superseded_id_whose_tags_are_unreadable(
-    fake_repo, monkeypatch, paths_unguarded
-):
+def test_up_keeps_a_superseded_id_whose_tags_are_unreadable(fake_repo, monkeypatch):
     # Fail closed: tags that can't be read count as "still referenced".
     import types
 
@@ -2306,7 +2331,7 @@ def test_reconcile_outcome_lands_in_the_host_log(fake_repo, capture_stream, monk
 
 
 def _compose_that_opens_its_files(calls: list):
-    """A stand-in for the host compose client: it opens each ``-f`` file the way podman-compose
+    """A stand-in for the compose client: it opens each ``-f`` file the way podman-compose
     does — a blocking ``open`` — unless it was given a timeout, where a FIFO makes it "run out"
     (``TimeoutExpired``, what ``subprocess.run`` raises when it kills a client stuck there)."""
     import stat
@@ -2338,22 +2363,10 @@ def fifo_compose(fake_repo, capture_stream, monkeypatch, special):
     return calls
 
 
-def test_a_fifo_compose_file_is_refused_before_the_client_runs(fifo_compose, special):
-    lines: list[str] = []
-    ok = special.promptly(
-        lambda: stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append)
-    )
-    assert ok is False  # never reported as reconciled
-    assert fifo_compose == []  # the client never ran on it
-    assert any("compose.podman.yml" in ln and "isn't a regular file" in ln for ln in lines), lines
-
-
-def test_a_compose_file_swapped_after_the_check_runs_out_the_deadline(
-    fifo_compose, special, monkeypatch
-):
-    # The check can't close the race (the box swaps the file in after it): every compose call the
-    # reconcile makes carries the deadline, and running out is a skipped reconcile, not a hang.
-    monkeypatch.setattr(stack, "_not_regular", lambda ctx: [])
+def test_a_compose_file_the_box_made_a_fifo_runs_out_the_deadline(fifo_compose, special):
+    # The box can make a compose file a FIFO, and the client in the guest would wait on it for
+    # ever: every compose call the reconcile makes carries the deadline, and running out is a
+    # skipped reconcile, not a hang.
     lines: list[str] = []
     ok = special.promptly(
         lambda: stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append)
@@ -2362,39 +2375,6 @@ def test_a_compose_file_swapped_after_the_check_runs_out_the_deadline(
     assert fifo_compose and all(timeout is not None for _cmd, timeout in fifo_compose)
     assert any("skipped" in ln and "didn't answer" in ln for ln in lines), lines
     assert "skipped" in _host_log_lines()[-1]
-
-
-@pytest.mark.parametrize("kind", ["fifo", "devnull"])
-def test_a_project_env_that_isnt_a_regular_file_is_compose_s_to_skip(
-    fake_repo, capture_run, monkeypatch, special, kind
-):
-    # `.env -> /dev/null`, or the FIFO a secrets tool serves it as: the compose client skips a
-    # `.env` that isn't a regular file itself, so refusing compose over one only broke it.
-    monkeypatch.setattr(config, "in_box", lambda: False)
-    if kind == "fifo":
-        special(fake_repo / ".env", "fifo")
-    else:
-        (fake_repo / ".env").symlink_to(os.devnull)
-    ctx = stack.resolve(no_machine=True)
-    assert stack._not_regular(ctx) == []
-    assert special.promptly(lambda: stack._compose(ctx, ["ps"])) == 0
-    assert _composes(capture_run)
-
-
-@pytest.mark.parametrize("verb", [["up", "-d"], ["ps"]])
-def test_fy_up_says_a_compose_file_isnt_a_regular_file(
-    fake_repo, capture_run, monkeypatch, special, capsys, verb
-):
-    # The reason, not "the compose config didn't render" under a heading about paths outside the
-    # checkout: the client never runs.
-    monkeypatch.setattr(config, "in_box", lambda: False)
-    special(fake_repo / "compose.podman.yml", "fifo")
-    ctx = stack.resolve(no_machine=True)
-    assert special.promptly(lambda: stack._compose(ctx, verb)) == 1
-    err = capsys.readouterr().err
-    assert "compose.podman.yml isn't a regular file" in err, err
-    assert "outside the checkout" not in err and "didn't render" not in err
-    assert _composes(capture_run) == []
 
 
 def test_a_reconcile_a_refusal_stopped_is_not_reported_as_done(
@@ -2872,7 +2852,7 @@ def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
     ctx = stack.Context(
         main=fake_repo,
         env={"COMPOSE_PROFILES": "metadata"},
-        compose=["podman", "compose", "-f", str(base), "-f", "compose.overlay.yml"],
+        compose=["podman", "compose", "-f", str(base), "-f", str(overlay)],
         app="app",
         project="p",
         worktree="",
@@ -2951,6 +2931,38 @@ def test_up_unions_running_extra_profiles(fake_repo, capture_run, monkeypatch):
     up_calls = [c for c in _composes(capture_run) if "up" in c]
     assert up_calls and "--profile" in up_calls[0]
     assert up_calls[0][up_calls[0].index("--profile") + 1] == "data"
+
+
+_SHAPED_PROFILE = "data\x1b]52;c;ZXZpbA==\x07\x1b[2J"
+
+
+def test_a_running_profiles_name_reaches_you_inert_from_up(
+    fake_repo, capture_run, monkeypatch, capsys
+):
+    # Profile names come from the compose files, read in the guest: the box's to choose.
+    monkeypatch.setattr(
+        stack, "_running_extra_profiles", lambda ctx, deadline=None: [_SHAPED_PROFILE]
+    )
+    assert stack.up() == 0
+    out, err = capsys.readouterr()
+    assert "including running profile(s): data" in out and "\x1b" not in out
+    assert "--profile 'data" in err and "\x1b" not in err  # the echoed compose command too
+
+
+def test_a_running_profiles_name_reaches_you_inert_from_a_reconcile(
+    fake_repo, capture_stream, monkeypatch
+):
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
+    monkeypatch.setattr(
+        stack, "_running_extra_profiles", lambda ctx, deadline=None: [_SHAPED_PROFILE]
+    )
+    lines: list[str] = []
+    assert stack.reconcile_posture(_sig(""), _sig("metadata"), sink=lines.append) is True
+    [said] = [ln for ln in lines if "keeping running" in ln]
+    assert "keeping running: data" in said
+    assert any("--profile 'data" in ln for ln in lines)  # the echoed compose command
+    assert not [ln for ln in lines if "\x1b" in ln], lines
 
 
 def test_compose_overlays_stacks_plugins_then_env_extra_and_filters_missing(monkeypatch, tmp_path):
@@ -3078,84 +3090,6 @@ def test_the_reconcile_reads_the_engine_up_built_on(fake_repo, monkeypatch):
     monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/fy-preset.sock")
     env = stack.resolve(no_machine=True).env
     assert env["DOCKER_HOST"] == env["CONTAINER_HOST"] == "unix:///nonexistent/fy-preset.sock"
-
-
-# ── compose paths outside the checkout are refused before the client acts ───────────────────
-# `env_file:`, build contexts, include/extends files… are read by the HOST-side compose client and
-# end up in containers/images the box can read. composeguard decides; these pin that every path
-# that creates containers or builds asks it first, and that nothing else does. Mutation that must
-# turn these red: dropping the `_escapes` check from `_compose`, `_compose_captured`,
-# `_podman_build` or `recreate_services`.
-
-_ESCAPING = "services:\n  api:\n    image: busybox\n    env_file: ../outside/creds.env\n"
-
-
-def _plant(fake_repo: Path, text: str = _ESCAPING) -> None:
-    (fake_repo / "compose.podman.yml").write_text(text)
-
-
-def _compose_verbs(calls: list[list[str]]) -> list[str]:
-    return [c[c.index("compose") + 1 :][-1] for c in _composes(calls) if "config" not in c]
-
-
-def test_up_refuses_a_compose_file_naming_a_host_path(fake_repo, capture_run, capsys):
-    _plant(fake_repo)
-    assert stack.up() != 0
-    assert not [c for c in capture_run if "up" in c and "compose" in c]  # nothing started
-    assert not [c for c in capture_run if len(c) > 1 and c[1] == "build"]  # nothing built
-    err = capsys.readouterr().err
-    assert "✗ refused" in err and "env_file: ../outside/creds.env" in err
-
-
-def test_the_render_is_checked_not_only_the_files(fake_repo, monkeypatch, capsys):
-    # `env_file: ${SOMEWHERE}/creds.env` reads fine as text; compose's own interpolation is what
-    # makes it a host path — so the RENDERED document is checked too.
-    calls = _run_returning(
-        monkeypatch, json.dumps({"services": {"api": {"env_file": ["/Users/x/.aws/credentials"]}}})
-    )
-    assert stack.up() != 0
-    assert not [c for c in calls if "up" in c and "compose" in c]
-    assert "/Users/x/.aws/credentials" in capsys.readouterr().err
-
-
-def test_the_supervisors_posture_reconcile_is_refused_too(fake_repo, capture_run, monkeypatch):
-    _plant(fake_repo)
-    streamed: list[list[str]] = []
-    monkeypatch.setattr(devmode, "run_stream", lambda cmd, emit, **kw: streamed.append(cmd) or 0)
-    emitted: list[str] = []
-    rc = stack._compose_captured(stack.resolve(), ["up", "-d"], emitted.append)
-    assert rc != 0 and not streamed
-    assert any("✗ refused" in line for line in emitted)
-
-
-def test_a_capability_heal_is_refused_too(fake_repo, capture_run, running_services):
-    _plant(fake_repo)
-    ok, summary = stack.recreate_services(["queue-worker"])
-    assert ok is False and "✗ refused" in summary
-    assert not [c for c in capture_run if "--force-recreate" in c]
-
-
-def test_a_podman_build_is_refused_before_it_packs_a_host_context(fake_repo, monkeypatch):
-    calls = _run_returning(
-        monkeypatch, json.dumps({"services": {"api": {"build": {"context": "/Users/x"}}}})
-    )
-    assert stack.build([]) != 0
-    assert not [c for c in calls if len(c) > 1 and c[1] == "build"]
-
-
-def test_verbs_that_create_nothing_are_not_gated(fake_repo, capture_run):
-    # `ps`/`down`/`logs` hand nothing to a container — refusing them would only make a bad
-    # compose file impossible to tear down.
-    _plant(fake_repo)
-    assert stack.ps() == 0
-    assert _compose_verbs(capture_run)[-1] == "ps"
-
-
-def test_in_the_box_the_guard_stands_down(fake_repo, monkeypatch):
-    # In the box the client runs in the VM, with nothing of the operator's to read.
-    _plant(fake_repo)
-    monkeypatch.setattr(config, "in_box", lambda: True)
-    assert stack._escapes(stack.resolve()) == []
 
 
 # ── stranded dependents (podman-compose 1.6.0's up/down disagreement) ──────────────────────
@@ -3378,9 +3312,9 @@ def test_up_removes_nothing_when_the_hashes_are_unavailable(fake_repo, monkeypat
     assert not any(c[:2] == ["podman", "rm"] for c in calls)
 
 
-def test_up_renders_the_config_once_for_the_sweep_and_the_guard(fake_repo, capture_run):
-    # The sweep reuses the path guard's render: one for the build, one for sweep + guard —
-    # no extra host-side parse of box-writable compose files per `fy up`.
+def test_up_renders_the_config_once_for_the_sweep_and_the_watch(fake_repo, capture_run):
+    # The sweep and `up`'s dependency watch share one render: one for the build, one for both —
+    # no extra round trip to the guest per `fy up`.
     assert stack.up() == 0
     renders = [c for c in capture_run if "compose" in c and c[-1] == "config"]
     assert len(renders) == 2
@@ -3568,12 +3502,13 @@ class _HangingProc:
         return -15
 
 
-def _stuck_watch(monkeypatch, stopped: list[_HangingProc]) -> None:
-    """Every `up` gets a watch that trips on its first poll, and stopping a client ends it."""
+def _stuck_watch(monkeypatch, stopped: list[_HangingProc], name: str = "p-sim") -> None:
+    """Every `up` gets a watch that trips on its first poll, and stopping a client ends it.
+    ``name``: the stuck dependency's container name, as the render gave it."""
     clock = _Clock()
 
     def watch_for(ctx, args, rendered):
-        watch = stack._DependencyWatch(ctx, {"sim": "p-sim"}, grace=0.0, interval=0.01, clock=clock)
+        watch = stack._DependencyWatch(ctx, {"sim": name}, grace=0.0, interval=0.01, clock=clock)
         answers = iter([[]])  # the baseline, before compose has created anything
         monkeypatch.setattr(watch, "probe", lambda: next(answers, [("a1", "app", 0, 0)]))
         return watch
@@ -3605,6 +3540,26 @@ def test_a_hung_host_up_is_stopped_and_explained(fake_repo, monkeypatch, capsys)
     err = capsys.readouterr().err
     assert "p-sim" in err
     assert "fy down && fy up" in err
+
+
+def test_a_hung_dependencys_name_reaches_you_inert(fake_repo, monkeypatch, capsys):
+    # The container name is the render's: a compose file's `container_name:`, the box's to choose.
+    from foldyard import guestcompose
+
+    proc = _HangingProc()
+    _stuck_watch(monkeypatch, [], name="p-sim\x1b]52;c;ZXZpbA==\x07\x1b[2J")
+
+    def stream(ctx, args, on_spawn=None, **_):
+        assert on_spawn is not None
+        on_spawn(proc)
+        return proc.wait()
+
+    monkeypatch.setattr(guestcompose, "stream", stream)
+    assert stack._compose(_fake_ctx(fake_repo, {}), ["up", "-d"], rendered={}) == (
+        stack.DEPENDENCY_HANG
+    )
+    err = capsys.readouterr().err
+    assert "waiting for p-sim" in err and "\x1b" not in err
 
 
 # ── what compose says on your computer reaches your terminal inert ──────────────────────
@@ -3642,10 +3597,10 @@ def test_a_watched_compose_verb_is_relayed_through_the_cleaner(fake_repo, monkey
 
 
 @pytest.mark.parametrize("verb", ["exec", "run", "attach"])
-def test_a_compose_verb_that_wants_your_terminal_keeps_it(fake_repo, monkeypatch, verb):
+def test_a_compose_verb_that_wants_your_terminal_keeps_it_in_the_box(fake_repo, monkeypatch, verb):
     from foldyard import guestcompose
 
-    monkeypatch.setattr(stack, "_escapes", lambda *a, **k: [])  # `run` creates: not this test's
+    monkeypatch.setattr(config, "in_box", lambda: True)  # on your computer none is ever sent
     monkeypatch.setattr(guestcompose, "stream_here", _ran_with_your_terminal)
     ran: list[tuple] = []
     monkeypatch.setattr(
@@ -3836,7 +3791,7 @@ _ARGV_CONTRACT: dict[str, _Sends] = {
         lambda _mp: stack.up(),
         [],
         [
-            ("config", {"services": False}),  # the build graph's and the path guard's renders
+            ("config", {"services": False}),  # the build graph's and the sweep's renders
             ("up", {"detach": True, "no_build": True}),
             ("ps", {"quiet": False}),
         ],
@@ -3846,11 +3801,6 @@ _ARGV_CONTRACT: dict[str, _Sends] = {
         lambda _mp: stack.logs(["app"]),
         ["app"],
         [("logs", {"follow": True, "tail": "50", "names": False, "services": ["app"]})],
-    ),
-    "shell": _Sends(
-        lambda _mp: stack.shell(),
-        [],
-        [("exec", {"service": "platform-frontend", "cnt_command": ["bash"]})],
     ),
     "down": _Sends(
         lambda _mp: stack.down(),

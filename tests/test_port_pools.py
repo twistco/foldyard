@@ -78,7 +78,7 @@ def test_two_pools_that_overlap_are_a_problem(fresh_config, tmp_path):
     _toml(
         fresh_config,
         tmp_path,
-        'A = { base = 1000, worktrees = "4001-4005" }\nB = { base = 2000, worktrees = "4005-4009" }',
+        'A_PORT = { base = 1000, worktrees = "4001-4005" }\nB_PORT = { base = 2000, worktrees = "4005-4009" }',
     )
     assert config.port_pools() == {}
     assert config.port_pool_problems()

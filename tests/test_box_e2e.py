@@ -5,11 +5,10 @@ list guards — in-box `fy ps` reaches the engine via the socket foldyard mounts
 work), and in-box `fy verify` is ALL PASS, including the dev-box posture checks that only run
 inside (no SSH key material, `git push` refused) — then `fy box down`.
 
-Host tier (tests/e2e_host.py). The box bind-mounts the checkout at its host path, and a VM's mount
-set is init-only, so the module RECREATES the VM from its own example copy first (`fy machine
-recreate --yes`) — the one module that needs the VM to mount its copy; the others' stacks ship
-their build context over the socket. The example's origin is this PUBLIC repo, on purpose: the
-push probe used to be `ls-remote`, which a public origin answers with no credential (so this
+Host tier (tests/e2e_host.py). The box bind-mounts the checkout at its host path, which every
+module's copy shares (the host tier's one checkout, which the compose client in the VM reads too),
+and the module RECREATES the VM from it first (`fy machine recreate --yes`) for a fresh one. The
+example's origin is this PUBLIC repo, on purpose: the push probe used to be `ls-remote`, which a public origin answers with no credential (so this
 fixture had to name a nonexistent private one — docs/archive/verify-false-pass.md, 2026-09-13).
 It is a dry-run push now, refused without write access on any repo; a public origin is the case
 that proves it. Lima 2.2.0, Fedora 44 guest.
@@ -53,8 +52,8 @@ MADE = "made"
 
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("box"))
+def repo():
+    r = example_copy()
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/twistco/foldyard.git"],
         cwd=str(r),
@@ -67,7 +66,7 @@ def repo(tmp_path_factory):
     )
     fy_ok(["worktree", "add", OTHER, "--yes"], r, timeout=300)  # registers it (the host's list)
     _adopt_on_host(other)  # so the teardown's `worktree remove` can resolve its stack
-    fy_ok(["machine", "recreate", "--yes"], r, timeout=900)  # so the VM mounts THIS copy
+    fy_ok(["machine", "recreate", "--yes"], r, timeout=900)  # a fresh VM for the box
     export_vm_socket()
     fy_ok(["up"], r)
     fy_ok(["box", "up"], r, timeout=1500)

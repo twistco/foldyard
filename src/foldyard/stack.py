@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import stat
 import subprocess
 import sys
 import threading
@@ -685,9 +684,10 @@ def shellenv(no_machine: bool = False) -> int:
     # Recipe bodies relied on _common.sh's `set -euo pipefail` (they don't set it
     # themselves), so re-establish it here — the eval runs in the recipe's own shell.
     lines = ["set -euo pipefail", f"cd {shlex.quote(str(main))}"]
+    # The ports first: foldyard's own vars come after them, so none of its can be a port's.
+    lines += [f"export {k}={shlex.quote(v)}" for k, v in ports.items()]
     lines += [f"{k}={shlex.quote(v)}" for k, v in plain.items()]
     lines += [f"export {k}={shlex.quote(v)}" for k, v in exported.items()]
-    lines += [f"export {k}={shlex.quote(v)}" for k, v in ports.items()]
     lines += [f'export {k}="${{{k}:-{v}}}"' for k, v in derived.items()]
     lines.append("COMPOSE=(" + " ".join(shlex.quote(x) for x in compose) + ")")
     lines.append("dev_vm_banner() { command foldyard banner; }")
@@ -721,13 +721,14 @@ def banner() -> int:
 
 # ── the compose client's environment ────────────────────────────────────────────────
 
-# What the engine and compose clients may inherit from the operator's environment. They run
-# host-side over box-writable compose files, and `${VAR}` / a bare `environment: [VAR]` or build
+# What the engine and compose clients may inherit from the operator's environment. The compose
+# client gets this env in the guest (guestcompose sends it, less the names that only describe your
+# computer), over box-writable compose files, and `${VAR}` / a bare `environment: [VAR]` or build
 # `args: [VAR]` read the CLIENT's environment into a container the box can inspect — so never
 # `os.environ` (in the supervisor that holds host.env). Enough for the clients to run and honour
 # the operator's own client settings; foldyard's resolved vars are added on top. The engine
 # selection (DOCKER_HOST/CONTAINER_HOST/CONTAINER_CONNECTION) is load-bearing: the operator's own
-# engine choice must reach the clients (a preset DOCKER_HOST is used as the socket, as is).
+# engine choice must reach the engine calls made here (a preset DOCKER_HOST is used as is).
 _PASSTHROUGH = frozenset(
     {
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "COLORTERM", "NO_COLOR",
@@ -768,8 +769,8 @@ def _host_passthrough() -> dict[str, str]:
         if k in declared
         or ((k in _PASSTHROUGH or k.startswith(_PASSTHROUGH_PREFIXES)) and k not in secret)
     }
-    if not config.in_box():  # the client's auth file: see registrylogins
-        out[registrylogins.AUTH] = registrylogins.for_compose(declared)
+    if not config.in_box():  # no logins for an engine call made here: see registrylogins
+        out[registrylogins.AUTH] = str(registrylogins.no_logins_file())
     return out
 
 
@@ -813,15 +814,16 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     env = {
         "PYTHONUNBUFFERED": "1",
         **_host_passthrough(),
+        **ports,  # before foldyard's own: a port never overrides one of them
         **plain,
         **exported,
-        **ports,
         **mode_env,
     }
     if not config.in_box():  # again, last: `[ports]` and the mode env can name anything
-        from . import registrylogins
+        from . import guestcompose, registrylogins
 
-        env[registrylogins.AUTH] = registrylogins.for_compose(config.compose_env())
+        env[registrylogins.AUTH] = str(registrylogins.no_logins_file())
+        guestcompose.say_ignored_settings()
     config.refuse_compose_provider(env.get("PODMAN_COMPOSE_PROVIDER", ""))
     return Context(
         main=main,
@@ -833,71 +835,48 @@ def resolve(no_machine: bool = False, worktree: str | None = None) -> Context:
     )
 
 
-# Compose subcommands that create containers or build images — where the client's host-side reads
-# (env_file, build contexts, include/extends files…) end up somewhere the box can see.
-_CREATES = frozenset({"up", "run", "create", "build"})
-
-# Compose subcommands that need your terminal: they attach it to a container (`fy shell`'s
-# `exec`), so they inherit stdio, as `fy box shell` does. Every other verb is one a person watches
+# Compose subcommands that need your terminal, in the box: they attach it to a container
+# (`fy shell`'s `exec`), so they inherit stdio, as `fy box shell` does. On your computer `fy shell`
+# is the engine's `exec` instead (`_exec_service`). Every other verb is one a person watches
 # (`up`, `ps`, `down`, `logs -f`), and the compose files, the images and the containers are the
 # box's: its output is relayed a line at a time with its control sequences stripped
 # (`guestcompose.stream_here`), as the VM path relays it.
 _INTERACTIVE = frozenset({"exec", "run", "attach"})
 
 
+def _in_the_box(ctx: Context, args: list[str]) -> list[str]:
+    """``<engine> compose -f … <args>`` as an argv to run HERE, which is only ever in the box: the
+    client there already runs in the VM. On your computer every compose call goes to the guest
+    (:mod:`foldyard.guestcompose`), so this refuses to build one there rather than run a compose
+    client over the box's files on your computer."""
+    if not config.in_box():
+        raise RuntimeError("no compose client runs on your computer: it runs in the VM")
+    return [*ctx.compose, *args]
+
+
 def _compose_output(
     ctx: Context, args: list[str], *, timeout: float | None = None
 ) -> subprocess.CompletedProcess:
-    """A compose call whose output is captured as text: in the guest under ``[machine] compose =
-    "vm"`` (:mod:`foldyard.guestcompose`), else here. ``args`` follow the ``-f`` list (profile flags
-    first, where the caller wants them)."""
+    """A compose call whose output is captured as text: in the guest on your computer
+    (:mod:`foldyard.guestcompose`), here in the box. ``args`` follow the ``-f`` list (profile
+    flags first, where the caller wants them)."""
     from . import guestcompose
 
     if guestcompose.wanted():
         return guestcompose.compose(ctx, args, timeout=timeout)
-    if bad := _not_regular(ctx):
-        return subprocess.CompletedProcess([*ctx.compose, *args], 1, "", _not_regular_says(bad))
-    return _run([*ctx.compose, *args], env=ctx.env, cwd=str(ctx.main), timeout=timeout)
+    return _run(_in_the_box(ctx, args), env=ctx.env, cwd=str(ctx.main), timeout=timeout)
 
 
-# One deadline over every compose call a posture reconcile makes: the box can swap a FIFO in for
-# a compose file after _not_regular looked, and a client that never returns would hang `fy mode`
-# or the TUI's reconcile worker for good. Generous, since the `up` it bounds may pull. It bounds a
-# hang, nothing more. The supervisor's tick never runs the reconcile (a TTL expiry reports what
-# the running stack still has instead), since even a bounded one there would outlast
-# devmode.HEARTBEAT_STALE_SECONDS and read as a wedged supervisor.
+# One deadline over every compose call a posture reconcile makes: the box can make a compose file a
+# FIFO, and a client that never returns would hang `fy mode` or the TUI's reconcile worker for
+# good. Generous, since the `up` it bounds may pull. It bounds a hang, nothing more. The
+# supervisor's tick never runs the reconcile (a TTL expiry reports what the running stack still has
+# instead), since even a bounded one there would outlast devmode.HEARTBEAT_STALE_SECONDS and read
+# as a wedged supervisor.
 RECONCILE_TIMEOUT = 600.0
 # The orphan sweep after a successful `up` gets at least this long, whatever the `up` left of
 # RECONCILE_TIMEOUT: a pull can spend it all, and the sweep's render would get a tenth of a second.
 ORPHAN_SWEEP_BUDGET = 60.0
-
-
-def _not_regular(ctx: Context) -> list[str]:
-    """The ``-f`` files that are there but aren't regular files. The checkout is the box's, and
-    the compose client on your computer opens each with a blocking ``open``: a FIFO waits for a
-    writer that never comes, a link to ``/dev/zero`` reads without end. A cheap first line only:
-    the box can swap one in after this looks, so the posture reconcile's calls carry a deadline
-    too (:data:`RECONCILE_TIMEOUT`). A file that isn't there is compose's to report.
-    Not the project ``.env``: the client skips one that isn't a regular file itself, and people
-    have them (``.env -> /dev/null``, the FIFO a secrets manager serves it as)."""
-    files = [Path(f) if Path(f).is_absolute() else ctx.main / f for f in _compose_files(ctx)]
-    bad = []
-    for path in files:
-        try:
-            if not stat.S_ISREG(os.stat(path).st_mode):
-                bad.append(str(path))
-        except OSError:
-            pass
-    return bad
-
-
-def _not_regular_says(bad: list[str]) -> str:
-    from .term import printable
-
-    return (
-        f"✗ not run: {', '.join(printable(p) for p in bad)} isn't a regular file (the box can "
-        "make one a FIFO or a link to a device, and the compose client would wait on it for ever)"
-    )
 
 
 def _compose_files(ctx: Context) -> list[str]:
@@ -913,14 +892,16 @@ def _where() -> str:
 
 
 def _shown(ctx: Context, args: list[str]) -> str:
-    """The echoed line for a compose call."""
-    return _where() + " ".join(shlex.quote(c) for c in [*ctx.compose, *args])
+    """The echoed line for a compose call, inert: its ``--profile`` names come from the compose
+    files, the box's (``shlex.quote`` keeps an escape sequence as it is)."""
+    from .term import printable
+
+    return _where() + printable(" ".join(shlex.quote(c) for c in [*ctx.compose, *args]))
 
 
 def _engine_output(ctx: Context, cmd: list[str], **kw) -> int:
-    """A build step (``podman build`` or ``tag``): in the guest under ``[machine] compose = "vm"``,
-    so the client packs the context from what the VM sees, else here. ``kw`` names where its output
-    goes."""
+    """A build step (``podman build`` or ``tag``): in the guest on your computer, so the client
+    packs the context from what the VM sees; here in the box. ``kw`` names where its output goes."""
     from . import guestcompose
 
     if guestcompose.wanted():
@@ -946,48 +927,6 @@ def _render_config(
     return doc if isinstance(doc, dict) else None
 
 
-def _escapes(
-    ctx: Context,
-    extra_profiles: list[str] | None = None,
-    *,
-    rendered: dict | None = None,
-    deadline: float | None = None,
-) -> list[str]:
-    """Why the compose client must not act on this stack: paths its compose files name outside
-    the checkout (see :mod:`foldyard.composeguard`). ``[]`` wherever the client runs in the VM
-    with nothing of the operator's to read: in the box, and under ``[machine] compose = "vm"``.
-    Fails closed: a config that won't render is a refusal too (compose would fail on it anyway)."""
-    from . import guestcompose
-
-    if config.in_box() or guestcompose.wanted():
-        return []
-    from . import composeguard
-
-    files = [Path(f) for f in _compose_files(ctx)]
-    if not files:
-        return []
-    project_dir = files[0].parent
-    roots = [Path(ctx.env["FOLDYARD_CHECKOUT"]), ctx.main]
-    problems = composeguard.raw_problems(files, project_dir, roots)
-    if bad := _not_regular(ctx):  # the client isn't run on one: say that, not "didn't render"
-        return [*problems, _not_regular_says(bad).removeprefix("✗ ")]
-    doc = rendered if rendered is not None else _render_config(ctx, extra_profiles, deadline)
-    if doc is None:
-        problems.append("the compose config didn't render, so its paths couldn't be checked")
-    else:
-        problems += composeguard.rendered_problems(doc, project_dir, roots, cwd=ctx.main)
-    return problems
-
-
-def _refusal(problems: list[str]) -> list[str]:
-    return [
-        "✗ refused: the compose files name paths outside the checkout. The compose client runs "
-        "on your computer, so it would read them there and hand their contents to containers "
-        "the box can see:",
-        *(f"    {p}" for p in problems),
-    ]
-
-
 def _compose(
     ctx: Context,
     args: list[str],
@@ -997,25 +936,14 @@ def _compose(
     stamps: bool = False,
 ) -> int:
     """Run `<engine> compose -f … [args]` with the resolved env, echoing the command (the
-    SPIKE 'thin and echoing' rule). Its output is relayed (``guestcompose.stream_here``), except
-    for the verbs that need your terminal (``_INTERACTIVE``), which inherit stdio. What is relayed
-    is restyled by what it says (``guestcompose.compose_style``: a colour per service prefix, the
-    level words); ``stamps``: its lines carry ``--timestamps``, shown in your time.
-    ``extra_profiles`` unions extra profiles into the run (see ``_profile_flags``); ``rendered``
-    hands the path guard a render the caller already made."""
+    SPIKE 'thin and echoing' rule): in the guest on your computer, here in the box. Its output is
+    relayed (``guestcompose.stream``, ``stream_here``), except for the verbs that need your
+    terminal in the box (``_INTERACTIVE``), which inherit stdio. What is relayed is restyled by
+    what it says (``guestcompose.compose_style``: a colour per service prefix, the level words);
+    ``stamps``: its lines carry ``--timestamps``, shown in your time. ``extra_profiles`` unions
+    extra profiles into the run (see ``_profile_flags``); ``rendered`` is a render the caller
+    already made, which an ``up`` watches its dependencies by (:func:`_watch_for`)."""
     from . import guestcompose
-
-    if not guestcompose.wanted() and (bad := _not_regular(ctx)):
-        _err(_not_regular_says(bad))  # the reason, ahead of a guard that could only fail to render
-        return 1
-    if (
-        args[:1]
-        and args[0] in _CREATES
-        and (problems := _escapes(ctx, extra_profiles, rendered=rendered))
-    ):
-        for line in _refusal(problems):
-            _err(line)
-        return 1
 
     full = [*_profile_flags(ctx, extra_profiles), *args]
     _err(_shown(ctx, full))
@@ -1027,7 +955,7 @@ def _compose(
         return _watching(
             watch, _err, lambda spawned: guestcompose.stream(ctx, full, spawned, style=style)
         )
-    cmd, cwd = [*ctx.compose, *full], str(ctx.main)
+    cmd, cwd = _in_the_box(ctx, full), str(ctx.main)
     if args[:1] and args[0] in _INTERACTIVE:
         return subprocess.run(cmd, env=ctx.env, cwd=cwd).returncode
     if watch is None:
@@ -1192,7 +1120,9 @@ def _watching(
         done.set()
     if not watch.stuck or rc == 0:  # finished as the watch tripped: not a hang
         return rc
-    names = ", ".join(watch.depended[s] for s in watch.stuck)
+    from .term import printable  # a container name is the render's: the box's to choose
+
+    names = printable(", ".join(watch.depended[s] for s in watch.stuck))
     emit(
         f"✗ compose was waiting for {names}, which has no container ({int(watch.grace)}s with "
         "nothing changing), so fy stopped it: podman-compose waits for a missing dependency "
@@ -1243,20 +1173,20 @@ def _podman_build(
     previous `<project>_<service>` images — for `up` to remove once containers have moved off
     them (see ``_remove_superseded``).
     """
+    from .term import printable
+
     cfg = _compose_output(ctx, [*_profile_flags(ctx, extra_profiles), "config"])
     if cfg.returncode != 0:
-        _err(cfg.stderr.strip())
+        from . import guestcompose
+
+        for line in cfg.stderr.strip().splitlines():  # the compose client's: the box can shape it
+            guestcompose.show(line)
         return cfg.returncode
     # podman-compose emits normalized YAML (unlike docker-compose's `--format json`). PyYAML is a
     # podman-compose dependency, imported only on the build path so the regular CLI stays light.
     import yaml
 
     rendered = yaml.safe_load(cfg.stdout) or {}
-    # Checked before any `podman build`: the build packs its context from the host.
-    if problems := _escapes(ctx, extra_profiles, rendered=rendered):
-        for line in _refusal(problems):
-            _err(line)
-        return 1
     configured_services = rendered.get("services", {})
     requested = set(services or [])
     missing = requested - configured_services.keys()
@@ -1321,7 +1251,8 @@ def _podman_build(
         for cname, cpath in extra_ctx.items():
             cmd += ["--build-context", f"{cname}={cpath}"]
         cmd.append(context)
-        echoed = _where() + " ".join(shlex.quote(c) for c in _redact_build_args(cmd))
+        # Inert: the render's contexts, targets and args are the compose files', the box's.
+        echoed = _where() + printable(" ".join(shlex.quote(c) for c in _redact_build_args(cmd)))
         _err(echoed)
         log.write(echoed + "\n")
         log.flush()  # the subprocess writes to the fd directly — keep ordering
@@ -1333,7 +1264,7 @@ def _podman_build(
             for alias_name, alias_svc in group[1:]:
                 alias = image_for(alias_name, alias_svc)
                 tag_cmd = [engine, "tag", image, alias]
-                tag_echoed = _where() + " ".join(shlex.quote(c) for c in tag_cmd)
+                tag_echoed = _where() + printable(" ".join(shlex.quote(c) for c in tag_cmd))
                 _err(tag_echoed)
                 log.write(tag_echoed + "\n")
                 log.flush()
@@ -1501,7 +1432,9 @@ def up() -> int:
     # of leaving them on the old identity/env. No extras → plain COMPOSE_PROFILES behaviour.
     extra = _running_extra_profiles(ctx)
     if extra:
-        print(f"▶ including running profile(s): {','.join(extra)}")
+        from .term import printable  # profile names are the compose files': the box's
+
+        print(f"▶ including running profile(s): {printable(','.join(extra))}")
     dropped = _dropped_mode_services(ctx)  # removed once the up has recreated their dependents
     # external_network consumer: compose declares `{project}_default` external, so it never
     # creates (or removes) it — foldyard does, before the first thing tries to attach.
@@ -1751,7 +1684,7 @@ def _remove_stranded_dependents(
     them as missing and creates them. Typical trigger: a stopped stack (VM restart) brought up
     after a posture change. podman-compose only; fail-safe — any probe that can't answer
     removes nothing. Named volumes are never touched. ``rendered`` is the caller's render,
-    shared with the path guard so the sweep adds no host-side parse of the compose files.
+    shared with ``up``'s dependency watch so the sweep asks for no render of its own.
     False means ``up`` must not run: the removal was refused, or would take a container with it
     that compose won't recreate."""
     emit = emit or _err
@@ -1973,6 +1906,8 @@ def reconcile_posture(
     into its log pane — CRUCIAL because the compose subprocess is CAPTURED (not inherited): a raw
     `docker compose` writes to the terminal's real fds, which a Textual app can't redirect, so its
     output bled over the TUI. Capturing + sinking keeps the TUI clean (a spinner shows instead)."""
+    from .term import printable  # the running profiles' names are the compose files': the box's
+
     emit = sink or _err
     if prev_posture == new_posture or config.in_box():
         return True
@@ -2017,7 +1952,7 @@ def reconcile_posture(
             emit(
                 f"▶ mode changed — reconciling stack "
                 f"({prev_profiles or 'none'} → {new_profiles or 'none'}"
-                + (f", keeping running: {','.join(extra)}" if extra else "")
+                + (f", keeping running: {printable(','.join(extra))}" if extra else "")
                 + f") for {ctx.project}…"
             )
             # The reconcile `up` is as blind to another provider's containers as `fy up` is —
@@ -2054,7 +1989,7 @@ def reconcile_posture(
             )
             _host_log(
                 f"stack {ctx.project} reconciled ({posture}"
-                + (f", keeping running: {','.join(extra)}" if extra else "")
+                + (f", keeping running: {printable(','.join(extra))}" if extra else "")
                 + ")"
                 + (f"; removing containers whose service left it skipped: {sweep}" if sweep else "")
             )
@@ -2307,7 +2242,9 @@ def _service_profiles(ctx: Context, timeout: float | None = None) -> dict[str, l
     """Service → its ``profiles``, merged across the ``-f`` files in order the way compose
     merges them: a later file's list APPENDS (podman-compose's list merge, compose-spec's rule for
     sequences), de-duplicated in order. Raises on an unreadable file — callers are best-effort.
-    PyYAML rides in with the bundled podman-compose; imported here only, off the hot path."""
+    Each file is parsed in the guest on your computer (the bytes are the box's, and so is any link
+    to them), here in the box. PyYAML rides in with the bundled podman-compose; imported here only,
+    off the hot path."""
     import yaml
 
     from . import guestcompose
@@ -2384,8 +2321,6 @@ def recreate_services(
         wanted = [s for s in wanted if s in rendered]
         if not wanted:
             return False, f"{', '.join(unrendered)} not in the rendered config — nothing recreated"
-        if problems := _escapes(ctx, extra, deadline=deadline):
-            return False, _refusal(problems)[0] + " " + "; ".join(problems)
         args = [
             *_profile_flags(ctx, extra),
             *["up", "-d", "--no-build", "--force-recreate", "--no-deps", *wanted],
@@ -2393,8 +2328,10 @@ def recreate_services(
         _err(_shown(ctx, args))
         proc = _compose_output(ctx, args, timeout=_left(deadline))
         if proc.returncode != 0:
+            from .term import printable  # the client's last word, which the box can shape
+
             lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
-            return False, (lines[-1] if lines else f"compose exited {proc.returncode}")
+            return False, (printable(lines[-1]) if lines else f"compose exited {proc.returncode}")
         named = [f"{s} (had crashed)" if s in crashed else s for s in wanted]
         return (not unrendered), f"recreated {', '.join(named)}" + (
             f"; not running, left alone: {', '.join(idle)}" if idle else ""
@@ -2489,54 +2426,47 @@ def _compose_captured(
     returned. Used by the posture reconcile so a TUI-driven `fy mode` toggle doesn't bleed raw
     compose output over the Textual UI (inherited fds bypass any Python-level stdout/stderr
     redirect — capturing is the only fix), and so the log pane fills LIVE during a slow recreate
-    instead of all at once at the end. ``deadline`` bounds every compose call here, the guard's
-    render as well as the run (killed at it: a non-zero exit)."""
+    instead of all at once at the end. ``deadline`` bounds the run (killed at it: a non-zero
+    exit). In the guest on your computer, here in the box."""
     from . import guestcompose
 
-    if not guestcompose.wanted() and (bad := _not_regular(ctx)):
-        emit(_not_regular_says(bad))
-        return 1
-    if (
-        args[:1]
-        and args[0] in _CREATES
-        and (problems := _escapes(ctx, extra_profiles, rendered=rendered, deadline=deadline))
-    ):
-        for line in _refusal(problems):
-            emit(line)
-        return 1
     timeout = devmode.STREAM_TIMEOUT if deadline is None else _left(deadline) or 0.1
     full = [*_profile_flags(ctx, extra_profiles), *args]
     emit(_shown(ctx, full))
     watch = _watch_for(ctx, args, rendered)
-    if guestcompose.wanted():
-        if watch is None:
-            return guestcompose.stream_to(ctx, full, emit, timeout=timeout)
-        return _watching(
-            watch,
-            emit,
-            lambda spawned: guestcompose.stream_to(ctx, full, emit, spawned, timeout=timeout),
-        )
 
-    def cleaned(line: str) -> None:  # the box's compose files and containers: as the VM path's
+    def cleaned(line: str) -> None:  # the box's compose files and containers
         if emit is _err:  # your terminal: the box's ✓ isn't foldyard's own to paint
             guestcompose.show(line)
         else:
             emit(guestcompose.printable(line))
 
+    if guestcompose.wanted():  # the guest's lines cleaned, foldyard's own (no route) as they are
+        if watch is None:
+            return guestcompose.stream_to(ctx, full, emit, timeout=timeout, relayed=cleaned)
+        return _watching(
+            watch,
+            emit,
+            lambda spawned: guestcompose.stream_to(
+                ctx, full, emit, spawned, timeout=timeout, relayed=cleaned
+            ),
+        )
+    cmd = _in_the_box(ctx, full)
     if watch is None:
         return devmode.run_stream(
-            [*ctx.compose, *full], cleaned, timeout=timeout, env=ctx.env, cwd=str(ctx.main)
+            cmd, cleaned, timeout=timeout, env=ctx.env, cwd=str(ctx.main), on_own=emit
         )
     return _watching(
         watch,
         emit,
         lambda spawned: devmode.run_stream(
-            [*ctx.compose, *full],
+            cmd,
             cleaned,
             timeout=timeout,
             env=ctx.env,
             cwd=str(ctx.main),
             on_spawn=spawned,
+            on_own=emit,
         ),
     )
 

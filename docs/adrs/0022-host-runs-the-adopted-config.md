@@ -127,6 +127,18 @@ both to containers the box can inspect. The client now starts from an allowliste
 that leave the checkout. That is a clamp on a host-side parser, not a VM boundary; the structural
 fix is to run the compose client in the VM, where the premise above becomes true.
 
+**Amended (2026-11-27, 0.16.0): the structural fix landed.** The compose client runs in the VM, as
+the VM user, over the backend's ssh route
+([compose-in-vm-scope](https://github.com/twistco/foldyard/blob/main/docs/compose-in-vm-scope.md),
+phase 4), and nowhere else from your computer: the host-side client, its path guard and the
+experimental `[machine] compose` switch are gone, with no fallback. So the premise above now holds
+for compose too: the working tree's compose files are parsed where the stack runs, and an
+`env_file:`, a build context or an `include:` reads the VM, which holds nothing of yours but the
+checkout. What the host still sends is the clamped environment (`stack._host_passthrough`, widened
+only by the adopted `[project] compose_env`), so that half of the 0.3.2 clamp stays. The adopted
+config's say over compose is now only that: a `[machine] compose` other than `"vm"` is ignored and
+said, never honoured, and the old registry-login opt-in reaches nothing.
+
 ## Consequences
 
 - A config change now takes one keypress at the next `fy up` — real friction, deliberately placed at

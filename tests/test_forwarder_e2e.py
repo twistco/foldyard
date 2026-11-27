@@ -61,8 +61,8 @@ GW = "192.168.5.2"
 
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("forwarder"), extra_toml="\n[proxy]\n")
+def repo():
+    r = example_copy(extra_toml="\n[proxy]\n")
     _adopt_on_host(r)
     ensure_vm(r)
     fy_ok(["machine", "stop"], r, timeout=300)  # both recordings apply at boot

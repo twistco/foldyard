@@ -39,7 +39,7 @@ class _Proc:
 
 
 @pytest.fixture
-def fake(tmp_path, monkeypatch):
+def fake(tmp_path, monkeypatch, guest_here):
     """A resolved box context + [box] config, with subprocess.run recorded/dispatched."""
     main = tmp_path / "repo"
     main.mkdir()
@@ -4467,3 +4467,16 @@ def test_a_bad_git_hooks_is_refused_before_the_old_box_goes(fake, monkeypatch, c
     assert box.main(cmd) == 1
     assert fake["calls"] == []
     assert "[box].git_hooks" in capsys.readouterr().err
+
+
+def test_a_failed_notes_reason_reaches_you_inert(tmp_path, monkeypatch, capsys):
+    # The filler runs the project's own box image: what it prints on failure is the box's.
+    def run(cmd, **kw):
+        if cmd[1] == "run":
+            return subprocess.CompletedProcess(cmd, 1, "", "\x1b]52;c;ZXZpbA==\x07\x1b[2Jdenied")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(box.subprocess, "run", run)
+    assert box._ensure_note("podman", "img", {}, tmp_path, tmp_path) is True
+    out = capsys.readouterr().out
+    assert "couldn't write the note" in out and "denied" in out and "\x1b" not in out

@@ -128,12 +128,13 @@ min_foldyard_version = "0.2.0"
   `fy box …` counterpart where one exists; `fy up` still starts the VM and the supervisor. A
   declared file missing from the checkout is an error naming the file.
 - **`compose_env`** — names of variables from your own environment the compose client may read, e.g.
-  `["NPM_TOKEN"]` for a build arg. Default: `[]`. The client runs on your computer, and otherwise
-  sees only foldyard's resolved vars (`PODMAN_PROJECT`, the `[ports]` values, …) plus what it needs
-  to run (`PATH`, `HOME`, locale, `COMPOSE_*`/`PODMAN_*` settings) — never `host.env`. Each name is
-  a widening, listed by `fy config widenings`: the compose files are editable from the box, and a
-  `${NAME}` in one hands the value to a container. `FY_REGISTRY_AUTH_FILE` is the one way to give
-  the client a registry login ([stack](./stack.md#private-images)).
+  `["NPM_TOKEN"]` for a build arg. Default: `[]`. The client runs in the VM, and otherwise sees only
+  foldyard's resolved vars (`PODMAN_PROJECT`, the `[ports]` values, …) plus what it needs to run
+  (locale, `COMPOSE_*`/`PODMAN_*` settings) — never `host.env`. Each name is a widening, listed by
+  `fy config widenings`: the compose files are editable from the box, and a `${NAME}` in one hands
+  the value to a container. `FY_REGISTRY_AUTH_FILE` gave the client a registry login when it ran on
+  your computer, and does nothing since 0.16.0: `fy doctor` says so
+  ([stack](./stack.md#private-images)).
 - **`ensure_dirs`** — bind-mount source dirs (checkout-relative) your compose file expects; created
   empty on `up`. Default: `[]`.
 - **`external_network`** — `true` lets foldyard own the `{prefix}_default` network: created on
@@ -339,6 +340,10 @@ disk_gib = 60
     `watchOptions.poll`). Edits made in the box work normally.
   - `fy verify` in the box adds a row checking the kernel it runs on; its VM mount audit reads `N/A`
     there, so run `fy verify` on your computer for that.
+  - With the compose client in the VM (the only way since 0.16.0), the VM user that runs it reads
+    nothing a gVisor box can't: checked by hand on the x86 rig, not yet by a test (#236).
+  - On Linux, a box can't create files on the checkout when your user's primary group id differs
+    from the VM user's (#234).
 
 - **`monitor`** *(experimental)* — `"observe"` runs a guest monitor: a root eBPF collector
   ([Tetragon](https://tetragon.io/)) in the VM that records what processes start, which connections
@@ -557,25 +562,25 @@ disk_gib = 60
     from inside another container: the note says where a request came from, not who steered it.
   - Details: [ADR-0034](./adrs/0034-the-proxy-knows-which-container-asked.md).
 
-- **`compose`** *(experimental)* — where the stack's compose client runs. `"host"` (the default)
-  runs it on your computer, which refuses compose files that name paths outside the checkout
-  ([stack](./stack.md#which-paths-compose-may-read)). `"vm"` runs foldyard's own podman-compose in
-  the VM instead, over the VM's ssh route, so a path in a compose file reads the VM, where the
-  checkout and its worktrees are the only files of yours. Any other value is an error. Env:
-  `MACHINE_COMPOSE`.
+- **`compose`** — where the stack's compose client runs, which is always the VM since 0.16.0.
+  foldyard runs its own podman-compose there over the VM's ssh route, so a path in a compose file
+  reads the VM, where the checkout and its worktrees are the only files of yours
+  ([stack](./stack.md#who-runs-compose)). `"vm"` is accepted and changes nothing. Any other value,
+  `"host"` included (the default before 0.16.0), is ignored, and `fy doctor` and the stack verbs say
+  so. So is `MACHINE_COMPOSE`.
 
-  - *Experimental*: it hasn't run under gVisor, and it hasn't been used day to day.
-  - Every compose call and the build of a project's own box image run in the VM. `fy shell` enters
-    the container through the engine instead.
+  - Every compose call, the stack's image builds and the build of a project's own box image run in
+    the VM. `fy shell` enters the container through the engine instead.
   - The VM must mount the checkout. `fy machine ensure` does, for a VM created from it; otherwise
     the verb refuses and names `fy machine recreate`.
-  - Registry logins on your computer don't reach the VM, so a private base image won't pull
+  - Registry logins on your computer don't reach the VM, so a private image won't pull by itself
     ([what to do instead](./stack.md#private-images)).
   - `${HOME}`, `~` and `$USER` in a compose file are the VM's, not your computer's.
   - Your own recipes that run `"$ENGINE" compose` are still a client on your computer.
   - The VM runs foldyard's own podman-compose, never one a `PODMAN_COMPOSE_PROVIDER` of yours names.
-  - Inside the box nothing changes: the client there already runs in the VM.
-  - The plan:
+  - Inside the box nothing changes: the client there already ran in the VM.
+  - Not yet run under `[machine] runtime = "gvisor"`.
+  - The design:
     [compose-in-vm-scope.md](https://github.com/twistco/foldyard/blob/main/docs/compose-in-vm-scope.md).
 
 - **`name`** — the VM's name. Default: the project name. Env: `PODMAN_MACHINE`. Same rule as
@@ -641,6 +646,13 @@ PG_PORT = 5544
 
 In-container ports never move. Each worktree adds its own offset (1–89) to every base, so a second
 stack beside main never collides. No `[ports]` table means worktrees publish no offset ports.
+
+**A key must be a port's name:** upper case, with `PORT` as a word in it (`APP_PORT`,
+`SUPABASE_DB_PORT`, `PORT`, `PORT_2`), and not one foldyard or the engine reads itself (`FY_*`,
+`FOLDYARD_*`, `DOCKER_*`, `PODMAN_*`, `MACHINE_*`, `CONTAINER_*`, `GCP_MINTER_PORT`). The keys are
+exported to your recipes by `fy shellenv` and passed into the box, so any other name (`PYTHONPATH`,
+`BASH_ENV`, `IN_DEVBOX`, …) would change what runs on your computer. One is ignored, never exported
+or passed in, and `fy doctor` names it.
 
 The offset resolves as: `WT_OFFSET` env → a pin in the main checkout's `foldyard.local.toml` → the
 offset your computer recorded for the worktree. It records one per worktree it knows: a hash of the

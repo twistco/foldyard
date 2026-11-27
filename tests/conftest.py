@@ -3,6 +3,7 @@ mirror, hit GCP/git/network, or depend on where they're run (CI, box, Mac)."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -871,3 +872,87 @@ def special(fifos):
     planted = Special(fifos)
     yield planted
     planted.release()
+
+
+# ── the guest, played here ──────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def guest_here(monkeypatch):
+    """The guest's compose client, played on this machine, for the golden tests of what foldyard
+    asks of it.
+
+    On your computer every compose call goes to the guest (:mod:`foldyard.guestcompose`, one ssh
+    run each), which these tests have no VM for. What they pin is what the calls ARE (the argv,
+    their order, what is made of each answer), not how a call travels, which
+    tests/test_guestcompose.py covers. So each call is handed to the stand-in a test installs, as
+    ``<engine> compose <argv>``, the command the guest runs: ``stack._run`` for a captured call,
+    ``subprocess.run`` for a build step, ``guestcompose.stream_here`` for a relayed verb and
+    ``devmode.run_stream`` for the posture reconcile. Each is looked up when called, so a test's
+    own stand-in wins. ``services`` parses each file with the guest's own runner, here, and
+    ``hash`` runs the real payload under this interpreter, as tests/test_guestcompose.py does."""
+    from foldyard import devmode, guestcompose, stack
+
+    def compose_argv(argv: list[str]) -> list[str]:
+        return [*config.engine_compose(), *argv]
+
+    def call(op, argv, env, cwd, *, timeout=None, stdout=None, stderr=None):
+        env = guestcompose.guest_env(env)
+        if op == "compose":
+            return stack._run(compose_argv(argv), env=env, cwd=cwd, timeout=timeout)
+        if op == "podman":
+            cmd = [config.engine(), *argv]
+            rc = stack.subprocess.run(cmd, env=env, cwd=cwd, stdout=stdout, stderr=stderr)
+            return subprocess.CompletedProcess(cmd, rc.returncode, "", "")
+        if op == "services":
+            answer = {f: _guest_runner()._one_file(f) for f in argv}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(answer), "")
+        request = {"op": op, "argv": argv, "env": env, "cwd": cwd, "socket": ""}
+        proc = subprocess.run(
+            [sys.executable, "-I", "-"],
+            input=guestcompose.bootstrap(request),
+            capture_output=True,
+            env={"PATH": os.environ.get("PATH", ""), "HOME": str(cwd)},
+            timeout=timeout or 60,
+        )
+        return subprocess.CompletedProcess(
+            argv, proc.returncode, proc.stdout.decode(), proc.stderr.decode()
+        )
+
+    def stream(ctx, args, on_spawn=None, *, style=None):
+        argv = compose_argv([*ctx.compose[2:], *args])
+        return guestcompose.stream_here(argv, ctx.env, str(ctx.main), on_spawn, style=style)
+
+    def stream_to(ctx, args, emit, on_spawn=None, timeout=None, *, relayed=None):
+        sink = relayed or emit
+        return devmode.run_stream(
+            compose_argv([*ctx.compose[2:], *args]),
+            lambda line: sink(guestcompose.printable(line)),
+            timeout=devmode.STREAM_TIMEOUT if timeout is None else timeout,
+            env=ctx.env,
+            cwd=str(ctx.main),
+            on_spawn=on_spawn,
+            on_own=emit,
+        )
+
+    def stream_podman(argv, env, cwd, *, to=None):
+        return guestcompose.stream_here([config.engine(), *argv], env, cwd, to=to)
+
+    monkeypatch.setattr(guestcompose, "call", call)
+    monkeypatch.setattr(guestcompose, "stream", stream)
+    monkeypatch.setattr(guestcompose, "stream_to", stream_to)
+    monkeypatch.setattr(guestcompose, "stream_podman", stream_podman)
+
+
+def _guest_runner():
+    """The guest's runner (``assets/compose/runner.py``), imported here from its file."""
+    import importlib.util
+
+    from foldyard import guestcompose
+
+    path = Path(guestcompose.__file__).parent / "assets" / "compose" / "runner.py"
+    spec = importlib.util.spec_from_file_location("fy_compose_runner_here", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

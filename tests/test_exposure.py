@@ -604,6 +604,59 @@ def test_a_vscode_workspace_file_is_named_as_ignored(checkout):
     assert "[vscode] extensions" in rendered(cfg)
 
 
+def test_a_compose_host_line_is_named_as_ignored(checkout):
+    """`[machine] compose = "host"` was the default until 0.16.0: the client runs in the VM now,
+    whatever the line says. Said, never refused: a config that has it keeps working."""
+    cfg = checkout(BASE + 'passthrough = []\n\n[machine]\ncompose = "host"\n')
+    exp = collect(cfg)
+
+    [(key, values, fix, origin)] = exp.ignored
+    assert key == "[machine] compose" and values == ["'host'"] and origin == exposure.SHARED
+    assert "0.16.0" in fix and "always runs in the VM" in fix
+    assert exposure.doctor_row(exp)[0] is None  # WARN
+
+
+@pytest.mark.parametrize("value", ['"vm"', '" VM "'])
+def test_a_compose_vm_line_says_what_happens_anyway(checkout, value):
+    cfg = checkout(BASE + f"passthrough = []\n\n[machine]\ncompose = {value}\n")
+    assert collect(cfg).ignored == []
+
+
+def test_the_old_registry_login_opt_in_is_named_as_ignored(checkout):
+    """`FY_REGISTRY_AUTH_FILE` in compose_env handed a login to the compose client on your
+    computer. That client is gone, so the name widens nothing and fetches nothing."""
+    cfg = checkout(
+        '[project]\nname = "acme"\ncompose_env = ["NPM_TOKEN", "FY_REGISTRY_AUTH_FILE"]\n\n'
+        "[proxy]\npassthrough = []\n"
+    )
+    exp = collect(cfg)
+
+    [(key, values, fix, _origin)] = exp.ignored
+    assert key == "FY_REGISTRY_AUTH_FILE in [project] compose_env"
+    assert values == ["FY_REGISTRY_AUTH_FILE"]
+    assert "run in the VM" in fix and "Private images" in fix
+    assert "`FY_REGISTRY_AUTH_FILE in [project] compose_env` is IGNORED" in exp.concerns[0]
+
+
+def test_a_port_named_like_what_foldyard_reads_is_named_as_ignored(checkout):
+    """`[ports] IN_DEVBOX = 1` reads like a port and would have been exported to your recipes,
+    putting the next `fy up` on your computer on the in-box path. It is ignored, and said."""
+    cfg = checkout(BASE + "passthrough = []\n\n[ports]\nAPP_PORT = 3000\nIN_DEVBOX = 1\n")
+    exp = collect(cfg)
+
+    [(key, values, fix, origin)] = exp.ignored
+    assert key == "[ports]" and values == ["IN_DEVBOX"] and origin == exposure.SHARED
+    assert "never exported" in fix
+    assert exposure.doctor_row(exp)[0] is None  # WARN
+    assert "[ports] *_PORT numbers" in rendered(cfg)  # the footer vouches only for what's passed
+
+
+def test_a_port_key_that_isnt_a_ports_name_is_named_as_ignored(checkout):
+    cfg = checkout(BASE + "passthrough = []\n\n[ports]\nAPP_PORT = 3000\nPYTHONPATH = 3001\n")
+    [(key, values, _fix, _origin)] = collect(cfg).ignored
+    assert key == "[ports]" and values == ["PYTHONPATH"]
+
+
 def test_an_old_key_spelling_is_honoured_but_named_with_its_new_name(checkout):
     """Renamed keys are aliases (config.RENAMED_KEYS), so this is a nudge, not a gap — but it has to
     be SAID, or nobody ever renames them and the alias can never be dropped."""

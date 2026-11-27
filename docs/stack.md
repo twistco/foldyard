@@ -3,9 +3,9 @@
 [Quickstart Step 3](./quickstart.md#step-3--bring-your-stack-in) is the short version: point
 `[project]` at your compose files, list your ports, run `fy up`. This page covers what you run into
 when the stack is a real one: which variables your compose files can use, how worktrees get a stack
-of their own, which paths compose may read, and the podman-compose behaviour that differs from
-Docker's. Every key is in [configuration.md](./configuration.md); compose files that change with the
-mode are [compose-overlays.md](./compose-overlays.md).
+of their own, where compose runs and what it can read, and the podman-compose behaviour that differs
+from Docker's. Every key is in [configuration.md](./configuration.md); compose files that change
+with the mode are [compose-overlays.md](./compose-overlays.md).
 
 ## What foldyard needs from your config
 
@@ -57,16 +57,32 @@ create before `up`), `external_network` (below) and `compose_env` (below).
 
 ## Who runs compose
 
-foldyard runs your engine's own compose command, and echoes each command line
-(`+ podman compose -f …`) so you can copy it.
+foldyard runs compose in the VM, and echoes each command line (`+ (in the VM) podman compose -f …`)
+so you can copy it. The client is the **podman-compose** bundled in foldyard's install (version 1.6
+or later), sent to the VM over its ssh route with each call, so nothing is installed there.
 
-`podman compose`, with its provider pinned to the **podman-compose** bundled in foldyard's install
-(version 1.6 or later). A `PODMAN_COMPOSE_PROVIDER` you set yourself wins if the file is called
-`podman-compose`. Any other name is refused: docker-compose is a docker client, which would send the
-VM your registry logins ([Private images](#private-images)).
+The compose files are editable from the box, so the client reads them in the VM, never on your
+computer. An `env_file:`, a build context, an `include:` or a bind mount reads the VM, where the
+checkout and its worktrees are the only files of yours, at the same paths as on your computer. A
+path outside them isn't there: a bind mount of `~/.aws` or `/etc/hosts` has nothing to find. Put
+what a service needs in the repo, or give it a credential through a mode
+([below](#keep-secrets-out-of-compose)). `${HOME}`, `~` and `$USER` in a compose file are the VM's.
 
-foldyard builds your images itself with `podman build`, then starts the stack with `up --no-build`.
-Builds go through the proxy and the allowlist like everything else
+So the VM must mount the checkout. `fy machine ensure` creates the VM from it, so it does; a VM
+created from another checkout makes the stack verbs refuse, naming `fy machine recreate`. `fy shell`
+is the one verb that doesn't run compose: it needs your terminal, so it enters the container through
+the engine (`podman exec`), the way `fy box shell` enters a box.
+
+Inside the box, `fy up` runs the same podman-compose there, which is in the VM already:
+`podman compose` with its provider pinned to the bundled one. A `PODMAN_COMPOSE_PROVIDER` you set
+yourself wins there, and in the `COMPOSE` array `fy shellenv` gives your own recipes, if the file is
+called `podman-compose`. Any other name is refused everywhere: docker-compose is a docker client,
+which would send the VM your registry logins ([Private images](#private-images)). Until 0.16.0 the
+client ran on your computer, and `[machine] compose = "vm"` moved it; that line changes nothing now,
+and any other value is ignored, with a warning.
+
+foldyard builds your images itself with `podman build`, in the VM, then starts the stack with
+`up --no-build`. Builds go through the proxy and the allowlist like everything else
 ([networking.md](./networking.md#image-builds-trusted-still-behind-the-allowlist)). `fy build [svc]`
 builds without starting.
 
@@ -128,11 +144,11 @@ your user id, or under `[machine] runtime = "gvisor"` to the box's filtered sock
 no boot script, so the [step above](#in-ci) makes the same link.
 
 **Nothing else from your shell reaches the compose client.** It gets only what it needs to run
-(`PATH`, `HOME`, locale, the engine's and compose's own `COMPOSE_*`/`PODMAN_*` settings) and the
-names you list in `[project] compose_env`. Any name in the secrets file foldyard keeps on your
-computer (`host.env`) is stripped, unless you list it in `compose_env`. The compose files can be
-edited from the box, and a `${NAME}` in one hands that value to a container, so each `compose_env`
-name widens what the box can read; `fy config widenings` lists them.
+(locale, the engine's and compose's own `COMPOSE_*`/`PODMAN_*` settings; `PATH` and `HOME` are the
+VM's own) and the names you list in `[project] compose_env`. Any name in the secrets file foldyard
+keeps on your computer (`host.env`) is stripped, unless you list it in `compose_env`. The compose
+files can be edited from the box, and a `${NAME}` in one hands that value to a container, so each
+`compose_env` name widens what the box can read; `fy config widenings` lists them.
 
 `MAIN_REPO` is how every worktree's stack shares one directory, say a folder of database dumps
 fetched once:
@@ -181,64 +197,38 @@ uses the same fixed name shares that cache with every box.
 main checkout it removes the shared ones too. `fy worktree remove <name>` tears down the worktree's
 stack and box before deleting the checkout.
 
-## Which paths compose may read
-
-When you run `fy up` on your computer, the compose client runs there too, and it opens some files by
-path: `env_file` and `label_file`, build contexts, Dockerfiles, `additional_contexts` and `ssh`
-keys, `include` and `extends` targets, and `secrets` and `configs` files. **Each must be inside the
-checkout** (or, from a worktree, the main checkout). Otherwise `fy up` and `fy build` refuse, naming
-each path, because the compose files are editable from the box and the client would hand those
-files' contents to a container the box can see. A remote build context (a git or https URL) is
-refused too: the client would fetch it from your computer. Paths in an `include` or `extends` target
-must be literal, with no `${…}`, since only the top-level files are checked after compose fills in
-variables.
-
-**Bind mounts are different:** the engine resolves them inside the VM, which holds only your repo
-and its worktrees (at the same paths as on your computer). A bind mount of `~/.aws` or `/etc/hosts`
-from your computer has nothing there to find. Put what a service needs in the repo, or give it a
-credential through a mode ([below](#keep-secrets-out-of-compose)).
-
-Run from inside the box, or with `[machine] compose = "vm"`
-([experimental](./configuration.md#machine)), the compose client runs in the VM, where the checkout
-and its worktrees are your only files, so these checks don't apply: a path like that just isn't
-there.
-
 ## Private images
 
-A compose client doesn't pull on your computer: it asks the VM to, and sends your logins along. So
-foldyard gives the clients it starts on your computer **no registry logins**, whatever
-`podman login` has stored, and images come from a registry anonymously. Your logins would otherwise
-sit in the VM during a build, where a box can read them, all of them, not only the one that build
-needs.
+A compose client doesn't pull or build by itself: it asks the engine to, and sends its registry
+logins along, all of them for a build, where a box can read them while the build runs. foldyard's
+compose client runs in the VM, where there are no logins of yours, and the clients it starts on your
+computer carry none either, whatever `podman login` has stored. So images come from a registry
+anonymously, which also means Docker Hub's lower rate limit.
 
-For a private image, opt in for that project:
+An image already in the VM needs no registry, so `fy up` finds it, in the box too. A new private one
+fails at the pull, and that's right for a pull a compose file asked for: an agent can't make your
+logins fetch something new by editing one.
+
+To get a private image into the VM, pull it there once yourself:
 
 ```bash
 podman login --authfile ~/.foldyard/acme-registry.json ghcr.io
-export FY_REGISTRY_AUTH_FILE=~/.foldyard/acme-registry.json
+# A subshell: `fy shellenv` points podman at the VM's engine, and stops at the first error.
+(eval "$(fy shellenv)" && podman pull --authfile ~/.foldyard/acme-registry.json ghcr.io/acme/base:1)
 ```
 
-```toml
-[project]
-compose_env = ["FY_REGISTRY_AUTH_FILE"]
-```
+**That pull hands every credential in the auth file to the VM's API service**, which writes them to
+a temp file of its own while the pull runs, where a box can read them, as with a build
+([security](./security.md)). So the file should hold that one login, read-only. And a file holding
+only that login isn't enough if you use credential helpers: podman also asks the helpers your own
+`registries.conf` names, whatever `--authfile` says. From then on the image is in the VM and needs
+no login. It's your own client, like a recipe of yours: foldyard never runs it, and never for an
+image a compose file named. The supported route, an adopted list of images foldyard pulls for you,
+is [#233](https://github.com/twistco/foldyard/issues/233).
 
-**A box can read what's in that file** while a build runs, so give it one login, read-only and
-scoped to what this project pulls. `fy config widenings` lists it. It takes both steps: naming it
-without exporting a file means no logins, and so does exporting one this project doesn't name. Your
-own `REGISTRY_AUTH_FILE` never counts, so a line in `compose_env`, which the box can propose, can't
-send the `auth.json` you already point it at.
-
-An image already in the VM needs no registry, so `fy up` in the box finds it. A new one fails at the
-pull: the box has no login, and an agent can't make your logins fetch something new by editing a
-compose file. An anonymous pull also means Docker Hub's lower rate limit.
-
-With `[machine] compose = "vm"` *(experimental)* the client runs in the VM, where the auth file you
-exported doesn't reach, so the opt-in does nothing there. Pull a private image once with the client
-on your computer, `MACHINE_COMPOSE=host fy up` with the opt-in above. That covers base images and
-services that only name an image, which `fy build` skips. From then on the image is in the VM and
-needs no login, and the override lasts only that run: the supervisor keeps following
-`[machine] compose`.
+Before 0.16.0 a project could opt in by naming `FY_REGISTRY_AUTH_FILE` in `[project] compose_env`,
+which handed the file you exported under that name to the compose client on your computer. That
+client is gone, so the name hands nothing to anything now, and `fy doctor` says so: drop it.
 
 ## podman-compose differences that bite
 

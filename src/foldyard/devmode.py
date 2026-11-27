@@ -1257,6 +1257,7 @@ def run_stream(
     cwd: str | None = None,
     stdin: bytes | None = None,
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
+    on_own: Callable[[str], None] | None = None,
 ) -> int:
     """Run ``cmd`` to completion, calling ``on_line(text)`` for each output line (stdout+stderr
     merged, ANSI-stripped), and return its exit code. For long-running, NON-INTERACTIVE
@@ -1265,11 +1266,14 @@ def run_stream(
     kills the process after ``timeout`` seconds so a wedged command can't hang the worker
     forever. ``stdin``, when given, is written to it and closed (the guest compose client's
     payload). ``on_spawn`` gets the process, started in a process group of its own so the
-    caller can stop it with what it started. Deliberately NOT logged to the command log: the
+    caller can stop it with what it started. ``on_own``: where this function's own lines go (it
+    couldn't start, it was killed at ``timeout``), when they aren't the process's to share
+    ``on_line`` with. Deliberately NOT logged to the command log: the
     live stream is the record, and double-logging would duplicate it under the fix output in the
     Doctor pane."""
     import threading
 
+    own = on_own or on_line
     try:
         proc = subprocess.Popen(
             cmd,
@@ -1283,12 +1287,14 @@ def run_stream(
             process_group=0 if on_spawn else None,
         )
     except Exception as e:
-        on_line(f"✗ {e}")
+        own(f"✗ {e}")
         return 127
     if on_spawn:
         on_spawn(proc)
     if stdin is not None:
-        return _run_stream_fed(proc, stdin, on_line, timeout, own_group=on_spawn is not None)
+        return _run_stream_fed(
+            proc, stdin, on_line, timeout, own_group=on_spawn is not None, on_own=own
+        )
     timer = threading.Timer(timeout, proc.kill)
     timer.start()
     rc = 127
@@ -1304,7 +1310,7 @@ def run_stream(
     finally:
         timer.cancel()
     if rc < 0:
-        on_line(f"✗ process killed after {int(timeout)}s (timeout)")
+        own(f"✗ process killed after {int(timeout)}s (timeout)")
     return rc
 
 
@@ -1315,6 +1321,7 @@ def _run_stream_fed(
     timeout: float,
     *,
     own_group: bool = False,
+    on_own: Callable[[str], None] | None = None,
 ) -> int:
     """:func:`run_stream`'s loop for a process fed ``stdin`` from a thread: a payload bigger than a
     pipe's buffer must not block the read of what the process says about it."""
@@ -1345,7 +1352,7 @@ def _run_stream_fed(
     finally:
         timer.cancel()
     if rc < 0:
-        on_line(f"✗ process killed after {int(timeout)}s (timeout)")
+        (on_own or on_line)(f"✗ process killed after {int(timeout)}s (timeout)")
     return rc
 
 

@@ -87,9 +87,8 @@ Start at [AGENTS.md](../AGENTS.md), the map for people and agents alike.
 - [isolation-layers.md](./isolation-layers.md) — which layer carries the boundary on each host
   (macOS, Linux, WSL2), with measurements.
 
-- [compose-in-vm-scope.md](./compose-in-vm-scope.md) — `[machine] compose = "vm"`: the compose
-  client runs in the VM instead of on your computer, what the spike found, and what's left before it
-  can retire the compose path guard.
+- [compose-in-vm-scope.md](./compose-in-vm-scope.md) — why the compose client runs in the VM, never
+  on your computer (the only way since 0.16.0), what the spike found, and what's still unverified.
 
 - [fleet-scope.md](./fleet-scope.md) — the agent control plane: what `fy agent` is as a first
   version, and the next phase (a hosted control plane, interaction, sizing).

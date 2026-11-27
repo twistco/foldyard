@@ -1078,6 +1078,54 @@ def test_port_bases_from_toml_else_empty(fresh_config, tmp_path):
     assert config.port_bases() == {"APP_PORT": 3000, "PG_PORT": 5533}
 
 
+_RESERVED_PORTS = (
+    "IN_DEVBOX = 1\nDOCKER_HOST = 2\nCONTAINER_HOST = 3\nREGISTRY_AUTH_FILE = 4\n"
+    "FY_PROXY_PORT = 5\nFOLDYARD_REPO = 6\nMACHINE_RUNTIME = 7\nPODMAN_MACHINE = 8\n"
+    'HTTPS_PROXY = 9\nPATH = 10\n"A=B" = 11\nGCP_MINTER_PORT = 12\nDOCKER_PORT = 13\n'
+)
+
+
+def test_a_port_named_like_what_foldyard_reads_is_never_a_port(fresh_config, tmp_path):
+    # [ports] keys are exported (`fy shellenv`) and passed into the box: `IN_DEVBOX = 1` would make
+    # the next `fy up` on your computer take the in-box path (a compose client here, no clamp, the
+    # working tree's config). A name foldyard, the engine or its connection reads is ignored.
+    (tmp_path / "foldyard.toml").write_text(
+        '[ports]\nAPP_PORT = 3000\nPG_PORT = { base = 5533, worktrees = "5534-5536" }\n'
+        + _RESERVED_PORTS
+        + '[ports.WORKTREE]\nbase = 7000\nworktrees = "7001-7002"\n'
+    )
+    fresh_config(FOLDYARD_REPO=tmp_path)
+    assert config.port_bases() == {"APP_PORT": 3000, "PG_PORT": 5533}
+    assert set(config.port_pools()) == {"PG_PORT"}
+    assert config.ignored_port_keys() == sorted(
+        ["IN_DEVBOX", "DOCKER_HOST", "CONTAINER_HOST", "REGISTRY_AUTH_FILE", "FY_PROXY_PORT",
+         "FOLDYARD_REPO", "MACHINE_RUNTIME", "PODMAN_MACHINE", "HTTPS_PROXY", "PATH", "A=B",
+         "WORKTREE", "GCP_MINTER_PORT", "DOCKER_PORT"]
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "name", ["APP_PORT", "PG_PORT", "SUPABASE_DB_PORT", "GCS_HTTPS_PORT", "PORT", "PORT_2"]
+)
+def test_a_ports_name_says_port(name):
+    assert not config.ignored_port_key(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Each, exported to a recipe that then runs `fy up` or git, runs what the box wrote:
+        "PYTHONPATH", "BASH_ENV", "GIT_CONFIG_GLOBAL", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+        "TMPDIR", "COMPOSE_PROFILES", "UV_PYTHON", "MAIN_REPO", "SSH_AUTH_SOCK", "LIMA_HOME",
+        # …and the names that only look like one.
+        "app_port", "SPORT", "PORTAL", "PORTS", "APP_PORTS", "_PORT", "PORT_", "APP__PORT",
+    ],
+)  # fmt: skip
+def test_only_a_ports_name_can_be_a_port(name):
+    # An allow-list, not a deny-list: every other environment name changes something.
+    assert config.ignored_port_key(name)
+
+
 def test_port_bases_empty_without_table(fresh_config, tmp_path):
     fresh_config(FOLDYARD_REPO=tmp_path)
     assert config.port_bases() == {}

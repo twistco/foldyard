@@ -39,8 +39,8 @@ pytestmark = host_tier
 
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("daemons"))
+def repo():
+    r = example_copy()
     _adopt_on_host(r)
     ensure_vm(r)
     fy_ok(["up"], r)

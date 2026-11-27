@@ -51,10 +51,10 @@ for seq in range(n):
 
 
 @pytest.fixture(scope="module")
-def scratch(tmp_path_factory):
+def scratch():
     """A fresh dir inside a writable mount of the running VM (same path on both sides)."""
     if "Running" not in lima_status():
-        ensure_vm(example_copy(tmp_path_factory.mktemp("visibility")))
+        ensure_vm(example_copy())
     mounts = lima_list(VM)[0].get("config", {}).get("mounts") or []
     shared = [
         Path(m["location"]).expanduser()

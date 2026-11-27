@@ -156,9 +156,12 @@ class BuildLog:
 
     def failed(self, header: str) -> None:
         """A failed build on your terminal: ``header`` (``✗ … failed (exit N)``), then what you
-        haven't seen of its output, and where its log is."""
+        haven't seen of its output, and where its log is. ``header`` is shown inert: the stack's
+        names the services that failed, the render's (the box's) to choose."""
         from . import guestcompose
+        from .term import printable
 
+        header = printable(header)
         lines = self.tail()
         if self.live:
             _err(f"{header}: its output {'since then ' if self._stopped else ''}is above")

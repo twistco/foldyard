@@ -132,7 +132,7 @@ def test_state_flags_a_stale_extra_overlay_as_drift(isolated_state, monkeypatch,
 
 
 @pytest.fixture
-def overlay_repo(tmp_path, isolated_state):
+def overlay_repo(tmp_path, isolated_state, guest_here):
     """The full config bound to a checkout whose posture overlays EXIST, each touching only the
     services a real consumer's would: the identity overlays re-render the workers, never
     postgres — so which containers an overlay leaves alone is observable (#33)."""

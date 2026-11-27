@@ -7,12 +7,14 @@ disagree with ``up``: an env-only posture change shows for precisely the service
 interpolate it, and a service no change touched never shows, whatever its ``config_files``
 label says (#33's follow-up — the overlay comparison could see neither).
 
-It needs no engine: the bundled podman-compose has no hash command, so a subprocess on foldyard's
-own interpreter (``python -m foldyard.confighash``) drives its parser and ``config_hash``, the very
-code its ``up`` compares with. A subprocess, never in-process: podman-compose parses through a
-module-level singleton that reads ``os.environ`` and the working directory. It leans on
-podman-compose internals, so it degrades to "unavailable" (never to a guess) if those move;
-tests/test_confighash.py pins the contract against the installed version.
+It needs no engine: the bundled podman-compose has no hash command, so foldyard drives its parser
+and ``config_hash``, the very code its ``up`` compares with, where the compose client runs: in the
+guest on your computer (the guest runner's ``hash``, :func:`foldyard.guestcompose.config_hashes`,
+so no compose file is parsed on your computer), and in the box a subprocess on foldyard's own
+interpreter (``python -m foldyard.confighash``). A subprocess, never in-process: podman-compose
+parses through a module-level singleton that reads ``os.environ`` and the working directory. It
+leans on podman-compose internals, so it degrades to "unavailable" (never to a guess) if those
+move; tests/test_confighash.py pins the contract against the installed version.
 
 This is the verdict of reconcile's stack scope. The live oracles, against labels a real ``up``
 wrote, are tests/test_probes_e2e.py and tests/test_e2e.py.
@@ -38,16 +40,16 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
 
     flags = stack._profile_flags(ctx, extra_profiles)
     if guestcompose.wanted():
-        # `[machine] compose = "vm"`: podman-compose's parser runs in the guest, not in a child
-        # here. A report only (`fy state`), so the box shaping the answer misleads no guard.
+        # On your computer podman-compose's parser runs in the guest, never in a child here. A
+        # report only (`fy state`), so the box shaping the answer misleads no guard.
         try:
             proc = guestcompose.config_hashes(ctx, flags, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as e:
             return None, f"{type(e).__name__}: {e}"
         return _answer(proc)
-    # -P: the child runs with cwd=the checkout, where plain -m would import a planted `foldyard/`
-    # first (selfspawn).
-    cmd = [*selfspawn.python_m(__name__), *ctx.compose[2:], *flags]
+    # In the box. -P: the child runs with cwd=the checkout, where plain -m would import a planted
+    # `foldyard/` first (selfspawn).
+    cmd = [*selfspawn.python_m(__name__), *stack._in_the_box(ctx, flags)[2:]]
     try:
         # selfspawn.env: this child runs in the main checkout, not here — a relative PYTHONPATH
         # entry must keep pointing where it does for this process, not move into the checkout.
@@ -67,8 +69,10 @@ def desired(ctx, extra_profiles: list[str] | None = None, timeout: float = 20.0)
 def _answer(proc: subprocess.CompletedProcess):
     """:func:`desired`'s ``(hashes, reason)`` from the provider's finished run."""
     if proc.returncode != 0:
+        from .term import printable  # the provider's last word, which the box can shape
+
         lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
-        return None, lines[-1] if lines else f"exited {proc.returncode}"
+        return None, printable(lines[-1]) if lines else f"exited {proc.returncode}"
     hashes = _parse(proc.stdout)
     return (hashes, "") if hashes else (None, "no service hashes in the render")
 

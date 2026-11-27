@@ -1,12 +1,18 @@
 # Compose in the VM: scope
 
-Status: **phases 0–3 built, behind an experimental switch**, 2026-11-04. With
-`[machine] compose = "vm"`, no compose client runs on your computer.
-`tests/test_guestcompose_e2e.py` passes on vz, on Linux over 9p and inside WSL2 (CI, run
-41751053725). Phase 4 (on by default, the host path deleted) waits on a route for private images,
-gVisor and real use. The four decisions below were taken as recommended. Related:
-[ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) (its 0.3.2 amendment names this as the
-structural fix), [ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md),
+Status: **phase 4 done** (0.16.0), 2026-11-27. No compose client runs on your computer, ever: the
+client in the VM is the only path, the host path and the path guard are deleted, and
+`[machine] compose` is no longer experimental (`"vm"` changes nothing; anything else is ignored and
+said). Phases 0–3 were built behind that switch on 2026-11-04, and `tests/test_guestcompose_e2e.py`
+passed on vz, on Linux over 9p and inside WSL2 (CI, run 41751053725); the maintainer then ran it on
+real projects for weeks without noticing a difference. Under the gVisor posture
+(`[machine] runtime = "gvisor"`) the premise was checked by hand on the x86 rig on 2026-11-27
+(below), and `test_guestcompose_e2e.py` and `test_e2e.py` pass there, but no test probes it through
+the box's filtered socket yet (#236). And private images have no route yet (below): the maintainer
+chose to ship without one and track the route separately. The four decisions below were taken as
+recommended. Related: [ADR-0022](./adrs/0022-host-runs-the-adopted-config.md) (its 0.3.2 amendment
+names this as the structural fix),
+[ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md),
 [ADR-0010](./adrs/0010-podman-everywhere-container-host.md) (why builds use native `podman build`),
 [ADR-0033](./adrs/0033-a-to-box-and-a-from-box-beside-the-checkout.md), and
 [security.md](./security.md)'s "The compose client reads your compose files on your computer".
@@ -19,7 +25,7 @@ boundary today:
 
 - **The environment.** `stack._host_passthrough` gives the client an allowlisted environment, not
   the supervisor's (which holds every `host.env` secret). `[project] compose_env` widens it.
-- **The paths.** `composeguard` refuses compose files that name paths outside the checkout. It is a
+- **The paths.** A path guard refused compose files that name paths outside the checkout. It was a
   list of keys that has to track compose's grammar (it once refused Tangible's `!override` tags),
   and the client re-opens every path after the guard checked it, so a box that swaps a checked file
   for a symlink in between wins the race.
@@ -29,7 +35,8 @@ the host's client there too.
 
 ### What ran the client on your computer
 
-All of this moved under the switch, and each row still runs here without it.
+All of this moved under the switch in phases 1–3, and since phase 4 none of it runs here. In the box
+each row runs in the box, as it always did: the client there already ran in the VM.
 
 | caller | what it runs | who calls it |
 | -- | -- | -- |
@@ -101,7 +108,14 @@ any client, and the API service holds the group. So a box can read the VM's whol
 premise holds (the test has a negative control, without the annotation). On those guests the relay
 and forwarder keys are not in the journal, and nothing else secret was seen in it.
 
-Not yet checked: the premise under the gVisor posture's filtered socket.
+Under the gVisor posture the premise holds, more strongly: runsc ignores
+`run.oci.keep_original_groups`, but a runsc container keeps the API service's supplementary groups
+anyway, so a gVisor box reads a group-gated file without asking. Checked by hand on the x86 rig
+(docs/nested-virt.md, Rig 1) on 2026-11-27, with the same runsc release and flags foldyard installs
+and a journal file readable only through the `adm` group: readable under runsc with and without the
+annotation, refused under crun without it. `test_the_vm_user_reads_nothing_a_box_cant` doesn't show
+this yet: it probes through the crun-default socket, and on Lima 2.3.0's Fedora 45 guest the VM user
+has no supplementary groups, so its journal check is vacuous there (#236).
 
 Consequences of running as the VM user:
 
@@ -141,13 +155,15 @@ Consequences of running as the VM user:
   `FY_REGISTRY_AUTH_FILE` that `[project] compose_env` names, a host secret the compose files could
   spend. The client in the VM has no such file, so a private image needs another route. None of the
   maintainers' projects uses one today, so this stays a documented limit for now, and it **blocks
-  phase 4**: other projects need a route before the host path goes. The two options: an adopted list
-  of images pulled by `podman pull` from your computer (small, and needs no new tool, but the named
-  registry's login reaches the VM during that pull), or by `skopeo` on your computer and
-  `podman load` (the login never enters the VM, but it needs `skopeo`, and your computer then parses
-  registry data and fetches outside the wall). Either way the list is adopted config, never what a
-  compose file names, or the box chooses what your login fetches. An image already in the VM needs
-  no registry, in or out of the box. A new one fails at the pull from the box, which is right.
+  phase 4**: other projects need a route before the host path goes. (Phase 4 shipped without one,
+  the maintainer's call: the old opt-in reaches nothing now, `fy doctor` says so, and the workaround
+  is pulling the image into the VM by hand. The route is tracked on its own.) The two options: an
+  adopted list of images pulled by `podman pull` from your computer (small, and needs no new tool,
+  but the named registry's login reaches the VM during that pull), or by `skopeo` on your computer
+  and `podman load` (the login never enters the VM, but it needs `skopeo`, and your computer then
+  parses registry data and fetches outside the wall). Either way the list is adopted config, never
+  what a compose file names, or the box chooses what your login fetches. An image already in the VM
+  needs no registry, in or out of the box. A new one fails at the pull from the box, which is right.
 - **`${HOME}`, `~` and `$USER` in a compose file are the guest's.** Your computer's home was never
   in the VM, so a bind mount from it found nothing there anyway.
 - **Your own recipes aren't moved.** A recipe that runs `"$ENGINE" compose` after
@@ -158,7 +174,7 @@ Consequences of running as the VM user:
 
 ## What it removes
 
-- **`composeguard` on the host.** Once no compose client runs on your computer, the paths it guards
+- **The path guard on the host.** Once no compose client runs on your computer, the paths it guards
   are read in the guest, where an `env_file: /etc/passwd` reads the guest's. The module, its tests
   and stack.md's "Which paths compose may read" section go. This needs the move to be total: no host
   fallback.
@@ -185,8 +201,8 @@ Consequences of running as the VM user:
    virtiofs, 5 s on libkrun (ADR-0021), and compose would call that a missing file. So the runner
    waits up to 6 s for a `-f` file before compose runs.
 
-**Still open:** the gVisor posture. The other host-tier modules have run under the switch on vz
-only, not on 9p or WSL2.
+**Still open:** the gVisor posture. Before phase 4 the other host-tier modules had run under the
+switch on vz only; since, every one runs on this path wherever CI runs it (9p, WSL2).
 
 Out of scope: **which compose client long-term** (plan 04 asked whether docker-compose in the VM
 could retire podman-compose's quirks). Keep podman-compose for this move, so only one thing changes
@@ -201,9 +217,12 @@ at a time.
 2. **Every other call:** the render, the builds, `up`, `down`, `logs`, the supervisor's recreate,
    and the two reads that parsed compose files here. Done. The guard stands down under the switch.
 3. **`fy box build`**, for a project's own image. Done.
-4. **Default on, then the host path deleted** with `composeguard`, the docs section, and a new ADR
-   amending 0022. There is no permanent fallback: with ssh unavailable, the verb refuses and says
-   so.
+4. **Default on, then the host path deleted** with the path guard, the docs section, and an
+   amendment to ADR-0022. There is no permanent fallback: with ssh unavailable, the verb refuses and
+   says so. Done in 0.16.0. What stays on your computer on purpose: the packaged box image and the
+   `[box].packages` layer builds (foldyard's own contexts), `fy shell` (the engine's `exec`), the
+   engine calls that parse no compose file, and your own recipes. The host tier's modules all run on
+   the VM path now, each copy at one checkout path the VM mounts (`tests/e2e_host.py`).
 
 ## Tests
 
@@ -216,21 +235,11 @@ at a time.
   A logging `podman` first on the CLI's PATH makes "no compose client or build ran on your computer"
   an assertion over what ran. `fy verify` passes.
 
-- **The existing tiers, unchanged, with `MACHINE_COMPOSE=vm`:** their copies aren't in the VM's
-  mounts, so give the VM one for a directory of its own and run under it:
-
-  ```bash
-  limactl stop foldyard-example
-  limactl edit --tty=false foldyard-example \
-    --set ".mounts += [{\"location\":\"$HOME/fy-e2e/vmtier\",\"mountPoint\":\"$HOME/fy-e2e/vmtier\",\"writable\":true}]"
-  limactl start foldyard-example
-  FOLDYARD_E2E=1 MACHINE_COMPOSE=vm CONTAINER_HOST=unix://$HOME/.lima/foldyard-example/sock/podman.sock \
-    uv run --group e2e pytest --basetemp=$HOME/fy-e2e/vmtier/run tests/test_e2e.py tests/test_probes_e2e.py …
-  ```
-
-  `fy verify` fails on that VM, correctly, for that extra mount. `test_reclaim_e2e` must not
-  directly follow `test_worktree_e2e` there: the removed worktree's image is one more orphan than it
-  expects.
+- **The existing tiers** all run on the VM path since phase 4. Their copies used to be made in
+  directories the VM didn't mount, so each module's copy is now made at one path under your home,
+  `~/fy-e2e/host-tier/example`, which every VM in a run was created from (`tests/e2e_host.py`; the
+  CI jobs create the first VM from it too). `test_reclaim_e2e` must not directly follow
+  `test_worktree_e2e`: the removed worktree's image is one more orphan than it expects.
 
 ## Decisions for the maintainer
 

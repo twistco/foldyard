@@ -8,20 +8,19 @@ Host tier (tests/e2e_host.py). Lima 2.2.0's QEMU driver on Linux: the hypervisor
 `qemu-system-x86_64`, its pid in `~/.lima/<name>/qemu.pid`; killing it is the "host crash /
 battery death" the revive path exists for. The module ends with the VM running and un-walled.
 
-The checkout the VM mounts lives UNDER THE HOST HOME (`~/fy-e2e/machine/example`), not under
-`tmp_path`, and the module recreates the VM from it FIRST so every restart below — stop→start,
-kill→ensure — runs with a repo mounted at `/home/<user>/…` inside the guest. That is the
-realistic Linux layout, and the one the open finding in docs/linux-support.md (a restarted
-guest with the host home itself mounted at its own path cannot create containers) had never
-been exercised with: every earlier restart test mounted `/tmp/pytest-…`. The copy is left in
-place at teardown (a fixed path, overwritten by the next run): the VM keeps mounting it, and a
-later module's restart with the location gone is not a case worth adding here.
+The checkout the VM mounts lives UNDER THE HOST HOME (the host tier's one checkout,
+`~/fy-e2e/host-tier/example`, tests/e2e_host.py), and the module recreates the VM from it FIRST so
+every restart below — stop→start, kill→ensure — runs with a repo mounted at `/home/<user>/…`
+inside the guest. That is the realistic Linux layout, and the one the open finding in
+docs/linux-support.md (a restarted guest with the host home itself mounted at its own path cannot
+create containers) had never been exercised with: every earlier restart test mounted
+`/tmp/pytest-…`. Every host-tier module runs with it now (the compose client reads the checkout
+in the VM), so this module's own claim is the restarts.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import signal
 import time
 from pathlib import Path
@@ -50,16 +49,12 @@ from foldyard.sandbox import FILTER_SOCKET
 
 pytestmark = host_tier
 
-HOME_COPY = Path.home() / "fy-e2e" / "machine"
-
 
 @pytest.fixture(scope="module")
 def repo():
-    shutil.rmtree(HOME_COPY, ignore_errors=True)
-    HOME_COPY.mkdir(parents=True)
-    r = example_copy(HOME_COPY)
+    r = example_copy()
     _adopt_on_host(r)
-    fy_ok(["machine", "recreate", "--yes"], r, timeout=900)  # so the VM mounts THIS copy
+    fy_ok(["machine", "recreate", "--yes"], r, timeout=900)  # fresh, from the copy under home
     export_vm_socket()
     ensure_vm(r)  # warm: the engine can run a container
     yield r

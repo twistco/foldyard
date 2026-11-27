@@ -66,6 +66,7 @@ from . import (
     stack,
 )
 from .plugins import registry
+from .term import printable
 
 # TOML's bare-key alphabet, and its two non-finite floats — both for `_toml_value`/`_toml_key`,
 # which render `[codex.config]` back into the TOML syntax `codex -c` parses.
@@ -641,7 +642,9 @@ def _ensure_note(engine: str, img: str, env: dict, main: Path, wt_root: Path) ->
             text=True,
             timeout=_DRIFT_TIMEOUT_S,
         )
-        why = None if got.returncode == 0 else (got.stderr or "").strip() or "no output"
+        # The project's own image printed it: the box's, so shown inert.
+        said = (got.stderr or "").strip() or "no output"
+        why = None if got.returncode == 0 else printable(said)
     except subprocess.TimeoutExpired:
         why = f"no answer in {_DRIFT_TIMEOUT_S}s"
     if why:

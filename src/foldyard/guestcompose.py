@@ -1,11 +1,11 @@
-"""The compose client runs in the guest — ``[machine] compose = "vm"`` (experimental).
+"""The compose client runs in the guest, never on your computer.
 
-Your stack runs in the VM, but by default its compose client runs on your computer, where it
-parses compose files the box can edit (``composeguard`` and ``stack._host_passthrough`` clamp
-that). With this on, the client runs in the guest instead, as the VM user, over the backend's
-ssh route (``Backend.ssh_target``, the route ``crossinject`` and ``guestlog`` use): an
-``env_file:`` or a build context there reads the guest, which holds nothing of yours. The design
-and its phases are docs/compose-in-vm-scope.md.
+Your stack runs in the VM, and so does the compose client that starts it: it parses compose files
+the box can edit, so it runs in the guest, as the VM user, over the backend's ssh route
+(``Backend.ssh_target``, the route ``crossinject`` and ``guestlog`` use). An ``env_file:``, an
+``include:`` or a build context there reads the guest, which holds nothing of yours. The design is
+docs/compose-in-vm-scope.md; until 0.16.0 a client on your computer was the default, clamped by a
+path guard, and this was the experimental ``[machine] compose = "vm"``.
 
 Each call is one ssh run of ``python3 -I -`` in the guest, its stdin the whole payload: a
 deterministic zip of foldyard's guest runner (``assets/compose/runner.py``), foldyard's own
@@ -15,21 +15,24 @@ directory, the guest socket). Nothing is installed in the guest: the zip is impo
 so it is always the client foldyard was tested with.
 
 There is never a fallback to a client on your computer: with no ssh route, the call refuses and
-says so. The one verb that doesn't come here is ``fy shell``, which needs your terminal on the
-stdin the payload uses: ``stack.shell`` finds the container through the engine and enters it the
-way ``fy box shell`` does, parsing no compose file.
+says so, and ``stack._in_the_box`` refuses to build a compose argv to run anywhere but the box. The
+one verb that doesn't come here is ``fy shell``, which needs your terminal on the stdin the payload
+uses: ``stack.shell`` finds the container through the engine and enters it the way
+``fy box shell`` does, parsing no compose file. Two builds stay on your computer on purpose: the
+packaged box image and the ``[box].packages`` layer, whose contexts are foldyard's own files.
 
-``stack._compose_output`` / ``_compose`` / ``_compose_captured`` are the only places that branch on
-it (an AST guard in tests/test_guestcompose.py holds every use of ``ctx.compose`` to them), and
-``composeguard`` stands down under it. It needs the checkout mounted in the VM, and registry logins
-on your computer don't reach it.
+``stack._compose_output`` / ``_compose`` / ``_compose_captured`` are where the stack verbs branch
+(:func:`wanted`: on your computer, never in the box, where the client already runs in the VM). It
+needs the checkout mounted in the VM, and registry logins on your computer don't reach it. A
+``[machine] compose`` or ``MACHINE_COMPOSE`` that asks for anything else is ignored, and said
+(:func:`say_ignored_settings`, and ``fy doctor``'s exposure row).
 
 What comes back is box-influenced data, like everything the engine answers: the compose files
 are the box's, and so is the VM user's home in the guest (anything a box can bind-mount). Callers
 use it only for the project they asked about, as they always have, and what is relayed to your
 terminal has its control sequences stripped (:func:`printable`). The same relay serves what runs
-on your computer with output the box chose (:func:`stream_here`): the compose client when this
-switch is off, a build of the box's Dockerfile, a container of the box's image.
+on your computer with output the box chose (:func:`stream_here`): a build of the packaged box
+image, a container of the box's image, and in the box the compose client itself.
 """
 
 from __future__ import annotations
@@ -105,9 +108,46 @@ sys.exit({runner}.main(json.loads(base64.b64decode({request!r}))))
 
 
 def wanted() -> bool:
-    """Whether compose runs in the guest: ``[machine] compose = "vm"``, on your computer. In the
-    box the client already runs in the VM, so nothing changes there."""
-    return not config.in_box() and config.machine_compose() == "vm"
+    """Whether compose calls go to the guest: always on your computer. In the box the client
+    already runs in the VM, so it runs there directly."""
+    return not config.in_box()
+
+
+# What a `[machine] compose` or `MACHINE_COMPOSE` may still say: what foldyard does anyway.
+_STILL_SO = "vm"
+_said_ignored = False
+
+
+def ignored_settings() -> list[str]:
+    """What asks for compose anywhere but the VM, and is ignored: ``MACHINE_COMPOSE`` in your
+    environment, ``[machine] compose`` in the adopted config. ``"vm"`` is what happens anyway,
+    so it is never one. Its value is shown inert (the config's is the box's to propose)."""
+    from .term import printable
+
+    found = []
+    env = os.environ.get("MACHINE_COMPOSE")
+    if env is not None and env.strip().lower() != _STILL_SO:
+        found.append(f"MACHINE_COMPOSE={printable(env)}")
+    raw = config._table("machine").get("compose")
+    if raw is not None and str(raw).strip().lower() != _STILL_SO:
+        found.append(f"[machine] compose = {printable(repr(raw))}")
+    return found
+
+
+def say_ignored_settings() -> None:
+    """One line on your terminal, once per process, for each :func:`ignored_settings`: anything
+    that ignores your config says so."""
+    global _said_ignored
+    if _said_ignored or not (found := ignored_settings()):
+        return
+    _said_ignored = True
+    for what in found:
+        print(
+            f"⚠ {what} is ignored: since 0.16.0 compose always runs in the VM, never on your "
+            "computer (`fy docs stack`)",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _sources() -> list[tuple[str, Path]]:
@@ -181,7 +221,7 @@ def _no_route() -> str:
     from . import machine
 
     return (
-        f'[machine] compose = "vm", but there is no ssh route into {machine.MACHINE} '
+        f"compose runs in the VM, but there is no ssh route into {machine.MACHINE} "
         "(is it running? `fy machine status`)"
     )
 
@@ -244,8 +284,8 @@ def compose(ctx, args: list[str], *, timeout: float | None = None) -> subprocess
 
 
 def config_hashes(ctx, flags: list[str], *, timeout: float | None = None):
-    """podman-compose's own per-service config hashes, rendered in the guest —
-    what ``confighash.desired``'s child computes here. The CompletedProcess's stdout is the JSON
+    """podman-compose's own per-service config hashes, rendered in the guest — what
+    ``confighash.desired``'s child computes in the box. The CompletedProcess's stdout is the JSON
     map."""
     return call("hash", [*ctx.compose[2:], *flags], ctx.env, str(ctx.main), timeout=timeout)
 
@@ -457,9 +497,9 @@ def stream_here(
     style: Style | None = None,
     to: Callable[[str], None] | None = None,
 ) -> int:
-    """``cmd`` run on your computer, relayed like :func:`stream` (a line at a time to your stdout
-    and stderr, :func:`printable`): for a process whose output the box chose — the compose client
-    reading its compose files, a build of its Dockerfile, a container of its image. Its stdin is
+    """``cmd`` run here, relayed like :func:`stream` (a line at a time to your stdout and stderr,
+    :func:`printable`): for a process whose output the box chose — a build of the packaged box
+    image, a container of the box's image, and in the box the compose client. Its stdin is
     empty, so a verb that needs your terminal (a shell, ``compose exec``) doesn't come here.
     ``clean_only_terminals``: a stream that isn't going to a terminal (a file, a pipe) gets the
     process's bytes as they are, for output that is data (``fy box exec 'pg_dump' > dump.sql``).
@@ -657,10 +697,14 @@ def stream_to(
     emit: Callable[[str], None],
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
     timeout: float | None = None,
+    *,
+    relayed: Callable[[str], None] | None = None,
 ) -> int:
     """Like :func:`stream`, its two streams merged and handed to ``emit`` a line at a time (the
     posture reconcile, whose output must not bleed over the TUI). Killed after ``timeout``
-    seconds (``devmode.run_stream``'s watchdog when None)."""
+    seconds (``devmode.run_stream``'s watchdog when None). ``relayed``: where the guest's lines go
+    instead, each already :func:`printable`; foldyard's own line (no route) still goes to
+    ``emit``."""
     from . import devmode
 
     command = _command("compose", [*ctx.compose[2:], *args], ctx.env, str(ctx.main))
@@ -668,11 +712,13 @@ def stream_to(
         emit(f"✗ {_no_route()}")
         return NO_ROUTE
     cmd, stdin = command
+    sink = relayed or emit
     return devmode.run_stream(
         cmd,
-        lambda line: emit(printable(line)),
+        lambda line: sink(printable(line)),
         timeout=devmode.STREAM_TIMEOUT if timeout is None else timeout,
         env=_ssh_env(),
         stdin=stdin,
         on_spawn=on_spawn,
+        on_own=emit,
     )

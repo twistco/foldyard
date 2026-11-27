@@ -209,6 +209,28 @@ def test_an_old_default_set_explicitly_is_reported_with_the_release_that_changed
     assert "0.4.0" in p.detail and '"@jvm"' in p.detail
 
 
+def test_an_old_default_no_longer_honoured_says_so_not_keep_it_if_you_mean_it():
+    # `[machine] compose = "host"` was the default before 0.16.0, and does nothing since: there is
+    # nothing left to mean by keeping it. Reported, never refused (adoption over strictness).
+    report = features.check({"machine": {"compose": "host"}}, {})
+    [p] = report.problems
+    assert (p.kind, p.label) == ("old-default", '[machine] compose = "host"')
+    assert "0.16.0" in p.detail and "no longer honoured" in p.detail
+    assert "if you mean it" not in p.detail
+    assert not report.failed
+
+
+@pytest.mark.parametrize("value", ["HOST", " host "])
+def test_an_old_default_is_known_however_it_was_spelt(value):
+    # The old reader took any case and spacing, so a config spelling it so meant the same thing.
+    [p] = features.check({"machine": {"compose": value}}, {}).problems
+    assert p.kind == "old-default" and "no longer honoured" in p.detail
+
+
+def test_a_compose_vm_line_says_what_happens_anyway_so_nothing_is_reported():
+    assert _problems({"machine": {"compose": "vm"}}) == []
+
+
 def test_todays_default_or_another_value_is_not_an_old_default():
     assert _problems({"proxy": {"passthrough": ["@jvm", "@linux"]}}) == []
     assert _problems({"proxy": {"passthrough": ["@all", "@vcs"]}}) == []
@@ -242,10 +264,12 @@ def test_a_table_feature_is_in_use_when_the_table_is_declared():
 
 
 def test_a_valued_feature_is_in_use_only_at_its_value():
-    report = features.check({"machine": {"compose": "host"}}, {})
-    row = _row(report, "machine", "compose", "vm")
-    assert not row.used and row.value == "host"
-    assert _row(features.check({"machine": {"compose": "vm"}}, {}), "machine", "compose", "vm").used
+    report = features.check({"machine": {"runtime": "crun"}}, {})
+    row = _row(report, "machine", "runtime", "gvisor")
+    assert not row.used and row.value == "crun"
+    assert _row(
+        features.check({"machine": {"runtime": "gvisor"}}, {}), "machine", "runtime", "gvisor"
+    ).used
 
 
 def test_a_valued_feature_in_an_array_is_in_use_when_any_entry_has_it():
@@ -342,7 +366,7 @@ ESC = "\x1b]52;c;cHduZWQ=\x07\x1b[2K"  # write the clipboard, then erase the lin
 def test_a_key_or_value_carrying_terminal_escapes_is_shown_as_text():
     # The checkout is box-writable, so its key names and values are the box's choice.
     shared = {
-        "machine": {ESC: True, "compose": f"host{ESC}"},
+        "machine": {ESC: True, "runtime": f"crun{ESC}"},
         "inject": [{"switch": f"gh{ESC}", "app_idd": 1}],
         ESC: {},
     }

@@ -241,8 +241,8 @@ def _seen() -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("logins"))
+def repo():
+    r = example_copy()
     _adopt_on_host(r)
     ensure_vm(r)
     yield r
@@ -285,10 +285,22 @@ def test_fy_build_leaves_none_there_with_your_export_set(repo, tmp_path):
     assert _seen() == []
 
 
-def test_a_docker_engine_is_refused_and_can_be_undone(tmp_path_factory):
+def test_a_docker_engine_is_refused_and_can_be_undone(repo):
     """One adopted line a box can propose. The refusal must leave the way back open: `fy config`
-    reads no engine, or a bad adoption could never be reverted."""
-    r = example_copy(tmp_path_factory.mktemp("docker"), extra_toml='\n[engine]\ncli = "docker"\n')
+    reads no engine, or a bad adoption could never be reverted. On the module's copy, put back
+    whatever happens: the module's teardown acts on it."""
+    r = repo
+    toml = r / "foldyard.toml"
+    original = toml.read_text()
+    toml.write_text(original + '\n[engine]\ncli = "docker"\n')
+    try:
+        _check_docker_refused_and_undone(r, toml, original)
+    finally:
+        toml.write_text(original)
+        _adopt_on_host(r)
+
+
+def _check_docker_refused_and_undone(r: Path, toml: Path, original: str) -> None:
     _adopt_on_host(r)
     from_config = {"FOLDYARD_ENGINE": ""}  # the test runner names podman, and the variable wins
     built = fy(["build"], r, timeout=120, env_extra=from_config)
@@ -296,8 +308,7 @@ def test_a_docker_engine_is_refused_and_can_be_undone(tmp_path_factory):
     assert "docker" in built.out and "podman" in built.out
     assert "Traceback" not in built.out, built.out
     assert fy(["config", "diff"], r, timeout=60, env_extra=from_config).rc == 0
-    toml = r / "foldyard.toml"
-    toml.write_text(toml.read_text().replace('\n[engine]\ncli = "docker"\n', "\n"))
+    toml.write_text(original)
     _adopt_on_host(r)
     # The same client by another door: podman runs whatever this names.
     provider = {"PODMAN_COMPOSE_PROVIDER": "docker-compose"}
@@ -316,10 +327,11 @@ def _still_ticking() -> None:
     )
 
 
-def test_a_supervisor_outlives_the_engine_being_refused_under_it(tmp_path_factory):
+def test_a_supervisor_outlives_the_engine_being_refused_under_it(repo):
     """The same line, adopted while a supervisor is running. It is all that expires a mode or stops
-    a daemon, so it has to stay, say why, and let `fy doctor` finish."""
-    r = example_copy(tmp_path_factory.mktemp("supervised"))
+    a daemon, so it has to stay, say why, and let `fy doctor` finish. On the module's copy, put
+    back in the end."""
+    r = repo
     _adopt_on_host(r)
     from_config = {"FOLDYARD_ENGINE": ""}
     fy_ok(["host", "restart"], r, timeout=300, env_extra=from_config)

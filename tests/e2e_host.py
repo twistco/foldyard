@@ -11,10 +11,19 @@ example's own VM (`[machine].name = "foldyard-example"`): they create it if abse
 recreate it, and mount things into it — never a consumer's VM.
 
 Every module here reuses `tests/test_e2e.py`'s runner (`_foldyard`: the real CLI as a subprocess
-with the example copy as the repo root) and its engine helpers, and follows its rules: a
-throwaway git copy of `example/` per module, adopted; `fy down` in teardown; the VM left RUNNING
-and un-walled so the next module (in the order pytest was given them, in one process — in CI, a
+with the example copy as the repo root) and its engine helpers, and follows its rules: a fresh
+git copy of `example/` per module, adopted; `fy down` in teardown; the VM left RUNNING and
+un-walled so the next module (in the order pytest was given them, in one process — in CI, a
 shard's list) starts from the same state.
+
+Every copy is made at ONE path, :data:`CHECKOUT` under your home (`test_e2e.HOST_TIER`), emptied
+and refilled in place by :func:`example_copy`. The compose client runs in the VM, which mounts only
+the checkout it was created from (and that checkout's worktrees root, :data:`WORKTREES`): with one
+path, whichever module (re)created the VM, it mounts the next module's copy. The CI jobs create
+the first VM from it too. A module that needs a second copy at once has nowhere the VM can see it.
+What your computer keys by the checkout's path (its adoptions, its worktree registry) goes with
+each refill (`e2e_adoptions.forget_checkout_state`), so a module never inherits an earlier one's
+worktrees.
 Versions asserted against are named in each module's docstring.
 """
 
@@ -33,6 +42,7 @@ import pytest
 
 from test_e2e import (  # noqa: F401  (re-exported for the host-tier modules)
     EXAMPLE,
+    HOST_TIER,
     NETWORK,
     PROJECT,
     _adopt_on_host,
@@ -41,9 +51,13 @@ from test_e2e import (  # noqa: F401  (re-exported for the host-tier modules)
     _foldyard,
     _probe_db,
     _service_is_listed,
+    fresh_example,
+    host_checkout,
 )
 
 VM = "foldyard-example"  # example/foldyard.toml [machine].name
+CHECKOUT = host_checkout()  # every module's copy (see the docstring)
+WORKTREES = Path(f"{CHECKOUT}-worktrees")  # its worktrees root, as foldyard derives it
 LIMA_DIR = Path.home() / ".lima" / VM
 LIMA_SOCK = LIMA_DIR / "sock" / "podman.sock"
 
@@ -119,23 +133,12 @@ def wait_for(predicate, timeout: float = 60, every: float = 1.0, what: str = "co
         time.sleep(every)
 
 
-def example_copy(base: Path, extra_toml: str = "") -> Path:
-    """A throwaway git copy of example/ (preflight refuses the nested project inside the foldyard
-    checkout; `main_repo()` shells git), optionally with `extra_toml` appended to foldyard.toml,
-    then ADOPTED — the launch gate refuses an unadopted checkout with no terminal (ADR-0022)."""
-    dst = base / "example"
-    shutil.copytree(EXAMPLE, dst)
-    if extra_toml:
-        with (dst / "foldyard.toml").open("a") as fh:
-            fh.write(extra_toml)
-    subprocess.run(["git", "init", "-q"], cwd=str(dst), check=True)
-    subprocess.run(["git", "add", "-A"], cwd=str(dst), check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "init"],
-        cwd=str(dst),
-        check=True,
-    )
-    return dst
+def example_copy(extra_toml: str = "") -> Path:
+    """:data:`CHECKOUT`, refilled with a fresh git copy of example/ (preflight refuses the nested
+    project inside the foldyard checkout; `main_repo()` shells git), optionally with
+    `extra_toml` appended to foldyard.toml. The caller adopts it — the launch gate refuses an
+    unadopted checkout with no terminal (ADR-0022)."""
+    return fresh_example(CHECKOUT, extra_toml)
 
 
 @dataclass

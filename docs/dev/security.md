@@ -95,15 +95,21 @@ anything a person might need to read exactly uses `printable`.
   still followed where it always was (`foldyard.toml`), and one to `/dev/null` reads as empty. A
   refused file reads like an unreadable one, and its reason is said. Where that would change a
   decision, refuse it and don't offer it, as adoption does (`configpin`'s `Drift.unadoptable`).
-- **A child that reads what the box wrote**: the host compose client opens the checkout's compose
-  files with a blocking `open`, so every compose call on your computer checks the `-f` files are
-  regular first (`stack._not_regular`) and says so when one isn't. Not the project `.env`: the
-  client skips one that isn't regular itself. The posture reconcile also runs under one deadline
-  (`stack.RECONCILE_TIMEOUT`), since the box can swap a file in after the check. Running out is a
-  reconcile skipped, never one done. The supervisor's tick never runs it, nor reads a compose file:
-  a TTL expiry writes the mode and records the lapse (`devmode.record_stack_lapse`), and `fy doctor`
-  asks the stack scope's drift verdict whether the stack has caught up, every call behind it under
-  one deadline (`reconcile.VERDICT_TIMEOUT`).
+- **A child that reads what the box wrote**: no compose client runs on your computer
+  (`guestcompose`; `stack._in_the_box` refuses to build one), so a compose file is opened in the VM.
+  One the box made a FIFO or a link to a device would hold the client there for ever, so the guest
+  runner refuses a `-f` file that isn't a regular file and says why (`runner.py`'s
+  `_refuse_special`), and its `services` read takes one as unreadable. That doesn't close the class:
+  the check is a `stat` the box can race (compose re-opens the file after it), and a file an
+  `include:` or `extends: file:` names isn't checked at all (the runner parses no YAML for it). So
+  an interactive verb (`fy up`, `fy build`, `fy ps`, `fy logs`, `fy down`) can still hang on one
+  until you press Ctrl-C. What runs without you is bounded instead: every compose call the posture
+  reconcile makes runs under one deadline (`stack.RECONCILE_TIMEOUT`), so a client that never
+  returns can't hang `fy mode` or the TUI. Running out is a reconcile skipped, never one done. The
+  supervisor's tick never runs it, nor reads a compose file: a TTL expiry writes the mode and
+  records the lapse (`devmode.record_stack_lapse`), and `fy doctor` asks the stack scope's drift
+  verdict whether the stack has caught up, every call behind it under one deadline
+  (`reconcile.VERDICT_TIMEOUT`).
 - **Names from config in the TUI**: never in a widget id or a selector. A switch name only has to be
   printable, and Textual raises on an id that isn't an identifier (`api.v2`, `a[b]`). A readable one
   can also be foldyard's own (switch `fix` made `fix-on`, a Doctor repair button's id). Keep the

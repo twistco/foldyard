@@ -36,7 +36,7 @@ stop_vms
 for v in $(limactl list -q 2>/dev/null); do
   limactl delete -f "$v" >/dev/null 2>&1
 done
-rm -rf "$src" "$N/state" "$N/fyex-machine" "$N/out" "$HOME/fy-e2e" "$HOME/.foldyard" "$FY_BASE_VM_STAMP"
+rm -rf "$src" "$N/state" "$N/out" "$HOME/fy-e2e" "$HOME/.foldyard" "$FY_BASE_VM_STAMP"
 mkdir -p "$N/out" "$N/tmp"
 
 say "rebuilding ${sha:0:12}"
@@ -58,9 +58,12 @@ if ! timeout --kill-after=30 360 bash -c "$(declare -f bake); N=$N src=$src bake
 fi
 
 say "creating the machine"
-cp -r "$src/example" "$N/fyex-machine"
+# At the host tier's one checkout (tests/test_e2e.py HOST_TIER), as CI does: compose runs in the VM,
+# which mounts only the checkout it was created from, and every module's copy is made there.
+mkdir -p "$HOME/fy-e2e/host-tier"
+cp -r "$src/example" "$HOME/fy-e2e/host-tier/example"
 (
-  cd "$N/fyex-machine" || exit 1
+  cd "$HOME/fy-e2e/host-tier/example" || exit 1
   git init -q && git add -A
   git -c user.email=e2e@foldyard -c user.name=e2e commit -qm init
   uv run --project "$src" foldyard config adopt &&

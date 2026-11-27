@@ -79,3 +79,60 @@ def test_refuses_a_copy_straight_in_the_shared_temp_folder(adoptions, tmp_path, 
     monkeypatch.setattr(e2e_adoptions.tempfile, "gettempdir", lambda: str(tmp_path))
     with pytest.raises(AssertionError):
         e2e_adoptions.record(tmp_path / "example")
+
+
+# ── a copy reusing a path starts from that path's clean state ───────────────────────────────
+# The host tier makes every module's copy at ONE path (tests/e2e_host.py), and what your computer
+# keys by a checkout's path outlives the files: a later module's `fy worktree add feat` found an
+# earlier module's `feat` "already registered".
+
+
+def test_a_reused_paths_state_goes_and_no_other_projects(adoptions, tmp_path):
+    from foldyard import worktree_registry
+
+    copy = tmp_path / "host-tier" / "example"
+    feat = tmp_path / "host-tier" / "example-worktrees" / "feat"
+    yours = tmp_path / "workspace" / "Tangible"
+    for repo in (copy, feat, yours, yours.parent / "Tangible-worktrees" / "feat"):
+        (repo / ".git").mkdir(parents=True)
+    worktree_registry.register(copy, "feat", feat)
+    worktree_registry.register(yours, "feat", yours.parent / "Tangible-worktrees" / "feat")
+    for main in (copy, yours):  # the offsets and the pooled ports beside each registry
+        worktree_registry.offsets_file(main).write_text("{}")
+        worktree_registry.ports_file(main).write_text("{}")
+    mine = _pin(adoptions, "example-1", copy)
+    mine_wt = _pin(adoptions, "feat-2", feat, "feat")
+    theirs = _pin(adoptions, "Tangible-3", yours)
+    beside = _pin(adoptions, "example2-4", tmp_path / "host-tier" / "example2")  # same parent
+
+    e2e_adoptions.forget_checkout_state(copy, adoptions)
+
+    assert worktree_registry.names(copy) == []
+    assert not worktree_registry.offsets_file(copy).exists()
+    assert not worktree_registry.ports_file(copy).exists()
+    assert not mine.exists() and not mine_wt.exists()
+    assert worktree_registry.names(yours) == ["feat"]
+    assert worktree_registry.offsets_file(yours).exists()
+    assert worktree_registry.ports_file(yours).exists()
+    assert theirs.is_dir()
+    assert beside.is_dir()
+
+
+def test_each_fresh_host_tier_copy_starts_from_its_paths_clean_state(
+    adoptions, tmp_path, monkeypatch
+):
+    import test_e2e
+    from foldyard import worktree_registry
+
+    monkeypatch.setattr(test_e2e, "_IN_BOX", False)
+    monkeypatch.setattr(e2e_adoptions.configpin, "_pin_root", lambda: adoptions)
+    copy = tmp_path / "host-tier" / "example"
+    feat = tmp_path / "host-tier" / "example-worktrees" / "feat"
+    (copy / ".git").mkdir(parents=True)
+    (feat / ".git").mkdir(parents=True)
+    worktree_registry.register(copy, "feat", feat)  # an earlier module's
+
+    test_e2e.fresh_example(copy)
+
+    assert worktree_registry.names(copy) == []
+    assert (copy / "foldyard.toml").is_file()

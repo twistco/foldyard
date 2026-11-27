@@ -287,12 +287,14 @@ jobs:
             bake
           fi
 
-      # The VM is created ONCE here, before pytest, from a throwaway copy of the example (preflight
-      # refuses the nested project; the launch gate refuses an unadopted checkout with no terminal
-      # — `fy config adopt` is the non-interactive path). Every example copy shares the VM name
-      # ([machine].name), and the example stack has no bind mounts (its build context ships over
-      # the socket), so the tests' own copies drive this VM through the real `foldyard up` —
-      # `machine.ensure` finds it running and goes on to the adopt gate + supervisor + compose.
+      # The VM is created ONCE here, before pytest, from a copy of the example (preflight refuses
+      # the nested project; the launch gate refuses an unadopted checkout with no terminal — `fy
+      # config adopt` is the non-interactive path) at the host tier's one checkout path
+      # (tests/test_e2e.py HOST_TIER, held to this step by tests/test_e2e_workflow.py): the compose
+      # client runs in the VM, which mounts only the checkout it was created from, and every test
+      # module's copy is made at that same path. So the tests drive this VM through the real
+      # `foldyard up` — `machine.ensure` finds it running and goes on to the adopt gate +
+      # supervisor + compose.
       # CONTAINER_HOST (NOT DOCKER_HOST) is exported so the tests' own engine helpers (`podman
       # ps/run` for the in-network probe) reach the VM's forwarded socket while the CLI under test
       # still resolves the socket ITSELF: a preset DOCKER_HOST makes `stack._docker_host` skip
@@ -301,7 +303,8 @@ jobs:
       - name: Create the machine (fy machine ensure)
         run: |
           set -euo pipefail
-          dst="$RUNNER_TEMP/fyex-machine"
+          dst="$HOME/fy-e2e/host-tier/example"
+          mkdir -p "$(dirname "$dst")"
           cp -r example "$dst"
           cd "$dst"
           git init -q && git add -A
@@ -621,14 +624,15 @@ jobs:
             bake
           fi
 
-      # As in lima-host-e2e: the VM is created ONCE, from a throwaway example copy — under the
-      # distro's home, not RUNNER_TEMP (a Windows path). CONTAINER_HOST (not DOCKER_HOST) for the
-      # tests' own engine calls, handed forward through the env file.
+      # As in lima-host-e2e: the VM is created ONCE, from an example copy at the host tier's one
+      # checkout path, under the distro's home. CONTAINER_HOST (not DOCKER_HOST) for the tests' own
+      # engine calls, handed forward through the env file.
       - name: Create the machine (fy machine ensure)
         shell: wsl-bash {0}
         run: |
           . "$HOME/.fy-ci.env"
-          dst="$HOME/fyex-machine"
+          dst="$HOME/fy-e2e/host-tier/example"
+          mkdir -p "$(dirname "$dst")"
           cp -r "$HOME/foldyard/example" "$dst"
           cd "$dst"
           git init -q && git add -A

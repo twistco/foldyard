@@ -47,13 +47,13 @@ LEAK_AT = "/mnt/c"  # a verify._FOREIGN_MOUNTS marker: "WSL2 Windows drive"
 
 
 @pytest.fixture(scope="module")
-def repo(tmp_path_factory):
-    r = example_copy(tmp_path_factory.mktemp("verify"))
+def repo():
+    r = example_copy()
     _adopt_on_host(r)
     # The boundary under audit is the one foldyard builds for THIS checkout, so build it: the
     # mount table then holds this repo + its worktrees root and nothing a previous module left
-    # (test_machine_e2e leaves the VM mounting ITS copy under the host home — a host path beyond
-    # this checkout's mounts, which the positive test would rightly FAIL on).
+    # (a mount a module added by hand is a host path beyond this checkout's mounts, which the
+    # positive test would rightly FAIL on).
     fy_ok(["machine", "recreate", "--yes"], r, timeout=900)
     export_vm_socket()
     ensure_vm(r)

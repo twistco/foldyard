@@ -2,8 +2,10 @@
 
 A `podman` client sends the logins in its auth file to the API service, and that service is in the
 VM: a build sends all of them, and the service writes them to a temp file a box can read through a
-bind mount. So the client is pointed at an empty file, unless the project opted in. The live proof,
-with a real client and a real VM, is tests/test_registrylogins_e2e.py.
+bind mount. So the client is pointed at an empty file. The old opt-in (`FY_REGISTRY_AUTH_FILE` in
+`[project] compose_env`) reached only a compose client on your computer, which is gone since 0.16.0:
+it hands nothing to anything now. The live proof, with a real client and a real VM, is
+tests/test_registrylogins_e2e.py.
 """
 
 from __future__ import annotations
@@ -146,19 +148,15 @@ def test_the_compose_client_gets_no_logins_by_default(host, monkeypatch):
     assert stack._host_passthrough()[AUTH] == str(registrylogins.no_logins_file())
 
 
-def test_a_project_that_names_it_gets_the_file_you_exported_for_it(host, monkeypatch):
-    """The opt-in: adopted, listed by `fy config widenings`, and only ever a file you named."""
-    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
-    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
-    assert stack._host_passthrough()[AUTH] == "/mine/narrow.json"
-
-
-def test_the_opt_in_survives_the_clamp_at_startup(host, monkeypatch):
+def test_the_old_opt_in_hands_your_file_to_nothing(host, monkeypatch):
+    """It reached the compose client on your computer, and that client is gone: the stack's pulls
+    and builds run in the VM, where no file here reaches. An engine call made here (an inspect, a
+    tag) gets no logins either."""
     monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
     monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
     monkeypatch.setenv(AUTH, "/mine/everything.json")
     registrylogins.clamp(os.environ)  # monkeypatch.setenv restores it at teardown
-    assert stack._host_passthrough()[AUTH] == "/mine/narrow.json"
+    assert stack._host_passthrough()[AUTH] == str(registrylogins.no_logins_file())
 
 
 def test_a_general_export_is_never_consent(host, monkeypatch):
@@ -222,10 +220,11 @@ def test_a_port_named_like_the_auth_file_cant_replace_it(host, tmp_path, monkeyp
     assert env[AUTH] == str(registrylogins.no_logins_file())
 
 
-def test_the_opt_in_survives_the_merge_too(host, tmp_path, monkeypatch):
+def test_the_old_opt_in_hands_nothing_after_the_merge_either(host, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
     monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
-    assert _resolved(monkeypatch, tmp_path, **{AUTH: "123"})[AUTH] == "/mine/narrow.json"
+    env = _resolved(monkeypatch, tmp_path, **{AUTH: "123"})
+    assert env[AUTH] == str(registrylogins.no_logins_file())
 
 
 def test_in_the_box_the_merge_is_left_alone(tmp_path, monkeypatch):
@@ -294,86 +293,50 @@ def test_a_file_of_yours_with_a_like_name_elsewhere_is_yours(host, tmp_path, mon
 # ── saying so ─────────────────────────────────────────────────────────────────────────────
 
 
+def _home(monkeypatch, tmp_path, *, logins: bool) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    if logins:
+        (tmp_path / ".docker").mkdir()
+        (tmp_path / ".docker" / "config.json").write_text("{}")
+
+
 def test_a_failure_names_the_logins_only_when_you_have_some(host, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    assert registrylogins.failure_hint() == []
-    (tmp_path / ".docker").mkdir()
-    (tmp_path / ".docker" / "config.json").write_text("{}")
-    hint = "\n".join(registrylogins.failure_hint())
-    assert "compose_env" in hint and OPT_IN in hint
-
-
-def _in_the_vm(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    monkeypatch.delenv(OPT_IN, raising=False)
-
-
-def test_with_the_client_in_the_vm_the_hint_doesnt_offer_an_opt_in_that_cant_work(
-    host, tmp_path, monkeypatch
-):
-    # No file on your computer reaches a client in the VM, so telling someone to export one and name
-    # it would send them round a loop. What works: pull it once with the client here.
-    _in_the_vm(monkeypatch, tmp_path)
+    _home(monkeypatch, tmp_path, logins=False)
     assert registrylogins.failure_hint() == []  # no logins of yours: a failed pull isn't about them
     (tmp_path / ".docker").mkdir()
     (tmp_path / ".docker" / "config.json").write_text("{}")
     hint = "\n".join(registrylogins.failure_hint())
-    assert 'compose = "vm"' in hint and "MACHINE_COMPOSE=host fy up" in hint
-    assert "compose_env" in hint  # the export alone isn't an opt-in: the pull would fail again
-    assert "fy docs stack" in hint
+    assert "runs in the VM" in hint and "fy docs stack" in hint
 
 
-def test_with_the_client_in_the_vm_having_opted_in_still_gets_the_hint(host, tmp_path, monkeypatch):
-    # Off the VM, opting in silences the hint because the logins went. Here they don't go.
-    _in_the_vm(monkeypatch, tmp_path)
-    offered = tmp_path / "acme.json"
-    offered.write_text('{"auths": {}}')
-    monkeypatch.setenv(OPT_IN, str(offered))
-    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
-    assert "MACHINE_COMPOSE=host" in "\n".join(registrylogins.failure_hint())
+def test_the_hint_never_offers_a_way_that_cant_work(host, tmp_path, monkeypatch):
+    """No file on your computer reaches the client in the VM, and the client here is gone: an
+    opt-in or `MACHINE_COMPOSE=host` would send people round a loop."""
+    _home(monkeypatch, tmp_path, logins=True)
+    hint = "\n".join(registrylogins.failure_hint())
+    assert "compose_env" not in hint and OPT_IN not in hint and "MACHINE_COMPOSE" not in hint
 
 
-def test_an_export_this_project_doesnt_name_still_gets_the_hint(host, tmp_path, monkeypatch):
-    """Half an opt-in gives no logins, so it's the case most in need of being told."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".docker").mkdir()
-    (tmp_path / ".docker" / "config.json").write_text("{}")
+@pytest.mark.parametrize("named", [True, False])
+def test_the_old_opt_in_exported_still_gets_the_hint(host, tmp_path, monkeypatch, named):
+    """Exported (and named, or not) it once handed a login over, so a failed pull is now most in
+    need of being told why it didn't."""
+    _home(monkeypatch, tmp_path, logins=False)
     monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
-    assert OPT_IN in "\n".join(registrylogins.failure_hint())
+    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN] if named else [])
+    assert "runs in the VM" in "\n".join(registrylogins.failure_hint())
 
 
 def test_the_clamp_itself_doesnt_read_as_you_having_logins(host, tmp_path, monkeypatch):
     """After the clamp REGISTRY_AUTH_FILE names the empty file, which is no login of yours, or every
     failed build would tell people with no logins about them."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    _home(monkeypatch, tmp_path, logins=False)
     monkeypatch.setenv(AUTH, str(registrylogins.no_logins_file()))
     assert registrylogins.failure_hint() == []
 
 
-def test_a_project_already_opted_in_isnt_told_to(host, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".docker").mkdir()
-    (tmp_path / ".docker" / "config.json").write_text("{}")
-    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
-    monkeypatch.setenv(OPT_IN, "/mine/narrow.json")
-    assert registrylogins.failure_hint() == []
-
-
-def test_a_project_that_names_it_tells_whoever_hasnt_exported_it(host, tmp_path, monkeypatch):
-    """A teammate on the same adopted config: no export means no logins, so the failure is theirs
-    to fix, and this is how they find out."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".docker").mkdir()
-    (tmp_path / ".docker" / "config.json").write_text("{}")
-    monkeypatch.setattr(config, "compose_env", lambda: [OPT_IN])
-    assert OPT_IN in "\n".join(registrylogins.failure_hint())
-
-
-def test_a_failed_stack_build_says_so(host, tmp_path, monkeypatch, capfd):
+def test_a_failed_stack_build_says_so(host, tmp_path, monkeypatch, capfd, guest_here):
     monkeypatch.setattr(registrylogins, "failure_hint", lambda: ["the logins hint"])
     monkeypatch.setattr(
         stack.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
@@ -381,7 +344,6 @@ def test_a_failed_stack_build_says_so(host, tmp_path, monkeypatch, capfd):
     rendered = {"services": {"api": {"build": {"context": str(tmp_path)}}}}
     monkeypatch.setattr(config, "state_dir", lambda: tmp_path / "state")
     monkeypatch.setattr(stack, "_image_id", lambda *a: None)
-    monkeypatch.setattr(stack, "_escapes", lambda *a, **k: [])
     import yaml
 
     monkeypatch.setattr(

@@ -5,13 +5,13 @@ test_box_e2e's — see the first test); its stack comes up beside main's in the 
 tears that stack down (containers AND the worktree's volumes), archives the worktree's bound-out
 agent transcripts to the durable store BEFORE git deletes the tree, removes the checkout, drops
 its local state, and leaves main's stack and the branch alone. It removes with `--discard`: its
-check for uncommitted work runs in the box image too, over the VM's mount of this copy, which
-this module has neither of — test_box_e2e drives that check.
+check for uncommitted work runs in the box image too, which this module has none of —
+test_box_e2e drives that check.
 
 Host tier (tests/e2e_host.py): run on your computer, the verbs set up the worktree's own box, stack
-and config (in a box they do less: `boxworktree`, driven by test_box_e2e). The example stack has no bind mounts, so
-the worktree's stack ships its build context over the socket and the VM need not mount the
-worktrees root (`machine.ensure` says so, as a warning). Lima 2.2.0, Fedora 44 guest.
+and config (in a box they do less: `boxworktree`, driven by test_box_e2e). The compose client reads
+the worktree's compose files in the VM, so the worktree lives in the worktrees root the VM mounts
+(`e2e_host.WORKTREES`, beside the host tier's one checkout). Lima 2.2.0, Fedora 44 guest.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import pytest
 
 from e2e_host import (
     PROJECT,
+    WORKTREES,
     _adopt_on_host,
     _probe_db,
     _service_is_listed,
@@ -75,7 +76,7 @@ def _worktree_paths(main: Path) -> list[str]:
 @pytest.fixture(scope="module")
 def rig(tmp_path_factory):
     base = tmp_path_factory.mktemp("worktree")
-    main = example_copy(base)
+    main = example_copy()
     # The bound-out transcript dir is a consumer's to gitignore (`fy init` does); the example
     # commits none, and `git worktree remove` refuses a tree with untracked files.
     with (main / ".gitignore").open("a") as fh:
@@ -92,7 +93,7 @@ def rig(tmp_path_factory):
     compose.write_text(text + "\nvolumes:\n  pgdata: {}\n")
     _git(main, "add", "compose.yml")
     _git(main, "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "volume")
-    wt_root = base / "example-worktrees"
+    wt_root = WORKTREES
     archive = base / "transcripts-archive"
     env = {"FOLDYARD_WORKTREES_ROOT": str(wt_root), "FOLDYARD_TRANSCRIPTS_ARCHIVE": str(archive)}
     _adopt_on_host(main, env)

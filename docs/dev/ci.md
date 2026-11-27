@@ -80,8 +80,10 @@ recipe `modprobe kvm; chown $USER /dev/kvm` — group membership does not take e
 and without the walls, QEMU start → READY in 29–41 s and the whole attempt under 2.5 min;
 [ADR-0027](../adrs/0027-always-a-vm-native-backend-retired.md) records the outcome, and PR #17 the
 measurements (its `docs/linux-support.md`; #34 later removed them from that page). The job creates
-the VM once from a throwaway example copy before pytest (the example stack has no bind mounts, so
-every test copy can drive the one VM). It bakes a session base VM first (`fy-ci-base`, named by
+the VM once from an example copy before pytest, at the host tier's one checkout path
+(`~/fy-e2e/host-tier/example`): the compose client runs in the VM, which mounts only the checkout it
+was created from, and every module's copy is made at that path ([testing](./testing.md)), so every
+module can drive the one VM. It bakes a session base VM first (`fy-ci-base`, named by
 `FY_BASE_VM_NAME`/`FY_BASE_VM_STAMP` job-wide, retried once), so that VM and every one a module
 recreates are clones: a template create runs the template's `dnf install podman` over the Fedora
 mirrors, and one stalled mirror once left a WSL2 run's every module after it on a VM whose boot
@@ -145,16 +147,18 @@ setup on their own runner (distro, Lima, the session base bake, the first VM), t
 modules in order — four on WSL2 (`W1`–`W4`), two on Linux (`L1`/`L2`, each the union of two WSL2
 shards, so a module's neighbours are the same on both hosts). The split is by module times averaged
 over several runs, and each shard starts with a module that recreates the VM (`W3` starts from the
-VM the setup just created). A module's time depends on its place: the first `fy up` after a recreate
-is the cold one (image builds and pulls), so whichever module follows a recreate carries it. Judge a
-rebalance on several runs' tables, not one: the apt step alone has ranged from under a minute to 13
-min on the same install (once 12 on Linux). (Pointing the distro's apt at
-`azure.archive.ubuntu.com`, the Linux runners' mirror, made it slower, 2–16 min, not faster. What
-the WSL2 job does instead is cache the debs together with the package lists they were resolved
-against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and install offline from them.
-On a miss it installs online as before and saves the result; if the offline install fails it
-installs online too, but a cache key can't be overwritten, so that cache stays until the month's key
-changes — bump the key's `v1` to replace it sooner, and when the package list changes.)
+VM the setup just created). One order matters: `test_reclaim_e2e` must not directly follow
+`test_worktree_e2e`, whose removed worktree's image is one more orphan than the reclaim module
+expects ([compose-in-vm-scope](../compose-in-vm-scope.md)). A module's time depends on its place:
+the first `fy up` after a recreate is the cold one (image builds and pulls), so whichever module
+follows a recreate carries it. Judge a rebalance on several runs' tables, not one: the apt step
+alone has ranged from under a minute to 13 min on the same install (once 12 on Linux). (Pointing the
+distro's apt at `azure.archive.ubuntu.com`, the Linux runners' mirror, made it slower, 2–16 min, not
+faster. What the WSL2 job does instead is cache the debs together with the package lists they were
+resolved against, keyed by month (`actions/cache`, restored to `RUNNER_TEMP`), and install offline
+from them. On a miss it installs online as before and saves the result; if the offline install fails
+it installs online too, but a cache key can't be overwritten, so that cache stays until the month's
+key changes — bump the key's `v1` to replace it sooner, and when the package list changes.)
 
 **4 vCPUs for the CI VM was tried and reverted (2026-10-22).** `MACHINE_CPUS=4` (over the example's
 `cpus = 2`) made no Linux module faster, and on WSL2 it made the VM-heavy ones slower and erratic.

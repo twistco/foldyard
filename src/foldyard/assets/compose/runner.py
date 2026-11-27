@@ -1,4 +1,4 @@
-"""The compose client, in the guest (``[machine] compose = "vm"``, docs/compose-in-vm-scope.md).
+"""The compose client, in the guest: where it runs from your computer (docs/compose-in-vm-scope.md).
 
 Run IN THE GUEST, as the VM user, never on your computer. ``foldyard.guestcompose`` sends one
 payload per call over the backend's ssh route: a zip of this module, foldyard's own pinned
@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -87,22 +88,54 @@ def _die_with_the_session() -> None:
     threading.Thread(target=watch, daemon=True).start()
 
 
-def _settle(argv: list[str]) -> None:
+def _compose_files(argv: list[str]) -> list[str]:
     # Only the leading `-f` pairs name compose files (your computer puts them first): a `-f` after
-    # the command is its own flag (`logs -f`, follow), and waiting on what follows it as a file
-    # held every followed log back by the whole settle time.
-    deadline = time.monotonic() + _SETTLE
+    # the command is its own flag (`logs -f`, follow).
+    files = []
     i = 0
     while i + 1 < len(argv) and argv[i] in ("-f", "--file"):
-        while not os.path.exists(argv[i + 1]) and time.monotonic() < deadline:
-            time.sleep(0.1)
+        files.append(argv[i + 1])
         i += 2
+    return files
+
+
+def _settle(argv: list[str]) -> None:
+    # Waiting on what follows a `logs -f` as a file held every followed log back by the whole
+    # settle time, hence the leading pairs alone.
+    deadline = time.monotonic() + _SETTLE
+    for path in _compose_files(argv):
+        while not os.path.exists(path) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+
+def _regular(path: str) -> bool:
+    """Whether ``path`` is a regular file, through any link. One that isn't there yet is compose's
+    to report. The checkout is the box's: a FIFO it made of a compose file, or a link to a device,
+    would hold compose's blocking ``open`` for ever."""
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except OSError:
+        return True
+
+
+def _refuse_special(argv: list[str]) -> bool:
+    """Say so, and True, when a compose file isn't a regular file (:func:`_regular`)."""
+    bad = [path for path in _compose_files(argv) if not _regular(path)]
+    if bad:
+        print(
+            f"✗ not run: {', '.join(bad)} isn't a regular file (the box can make one a FIFO or a "
+            "link to a device, and compose would wait on it for ever)",
+            file=sys.stderr,
+        )
+    return bool(bad)
 
 
 def _compose(argv: list[str]) -> int:
     import podman_compose  # after the env and cwd are set: its parser reads both
 
     _settle(argv)
+    if _refuse_special(argv):
+        return 1
     sys.argv = ["podman-compose", *argv]
     try:
         podman_compose.main()
@@ -116,6 +149,8 @@ def _hash(argv: list[str]) -> int:
     import podman_compose
 
     _settle(argv)
+    if _refuse_special(argv):
+        return 1
     pc = podman_compose.podman_compose
     pc.global_args = pc._parse_args([*argv, "config"])
     pc._parse_compose_file()
@@ -129,6 +164,8 @@ def _one_file(path: str) -> dict[str, list[str]] | None:
     deadline = time.monotonic() + _SETTLE
     while not os.path.exists(path) and time.monotonic() < deadline:
         time.sleep(0.1)
+    if not _regular(path):
+        return None
     try:
         with open(path) as f:
             services = (yaml.safe_load(f) or {}).get("services") or {}
@@ -157,9 +194,11 @@ def main(request: dict) -> int:
         os.chdir(str(request.get("cwd") or "/"))
     except OSError as e:
         # The compose files and build contexts are read in the VM, so the checkout must be there.
+        # A VM mounts the checkout it was created from (and its worktrees root), and no other.
         print(
-            f"✗ foldyard's compose client can't enter {request.get('cwd')!r} in the VM ({e}): does "
-            "the VM mount this checkout? (`fy doctor` says; `fy machine recreate`)",
+            f"✗ the VM has no {request.get('cwd')!r} ({e.strerror or e}), and compose runs there: "
+            "it mounts only the checkout it was created from. `fy machine recreate` from this "
+            "checkout makes one that mounts it (the VM's images and volumes go with the old one).",
             file=sys.stderr,
         )
         return 125

@@ -18,7 +18,9 @@ The problems it reports are each a key the readers would pass over in silence:
 - **removed** — :data:`foldyard.exposure.IGNORED_KEYS`, with what replaced it (exit 1);
 - **renamed** — :data:`foldyard.config.RENAMED_KEYS`; the old spelling still works;
 - **old-default** — :data:`OLD_DEFAULTS`: a value that was the default before a release changed
-  it, written out, so the project kept the old behaviour without choosing it.
+  it, written out, so the project kept the old behaviour without choosing it — or, where
+  :data:`foldyard.exposure.IGNORED_VALUES` names it (``[machine] compose = "host"``), didn't keep
+  it at all.
 
 Reads the files the way ``fy config widenings`` does (:func:`foldyard.exposure._files`): the
 ADOPTED copies on the host, the working tree in a box or before anything is adopted — and each
@@ -143,13 +145,7 @@ KEYS: tuple[Key, ...] = (
         "the proxy's log names the container behind each request",
         on="record",
     ),
-    Key(
-        "machine",
-        "compose",
-        "0.9.0",
-        "compose and image builds run in the VM, not on your computer",
-        on="vm",
-    ),
+    *_keys("machine", "compose", since="0.9.0"),  # always "vm" since 0.16.0: not a feature now
     Key(
         "machine",
         "firewall_allow",
@@ -230,6 +226,7 @@ KEYS: tuple[Key, ...] = (
 #: ``(table, field, old value, changed in, today's default)``.
 OLD_DEFAULTS: tuple[tuple[str, str, object, str, object], ...] = (
     ("proxy", "passthrough", ["@all"], "0.4.0", ["@jvm", "@linux"]),
+    ("machine", "compose", "host", "0.16.0", "vm"),
 )
 
 
@@ -275,6 +272,12 @@ def _ignored() -> dict[str, str]:
     from .exposure import IGNORED_KEYS
 
     return IGNORED_KEYS
+
+
+def _ignored_values() -> dict[str, str]:
+    from .exposure import IGNORED_VALUES
+
+    return IGNORED_VALUES
 
 
 def _entries(value: object) -> list[dict]:
@@ -341,14 +344,23 @@ def _renamed(shared: dict, local: dict) -> list[Problem]:
 def _old_defaults(doc: dict, origin: str) -> list[Problem]:
     found: list[Problem] = []
     for table, name, old, changed_in, now in OLD_DEFAULTS:
-        if any(e.get(name) == old for e in _entries(doc.get(table))):
+        if any(_same(e.get(name), old) for e in _entries(doc.get(table))):
             label = f"{Key(table, name).label} = {_toml(old)}"
             detail = (
                 f"the default before {changed_in}; today's is {_toml(now)}, so keep it only if "
                 "you mean it"
             )
+            if ignored := _ignored_values().get(f"{table}.{name}"):  # nothing to mean any more
+                detail = f"the default before {changed_in}, and no longer honoured: {ignored}"
             found.append(Problem("old-default", label, detail, origin))
     return found
+
+
+def _same(value: object, old: object) -> bool:
+    """Whether ``value`` is ``old`` as foldyard read it: a word in any case and spacing."""
+    if isinstance(value, str) and isinstance(old, str):
+        return value.strip().lower() == old.lower()
+    return value == old
 
 
 def _file(in_local: bool) -> str:

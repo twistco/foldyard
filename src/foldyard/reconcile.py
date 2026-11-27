@@ -368,7 +368,9 @@ def _overlay_services(paths: dict[str, Path]) -> dict[str, set[str] | None]:
     from . import guestcompose, mountwrite
 
     out: dict[str, set[str] | None] = {}
-    if guestcompose.wanted():  # parsing them here would read box-written bytes on your computer
+    # Parsed in the guest on your computer, never here: the bytes are the box's, and so is any link
+    # to them. In the box, here.
+    if guestcompose.wanted():
         parsed = guestcompose.file_services([str(p) for p in paths.values()], timeout=20)
         for name, path in paths.items():
             services = parsed[str(path)]

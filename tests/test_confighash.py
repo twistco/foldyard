@@ -1,8 +1,9 @@
 """`confighash` — "would `up` recreate it?", asked of the compose provider itself.
 
-The podman path drives the bundled podman-compose's own parser in a subprocess, so these tests
-render REAL compose files through the installed podman-compose (no engine: the hash is a pure
-function of the rendered config). What they pin is the contract `fy state` leans on: stable for an
+It drives the bundled podman-compose's own parser where the compose client runs: the guest runner
+on your computer (played here by the real payload under this interpreter: ``guest_here``) and a
+subprocess in the box. So these tests render REAL compose files through the installed
+podman-compose, both ways (no engine: the hash is a pure function of the rendered config). What they pin is the contract `fy state` leans on: stable for an
 unchanged config, moved by an env-only change for exactly the services that interpolate it, blind
 to services outside the rendered profiles unless asked. The live e2e tiers close the loop against
 labels a real `up` wrote (tests/test_probes_e2e.py on podman, tests/test_e2e.py on docker).
@@ -13,7 +14,21 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from foldyard import confighash, stack
+import pytest
+
+from foldyard import config, confighash, stack
+
+
+@pytest.fixture(autouse=True, params=["your computer", "the box"])
+def where(request, monkeypatch):
+    """Each test both where the hash is computed: in the guest from your computer, a child in the
+    box."""
+    in_box = request.param == "the box"
+    monkeypatch.setattr(config, "in_box", lambda: in_box)
+    if not in_box:
+        request.getfixturevalue("guest_here")
+    return request.param
+
 
 _COMPOSE = """\
 services:

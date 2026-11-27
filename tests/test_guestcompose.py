@@ -1,4 +1,5 @@
-"""`[machine] compose = "vm"` — the compose client in the guest (docs/compose-in-vm-scope.md).
+"""The compose client in the guest, the only place it runs from your computer
+(docs/compose-in-vm-scope.md).
 
 Hermetic: ssh is never run. The payload itself IS run, by this interpreter under ``-I`` (the
 interpreter is the one binary the gate lets through), so the code the guest runs — the zip
@@ -43,9 +44,8 @@ class _Backend:
 
 @pytest.fixture
 def vm(monkeypatch):
-    """Your computer, `[machine] compose = "vm"`, a lima backend with an ssh route."""
+    """Your computer, a lima backend with an ssh route."""
     monkeypatch.setattr(config, "in_box", lambda: False)
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
     monkeypatch.setenv("PODMAN_SOCK_IN_VM", GUEST_SOCK)  # else it names this machine's uid
     from foldyard import machine
 
@@ -70,26 +70,94 @@ def _ctx(tmp_path: Path) -> stack.Context:
     return stack.Context(tmp_path, env, compose, "app", "acme", "")
 
 
-# ── the switch ────────────────────────────────────────────────────────────────────────────
-
-
-def test_the_switch_defaults_to_host_and_refuses_anything_else(monkeypatch):
-    monkeypatch.delenv("MACHINE_COMPOSE", raising=False)
-    monkeypatch.setattr(config, "_table", lambda name: {})
-    assert config.machine_compose() == "host"
-    monkeypatch.setenv("MACHINE_COMPOSE", " VM ")
-    assert config.machine_compose() == "vm"
-    monkeypatch.setenv("MACHINE_COMPOSE", "/usr/bin/docker-compose")
-    with pytest.raises(SystemExit, match="never a program"):
-        config.machine_compose()
+# ── where it runs: always the guest, from your computer ───────────────────────────────────
 
 
 def test_in_the_box_the_client_already_runs_in_the_vm(monkeypatch):
-    monkeypatch.setenv("MACHINE_COMPOSE", "vm")
     monkeypatch.setattr(config, "in_box", lambda: True)
     assert not guestcompose.wanted()
     monkeypatch.setattr(config, "in_box", lambda: False)
     assert guestcompose.wanted()
+
+
+@pytest.mark.parametrize("asked", [{"MACHINE_COMPOSE": "host"}, {"compose": "host"}, {}])
+def test_nothing_asks_the_client_back_onto_your_computer(vm, tmp_path, monkeypatch, asked):
+    """The old switch, in the environment or the adopted config, is ignored: the guest is asked
+    and nothing runs here."""
+    for name, value in asked.items():
+        if name.isupper():
+            monkeypatch.setenv(name, value)
+    monkeypatch.setattr(config, "_table", lambda name: dict(asked) if name == "machine" else {})
+    monkeypatch.setattr(stack, "_run", _never)
+    monkeypatch.setattr(stack.subprocess, "run", _never)
+    asked_guest = _answering(monkeypatch, "web\n")
+    assert stack._rendered_services(_ctx(tmp_path)) == {"web"}
+    assert asked_guest[0][0] == "compose"
+    assert stack._where().startswith("+ (in the VM)")
+
+
+def test_a_compose_argv_to_run_here_is_refused_off_the_box(tmp_path, monkeypatch):
+    """The structural half of "no compose client on your computer": the one helper that builds an
+    argv to run here refuses to build one anywhere but the box."""
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    with pytest.raises(RuntimeError, match="no compose client runs on your computer"):
+        stack._in_the_box(ctx, ["ps"])
+    monkeypatch.setattr(config, "in_box", lambda: True)
+    assert stack._in_the_box(ctx, ["ps"]) == [*ctx.compose, "ps"]
+
+
+@pytest.mark.parametrize(
+    ("env", "table", "said"),
+    [
+        ("host", {}, ["MACHINE_COMPOSE=host"]),
+        (None, {"compose": "host"}, ["[machine] compose = 'host'"]),
+        (" VM ", {"compose": "vm"}, []),  # what happens anyway: never said
+        (None, {}, []),
+    ],
+)
+def test_an_ignored_compose_setting_is_said_once(monkeypatch, capsys, env, table, said):
+    if env is None:
+        monkeypatch.delenv("MACHINE_COMPOSE", raising=False)
+    else:
+        monkeypatch.setenv("MACHINE_COMPOSE", env)
+    monkeypatch.setattr(config, "_table", lambda name: table if name == "machine" else {})
+    monkeypatch.setattr(guestcompose, "_said_ignored", False)
+    assert guestcompose.ignored_settings() == said
+    guestcompose.say_ignored_settings()
+    guestcompose.say_ignored_settings()
+    err = capsys.readouterr().err
+    assert err.count("is ignored") == len(said)
+    for what in said:
+        assert f"⚠ {what} is ignored: since 0.16.0 compose always runs in the VM" in err
+
+
+def test_an_ignored_compose_setting_is_shown_inert(monkeypatch):
+    monkeypatch.setenv("MACHINE_COMPOSE", "host\x1b]52;c;ZXZpbA==\x07")
+    monkeypatch.setattr(config, "_table", lambda name: {"compose": "\x1b[2Jhost"})
+    assert not any("\x1b" in what for what in guestcompose.ignored_settings())
+
+
+def test_resolve_says_an_ignored_compose_setting(monkeypatch, capsys):
+    said = []
+    monkeypatch.setattr(guestcompose, "say_ignored_settings", lambda: said.append(True))
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    monkeypatch.setattr(
+        stack,
+        "_context",
+        lambda *a, **k: (
+            Path("/repo"),
+            {},
+            {"FOLDYARD_CHECKOUT": "/repo", "PODMAN_PROJECT": "p", "WORKTREE": ""},
+            {},
+        ),
+    )
+    monkeypatch.setattr(stack.devmode, "read", lambda *a, **k: {"mode": {}})
+    monkeypatch.setattr(stack.devmode, "derive_env", lambda mode: {})
+    monkeypatch.setattr(config, "compose_files", lambda: [])
+    monkeypatch.setattr(stack, "_compose_overlays", lambda mode, base: [])
+    stack.resolve()
+    assert said == [True]
 
 
 # ── the payload ───────────────────────────────────────────────────────────────────────────
@@ -192,9 +260,8 @@ def test_ps_and_the_service_list_go_to_the_guest(vm, tmp_path, monkeypatch):
     assert asked[1][-2:] == ["config", "--services"]
 
 
-def test_off_nothing_goes_to_the_guest(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "in_box", lambda: False)
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+def test_in_the_box_nothing_goes_to_the_guest(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "in_box", lambda: True)
     monkeypatch.setattr(guestcompose, "call", _never)
     monkeypatch.setattr(
         stack, "_run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "web\n", "")
@@ -294,13 +361,77 @@ _HOST_HASH = (
 )
 
 
+def test_a_vm_without_the_checkout_says_how_to_get_one_that_mounts_it(checkout):
+    """Every project's compose calls go to the VM, and a VM mounts only the checkout it was
+    created from: the refusal names the way to one that mounts this one, and what that costs."""
+    request = {
+        "op": "compose",
+        "argv": ["config"],
+        "env": {},
+        "cwd": str(checkout / "not-in-the-vm"),
+        "socket": GUEST_SOCK,
+    }
+    proc = subprocess.run(
+        [sys.executable, "-I", "-"],
+        input=guestcompose.bootstrap(request),
+        capture_output=True,
+        env={"PATH": str(checkout / "bin"), "HOME": str(checkout)},
+        timeout=60,
+    )
+    err = proc.stderr.decode()
+    assert proc.returncode == 125
+    assert "not-in-the-vm" in err and "`fy machine recreate` from this checkout" in err
+    assert "images and volumes go" in err
+
+
+@pytest.mark.parametrize("op", ["compose", "hash"])
+def test_a_compose_file_the_box_made_a_fifo_is_refused_not_waited_on(checkout, op):
+    """The box can make a compose file a FIFO (or a link to a device), and compose would wait on
+    it for ever: an interactive verb hung with no reason given. The runner says why instead."""
+    fifo = checkout / "fifo.yml"
+    os.mkfifo(fifo)
+    request = {
+        "op": op,
+        "argv": ["-f", str(checkout / "stack.yml"), "-f", str(fifo), "config"][
+            : 4 if op == "hash" else 5
+        ],
+        "env": {},
+        "cwd": str(checkout),
+        "socket": GUEST_SOCK,
+    }
+    proc = subprocess.run(
+        [sys.executable, "-I", "-"],
+        input=guestcompose.bootstrap(request),
+        capture_output=True,
+        env={"PATH": str(checkout / "bin"), "HOME": str(checkout)},
+        timeout=20,
+    )
+    assert proc.returncode == 1
+    assert f"{fifo} isn't a regular file" in proc.stderr.decode()
+
+
+def test_the_services_op_reads_a_fifo_as_unreadable_not_waited_on(checkout):
+    fifo = checkout / "fifo.yml"
+    os.mkfifo(fifo)
+    proc = subprocess.run(
+        [sys.executable, "-I", "-"],
+        input=guestcompose.bootstrap(
+            {"op": "services", "argv": [str(fifo)], "env": {}, "cwd": "/", "socket": ""}
+        ),
+        capture_output=True,
+        env={"PATH": str(checkout / "bin"), "HOME": str(checkout)},
+        timeout=20,
+    )
+    assert proc.returncode == 0 and json.loads(proc.stdout) == {str(fifo): None}
+
+
 def test_the_payload_never_runs_an_unknown_op(checkout):
     proc = _run_payload(checkout, "sh", ["-c", "id"], {})
     assert proc.returncode == 125
     assert b"unknown op" in proc.stderr
 
 
-# ── phase 2: with it on, no compose client runs on your computer ──────────────────────────
+# ── no compose client runs on your computer ───────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -329,29 +460,6 @@ def test_the_render_comes_from_the_guest(no_host_client, tmp_path, monkeypatch):
     asked = _answering(monkeypatch, "services: {web: {image: x}}")
     assert stack._render_config(_ctx(tmp_path)) == {"services": {"web": {"image": "x"}}}
     assert asked[0][0] == "compose" and asked[0][1][-1] == "config"
-
-
-def test_the_path_guard_stands_down_when_nothing_on_your_computer_reads(
-    no_host_client, tmp_path, monkeypatch
-):
-    """No client here means nothing here to guard, and the guard itself reads box-writable files
-    on your computer. So it isn't asked at all, rendered or raw."""
-    from foldyard import composeguard
-
-    monkeypatch.setattr(composeguard, "raw_problems", _never)
-    monkeypatch.setattr(composeguard, "rendered_problems", _never)
-    assert stack._escapes(_ctx(tmp_path)) == []
-
-
-def test_off_the_path_guard_still_refuses(tmp_path, monkeypatch):
-    from foldyard import composeguard
-
-    monkeypatch.setattr(config, "in_box", lambda: False)
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
-    monkeypatch.setattr(composeguard, "raw_problems", lambda *a: ["env_file: /etc/passwd"])
-    monkeypatch.setattr(composeguard, "rendered_problems", lambda *a, **k: [])
-    problems = stack._escapes(_ctx(tmp_path), rendered={"services": {}})
-    assert problems == ["env_file: /etc/passwd"]
 
 
 def test_up_and_down_stream_from_the_guest(no_host_client, tmp_path, monkeypatch):
@@ -559,25 +667,35 @@ def test_the_ssh_client_gets_a_clean_environment(vm, tmp_path, monkeypatch):
     assert "PATH" in seen["env"]
 
 
-def test_only_the_client_helpers_ever_touch_the_compose_argv():
-    """The guard behind "no compose client on your computer": every use of ``ctx.compose`` as an
-    argv is in a function that asks ``guestcompose`` first. A new one here would run the client on
-    your computer with the path guard standing down."""
+def test_no_compose_client_is_ever_built_to_run_on_your_computer():
+    """The guard behind "no compose client on your computer": across the package, ``ctx.compose``
+    is read only to send it to the guest (its ``-f`` list, in the request), to list or echo it, and
+    by :func:`stack._in_the_box`, which refuses off the box. A new use would be a client that can
+    run here."""
     import ast
 
-    tree = ast.parse(Path(stack.__file__).read_text())
-    users = {
-        fn.name
-        for fn in ast.walk(tree)
-        if isinstance(fn, ast.FunctionDef)
-        for node in ast.walk(fn)
-        if isinstance(node, ast.Attribute)
-        and node.attr == "compose"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "ctx"
+    users = set()
+    for module in Path(stack.__file__).parent.glob("*.py"):
+        tree = ast.parse(module.read_text())
+        users |= {
+            f"{module.stem}.{fn.name}"
+            for fn in ast.walk(tree)
+            if isinstance(fn, ast.FunctionDef)
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Attribute)
+            and node.attr == "compose"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "ctx"
+        }
+    assert users == {
+        "stack._in_the_box",  # refuses off the box
+        "stack._compose_files",  # the -f paths
+        "stack._shown",  # the echoed line
+        "guestcompose.compose",  # these four send it to the guest
+        "guestcompose.config_hashes",
+        "guestcompose.stream",
+        "guestcompose.stream_to",
     }
-    # _compose_files lists the -f paths and _shown echoes; the others branch on wanted().
-    assert users == {"_compose", "_compose_captured", "_compose_output", "_compose_files", "_shown"}
 
 
 def test_the_guests_output_reaches_your_terminal_without_control_sequences():
@@ -1602,7 +1720,7 @@ def test_the_reconciles_stream_says_when_it_cant_run(vm, tmp_path, monkeypatch):
 
 def test_the_build_line_says_where_it_runs(vm, tmp_path, monkeypatch):
     assert stack._where().startswith("+ (in the VM)")
-    monkeypatch.setenv("MACHINE_COMPOSE", "host")
+    monkeypatch.setattr(config, "in_box", lambda: True)
     assert stack._where() == "+ "
 
 
@@ -1629,3 +1747,84 @@ def test_fy_ps_to_a_file_keeps_the_guests_stderr_out_of_it(vm, tmp_path, monkeyp
     assert guestcompose.stream(_ctx(tmp_path), ["ps"]) == 0
     captured = capfd.readouterr()
     assert (captured.out, captured.err) == ("row\n", "noise\n")
+
+
+# ── what the guest says reaches you inert ─────────────────────────────────────────────────
+# The VM user's shell startup files run before the runner, and a box can write them: a failed
+# call's stderr and stdout are the box's to shape, so they are never printed or reported raw.
+
+_SHAPED = "\x1b]52;c;ZXZpbA==\x07\x1b[2J✓ ok"
+
+
+def test_a_failed_guest_render_before_a_build_reaches_you_inert(
+    no_host_client, tmp_path, monkeypatch, capsys
+):
+    from foldyard import term
+
+    raw = io.StringIO()
+    monkeypatch.setattr(stack.sys, "stderr", term.ColorStream(raw))
+    monkeypatch.setattr(sys, "stderr", stack.sys.stderr)
+    monkeypatch.setattr(
+        guestcompose,
+        "call",
+        lambda op, argv, env, cwd, **kw: subprocess.CompletedProcess(argv, 1, "", _SHAPED + "\n"),
+    )
+    assert stack._podman_build(_ctx(tmp_path), None) == 1
+    out = raw.getvalue()
+    assert "\x1b]52" not in out and "\x1b[2J" not in out
+    assert "✓ ok" in out and "\x1b[32m✓" not in out  # the box's ✓, never painted as foldyard's
+
+
+def test_a_failed_heals_summary_carries_nothing_a_terminal_acts_on(
+    no_host_client, tmp_path, monkeypatch
+):
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(stack, "machine_down", lambda: None)
+    monkeypatch.setattr(stack, "resolve", lambda **kw: ctx)
+    monkeypatch.setattr(stack, "_running_services", lambda c, d: {"web"})
+    monkeypatch.setattr(stack, "_crashed_services", lambda c, d: set())
+    monkeypatch.setattr(stack, "_running_extra_profiles", lambda c, d, also=(): [])
+    monkeypatch.setattr(stack, "_rendered_services", lambda c, e, d: {"web"})
+    monkeypatch.setattr(
+        guestcompose,
+        "call",
+        lambda op, argv, env, cwd, **kw: subprocess.CompletedProcess(argv, 1, "", _SHAPED),
+    )
+    ok, summary = stack.recreate_services(["web"])
+    assert not ok and "✓ ok" in summary
+    assert all(c.isprintable() for c in summary), summary
+
+
+def test_a_failed_config_hashs_reason_carries_nothing_a_terminal_acts_on():
+    hashes, why = confighash._answer(subprocess.CompletedProcess([], 1, "", _SHAPED))
+    assert hashes is None and "✓ ok" in why
+    assert all(c.isprintable() for c in why), why
+
+
+def test_foldyards_own_no_route_line_in_a_reconcile_stays_foldyards(vm, tmp_path, monkeypatch):
+    # The guest's lines go to your terminal as they are (never painted); foldyard's own `✗` is
+    # foldyard's, painted as it paints its own.
+    from foldyard import term
+
+    vm.BACKEND = _Backend(None)
+    raw = io.StringIO()
+    monkeypatch.setattr(stack.sys, "stderr", term.ColorStream(raw))
+    monkeypatch.setattr(sys, "stderr", stack.sys.stderr)
+    assert stack._compose_captured(_ctx(tmp_path), ["ps"], stack._err) == guestcompose.NO_ROUTE
+    [line] = [ln for ln in raw.getvalue().splitlines() if "no ssh route" in ln]
+    assert line.startswith("\x1b[")  # painted: the token is foldyard's
+
+
+def test_foldyards_own_timeout_line_in_a_reconcile_stays_foldyards(vm, tmp_path, monkeypatch):
+    # The guest's lines go to `relayed` (cleaned, never painted as foldyard's); foldyard's own
+    # word that it stopped the client goes to `emit`, as foldyard's.
+    program = b"import time\nprint('from the guest', flush=True)\ntime.sleep(30)\n"
+    monkeypatch.setattr(guestcompose, "_command", lambda *a: ([sys.executable, "-I", "-"], program))
+    relayed: list[str] = []
+    emitted: list[str] = []
+    rc = guestcompose.stream_to(
+        _ctx(tmp_path), ["up"], emitted.append, timeout=1, relayed=relayed.append
+    )
+    assert rc != 0
+    assert relayed == ["from the guest"]
+    assert emitted == ["✗ process killed after 1s (timeout)"]

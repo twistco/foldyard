@@ -1,4 +1,4 @@
-"""foldyard's clients on your computer carry no registry logins, unless the project opted in.
+"""foldyard's clients on your computer carry no registry logins.
 
 A ``podman`` client doesn't pull or build on your computer: it asks the API service in the VM, and
 sends the logins from its auth file along. A build sends every login in the file, whatever it needs,
@@ -10,16 +10,17 @@ logins, and every child inherits that, whichever engine call it makes. The varia
 podman's default paths (``$XDG_RUNTIME_DIR/containers/auth.json`` on Linux,
 ``~/.config/containers/auth.json``, ``~/.docker/config.json``), so those are never read.
 
-A project that really needs a login takes two steps: you export :data:`OPT_IN` at a file made for
-it, and the adopted ``[project] compose_env`` names :data:`OPT_IN` (``fy config widenings`` lists
-it). Only then does the compose client (:func:`for_compose`) get that file. The name exists for this
-alone, never ``REGISTRY_AUTH_FILE`` itself: plenty of people export that at their whole auth.json,
-and a box can commit one line to ``compose_env``, which reads as harmless when it's adopted. So a
-general export is never consent, and neither step alone gives anything. What's in that file reaches
-the VM, so a box can read it during a build: make it hold one narrow login.
+Until 0.16.0 a project could opt in: you exported :data:`OPT_IN` at a file holding one narrow
+login, the adopted ``[project] compose_env`` named it, and the compose client on your computer got
+that file. Since 0.16.0 the compose client and the stack's builds run in the VM
+(:mod:`foldyard.guestcompose`), where no file on your computer reaches, so the opt-in has no route
+and no effect: ``fy doctor`` says so when ``compose_env`` still names it
+(``exposure._ignored``), and :func:`failure_hint` says what to do instead. Its route is a later
+change, never what a compose file names (or the box would choose what your login fetches).
 
-``stack._host_passthrough`` asks :func:`for_compose`, and ``stack.resolve`` asks again after its
-merges, because ``[ports]`` and the mode env can name anything.
+``stack._host_passthrough`` pins the no-logins file in the env of every engine call made here, and
+``stack.resolve`` pins it again after its merges, because ``[ports]`` and the mode env can name
+anything.
 
 This is podman's alone. The docker CLI has no one switch (``config.json``, the platform's credential
 store, ``DOCKER_AUTH_CONFIG``), so ``config.engine`` refuses it instead.
@@ -30,13 +31,14 @@ Inside a box nothing is touched: its logins are its own. Stdlib only: this runs 
 from __future__ import annotations
 
 import os
-from collections.abc import Collection, MutableMapping
+from collections.abc import MutableMapping
 from pathlib import Path
 
 from . import config
 
 AUTH = "REGISTRY_AUTH_FILE"
-# The opt-in: the one auth file you offered this project's compose client (see above).
+# The old opt-in (see above): the one auth file you offered this project's compose client, when it
+# ran on your computer. Named still, to say it does nothing now.
 OPT_IN = "FY_REGISTRY_AUTH_FILE"
 # Your own REGISTRY_AUTH_FILE, remembered across the clamp only to hand back to your editor
 # (:func:`operators_env`). Not a name `stack._host_passthrough` lets through.
@@ -100,17 +102,6 @@ def clamp(environ: MutableMapping[str, str] | None = None) -> None:
     env[AUTH] = str(no_logins_file())
 
 
-def _offered(declared: Collection[str]) -> str:
-    """The file a project opted in with, which takes both steps; ``""`` otherwise."""
-    return os.environ.get(OPT_IN, "") if OPT_IN in declared else ""
-
-
-def for_compose(declared: Collection[str]) -> str:
-    """``REGISTRY_AUTH_FILE`` for the compose client and the builds, on your computer: the file
-    you exported as :data:`OPT_IN`, if the adopted ``[project] compose_env`` names it, else none."""
-    return _offered(declared) or str(no_logins_file())
-
-
 def operators_env(env: dict[str, str]) -> dict[str, str]:
     """``env`` for something of YOURS foldyard launches (your editor), not a client of foldyard's:
     your own setting back, or none."""
@@ -138,26 +129,14 @@ def _your_logins() -> list[Path]:
 
 def failure_hint() -> list[str]:
     """What to say after a failed build or start, where a pull may be why: pinning makes this
-    silent by construction, so it must be said. Only to someone who has logins here and hasn't
-    opted in, which takes the export as well as the config line. With the client in the VM, no file
-    here reaches it, so opting in changes nothing and isn't what to offer."""
+    silent by construction, so it must be said. Only to someone with logins here (or the old
+    opt-in exported): compose runs in the VM, where none of them reaches."""
     if config.in_box():
         return []
-    if config.machine_compose() == "vm":
-        if not (_your_logins() or os.environ.get(OPT_IN)):
-            return []
-        return [
-            '  If that was a pull from a private registry: with [machine] compose = "vm" no login',
-            "  on your computer reaches the VM. An image already in the VM needs none, so pull it",
-            f"  once with the client here: export {OPT_IN} to a file with only that login, add",
-            "  that name to [project] compose_env, then run `MACHINE_COMPOSE=host fy up`",
-            "  (`fy docs stack`, Private images).",
-        ]
-    if _offered(config.compose_env()) or not _your_logins():
+    if not (_your_logins() or os.environ.get(OPT_IN)):
         return []
     return [
-        "  If that was a pull from a private registry: foldyard doesn't hand your registry logins",
-        "  to the VM, where a box could read them. For one this project needs, make a file with",
-        f"  only that login, export {OPT_IN} to it, and add that name to [project] compose_env",
-        "  (`fy docs stack`, Private images).",
+        "  If that was a pull from a private registry: compose runs in the VM, and no registry",
+        "  login on your computer reaches it. An image already in the VM needs none, so pull it",
+        "  there once yourself (`fy docs stack`, Private images).",
     ]

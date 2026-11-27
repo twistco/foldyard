@@ -50,7 +50,11 @@ foldyard's surface splits by *where it can be validated*:
    — the `lima-host-e2e` job ([CI](./ci.md)), and the same VM inside WSL2 on a Windows runner
    (`wsl2-host-e2e`) — and live as `tests/test_*_e2e.py` modules over the shared substrate
    `tests/e2e_host.py` (gated: `FOLDYARD_E2E=1`, not in a box, `limactl` on PATH; each module takes
-   a throwaway example copy, leaves the VM running and un-walled):
+   a fresh example copy, leaves the VM running and un-walled). Every copy is made at ONE path under
+   your home (`~/fy-e2e/host-tier/example`, `e2e_host.CHECKOUT`), emptied and refilled in place: the
+   compose client runs in the VM, which mounts only the checkout it was created from, so with one
+   path whichever module (re)created the VM mounts the next one's. The CI jobs create the first VM
+   from it too (`tests/test_e2e_workflow.py` holds them to it):
    - `test_verify_e2e.py` — ALL PASS on the boundary foldyard builds, **FAIL against a VM mounting
      the operator's whole home**, PASS again once the mount is gone (the negative
      [docs/archive/verify-false-pass.md](../archive/verify-false-pass.md) owed). Never weaken this
@@ -62,10 +66,10 @@ foldyard's surface splits by *where it can be validated*:
      unit suite cannot see.
    - `test_machine_e2e.py` — ensure idempotent; stop stops the supervisor (heartbeat stale) and
      keeps the VM; a SIGKILLed hypervisor recovered by ensure (the flag-is-not-liveness item in
-     [gotchas](./gotchas.md)); recreate. Its copy lives UNDER THE HOST HOME (`~/fy-e2e/machine/`,
-     left in place) and the VM is recreated from it first, so every restart runs with a repo mounted
-     at `/home/<user>/…` — the realistic Linux layout the open home-mount finding in
-     [docs/linux-support.md](../linux-support.md) needed exercised.
+     [gotchas](./gotchas.md)); recreate. The VM is recreated from the copy under the host home
+     first, so every restart runs with a repo mounted at `/home/<user>/…` — the realistic Linux
+     layout the open home-mount finding in [docs/linux-support.md](../linux-support.md) needed
+     exercised.
    - `test_mount_visibility_e2e.py` — the git heal's premise on THIS host's mount (virtiofs on
      macOS, 9p on the Linux/WSL2 runners): a file the VM renames into place reaches the host whole,
      never briefly missing, never older than one already seen (ADR-0021, 2026-09-27).
@@ -73,13 +77,13 @@ foldyard's surface splits by *where it can be validated*:
      every login; clamped, none, default paths included), then a real `fy build` watched by a
      rootless container bind-mounting the guest's `/var/tmp`, as a box could, with a positive
      control.
-   - `test_guestcompose_e2e.py` — `[machine] compose = "vm"`: the spike (the payload on the guest's
-     python, one call's cost in the step summary, config-hash parity, red-first controls that an
-     `env_file:` and an `include:` naming files only on your computer are read by the host's client
-     and not the guest's, the premise that the VM user reads nothing a box can't, through the engine
-     socket), then the whole flow on a VM recreated from its own copy, a logging `podman` on the
-     CLI's PATH asserting no compose client or build ran on your computer. Its doc has the recipe
-     for the OTHER tiers under the switch, whose copies the VM doesn't mount otherwise.
+   - `test_guestcompose_e2e.py` — the compose client in the guest, the only way since 0.16.0: the
+     spike (the payload on the guest's python, one call's cost in the step summary, config-hash
+     parity with the box's child, red-first controls that an `env_file:` and an `include:` naming
+     files only on your computer are read by a client here and not the guest's, the premise that the
+     VM user reads nothing a box can't, through the engine socket), then the whole flow on a freshly
+     recreated VM, a logging `podman` on the CLI's PATH asserting no compose client or build ran on
+     your computer. Every other host-tier module drives compose the same way now.
    - `test_mounts_e2e.py` — ADR-0033's to-box against ROOT in the guest: a test-only boot script
      (own marker, always exits 0) remounts it rw and tries every kind of write; all refused and the
      host's seeded file unchanged. The red-first control records it `writable: true` (started with

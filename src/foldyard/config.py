@@ -968,12 +968,12 @@ def external_network() -> bool:
 
 
 def compose_env() -> list[str]:
-    """Names of the operator's environment variables the compose client may see, beyond
-    foldyard's own resolved vars and a fixed passthrough (``PATH``, ``HOME``, locale, ``COMPOSE_*``
-    …) — for a stack that means to read one, e.g. a registry token behind a bare build ``args:``
-    entry. The compose files are box-writable and ``${VAR}`` interpolation hands the value to a
-    container the box can inspect, so every name here is a widening (``fy config widenings``).
-    From ``[project].compose_env`` ([])."""
+    """Names of the operator's environment variables the compose client in the VM may see, beyond
+    foldyard's own resolved vars and a fixed passthrough (locale, ``COMPOSE_*`` …) — for a stack
+    that means to read one, e.g. a registry token behind a bare build ``args:`` entry. The compose
+    files are box-writable and ``${VAR}`` interpolation hands the value to a container the box can
+    inspect, so every name here is a widening (``fy config widenings``). From
+    ``[project].compose_env`` ([])."""
     raw = _project_table().get("compose_env")
     return [str(x) for x in raw if x] if isinstance(raw, list) else []
 
@@ -1021,10 +1021,42 @@ def port_bases() -> dict[str, int]:
     return _bases_of(_table("ports"))
 
 
+# What a `[ports]` key may be. Each key is exported (`fy shellenv`, which a recipe evals before it
+# runs `fy up`, git or anything else) and passed into the box and the compose env, so a key is an
+# environment variable set on your computer from adopted config: `PYTHONPATH`, `BASH_ENV`,
+# `GIT_CONFIG_GLOBAL` or `IN_DEVBOX` would run what the box wrote there. So an ALLOW-list: a port's
+# name, upper case with PORT as a word in it (APP_PORT, SUPABASE_DB_PORT, PORT_2) — and even then
+# not one foldyard, the engine or its connection reads (FY_PROXY_PORT, GCP_MINTER_PORT,
+# DOCKER_PORT).
+_PORT_KEY = re.compile(r"(?:[A-Z][A-Z0-9]*_)*PORT(?:_[A-Z0-9]+)*")
+_RESERVED_PORT_PREFIXES = ("MACHINE_", "PODMAN_", "DOCKER_", "CONTAINER_", "CONTAINERS_")
+
+
+def ignored_port_key(name: str) -> bool:
+    """Whether ``name`` can't be a ``[ports]`` key: not a port's name (:data:`_PORT_KEY`), or one
+    foldyard, the engine or its connection reads from the environment. Such a key is ignored —
+    never exported, never in the compose env or the box — and :func:`ignored_port_keys` names it
+    (``fy doctor``, the adoption note)."""
+    return (
+        _PORT_KEY.fullmatch(name) is None
+        or foldyard_owned(name)
+        or name.startswith(_RESERVED_PORT_PREFIXES)
+    )
+
+
+def ignored_port_keys(table: dict | None = None) -> list[str]:
+    """The ``[ports]`` keys :func:`ignored_port_key` ignores, sorted."""
+    ports = _table("ports") if table is None else table
+    return sorted(k for k in ports if ignored_port_key(str(k)))
+
+
 def _bases_of(table: dict) -> dict[str, int]:
-    """:func:`port_bases` of one ``[ports]`` table."""
+    """:func:`port_bases` of one ``[ports]`` table, less the keys it can't have
+    (:func:`ignored_port_key`)."""
     out: dict[str, int] = {}
     for key, value in table.items():
+        if ignored_port_key(str(key)):
+            continue
         if isinstance(value, dict):
             value = value.get("base")
         if value is None or isinstance(value, bool):
@@ -1068,7 +1100,7 @@ def _declared_pools(table: dict) -> tuple[dict[str, range], list[str]]:
     pools: dict[str, range] = {}
     problems: list[str] = []
     for key, value in table.items():
-        if not isinstance(value, dict) or "worktrees" not in value:
+        if ignored_port_key(str(key)) or not isinstance(value, dict) or "worktrees" not in value:
             continue
         base = value.get("base")
         if not isinstance(base, int) or isinstance(base, bool):
@@ -1575,26 +1607,6 @@ def machine_attribution() -> str:
             "it names a level foldyard provisions, never a program or a rule."
         )
     return level
-
-
-_MACHINE_COMPOSE = ("host", "vm")
-
-
-def machine_compose() -> str:
-    """``[machine].compose`` — where the stack's compose client runs (:mod:`foldyard.guestcompose`,
-    docs/compose-in-vm-scope.md): ``"host"`` (the default), on your computer under the path guard,
-    or ``"vm"``, in the guest as the VM user, where the compose files' paths read nothing of
-    yours. Experimental. ``MACHINE_COMPOSE`` env wins."""
-    raw = os.environ.get("MACHINE_COMPOSE")
-    if raw is None:
-        raw = _table("machine").get("compose", "host")
-    where = str(raw or "host").strip().lower()
-    if where not in _MACHINE_COMPOSE:
-        raise SystemExit(
-            f'✗ [machine].compose must be "vm" or "host" (the default), not {where!r} — it names '
-            "where foldyard runs its own compose client, never a program."
-        )
-    return where
 
 
 # Lima's documented guest→host address: the user-mode network's host gateway, which the usernet

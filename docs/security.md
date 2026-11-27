@@ -107,24 +107,23 @@ Three channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-rep
   `fy worktree add` starts meets conditions yours doesn't), and runs no git when one of them can't
   be read. One gap remains: a hook added to `.git/config` while the command runs can still slip
   past. Your own git on your computer runs all of this, filters included, as it always has.
-- **The compose client reads your compose files on your computer.** Your stack runs in the VM, but
-  the compose client that starts it runs on your computer, and the compose files are editable from
-  the box. foldyard gives the client a minimal environment (never `host.env`; add names with
-  `[project] compose_env`, which `fy config widenings` lists) and refuses to act on compose files
-  that name paths outside the checkout — `env_file:`, build contexts, `include:` and the like (a
-  `.env`, `env_file:` or `label_file:` that is `/dev/null` is fine: there's nothing of yours there).
-  That check is a list of known keys, and the client re-opens each path after foldyard checked it,
-  so it narrows this channel rather than closing it. `[machine] compose = "vm"` closes it by running
-  the client in the VM, where those paths hold nothing of yours. It is experimental, and it will
-  become the default once it has been proven ([configuration](./configuration.md#machine)).
+- **The compose client reads your compose files in the VM, not on your computer.** The compose files
+  are editable from the box, so since 0.16.0 foldyard runs its own podman-compose in the VM, as the
+  VM user, and an `env_file:`, a build context or an `include:` there reads the VM, which holds
+  nothing of yours but the checkout. What still crosses: the environment your computer sends it
+  (never `host.env`; add names with `[project] compose_env`, which `fy config widenings` lists), and
+  the request itself, which the VM user's shell startup files see first. A box can write those
+  through a bind mount, so it can read the request, and the per-build token in it, before the client
+  starts: a token a box can already read from a running build
+  ([compose-in-vm-scope](https://github.com/twistco/foldyard/blob/main/docs/compose-in-vm-scope.md)).
 - **Registry logins stay on your computer.** A client there sends its logins to the VM's API service
   with each pull and build, all of them for a build, and the service keeps them in a temp file a box
-  can read while it runs. So foldyard's clients get none, whatever `podman login` has stored. A
-  project can name `FY_REGISTRY_AUTH_FILE` in `[project] compose_env`, for a file you export under
-  that name ([stack](./stack.md#private-images)): a box can read that file's login during a build,
-  so keep it narrow. Before this, every login on your computer was exposed that way. Your own
-  recipes that run `"$ENGINE" compose` or `podman build` aren't foldyard's clients: they still send
-  yours.
+  can read while it runs. So foldyard's clients get none, whatever `podman login` has stored, and
+  the compose client in the VM has none either. A private image is one you pull into the VM
+  yourself, which hands that pull's credentials to the service the same way: keep the file to its
+  one login ([stack](./stack.md#private-images)). Before this, every login on your computer was
+  exposed that way. Your own recipes that run `"$ENGINE" compose` or `podman build` aren't
+  foldyard's clients: they still send yours.
 - **Repo text that steers the agent.** `[claude].system_prompt` is prepended to every teammate's
   agent, and `[claude.settings]` / `[codex.config]` are passed to the agent CLI (`--settings` /
   `-c`), where a `hooks` or `permissions` entry steers it harder than any prompt. This runs in the

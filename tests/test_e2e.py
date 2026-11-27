@@ -40,6 +40,62 @@ PROJECT = "fyex"  # the example's [project].prefix
 NETWORK = f"{PROJECT}_default"  # compose's default network for that project
 API_DB_URL = "http://api:8080/db"  # the api service (in-network) + the DB-wiring endpoint
 
+# The host tier's checkout, under your home: ONE path for every example copy a host-tier run makes.
+# The compose client runs in the VM (since 0.16.0), so the checkout must be one the VM mounts, and
+# a VM mounts only the checkout it was created from and that checkout's worktrees root. With every
+# copy at this path, and the CI jobs creating the first VM from it too (foldyard-e2e.yml, held to
+# it by tests/test_e2e_workflow.py), whichever module (re)created the VM, it mounts the next one's.
+# In a box (the live-e2e topology) the client runs there, and a per-test copy is fine.
+HOST_TIER = "fy-e2e/host-tier"
+
+
+def host_checkout() -> Path:
+    """The host tier's one checkout (:data:`HOST_TIER`); its worktrees root is beside it,
+    ``<checkout>-worktrees``, as foldyard derives it."""
+    return Path.home() / HOST_TIER / "example"
+
+
+def _emptied(d: Path) -> None:
+    """``d`` there and empty, never removed: the VM shares the host tier's checkout and worktrees
+    root by path, and a share whose directory was replaced reads stale. What can't be removed (a
+    file a container made under an id that isn't yours) fails here by name, not later as a stray
+    file in the next copy's first commit."""
+    d.mkdir(parents=True, exist_ok=True)
+    for child in d.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    left = sorted(str(c) for c in d.iterdir())
+    assert not left, (
+        f"couldn't empty {d} for a fresh example copy: {left[:5]} — most likely a file a "
+        f"container made under an id that isn't yours. Remove it yourself (`sudo rm -rf {d}/*`), "
+        "then run again."
+    )
+
+
+def fresh_example(dst: Path, extra_toml: str = "") -> Path:
+    """``dst`` holding a fresh, committed git copy of example/ (foldyard's main_repo() shells
+    git), with ``extra_toml`` appended to its foldyard.toml. ``dst`` and its worktrees root are
+    emptied first, in place (:func:`_emptied`), and on your computer so is what it keeps by that
+    path (its adoptions, its worktree registry): an earlier copy at the same path left them."""
+    if not _IN_BOX:
+        e2e_adoptions.forget_checkout_state(dst)
+    for d in (dst, Path(f"{dst}-worktrees")):
+        _emptied(d)
+    shutil.copytree(EXAMPLE, dst, dirs_exist_ok=True)
+    if extra_toml:
+        with (dst / "foldyard.toml").open("a") as fh:
+            fh.write(extra_toml)
+    subprocess.run(["git", "init", "-q"], cwd=str(dst), check=True)
+    subprocess.run(["git", "add", "-A"], cwd=str(dst), check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "init"],
+        cwd=str(dst),
+        check=True,
+    )
+    return dst
+
 
 def _engine() -> str:
     return "podman"
@@ -172,16 +228,9 @@ def _adopt_on_host(repo: Path, env_extra: dict[str, str] | None = None) -> None:
 @pytest.fixture
 def example_repo(tmp_path):
     """A throwaway git copy of example/ (foldyard's main_repo() shells git), so up/down never
-    touch the committed tree. Tears the stack down even if the test body fails mid-way."""
-    dst = tmp_path / "example"
-    shutil.copytree(EXAMPLE, dst)
-    subprocess.run(["git", "init", "-q"], cwd=str(dst), check=True)
-    subprocess.run(["git", "add", "-A"], cwd=str(dst), check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "init"],
-        cwd=str(dst),
-        check=True,
-    )
+    touch the committed tree: the host tier's one checkout on your computer (:data:`HOST_TIER`).
+    Tears the stack down even if the test body fails mid-way."""
+    dst = fresh_example(tmp_path / "example" if _IN_BOX else host_checkout())
     _adopt_on_host(dst)
     yield dst
     _foldyard(["down"], dst, timeout=180)  # belt-and-suspenders if the body raised early
@@ -250,16 +299,8 @@ def test_example_stack_up_serves_then_down(example_repo):
 @pytest.fixture
 def example_with_worktree(tmp_path):
     """A throwaway example repo plus a real sibling Git worktree, mirroring the host layout."""
-    main = tmp_path / "example"
-    shutil.copytree(EXAMPLE, main)
-    subprocess.run(["git", "init", "-q"], cwd=str(main), check=True)
-    subprocess.run(["git", "add", "-A"], cwd=str(main), check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=e2e@foldyard", "-c", "user.name=e2e", "commit", "-qm", "init"],
-        cwd=str(main),
-        check=True,
-    )
-    wt_root = tmp_path / "example-worktrees"
+    main = fresh_example(tmp_path / "example" if _IN_BOX else host_checkout())
+    wt_root = Path(f"{main}-worktrees")
     feat = wt_root / "feat"
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-b", "feat", str(feat)], check=True)
     env = {"FOLDYARD_WORKTREES_ROOT": str(wt_root)}
