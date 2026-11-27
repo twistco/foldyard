@@ -1100,7 +1100,10 @@ def test_a_root_spelled_another_way_is_judged_by_what_it_is(yard, monkeypatch):
     cafe = _repo(yard["base"] / nfc, '[project]\nname = "cafe"\n')
     _adopt(cafe)
     (cafe / "trees" / "x").mkdir(parents=True)
-    if not os.path.samefile(yard["base"] / nfc, yard["base"] / nfd):
+    # Where the spellings are two names (ext4), the NFD one doesn't exist: samefile would raise.
+    if not (yard["base"] / nfd).exists() or not os.path.samefile(
+        yard["base"] / nfc, yard["base"] / nfd
+    ):
         pytest.skip("this filesystem tells the two spellings apart")
     declared = str(yard["base"] / nfd / "trees")
     bravo = _repo(
