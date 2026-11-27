@@ -123,6 +123,42 @@ anything a person might need to read exactly uses `printable`.
   knows. Its branch is read from main's `.git/worktrees` (`worktree._branch_read`). Its bound config
   carries main (`Config.main`, set by `devmode.worktree_config`): code that needs "this checkout's
   main" takes it from there (`devmode.main_repo`, the `[ports]` pools).
+- **Which project a directory belongs to**: your computer's records decide, and what the box can
+  write may only make fy refuse, never steer it. The records (`config._records`) are every adopted
+  main (`configpin.adopted_worktrees_roots`), its raw registry entries
+  (`worktree_registry.recorded`) and its worktrees root from its ADOPTED config, counted only while
+  it is dedicated (not main, not a directory holding main) and, inside main, reached one directory
+  at a time through no link (`config._walked_ident`). Which records stand is decided once per read
+  by what their real paths ARE (device and inode, `config._Claim`), never by how a path is spelled
+  (case, Unicode normalisation): a record reached through a link when read stands for nothing, a
+  main that another main REGISTERED as its worktree is that worktree, a root that overlaps another
+  project's main, registered worktree or root (but for one inside another's root) claims nothing,
+  and a main or registered worktree inside another's checkout or worktree is skipped
+  (`config._judged`, `config.NESTED`: the two walls bridged). Adopting any overlap is refused
+  (`config.nesting_conflict` in `configpin.adopt` and `fy init`, `config.claimed_elsewhere` in
+  `fy worktree add`, twice), mounting a root that overlaps is refused (`config.mount_conflict` in
+  `machine.ensure`/`recreate` and the stack's env, a doctor FAIL), and what doesn't stand is said in
+  the doctor of each project it concerns alone. The CLI's front door pins its placement for the verb
+  (`config.pin_placement`), so a plant mid-verb changes nothing it reads. Each lookup then counts a
+  record only while its path is its real path (`config._live_ident`: a link swapped in above it
+  would make it another directory), so nothing a box does outlives its undoing in the cache.
+  `config.placement` walks up from the real path, matching each record by device and inode
+  (`config._ident`, case folds), and the nearest wins; the checkout is the record's own path, which
+  its adoption is keyed by. Between there and the record a `.git` (file or directory) or a
+  `foldyard.toml` refuses (a submodule's `.git`, naming a git dir under `modules/` in main's git
+  dir, is the checkout's own), a registered worktree's `.git` must point into its main's git dir's
+  `worktrees` (by identity: `--separate-git-dir` mains too), the root itself, a directory several
+  mains claim and a stray named like a registered worktree (case folded) refuse, and under no record
+  a linked worktree's `.git` refuses, saying so for a bare repository's. `config.placement_here`
+  adds the path you came by (`FOLDYARD_REPO` as written, or the shell's `$PWD`): a logical path the
+  records place elsewhere refuses. Git isn't asked, and a `.git`'s word is at most a path or the
+  words of a refusal (`Placed.main` is the records'). Every resolver goes through it (the CLI's
+  callback, `config`'s ambient readers, `stack.find_main_repo` and `main_checkout_of`,
+  `devmode._main_checkout`, `configpin.adopted_checkouts` for `fy ls`), and a new one must too. Help
+  and the project-free verbs read no records and ask no git (`config.unplaced`). The one verb that
+  runs where fy refuses is `fy box exec` in a worktree made outside fy inside a recorded main
+  (`Placed.within`): the callback points it at that main (`FOLDYARD_REPO`, `WORKTREE=""`), so it
+  names nothing from the worktree.
 - **Waiting on git**: git blocks for good on a FIFO it finds in `.git` (an include, a
   `.git/worktrees/<id>` record). These take a timeout, and read running out as "git can't say", said
   as that rather than as a config problem (`worktree.GitTimeout`): finding main
@@ -137,7 +173,7 @@ anything a person might need to read exactly uses `printable`.
   - Build the path from parts the host knows (`worktree._own_admin_dir`).
   - Open it with `O_NOFOLLOW | O_NONBLOCK`, check `S_ISREG`, and cap the size.
   - Only return a value of the shape you expect.
-  - Name it from main's adopted config (`config.stray_identity`), not from the directory.
+  - Name it from main's adopted config (`config.worktree_identity`), not from the directory.
   - Find its main the way a registered one's is found (`Config.main`), never from git in it.
 - **Engine listings**: read `ps --format json` and act only on the engine's own `Id`
   (`stack._project_services`). In a `--format` template with one line per container, a label holding

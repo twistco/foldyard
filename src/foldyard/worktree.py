@@ -750,6 +750,38 @@ def _shown_path(path: str) -> str:
     return shlex.quote(path) if path.isprintable() else ascii(path)
 
 
+def _branch_holder(listing: str, branch: str) -> str | None:
+    """The worktree ``listing`` (:func:`_worktree_listing`) names with ``branch`` checked out."""
+    for entry in listing.split("\n\n"):
+        lines = entry.strip("\n").split("\n")
+        if lines[0].startswith("worktree ") and f"branch refs/heads/{branch}" in lines[1:]:
+            return lines[0].removeprefix("worktree ")
+    return None
+
+
+def _refuse_branch_outside_fy(main: Path, branch: str) -> bool:
+    """Refuse (True), saying what to do, a new worktree on ``branch`` when a worktree made outside
+    fy (plain ``git worktree add``, outside the worktrees root) has it checked out: git would
+    refuse it too, but only fy can say that worktree isn't one it manages or takes in. Main's, a
+    registered one, or one in the worktrees root (which ``fy worktree add <its name>`` registers)
+    is left to git's own refusal, and so is everything when git can't list them."""
+    if (listing := _worktree_listing(main)) is None:
+        return False
+    if (held := _branch_holder(listing, branch)) is None:
+        return False
+    # By what each directory is, not its spelling (a case-insensitive disk).
+    here, root = config._stat_ident(held), config._stat_ident(config.worktrees_root(main))
+    if here == config._stat_ident(main) or config._stat_ident(Path(held).parent) == root:
+        return False
+    if here in {config._stat_ident(p) for p in worktree_registry.checkouts(main).values()}:
+        return False
+    _err(f"✗ branch '{printable(branch)}' is checked out in a worktree made outside fy (plain")
+    _err(f"  `git worktree add`): {_shown_path(held)}. fy doesn't manage that worktree, and won't")
+    _err("  take it in. Pick another branch, or commit its work there, remove it with")
+    _err(f"  `git worktree remove {_shown_path(held)}`, and run this again.")
+    return True
+
+
 # ── `remove` reads the worktree in the yard ───────────────────────────────────────────────────
 #
 # Whether a worktree holds uncommitted work is a `git status`, and parking that work on a ref is an
@@ -1377,9 +1409,11 @@ def add(
     A brand-new branch forks off ``base`` (an explicit ``--from``), else the project's default
     branch (:func:`_default_base_ref`) — NOT the primary checkout's current HEAD.
 
-    On a worktree that ALREADY exists (one from before the registry, or made with plain ``git
-    worktree add``) it registers instead, once the operator has confirmed its real path — the one
-    way a worktree comes (back) under host management. See :mod:`foldyard.worktree_registry`.
+    On a worktree that ALREADY exists in the worktrees root it registers instead, once the operator
+    has confirmed its real path — the one way a worktree comes (back) under host management: one a
+    box made, one from before the registry, or one made with plain ``git worktree add`` there. See
+    :mod:`foldyard.worktree_registry`. A plain one elsewhere isn't an fy worktree: a new worktree
+    on a branch it has checked out is refused, saying so (:func:`_refuse_branch_outside_fy`).
     ``box_up`` starts it there too; that box's own launch gate asks for any adoption still owed."""
     if config.in_box():
         from . import boxworktree
@@ -1392,8 +1426,14 @@ def add(
     again = _add_command(name, branch, base)
     branch = branch or f"wt/{name}"
     wt_dir = wt_root / name
+    # Never at or inside another project's checkout or root (config.NESTED).
+    if why := config.claimed_elsewhere(wt_dir, main):
+        _err(f"✗ {why}")
+        return 1
     if wt_dir.exists() or wt_dir.is_symlink():
         return _register_existing(main, name, wt_dir, assume_yes, box_up)
+    if _refuse_branch_outside_fy(main, branch):
+        return 1
     if _no_pooled_port(name):
         return 1
     wt_root.mkdir(parents=True, exist_ok=True)
@@ -1442,6 +1482,11 @@ def add(
         argv = ["worktree", "add", "--no-track", "-b", branch, str(wt_dir)] + ([ref] if ref else [])
         # Either is read from the shared .git, which the box writes: shown inert.
         print(f"  new branch off {printable(ref or f'current HEAD ({_branch_of(main)})')}")
+    # Again, as late as can be: the VM and the yard were readied meanwhile, and the root's path
+    # inside main is the box's to swap for a link.
+    if why := config.claimed_elsewhere(wt_dir, main):
+        _err(f"✗ {why}")
+        return 1
     rc = _git_worktree_add(main, argv)
     if rc != 0:
         _err("✗ git worktree add failed")

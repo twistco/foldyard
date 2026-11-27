@@ -62,9 +62,11 @@
 - **Nested Podman in the box is only partial** — `crun` can't set up a container in-box (`/proc/sys`
   read-only, no devices). foldyard doesn't need it: test with the mocked engine (golden tests) or
   the real socket.
-- **Two "repo roots":** `stack.main_repo()` = `git --git-common-dir` (MAIN checkout, even from a
-  worktree); `config.repo_root()` = the `foldyard.toml` marker (per-checkout). They diverge for
-  worktrees, deliberately — engine setup uses main_repo, posture/state uses config.
+- **Two "repo roots":** `stack.main_repo()` = the MAIN checkout, even from a worktree;
+  `config.repo_root()` = the checkout itself. They diverge for worktrees, deliberately — engine
+  setup uses main_repo, posture/state uses config. On your computer both come from its records
+  (`config.placement`); only where none holds the directory (a project not adopted yet) from
+  `git --git-common-dir` and the `foldyard.toml` marker.
 - **shellenv error propagation:** `eval "$(foldyard shellenv)"` can't fail the recipe via exit code,
   so on a fatal error shellenv prints `exit 1` to **stdout** (eval runs it) + the reason to stderr.
   Recipes have no `set -euo pipefail` of their own — shellenv emits it.

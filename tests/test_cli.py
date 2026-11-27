@@ -193,11 +193,14 @@ def _callback_ctx():
     Built from typer's own `get_command`, not `click.Command`: typer vendors its own click, so
     a plain click Command is a different type to the one `typer.Context` expects. Its
     `invoked_subcommand` is None — "no verb" — which is what these tests want: they exercise
-    the worktree pin, not the version window."""
+    the worktree pin, not the version window. Its command line is a project verb's (`fy mode`):
+    help and the project-free verbs pin no worktree."""
     import typer
     from typer.main import get_command
 
-    return typer.Context(get_command(cli.app))
+    ctx = typer.Context(get_command(cli.app))
+    ctx.meta["fy.argv"] = ["mode"]
+    return ctx
 
 
 def test_callback_pins_worktree_from_cwd_inference(monkeypatch):

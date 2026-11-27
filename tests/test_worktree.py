@@ -286,6 +286,58 @@ def test_add_on_an_existing_git_worktree_confirms_then_registers(fake_main, monk
     assert not any("worktree" in c and "add" in c for c in fake_main["calls"])  # no git add
 
 
+def test_add_refuses_a_branch_checked_out_in_a_worktree_made_outside_fy(fake_main, capsys):
+    # Git would refuse it too ("already used by worktree at …"), after the VM and the yard were
+    # readied; only fy can say that worktree isn't one it manages, before anything is made.
+    held = fake_main["main"].parent / "elsewhere"
+    fake_main["state"]["registered"].add(str(held))
+    fake_main["state"]["listed_branch"][str(held)] = "wt/feat"
+    assert worktree.add("feat") == 1
+    err = capsys.readouterr().err
+    assert "branch 'wt/feat' is checked out in a worktree made outside fy" in err
+    assert f"`git worktree remove {held}`" in err
+    assert not (fake_main["wt_root"] / "feat").exists()
+    assert not any("add" in c and "worktree" in c for c in fake_main["calls"])  # no git add
+
+
+def test_add_refuses_a_place_another_project_claims(fake_main, monkeypatch, capsys):
+    # A root declared on another project's checkout (adopted before that was refused) would put
+    # the new worktree inside it: config.claimed_elsewhere says so, before anything is made.
+    asked: list = []
+    monkeypatch.setattr(
+        worktree.config,
+        "claimed_elsewhere",
+        lambda path, main: asked.append(path) or "the worktree x is inside y, bravo's checkout",
+    )
+    assert worktree.add("feat") == 1
+    assert asked == [fake_main["wt_root"] / "feat"]
+    assert "✗ the worktree x is inside y, bravo's checkout" in capsys.readouterr().err
+    assert not (fake_main["wt_root"] / "feat").exists()
+    assert not any("add" in c and "worktree" in c for c in fake_main["calls"])
+
+
+def test_add_asks_again_right_before_git_makes_the_checkout(fake_main, monkeypatch, capsys):
+    # The VM and the yard are readied in between, and the root inside main is the box's to swap.
+    answers = iter([None, "the worktrees root is reached through a link"])
+    monkeypatch.setattr(worktree.config, "claimed_elsewhere", lambda path, main: next(answers))
+    assert worktree.add("feat") == 1
+    assert "✗ the worktrees root is reached through a link" in capsys.readouterr().err
+    assert not any("add" in c and "worktree" in c for c in fake_main["calls"])
+
+
+@pytest.mark.parametrize("where", ["registered", "in the worktrees root"])
+def test_a_branch_one_fy_can_take_in_holds_is_left_to_git(fake_main, where):
+    # A registered worktree's, or one in the worktrees root (`fy worktree add <its name>` takes
+    # it in): git's own refusal names it.
+    if where == "registered":
+        assert worktree.add("feat") == 0
+        held = fake_main["wt_root"] / "feat"
+    else:
+        held = _existing_git_worktree(fake_main, "plain")
+    fake_main["state"]["listed_branch"][str(held)] = "wt/other"
+    assert not worktree._refuse_branch_outside_fy(fake_main["main"], "wt/other")
+
+
 def test_add_on_an_existing_worktree_declined_registers_nothing(fake_main, monkeypatch):
     _existing_git_worktree(fake_main)
     monkeypatch.setattr("builtins.input", lambda *a: "")

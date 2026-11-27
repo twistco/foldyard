@@ -92,6 +92,30 @@ def test_in_box_fy_ps_reaches_the_engine_over_container_host(repo):
     assert _service_is_listed(inside.out, PROJECT, "api"), inside.out
 
 
+def test_a_hooks_box_exec_from_a_worktree_made_inside_main_runs_in_mains_box(repo):
+    # Claude Code's `.claude/worktrees/<x>` is no fy worktree, but a commit there runs the
+    # project's git hooks, which dispatch into the box with FOLDYARD_REPO set to the worktree: it
+    # runs in main's box, which sees the path as it is. Every other verb there is refused.
+    wt = repo / ".claude" / "worktrees" / "hook"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "hook", str(wt)], cwd=str(repo), check=True
+    )
+    try:
+        ran = fy_ok(
+            ["box", "exec", "--skip-if-down", "pwd"],
+            wt,
+            timeout=120,
+            env_extra={"FOLDYARD_REPO": str(wt)},
+        )
+        assert str(wt) in ran.out.splitlines(), ran.out
+        refused = fy(["mode", "show"], wt, timeout=60)
+        assert refused.rc != 0 and "is a worktree made outside fy" in refused.out, refused.out
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt)], cwd=str(repo), check=False
+        )
+
+
 def test_in_box_verify_is_all_pass(repo):
     inside = fy_ok(["box", "exec", "fy verify"], repo, timeout=600)
     assert "ALL PASS" in inside.out, inside.out

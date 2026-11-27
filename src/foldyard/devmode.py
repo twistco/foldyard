@@ -800,7 +800,8 @@ def main_repo() -> Path:
     anchors here — the worktree registry above all: ``fy worktree add`` records a worktree under
     main, so a lookup from inside the worktree must land on main too. Outside git, the checkout.
     A bound worktree config on your computer carries its main (``Config.main``): git there would
-    read the ``.git`` file the box can write."""
+    read the ``.git`` file the box can write. Unbound on your computer, your computer's records
+    say (``config.placement``), and git only where none does."""
     bound = config.bound_config()
     if bound is not None and bound.main is not None:
         return bound.main
@@ -809,7 +810,15 @@ def main_repo() -> Path:
 
 @lru_cache(maxsize=16)
 def _main_checkout(root: Path) -> Path:
-    """Memoized per checkout: hot paths (the supervisor tick, the TUI timer) ask repeatedly."""
+    """Memoized per checkout: hot paths (the supervisor tick, the TUI timer) ask repeatedly. Where
+    your computer's records place ``root``, its main, and where they refuse, it says why and
+    exits."""
+    placed = config.placement(root)
+    if placed is not None and placed.kind != "refused":
+        return placed.main or root
+    if placed is not None:
+        print(placed.why, file=sys.stderr)
+        raise SystemExit(1)
     try:
         out = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -974,37 +983,35 @@ def worktree_config(wt: str) -> config.Config:
         bound = config.bound_config()
         if bound is not None and bound.worktree == "" and not os.environ.get("WORKTREE"):
             return bound
-        return configpin.effective(config.resolve(worktree="", repo=main_repo()))
+        cfg = config.resolve(worktree="", repo=main_repo())
+        if in_box():  # named as your computer names it, from what it baked into the box
+            cfg = dataclasses.replace(cfg, identity=config._baked_identity() or {})
+        return configpin.effective(cfg)
     # Same primary-anchor as worktree_keys(): the sibling path must key off main_repo, not the
     # (possibly worktree) active checkout, or a bound-config caller resolves the wrong dir.
     main = main_repo()
+    # Every worktree is in main's project: its state dir, port band and machine are main's, whatever
+    # its own config declares, adopted or not (config.worktree_identity) — in a box too, so the
+    # box names its stack as your computer does.
+    identity = config.worktree_identity(main)
     if in_box():
-        return configpin.effective(
-            config.resolve(worktree=wt, repo=config.worktrees_root(main) / wt)
-        )
+        cfg = config.resolve(worktree=wt, repo=config.worktrees_root(main) / wt)
+        return configpin.effective(dataclasses.replace(cfg, identity=identity))
     path = worktree_registry.checkouts(main).get(wt)
     if path is None:
         # Not a worktree the host recorded: read NOTHING from it. Resolving its path would follow a
         # box-made symlink to another checkout — and hand this worktree that checkout's adoption.
-        # Named for main (config.stray_identity), never after the directory the box chose.
         return config.Config(
             repo_root=config.worktrees_root(main) / wt,
             worktree=wt,
             toml={},
-            identity=config.stray_identity(main),
+            identity=identity,
             main=main,
         )
-    # Its main is the one whose registry it's in: never asked of git there (Config.main).
-    cfg = dataclasses.replace(
-        configpin.effective(config.resolve(worktree=wt, repo=path)), main=main
-    )
-    if cfg.toml:
-        return cfg
-    # Nothing adopted for it: it still runs nothing, but it is still the PROJECT's worktree — its
-    # state dir, port band and machine are main's, not ones named after its directory. (Under a
-    # main that declares no name, a worktree is named after its directory, adopted or not: the
-    # name `fy worktree add` gave it, which the registry vouches for — unlike a stray's.)
-    return dataclasses.replace(cfg, identity=config.identity_from(main, path))
+    # Its main is the one whose registry it's in: never asked of git there (Config.main). Nothing
+    # adopted for it: an empty config — it runs nothing, but it is still the project's worktree.
+    cfg = config.resolve(worktree=wt, repo=path)
+    return configpin.effective(dataclasses.replace(cfg, identity=identity, main=main))
 
 
 def branches() -> list[str]:
@@ -1435,9 +1442,12 @@ def _config_pin_check() -> tuple[str, str, str]:
             "diff`, then `fy config adopt` (`fy up` also asks)",
         )
     unread = drift.refused_note()
+    # A worktree's own [project].name and the rest of its identity keys aren't read (it is always
+    # main's project): an adoption from before that rule, or one that came along, says so here.
+    unnamed = configpin.identity_note(cfg.toml, cfg.identity)
     return _result(
         # None ⇒ WARN: safe posture, outstanding decision (or a file in it that isn't read)
-        True if not (drift.changed or unread) else None,
+        True if not (drift.changed or unread or unnamed) else None,
         "adopted config",
         f"foldyard.toml matches what the host runs ({drift.tree_digest()})",
         (
@@ -1446,7 +1456,12 @@ def _config_pin_check() -> tuple[str, str, str]:
             if drift.changed
             else "matches what the host runs"
         )
-        + (f"; {unread}" if unread else ""),
+        + (f"; {unread}" if unread else "")
+        + (
+            f"; {unnamed} (a rename on this branch takes effect once main adopts it)"
+            if unnamed
+            else ""
+        ),
     )
 
 
@@ -1457,6 +1472,10 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     says why instead of looking broken. One a box made (:mod:`foldyard.boxworktree`) is meant to be
     unregistered: named, not warned about — by the box's own marker, so it says whose word it is."""
     main = main_repo()
+    # Mounted, a root on another project's files bridges the two VMs: machine.ensure, recreate
+    # and the stack refuse, and this says what to change.
+    if why := config.mount_conflict(main, config.worktrees_root(main)):
+        return _result(False, "worktrees", "", why)
     try:
         known = worktree_registry.checkouts(main)
         from . import boxworktree
@@ -1473,13 +1492,20 @@ def _worktree_registry_check() -> tuple[str, str, str]:
     # tab shows this row too).
     box_made, stray = [printable(n) for n in box_made], [printable(n) for n in stray]
     fixes = "; ".join(f"`fy worktree add {n}`" for n in stray)
+    # A record your computer couldn't read, or that doesn't stand, claims nothing: said here, in
+    # the doctor of each project it concerns alone, never fatal (config._records).
+    skipped = list(config.record_problems(main))
     return _result(
-        True if not stray else None,
+        True if not (stray or skipped) else None,
         "worktrees",
         f"{len(known)} registered"
         + (f"; made in a box (by its own word): {', '.join(box_made)}" if box_made else ""),
-        f"not registered, so your computer runs nothing for them: {', '.join(stray)} — {fixes}",
-    )
+        "; ".join(
+            ([f"not registered, so your computer runs nothing for them: {', '.join(stray)} — "
+              f"{fixes}"] if stray else [])
+            + skipped
+        ),
+    )  # fmt: skip
 
 
 def _port_pool_check() -> Iterable[tuple[str, str, str]]:

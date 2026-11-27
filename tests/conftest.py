@@ -410,6 +410,21 @@ def ambient_reads_the_tree(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reads_no_git_link(monkeypatch, request):
+    """On your computer, a checkout whose ``.git`` file says it is a linked worktree no record holds
+    is refused (``config.placement``) — and the suite runs from whatever checkout it is in. From a
+    worktree made outside fy (an agent's ``.claude/worktrees/<x>``) every CLI test would be refused
+    there and pass in CI, so the seam reads no ``.git`` link here: the checkout reads as the main
+    it is in CI. ``tests/test_worktree_records.py`` runs the real one. Not for the live modules:
+    their CLI runs in a subprocess, on the real check."""
+    if _runs_the_real_cli(request.module):
+        return
+    from foldyard import config
+
+    monkeypatch.setattr(config, "_linked_admin", lambda checkout: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_worktree_registry(tmp_path, monkeypatch, request):
     """Point the host's worktree registry at a per-test dir: no test reads or writes the real
     ``~/.foldyard/worktrees/``, and every test starts with NO worktree registered. A test that
@@ -504,6 +519,7 @@ def scrubbed_box_session_env(monkeypatch):
         "GCP_MINTER_PORT",
         "FY_PROXY",
         "WORKTREE",
+        "FY_MAIN_IDENTITY",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",

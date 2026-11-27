@@ -69,10 +69,14 @@ def main_repo() -> Path:
     costs ~3s per invocation, i.e. a 1s timer that can never finish a tick. The answer is a
     function of CWD, which no foldyard process ever changes (no ``os.chdir`` in the package), so
     one resolution per process is correct. Tests that relocate the repo clear it via
-    ``config.clear_caches()``."""
+    ``config.clear_caches()``.
+
+    On your computer, where its records place where fy runs (``config.placement_here``), their
+    main, git or no git: anywhere they refuse, the refusal is said."""
     found = find_main_repo()
     if found is None:
-        _err("✗ not a git repository")
+        placed = None if config.in_box() else config.placement_here()
+        _err(placed.why if placed is not None and placed.why else "✗ not a git repository")
         raise SystemExit(1)
     return found
 
@@ -102,7 +106,11 @@ def _ask_git(cmd: list[str], where: Path | str, **kw) -> subprocess.CompletedPro
 def find_main_repo() -> Path | None:
     """:func:`main_repo` for a caller that only wants to know: ``None`` outside a git repo, and
     nothing printed (the CLI's up-front worktree pin runs before every verb, `--help` included)
-    — unless git didn't answer (:func:`_ask_git`)."""
+    — unless git didn't answer (:func:`_ask_git`). On your computer, where its records place where
+    fy runs (``config.placement_here``: ``FOLDYARD_REPO``, else the working directory, as config
+    takes it), their main (``None`` where they refuse), and git isn't asked."""
+    if not config.in_box() and (placed := config.placement_here()) is not None:
+        return placed.main if placed.kind != "refused" else None
     out = _ask_git(
         ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], "the current directory"
     )
@@ -120,8 +128,13 @@ def main_checkout_of(path: Path) -> Path | None:
     outside git. :func:`main_repo` asks the working directory; this asks a given checkout — the one
     whose config is being read (``config._project_ports``). Memoized like it: the TUI asks every
     second, and which repo a path belongs to doesn't change under a process — nor does a git that
-    didn't answer (:func:`_ask_git`): None, for the process."""
+    didn't answer (:func:`_ask_git`): None, for the process. On your computer, where its records
+    place ``path``, their main (``None`` where they refuse), and git isn't asked."""
     from .hostgit import REPO_ENV  # lazy: stack is on every verb's path
+
+    if not config.in_box() and (placed := config.placement(path)) is not None:
+        main = placed.main if placed.kind != "refused" else None
+        return Path(os.path.realpath(main)) if main is not None else None
 
     # Without git's location variables, which beat `-C`: an inherited GIT_DIR named another main.
     env = {k: v for k, v in os.environ.items() if k not in REPO_ENV}
@@ -510,6 +523,7 @@ def _context(
         raise SystemExit(1)
     main = main_repo()
     wt_root = worktrees_root(main)
+    config.refuse_mount_conflict(main, wt_root)  # what the box mounts comes from this env
     dev_vm_rel = config.dev_vm_rel()
     prefix = config.project_prefix()
     pin_filemode(main)

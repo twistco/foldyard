@@ -113,6 +113,13 @@ def test_add_registers_a_sibling_checkout_on_its_own_branch(rig):
     # its own, so test_box_e2e (which recreates the VM for its copy and builds the image) drives
     # that path; this module's subject is the worktree's stack and its removal.
     _git(rig.main, "worktree", "add", "-q", "-b", f"wt/{NAME}", str(rig.feat))
+    # One made the same way OUTSIDE the worktrees root isn't an fy worktree: fy run there says so,
+    # rather than act on a project named after it.
+    elsewhere = rig.main.parent / "made-by-hand"
+    _git(rig.main, "worktree", "add", "-q", "-b", "by-hand", str(elsewhere))
+    there = fy(["mode", "show"], elsewhere, timeout=60, env_extra=rig.env)
+    assert there.rc != 0 and "is a worktree made outside fy" in there.out, there.out
+    _git(rig.main, "worktree", "remove", "--force", str(elsewhere))
     added = fy_ok(["worktree", "add", NAME, "--yes"], rig.main, timeout=300, env_extra=rig.env)
     assert f"worktree '{NAME}' registered" in added.out, added.out
     assert (rig.feat / ".git").exists(), added.out

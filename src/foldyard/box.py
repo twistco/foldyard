@@ -925,6 +925,7 @@ def _create_env(
     already-up drift check (:func:`env_drift`) reads too, so the two cannot disagree. The plugins'
     share (proxy, CA, ``[[inject]]`` dummies, agents, gcp) is their ``box_args``, beside it.
     ``env`` is the resolved stack env: the checkout, the env override, the port values."""
+    main = Path(env["MAIN_REPO"]) if env.get("MAIN_REPO") else stack.main_repo()
     env_args = [
         "-e",
         "DOCKER_HOST=unix:///var/run/docker.sock",
@@ -963,6 +964,10 @@ def _create_env(
         # box runs `fy` for any checkout it mounts, and two names can hash to one offset.
         "-e",
         f"FY_WORKTREE_OFFSETS={json.dumps(stack.worktree_offsets(), sort_keys=True)}",
+        # …and the project's identity as your computer names it (from main's adopted copy), so the
+        # box names its stacks the same way rather than from a tree that may hold an unadopted edit.
+        "-e",
+        f"{config.BAKED_IDENTITY_ENV}={json.dumps(config.worktree_identity(main), sort_keys=True)}",
         # The operator's home, for the in-box `fy verify` mount audit: the box's own HOME is
         # /root or /home/vscode, not the path a leaked host mount would carry.
         "-e",

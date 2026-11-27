@@ -186,8 +186,32 @@ then saves the result on a ref and deletes the checkout.
 
 For parallel work, make a worktree on your computer with `fy worktree add <name>`: its own checkout
 and branch (`wt/<name>` by default, forked from the trunk), its own box, stack, mode and ports, all
-in the one VM. Run in a box, `fy worktree add` makes one with no stack of its own: see
+in the one VM and the one project: its name, state and VM are main's, whatever its own
+`foldyard.toml` says
+([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)). Run in a box,
+`fy worktree add` makes one with no stack of its own: see
 [worktrees a box makes](#worktrees-a-box-makes).
+
+A worktree made with plain `git worktree add` outside the worktrees root isn't an fy worktree, and
+neither is one Claude Code makes under `.claude/worktrees/`. You can go on using one with git, but
+fy doesn't act in it: on your computer every `fy` project verb run there refuses and names your main
+checkout, and `fy worktree add` won't make a worktree on a branch one has checked out. The one
+exception is `fy box exec` in a worktree inside your main checkout, as Claude Code's are: it runs in
+main's box, which sees that path as it is, so the git hooks a commit there runs still check it in
+the box (with `--skip-if-down`, a down box skips them as ever). Main's box is the one it runs in,
+whatever `WORKTREE` or `FOLDYARD_REPO` says. To bring one under fy, move it into the worktrees root
+(`git worktree move`) and run `fy worktree add <name>`, which registers it after asking.
+
+Your computer tells which project, and which checkout of it, a directory belongs to by its own
+records, never by what git or a `foldyard.toml` there says: the box can write those. The records are
+the main checkouts you adopted, each one's registered worktrees, and each one's worktrees root where
+that root is the project's own. Walking up from where `fy` runs, the nearest one decides; anything
+the box wrote in between only makes fy refuse. So a registered worktree whose `.git` is missing,
+emptied or pointing elsewhere is refused (`git worktree repair <path>`, run in main, mends it), and
+so is a repository made inside a checkout, the worktrees root itself, a directory two projects'
+roots both claim until one registers it, and a path you reached through a link that leads somewhere
+the path doesn't say. `WORKTREE=<name>` only picks which registered worktree to act on; it doesn't
+skip any of this.
 
 Your computer runs each checkout's *adopted* `foldyard.toml`, never the working tree
 ([configuration](./configuration.md#the-adopted-config-what-the-host-actually-runs)), so

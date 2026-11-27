@@ -936,6 +936,7 @@ def ensure(main: Path, wt_root: Path) -> None:
     Progress → stderr."""
     if config.in_box():
         return
+    config.refuse_mount_conflict(main, wt_root)  # another project's files in this one's VM
     if not config.ambient_adopted():
         # The host reads the ADOPTED config, and with nothing adopted that's an empty one — whose
         # `[machine].firewall` is off. Never provision (or restart) the VM from it.
@@ -1170,6 +1171,7 @@ def recreate(main: Path, wt_root: Path, assume_yes: bool = False) -> int:
     if config.in_box():
         print("✗ run on your computer — the box can't recreate its own machine")
         return 1
+    config.refuse_mount_conflict(main, wt_root)  # another project's files in this one's VM
     _refuse_unusable()
     vols = _volumes(main, wt_root, BACKEND.resolve_vmtype())
     print(f"This stops + REMOVES {BACKEND.name} machine '{MACHINE}' and re-creates it with mounts:")

@@ -82,7 +82,11 @@ repo, so an edit to `[proxy]` or `[[inject]]` does nothing until you accept it a
 or `fy config adopt` ([ADR-0022](./adrs/0022-host-runs-the-adopted-config.md)). Nor is the worktrees
 folder: your computer keeps its own list of worktrees, written only by `fy worktree add`, and runs
 nothing for a checkout that isn't on it — `fy worktree list` and `fy doctor` name any that aren't.
-Three channels remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
+Nor is git's or a `foldyard.toml`'s word on which project a directory belongs to: your computer
+decides that from its own records (the mains you adopted, their registered worktrees and worktrees
+roots), and what the box wrote there (a `.git`, a nested repository or `foldyard.toml`, a link) can
+only make `fy` refuse, never pick the project it acts on ([git](./git.md#worktrees)). Three channels
+remain ([ADR-0023](./adrs/0023-no-host-executed-code-from-the-repo-mount.md)):
 
 - **Git's own hooks run on your computer, and foldyard doesn't manage them.** `lefthook.yml`,
   `.git/hooks/*` and `.git/config` (aliases, and since git 2.54 `[hook]` entries) can be written

@@ -1211,6 +1211,26 @@ def test_up_bakes_every_worktrees_offset_into_the_box(fake, monkeypatch, registe
     )
 
 
+def test_up_bakes_the_projects_identity_into_the_box(fake):
+    # As your computer names the project (main's adopted copy): the box names its stacks by it,
+    # never by a working tree that may hold an edit nobody adopted.
+    assert box.main("up") == 0
+    run = _find(fake["calls"], has=["run", "-d", "sleep"])[0]
+    [baked] = [t.partition("=")[2] for t in run if t.startswith("FY_MAIN_IDENTITY=")]
+    assert json.loads(baked) == {"project": {"name": "repo"}}  # the fixture's main: `repo`, unnamed
+
+
+def test_a_box_named_before_a_rename_is_drift(fake, monkeypatch, capsys):
+    # Main's adopted `[project].name` changed after the box was made: it names its stacks the old
+    # way, so it is asked to be recreated — not quietly left on the old name.
+    _create_then_run(fake)
+    monkeypatch.setattr(config, "worktree_identity", lambda main: {"project": {"name": "renamed"}})
+    capsys.readouterr()
+    assert box.main("up") == 0
+    line = _drift_line(capsys.readouterr().out)
+    assert "FY_MAIN_IDENTITY" in line and "fy box recreate" in line
+
+
 def test_up_bakes_every_worktrees_pooled_ports_into_the_box(fake, monkeypatch, register_worktree):
     # In-box `fy up` for a sibling must publish on the port the host gave it, not guess its band.
     monkeypatch.setattr(box.config, "port_pools", lambda: {"APP_PORT": range(3001, 3006)})

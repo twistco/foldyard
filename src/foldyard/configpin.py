@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING
 from . import config, mountwrite, term
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
 # The consumer config files the host pins. Order matters: it is the deep-merge order
 # (``foldyard.local.toml`` over ``foldyard.toml``), the same one ``config._toml_ambient`` uses.
@@ -113,11 +113,25 @@ def adopted_checkouts() -> list[Path]:
     under :func:`_pin_root` (host state, never the mount), so nothing in a checkout can add one;
     a checkout that no longer holds a ``foldyard.toml`` is left out. Worktrees' markers are
     skipped: each project lists its own worktrees from its registry."""
+    # exists(), not is_file(): a foldyard.toml the box made a FIFO isn't read, but the project is
+    # still there. As your computer's records stand: not one adopted as a project of its own that
+    # is another's worktree, or that lies inside another project's.
+    return [path for path in config.recorded_mains() if (path / "foldyard.toml").exists()]
+
+
+def adopted_mains() -> list[Path]:
+    """:func:`adopted_checkouts`, a ``foldyard.toml`` or not: what your computer's records say a
+    main checkout is (``config.placement``). The box can delete the file; it can't unmake the
+    record."""
+    return sorted({checkout for _, _, checkout in _main_markers()})
+
+
+def _main_markers() -> Iterator[tuple[Path, dict, Path]]:
+    """``(pin, marker, checkout)`` for each main checkout's adoption whose checkout is there."""
     try:
         pins = sorted(_pin_root().iterdir())
     except OSError:
-        return []
-    found: set[Path] = set()
+        return
     for pin in pins:
         try:
             doc = json.loads((pin / ADOPTED_MARKER).read_text())
@@ -126,13 +140,31 @@ def adopted_checkouts() -> list[Path]:
         if not isinstance(doc, dict) or doc.get("worktree"):
             continue
         checkout = doc.get("checkout")
-        if isinstance(checkout, str) and checkout:
-            path = Path(checkout)
-            # exists(), not is_file(): a foldyard.toml the box made a FIFO isn't read, but the
-            # project is still there.
-            if path.is_dir() and (path / "foldyard.toml").exists():
-                found.add(path)
-    return sorted(found)
+        if isinstance(checkout, str) and checkout and Path(checkout).is_dir():
+            yield pin, doc, Path(checkout)
+
+
+def adopted_worktrees_roots() -> dict[Path, object]:
+    """:func:`adopted_mains`, each with ``[machine].worktrees_root`` as its ADOPTED config declares
+    it (``None``: not declared, or nothing usable adopted). Every fy start reads this
+    (``config._records``), so each marker is read once, and the files are parsed only where they
+    could declare it: TOML spells a key literally, but for a ``\\u`` escape in a quoted one."""
+    roots: dict[Path, object] = {}
+    for pin, doc, checkout in _main_markers():
+        gen = str(doc.get("generation") or "")
+        selected = pin / GENERATIONS / gen if gen else pin  # as current_dir selects it
+        try:
+            files = _read_files(selected) if selected.is_dir() else {}
+        except (OSError, ValueError):  # pragma: no cover — unreadable state dir
+            files = {}
+        roots[checkout] = None
+        if any(
+            data and (b"worktrees_root" in data or b"\\u" in data or b"\\U" in data)
+            for data in files.values()
+        ):
+            machine = merged_toml(files).get("machine")
+            roots[checkout] = machine.get("worktrees_root") if isinstance(machine, dict) else None
+    return roots
 
 
 def pin_dir(cfg: config.Config) -> Path:
@@ -835,6 +867,18 @@ class Unparseable(RuntimeError):
     it would hand the host an ABSENT one, the same narrowings dropped."""
 
 
+class NotRegistered(Unparseable):
+    """An adoption for a directory in a worktrees root your computer didn't register: a stray,
+    whose config is never read. An :class:`Unparseable` for the same reason as
+    :class:`NestedProject`."""
+
+
+class NestedProject(Unparseable):
+    """A main checkout inside another project's checkout or worktrees root, or around one
+    (``config.nesting_conflict``): never adopted. An :class:`Unparseable` so that every door that
+    adopts already refuses it the same way, saying why, with nothing adopted."""
+
+
 def _refuse_unparseable(tree: dict[str, bytes | None], pinned: dict[str, bytes | None]) -> None:
     """Raise :class:`Unparseable` when a file in ``tree`` that differs from the ``pinned`` copy
     doesn't parse, saying where. Only those: one the host already reads as empty, left as it is,
@@ -900,6 +944,18 @@ def adopt(cfg: config.Config, *, reviewed: str | None = None, baseline: str | No
     door that forgot to seed left a box with ``claude``/``codex`` off."""
     _require_host()
     drift = inspect(cfg)
+    if not cfg.worktree:  # its worktrees root, as the tree about to be adopted declares it
+        machine = merged_toml(drift.tree).get("machine")
+        root = machine.get("worktrees_root") if isinstance(machine, dict) else None
+        if why := config.nesting_conflict(cfg.repo_root, root):
+            raise NestedProject(f"{why} — nothing adopted")
+    elif (placed := config.placement(cfg.repo_root)) is not None and placed.kind == "stray":
+        raise NotRegistered(
+            f"{term.printable(str(cfg.repo_root))} is in {term.printable(str(placed.main))}'s "
+            "worktrees root but isn't a worktree your computer registered, so its config is never "
+            f"read — nothing adopted. `fy worktree add {term.printable(placed.name)}` in "
+            f"{term.printable(str(placed.main))} registers it"
+        )
     if reviewed is not None and drift.tree_digest() != reviewed:
         raise ReviewStale(
             f"foldyard.toml changed again since it was reviewed ({reviewed} → "
@@ -1060,6 +1116,33 @@ def _stale_key_notes(cfg: config.Config, tree: dict[str, bytes | None]) -> list[
     return notes
 
 
+def identity_note(toml: dict, identity: dict) -> str:
+    """What a worktree's ``toml`` declares among the identity keys that is NOT read
+    (:func:`config.ignored_identity`), as one sentence — ``""`` when nothing is. A worktree is
+    always its main's project, so a branch's ``[project].name`` changes nothing, and adopting it
+    would look like a rename that did nothing: said at the decision moment (:func:`resolve`) and on
+    the ``adopted config`` doctor row. The values are the checkout's: shown inert."""
+    ignored = config.ignored_identity(toml, identity)
+    if not ignored:
+        return ""
+    keys = ", ".join(f"{key} = {term.printable(repr(value))}" for key, value in ignored)
+    project = term.printable(str(identity.get("project", {}).get("name", "")))
+    return (
+        f"{keys} {'is' if len(ignored) == 1 else 'are'} not read: a worktree is always in its main "
+        f"checkout's project ({project}), and its state, ports and VM are main's"
+    )
+
+
+def _identity_notes(cfg: config.Config, tree: dict[str, bytes | None]) -> list[str]:
+    """:func:`identity_note` for the TREE about to be adopted, as the review prints it.
+    Best-effort, like :func:`_stale_key_notes`: the gate must never break on its own footnote."""
+    try:
+        note = identity_note(merged_toml(tree), cfg.identity)
+    except Exception:  # pragma: no cover — defensive: a report must not block the gate
+        return []
+    return [f"  ⚠ NB {note}."] if note else []
+
+
 def resolve(
     cfg: config.Config,
     *,
@@ -1107,7 +1190,7 @@ def resolve(
         if rows:
             echo(term.paint_diff(rows, color=term.color_enabled(sys.stderr)))
             echo("  What these declarations let the host DO: `fy config widenings`.")
-        for note in _stale_key_notes(cfg, drift.tree):
+        for note in _stale_key_notes(cfg, drift.tree) + _identity_notes(cfg, drift.tree):
             echo(note)
         if not interactive:
             # No TTY ⇒ nobody read it, so it does not get adopted. Adopting here was the same
@@ -1152,7 +1235,7 @@ def resolve(
         # Colored here too, not just in `fy config diff`: this is the moment someone decides, and
         # a wall of monochrome context lines is where a one-line insertion hides.
         echo(term.paint_diff(rows, color=term.color_enabled(sys.stderr)))
-    for note in _stale_key_notes(cfg, drift.tree):
+    for note in _stale_key_notes(cfg, drift.tree) + _identity_notes(cfg, drift.tree):
         echo(note)
     echo(
         "  This file drives host-side credential injection and egress capture, and ANYTHING that "

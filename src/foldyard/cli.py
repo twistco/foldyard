@@ -188,19 +188,58 @@ def _resolve_worktree(
     run from inside a worktree would write MAIN's posture while the stack acts on the worktree — the
     "changing mode changes both" footgun. Resolve it here (host only — the box already exports
     ``WORKTREE``) and export it into the process env so config + every child ``foldyard`` agree.
-    Best-effort: a non-git dir leaves it unset, silently."""
+    Best-effort: a non-git dir leaves it unset, silently.
+
+    On your computer the checkout comes from your computer's records (``config.placement_here``),
+    and where they refuse (a worktree made outside fy, a repository inside a checkout, a
+    registered worktree whose ``.git`` was broken…) a project verb is refused, saying why —
+    ``WORKTREE`` set or not: it only picks which registered worktree to act on, from a place fy
+    acts in. Help and the project-free verbs are resolved without the records."""
+    from . import config
+
+    path, is_help = _command_path(ctx)
+    project_free = is_help or any(path[: len(free)] == free for free in _PROJECT_FREE)
+    if project_free:
+        # Help and the project-free verbs act on no project: resolved without your computer's
+        # records (config.unplaced), which are every adopted project's to read.
+        with config.unplaced():
+            _front_door(ctx, path, project_free=True)
+    else:
+        _front_door(ctx, path, project_free=False)
+
+
+def _front_door(ctx: typer.Context, path: tuple[str, ...], *, project_free: bool) -> None:
+    """:func:`_resolve_worktree`'s work, for the verb at ``path``."""
     import os
     import sys
 
     from . import compat, config
 
-    path, is_help = _command_path(ctx)
-    project_free = is_help or any(path[: len(free)] == free for free in _PROJECT_FREE)
+    placed = None if config.in_box() or project_free else config.placement_here()
+    if placed is not None and placed.within is not None and path == ("box", "exec"):
+        # A git hook's dispatch from a worktree made outside fy inside a main checkout (Claude
+        # Code's `.claude/worktrees/<x>`): refused, a commit there would fail or skip its checks.
+        # Main's box sees this path as it is, and exec names nothing from the worktree's config,
+        # so it runs there as from main — main's config, main's box, whatever `FOLDYARD_REPO` (the
+        # hook's: the worktree) or `WORKTREE` said. Only `within`, the records' main, is used.
+        os.environ["FOLDYARD_REPO"] = str(placed.within)
+        os.environ["WORKTREE"] = ""
+        config.clear_caches()
+        placed = config.placement_here()
+    if placed is not None and placed.kind == "refused" and not project_free:
+        print(placed.why, file=sys.stderr)
+        raise typer.Exit(1)
+    if not (project_free or config.in_box()):
+        config.pin_placement(placed)  # what every reader in this verb sees, whatever lands later
     if not (project_free or config.in_box() or config.in_project()):
         print(_NOT_A_PROJECT, file=sys.stderr)
         raise typer.Exit(1)
     try:
-        if not (config.in_box() or os.environ.get("WORKTREE")):
+        if placed is not None and placed.kind != "refused" and not os.environ.get("WORKTREE"):
+            os.environ["WORKTREE"] = placed.name
+        elif not (project_free or config.in_box() or os.environ.get("WORKTREE")):
+            # Not for help or a project-free verb: they act on no worktree, and git's answer is
+            # the box's to shape.
             try:
                 from . import stack
 
@@ -287,8 +326,16 @@ def init(
     untracked, hidden by the clone's own .git/info/exclude, worktrees get their copy from your
     computer, and the agent is told. On a clone set up the usual way, it converts that setup,
     keeping your foldyard.toml. `fy docs private-config` has the detail."""
+    import sys
+    from pathlib import Path
+
+    from . import config
     from . import init as init_mod
 
+    # Not inside another project's checkout, nor around one (config.nesting_conflict).
+    if why := config.nesting_conflict(Path(path).resolve()):
+        print(f"✗ {why}", file=sys.stderr)
+        raise typer.Exit(1)
     raise typer.Exit(
         init_mod.init(
             path=path,

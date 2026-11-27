@@ -115,7 +115,8 @@ min_foldyard_version = "0.2.0"
 
 - **`name`** — the project key; names the state dir `~/.foldyard/<name>/`. Default: the repo
   directory name, lowercased. Env: `FOLDYARD_PROJECT`. A plain name — letters, digits, `.`, `_` and
-  `-`, starting with a letter or digit; anything else is refused.
+  `-`, starting with a letter or digit; anything else is refused. Main's names every worktree too:
+  see [the adopted config](#the-adopted-config-what-the-host-actually-runs).
 - **`prefix`** — container/volume/network name prefix (a worktree appends `-<name>`). Default:
   `name`. Env: `FOLDYARD_PROJECT_PREFIX`.
 - **`app`** — the compose service `fy shell` targets. Default: `"app"`. Env: `FOLDYARD_APP`.
@@ -600,7 +601,28 @@ disk_gib = 60
 
 - **`worktrees_root`** — the parent dir of sibling worktree checkouts, mounted into the VM beside
   the repo. Relative values resolve against the main checkout's path. Default: `<repo>-worktrees`
-  beside the repo. Env: `FOLDYARD_WORKTREES_ROOT`.
+  beside the repo. Env: `FOLDYARD_WORKTREES_ROOT`. Give it a directory of its own: your computer
+  reads anything in it as one of the project's worktrees (one `fy worktree add` didn't register
+  reads as nothing of its own), so a repository you clone there is never a project of its own, and
+  fy refuses to act in the root itself. A root that holds the main checkout too (`".."` or above),
+  where your other repositories live, claims nothing: there only the worktrees `fy worktree add`
+  registered are the project's. A root reached through a link claims nothing: declare its real path.
+  Nor can it lie at or inside another project's checkout, registered worktree or worktrees root, or
+  hold one, wherever its path really leads: adopting such a config is refused, and one adopted
+  before claims nothing and isn't mounted — `fy up`, `fy box up` and `fy machine recreate` refuse,
+  and `fy doctor` fails saying what to change (a VM made before keeps its mount until
+  `fy machine recreate`). A root inside a root that holds it is the outer one's problem, not its
+  own. Your computer goes by the value adopted for main, never this env var, when it decides which
+  project a directory belongs to.
+
+  A project can't lie inside another one's checkout (main or a worktree) or worktrees root: the
+  outer project's box could write the inner one's files, and the inner one's box what the outer one
+  reads, so neither wall would hold. fy refuses to act in a `foldyard.toml` or a repository of its
+  own in a subdirectory, and `fy init` and `fy config adopt` refuse there, and around an adopted
+  project too. Move it out to make it a project of its own, or make it part of the outer project.
+  One adopted inside another's checkout before this rule is skipped (`fy doctor` names it) and
+  refused where it is; one inside another's worktrees root stays a project, and that root loses. A
+  project in a subdirectory of a repository that is no fy project (`mono/svc`) is fine.
 
 - **`worktree_base`** — the git ref a new worktree branch forks from. Default: auto-detected
   (`origin/HEAD`, then `main`/`master`), so new worktrees fork off the trunk rather than whatever
@@ -1493,11 +1515,17 @@ Day to day:
   branches counts as a change and gets asked about. `fy worktree add` settles a new worktree's first
   adoption: identical to main's adopted copy is adopted without asking, anything else is shown as a
   diff against main and adopted only at the prompt ([git](./git.md#worktrees)). Until a worktree you
-  made with `fy worktree add` is adopted, your computer runs nothing for it, but still knows whose
-  it is: its project and machine (`[project] name`/`prefix`,
-  `[machine] name`/`backend`/`worktrees_root`) come from main's adopted copy, where main declares
-  them. Under a main with no `[project].name`, the worktree is named after its own directory (and so
-  are its prefix and machine, unless main declares those), as it is once adopted.
+  made with `fy worktree add` is adopted, your computer runs nothing for it.
+
+- **A worktree is always in main's project**, adopted or not: it shares main's state dir, port band
+  and VM. Its project and machine (`[project] name`/`prefix`,
+  `[machine] name`/`backend`/`worktrees_root`) come from main's adopted copy; where main declares no
+  `[project].name`, from main's directory name, as main's own does. A box is given them when it's
+  made, so it names a worktree's stack (and main's) as your computer does, never from a working tree
+  holding an edit nobody adopted; a box made before that reads main's tree, and `fy box up` asks
+  once for `fy box recreate` to give it them. What a worktree's own `foldyard.toml` says for those
+  keys isn't read, and the review at its adoption and `fy doctor`'s `adopted config` row say so (a
+  branch that renames the project takes effect once main adopts the rename).
 
 **Scope:** adoption governs what your computer does — daemons, injection, `passthrough`, and the
 switches `fy mode`/the TUI show. Compose files, `[box]` tools and bootstrap, and ports still read

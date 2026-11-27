@@ -16,6 +16,7 @@ from foldyard import cli, config, configpin, projects, supervisor
 from foldyard.machine_backend import LimaBackend
 
 FP = "fingerprint-now"
+_REAL_ADOPTED_CHECKOUTS = configpin.adopted_checkouts  # before the fixture stubs it
 
 
 @pytest.fixture
@@ -437,6 +438,25 @@ def test_a_kept_adoptions_state_folder_is_never_called_unused(host, pins, monkey
     )
     folders = {lo.what for lo in projects.collect().leftovers if lo.kind == "folder"}
     assert "folder ~/.foldyard/nas" not in folders  # the name its adopted config declares
+
+
+def test_a_worktree_that_was_a_project_of_its_own_leaves_its_vm_and_folder_over(
+    host, pins, monkeypatch
+):
+    # An older foldyard named a worktree by its own adoption (`[project].name = "live-old"`, or
+    # after its directory): its own VM and state folder. A worktree is always main's project now,
+    # so nothing claims them — listed as left over for the operator to delete, never migrated.
+    monkeypatch.setattr(configpin, "adopted_checkouts", _REAL_ADOPTED_CHECKOUTS)
+    live = host.tmp / "work" / "alpha-worktrees" / "live"
+    host.tomls[live] = {"project": {"name": "live-old"}, "machine": {"backend": "lima"}}
+    host.instances["live-old"] = {"name": "live-old", "status": "Stopped", "dir": ""}
+    host.provisioned.add("live-old")
+    (host.tmp / "home" / ".foldyard" / "live-old").mkdir(parents=True)
+    got = projects.collect()
+    assert [p.project for p in got.projects] == ["alpha"]  # its worktree's adoption names none
+    left = {lo.what: lo for lo in got.leftovers}
+    assert left["VM live-old (stopped)"].fix == "`limactl delete live-old`"
+    assert "folder ~/.foldyard/live-old" in left
 
 
 def test_a_big_folder_is_sized_only_so_far(host, pins, monkeypatch):

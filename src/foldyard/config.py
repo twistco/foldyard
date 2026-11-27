@@ -38,14 +38,15 @@ import subprocess
 import sys
 import threading
 import tomllib
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 
 def _git_toplevel(start: Path) -> Path | None:
@@ -89,9 +90,9 @@ class Config:
     repo_root: Path
     worktree: str  # "" = the main checkout; otherwise the worktree dir name
     toml: dict
-    # What NAMES the project for a registered worktree with nothing adopted: main's adopted
-    # identity keys (:func:`identity_from`), never config; for a worktree dir the host has no
-    # record of, main's (:func:`stray_identity`). Empty for every other checkout.
+    # What NAMES the project for a worktree, registered or not, adopted or not: main's identity
+    # (:func:`worktree_identity`), which beats the worktree's own config. Empty for main's own,
+    # but in a box, where it is what your computer baked in.
     identity: dict = field(default_factory=dict)
     # The main checkout, for a worktree on your computer (registered or not): known when the
     # config is made, so nothing asks git in ``repo_root`` — whose ``.git`` file the box can write,
@@ -260,7 +261,16 @@ def current() -> Config:
 def _repo_root_ambient() -> Path:
     """The consumer repo root, resolved from the AMBIENT process env/CWD (memoized). The
     public :func:`repo_root` consults a bound :class:`Config` context first (so a long-lived
-    ``fy host``/TUI can resolve a different checkout per worktree) and falls back here."""
+    ``fy host``/TUI can resolve a different checkout per worktree) and falls back here. On your
+    computer, where its records place it (:func:`placement_here`) first: that checkout, whatever
+    the nearest ``foldyard.toml`` or git says."""
+    placed = placement_here()
+    if placed is not None and placed.checkout is not None:
+        return placed.checkout
+    if placed is not None and placed.main is not None:
+        # Refused under a recorded main: that main, never what a `foldyard.toml` or git there
+        # (the box's to plant) would name.
+        return placed.main
     env = os.environ.get("FOLDYARD_REPO")
     if env:
         return Path(env).expanduser().resolve()
@@ -275,8 +285,12 @@ def in_project() -> bool:
     """Is there a foldyard project to act on? A bound :class:`Config`, an explicit
     ``FOLDYARD_REPO``, or a ``foldyard.toml`` in CWD or above. NOT the git/CWD fallbacks
     :func:`repo_root` keeps for code that already knows it's in one: a project verb run anywhere
-    else would act on a made-up project named after the directory, writing state for it."""
+    else would act on a made-up project named after the directory, writing state for it. On your
+    computer, anywhere its records place (:func:`placement_here`) too, ``foldyard.toml`` or not."""
     if _BOUND.get() is not None or os.environ.get("FOLDYARD_REPO"):
+        return True
+    placed = placement_here()
+    if placed is not None and placed.kind != "refused":
         return True
     cur = Path.cwd().resolve()
     return any((d / "foldyard.toml").is_file() for d in (cur, *cur.parents))
@@ -298,6 +312,10 @@ def clear_caches() -> None:
     _repo_root_ambient.cache_clear()
     _toml_ambient.cache_clear()
     _identity_ambient.cache_clear()
+    # …and the records it was placed by, so the next lookup reads them afresh: nothing read under
+    # one test's state dir (or your computer's, before a test isolated it) answers the next.
+    _RECORDS.clear()
+    _PINNED.set(None)
     # The two main-checkout resolvers (stack.main_repo, devmode's per-checkout one) are memoized
     # for the same reason and invalidated by the same events (a test relocating the repo, a
     # rewritten foldyard.toml). Lazy + doubly guarded: config must not import either at module
@@ -538,10 +556,14 @@ def _toml_ambient() -> dict:
     because the tree is on the mount and every ambient read here has a host consequence: which VM
     and how it is walled, where state and secrets live, what ``verify`` exempts. Resolving each
     such field through the pin one at a time is how several stayed live (ADR-0022: the channel,
-    not the field); this is the channel."""
+    not the field); this is the channel. Nothing for a directory in a worktrees root your computer
+    didn't register, or a place it refuses (:func:`placement_here`)."""
     root = _repo_root_ambient()
     if in_box():
         return _tree_toml(root)
+    placed = placement_here()
+    if placed is not None and placed.kind in ("stray", "refused"):
+        return {}
     return _host_toml(root) or {}
 
 
@@ -549,7 +571,12 @@ def ambient_adopted() -> bool:
     """Is the ambient checkout's config one the operator adopted? Always True in the box (there is
     nothing to adopt there). False means the host is reading an empty config — fine for a report,
     never a basis to provision anything (:func:`foldyard.machine.ensure` refuses)."""
-    return in_box() or _host_toml(_repo_root_ambient()) is not None
+    if in_box():
+        return True
+    placed = placement_here()
+    if placed is not None and placed.kind in ("stray", "refused"):
+        return False  # read as nothing (_toml_ambient), whatever was once adopted there
+    return _host_toml(_repo_root_ambient()) is not None
 
 
 def unadopted_notice() -> str | None:
@@ -559,6 +586,9 @@ def unadopted_notice() -> str | None:
     after the directory). Ambient only: a bound config is an adopted one by construction."""
     if _BOUND.get() is not None or ambient_adopted():
         return None
+    placed = placement_here()
+    if placed is not None and placed.kind in ("stray", "refused"):
+        return None  # nothing there is ever adopted: what fy says there is the refusal, or nothing
     # exists(), not is_file(): one the box made a FIFO (or that can't be read) is still a config
     # nobody adopted, not "no config here".
     if not (_repo_root_ambient() / "foldyard.toml").exists():
@@ -569,101 +599,1080 @@ def unadopted_notice() -> str | None:
     )
 
 
-# ── a registered worktree with nothing adopted is still its project's ───────────────────
-# On your computer an unadopted checkout reads an EMPTY config, so a fresh worktree was named
-# after its directory: its own project (and `~/.foldyard/<project>/` state dir and port band), a
-# machine of that name, the default backend. Every host verb run there before its adoption — a
-# git hook calling `fy box exec`, `fy mode`, `fy allow` — acted on a project that doesn't exist.
-# What NAMES the project is a fact about main, so these keys (and these only) come from main's
-# ADOPTED snapshot. `worktrees_root` with them: without it, a project that moved its worktrees
-# leaves the CLI's worktree inference reading the checkout as main.
+# ── a worktree is always its main's project ─────────────────────────────────────────────
+# What NAMES the project is a fact about main: these keys (and these only) come from main for
+# every worktree, registered or not, adopted or not, whatever its own config says. Each worktree
+# took its own before, so a fresh one (an EMPTY config on your computer until adopted) was named
+# after its directory — its own project, `~/.foldyard/<project>/` state dir, port band and machine
+# — and one adopted from a branch that declares another `[project].name` was another project.
+# `worktrees_root` with them: without it, a project that moved its worktrees leaves the CLI's
+# worktree inference reading the checkout as main. On your computer from main's ADOPTED snapshot;
+# in a box, from what your computer baked into it.
 
 _IDENTITY = {"project": ("name", "prefix"), "machine": ("name", "backend", "worktrees_root")}
 
 
-def _git_main(root: Path) -> Path | None:
-    """The main checkout git links ``root`` to (its common dir's parent). The link is the
-    worktree's ``.git`` file, which the box can write — :func:`identity_from` never trusts it
-    alone. A read-only ``rev-parse``: it runs nothing from the repo."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    common = out.stdout.strip()
-    return Path(common).parent if out.returncode == 0 and common else None
-
-
-def identity_from(main: Path, root: Path) -> dict:
-    """The identity keys (:data:`_IDENTITY`) the checkout at ``root`` takes from ``main``'s
-    adopted config, or ``{}``. Only on your computer, only for a checkout the host REGISTERED as a
-    worktree of ``main`` (:mod:`foldyard.worktree_registry` — the host's own record, so a box that
-    rewrites the worktree's ``.git`` or plants a directory gains nothing), only while that
-    checkout has nothing adopted itself (its own adoption, once made, is all it reads), and only
-    from main's ADOPTED copy, never a tree."""
-    if in_box():
-        return {}
-    from . import worktree_registry  # lazy, and stdlib-only: it imports nothing of ours
-
-    main, root = Path(main).resolve(), Path(root).resolve()
-    if root == main or root not in worktree_registry.checkouts(main).values():
-        return {}
-    if _host_toml(root) is not None:
-        return {}
-    return _adopted_identity(main)
-
-
-def _adopted_identity(main: Path) -> dict:
-    """The identity keys (:data:`_IDENTITY`) ``main``'s ADOPTED config declares (``{}`` when
-    nothing is adopted)."""
-    adopted = _host_toml(main) or {}
+def _identity_keys(toml: dict) -> dict:
+    """The identity keys (:data:`_IDENTITY`) ``toml`` declares."""
     got: dict[str, dict] = {}
     for table, keys in _IDENTITY.items():
-        source = adopted.get(table)
+        source = toml.get(table)
         if isinstance(source, dict):
             if picked := {k: source[k] for k in keys if k in source}:
                 got[table] = picked
     return got
 
 
-def stray_identity(main: Path) -> dict:
-    """The identity a directory under ``main``'s worktrees root that the host has NO record of
-    (one the box made) is named by: main's own — its adopted keys, and its directory's name when it
-    declares no ``[project].name`` (what main itself resolves to on your computer). Nothing comes
-    from the directory, and nothing is named after it: its name is the box's choice, and named
-    after it, its card's state dir was ``~/.foldyard/<that name>/`` (another project's, should the
-    box pick one), a port band was allocated for it, and a name that isn't a plain one raised on
-    every read of it — the TUI's highlight among them."""
-    main = Path(main).resolve()
-    got = _adopted_identity(main)
+# The identity your computer names the project by (:func:`worktree_identity`, from main's ADOPTED
+# copy), baked into a box at create (``box._create_env``): the box reads it rather than derive it
+# from main's working tree, which may hold an edit nobody adopted — so the box names a worktree's
+# stack, and main's, as your computer does. A box from before it reads main's tree.
+BAKED_IDENTITY_ENV = "FY_MAIN_IDENTITY"
+
+
+def _baked_identity() -> dict | None:
+    """In a box, the identity your computer baked into it (:data:`BAKED_IDENTITY_ENV`): only the
+    identity keys, only strings, and a project name — else ``None``."""
+    try:
+        data = json.loads(os.environ.get(BAKED_IDENTITY_ENV) or "null")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    got: dict[str, dict] = {}
+    for table, keys in _IDENTITY.items():
+        source = data.get(table)
+        if isinstance(source, dict):
+            got[table] = {k: source[k] for k in keys if isinstance(source.get(k), str)}
+    return got if got.get("project", {}).get("name") else None
+
+
+def worktree_identity(main: Path) -> dict:
+    """The identity every worktree of ``main`` is named by: main's own. Its keys from main's
+    ADOPTED config on your computer (main's tree in a box, unless your computer baked one in), and
+    main's directory name when it declares no ``[project].name`` (what main itself resolves to).
+    Never empty, so a worktree's own config never names it (:func:`_identity_value`), and nothing
+    comes from the worktree's directory: for one your computer has no record of, that name is the
+    box's choice."""
+    if in_box() and (baked := _baked_identity()) is not None:
+        return baked
+    main = Path(main)
+    got = _identity_keys(_tree_toml(main) if in_box() else (_host_toml(main) or {}))
     project = got.setdefault("project", {})
     if not project.get("name"):  # an empty one too: project() would fall back to the directory's
         project["name"] = main.name.lower()
     return got
 
 
+def ignored_identity(toml: dict, identity: dict) -> list[tuple[str, object]]:
+    """``("[table].key", value)`` for each identity key a worktree's own ``toml`` declares that its
+    ``identity`` (its main's, :func:`worktree_identity`) doesn't: config that is not read, which
+    the adoption review and the ``adopted config`` doctor row say. ``[]`` for main (no identity).
+    The values are the checkout's, so box-written: print them through ``term.printable``."""
+    if not identity:
+        return []
+    out: list[tuple[str, object]] = []
+    for table, keys in _IDENTITY.items():
+        own = toml.get(table)
+        if not isinstance(own, dict):
+            continue
+        for key in keys:
+            value = own.get(key)
+            if value and value != identity.get(table, {}).get(key):
+                out.append((f"[{table}].{key}", value))
+    return out
+
+
+# ── which project a directory is in: your computer's records ────────────────────────────
+# One rule: your computer's records decide which project, and which checkout of it, a directory
+# belongs to. The records are host state the box can't write: the main checkouts you adopted a
+# config for (configpin), each one's registered worktrees (worktree_registry, written only by
+# `fy worktree add`), and each one's worktrees root by its ADOPTED config, where that root is a
+# directory for its worktrees alone. Anything the box can write — a `.git` file or directory, a
+# repository nested in a checkout, a `foldyard.toml`, a link, a directory — may only make fy
+# REFUSE, never steer it. Git isn't asked: its answer comes from a `.git` the box writes.
+#
+# Each record is matched by what the directory IS (device and inode, re-read on every lookup), so
+# a path spelled in another case on a case-insensitive disk still matches, and a link the box puts
+# where a record was never does. Walking up from where fy runs, the nearest record wins (a
+# worktree or a root inside main's checkout).
+#
+# No fy project lies inside another's checkout (main or a registered worktree) or worktrees root:
+# the outer box can write the inner project's files, and the inner box writes what the outer one
+# reads, so the two walls would be bridged. Adopting one is refused (:func:`nesting_conflict`), and
+# one adopted before that rule is skipped, said, and refused where it is. A project in a
+# subdirectory of a repository that is no fy project (`mono/svc`) is fine.
+
+
+class Placed(NamedTuple):
+    """Where your computer's records place a directory (:func:`placement`). ``kind``:
+
+    - ``"main"``: in an adopted main checkout (``checkout`` is ``main``),
+    - ``"worktree"``: in ``main``'s registered worktree ``name`` at ``checkout``,
+    - ``"stray"``: in directory ``name`` of main's worktrees root, which isn't registered — named
+      for main, and nothing of its own is read,
+    - ``"refused"``: fy won't act here, and ``why`` says so and what to do. ``within``: it is a
+      worktree made outside fy inside
+      the recorded main checkout ``within`` — whose box sees it at the same path, so a git hook's
+      `fy box exec` there runs in that box (the CLI's callback).
+
+    ``main`` is only ever from the records: what a ``.git`` there names is the box's to write, so it
+    is at most a path a refusal suggests."""
+
+    kind: str
+    main: Path | None
+    checkout: Path | None
+    name: str = ""
+    why: str = ""
+    within: Path | None = None
+
+
+class _Record(NamedTuple):
+    kind: (
+        str  # "main" | "worktree" | "root" | "nested" (a project adopted inside another's, skipped)
+    )
+    main: Path
+    path: Path  # a root's: its real path, or as declared when inside main
+    name: str = ""
+    ident: tuple | None = None  # what ``path`` was when read, if it was its real path then
+    held: frozenset = frozenset()  # a root: what main and its parents are (it must be none)
+    below: tuple = ()  # a root inside main: its parts below main, which the box can write
+
+
+def _ident(path: Path | str) -> tuple[int, int] | None:
+    """What ``path`` is — its device and inode, a link's own (``lstat``)."""
+    try:
+        st = os.lstat(path)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _stat_ident(path: Path | str) -> tuple[int, int] | None:
+    """:func:`_ident`, through a link at ``path``."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _walked_ident(top: Path, parts: tuple) -> tuple[int, int] | None:
+    """What ``top``/``parts`` is, reached one directory at a time and through no link
+    (``O_NOFOLLOW``): the parts are the box's to write, and a check for a link and then a lookup
+    that follows one is beaten by a swap between the two."""
+    step = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except (OSError, ValueError):
+        return None
+    try:
+        for part in parts:
+            nxt = os.open(part, step, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        st = os.fstat(fd)
+        return st.st_dev, st.st_ino
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _stamp(path: Path) -> tuple[int, int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def _declared_root(main: Path, declared: object) -> Path:
+    """``main``'s worktrees root as its adopted config declares it (``declared``), as a path (no
+    link followed), as :func:`worktrees_root` places it — but never from
+    ``FOLDYARD_WORKTREES_ROOT``: that is one invocation's word about one project. Raises on a value
+    that names no path (``~nosuchuser``)."""
+    if not declared:
+        return Path(f"{main}-worktrees")
+    path = Path(str(declared)).expanduser()
+    return Path(os.path.normpath(path if path.is_absolute() else main / path))
+
+
+def _lineage(path: str) -> list[str]:
+    """``path`` and each directory above it, as strings (cheaper than ``Path.parents`` for the
+    hundreds a cold read walks)."""
+    out = [path]
+    while (up := os.path.dirname(out[-1])) != out[-1]:
+        out.append(up)
+    return out
+
+
+def _root_record(main: Path, root: Path, ident_of) -> _Record:
+    held = frozenset(i for p in _lineage(str(main)) if (i := ident_of(p)) is not None)
+    below: tuple = ()
+    if str(root).startswith(os.path.join(str(main), "")):
+        below = tuple(str(root)[len(str(main)) + 1 :].split(os.sep))
+    elif (main_ident := ident_of(str(main))) is not None:  # spelled another way (case): by identity
+        for parent in _lineage(str(root))[1:]:
+            if ident_of(parent) == main_ident:
+                below = root.relative_to(parent).parts
+                break
+    return _Record("root", main, root, ident=_ident(root), held=held, below=below)
+
+
+def _live_ident(record: _Record) -> tuple[tuple[int, int] | None, bool]:
+    """``(what the record's path is now, whether that is through a link)``. A path that is no
+    longer what it was when read counts only while it is still its real path: a link swapped in for
+    a directory above it would make it another project's directory of the same name."""
+    ident = _ident(record.path)
+    if ident == record.ident or os.path.realpath(record.path) == str(record.path):
+        return ident, False
+    return None, True
+
+
+def _root_ident(record: _Record) -> tuple[int, int] | None:
+    """What a root record claims now: ``None`` while it is no directory for worktrees alone —
+    main, one holding main (`worktrees_root = ".."` claims only what the registry lists), or one
+    reached through a link (inside main, walked one directory at a time: it would claim whatever
+    the link points at)."""
+    if record.below:
+        ident = _walked_ident(record.main, record.below)
+    else:
+        ident = _live_ident(record)[0]
+    return None if ident in record.held else ident
+
+
+def _linked_admin(checkout: Path) -> Path | None:
+    """The admin dir ``checkout``'s ``.git`` file names when it is a linked worktree's
+    (``<git dir>/worktrees/<id>``, the name in any case), or ``None``. The box's to write: only
+    ever a reason to refuse, or a path to suggest (:func:`_suggested_main`)."""
+    gitdir = _gitdir_of(checkout)
+    if gitdir is None or gitdir.parent.name.casefold() != "worktrees":
+        return None
+    # A whole git dir of its own that happens to sit in a `worktrees` directory
+    # (`--separate-git-dir`) is no worktree's: it has objects, and no `commondir` naming another.
+    whole = os.path.isdir(gitdir / "objects") and not os.path.lexists(gitdir / "commondir")
+    return None if whole else gitdir
+
+
+def _suggested_main(admin: Path) -> Path | None:
+    """The main checkout a linked worktree's admin dir suggests (its git dir's parent, for a git
+    dir that is a `.git`): a path for a refusal to name, never one fy acts on."""
+    common = admin.parent.parent
+    return common.parent if common.name.casefold() == ".git" else None
+
+
+def _git_dir(main: Path) -> Path:
+    """Main's git dir: its ``.git`` directory, or the one its ``.git`` file names
+    (``--separate-git-dir``, a main that is a submodule). Box-writable, so only compared by
+    identity, to tell whether a ``.git`` below points into it."""
+    return _gitdir_of(main) or main / ".git"
+
+
+def _is_worktree_of(checkout: Path, main: Path) -> bool:
+    """``checkout``'s ``.git`` names an admin dir in main's git dir's ``worktrees``."""
+    admin = _gitdir_of(checkout)
+    wts = _stat_ident(_git_dir(main) / "worktrees")
+    return admin is not None and wts is not None and _stat_ident(admin.parent) == wts
+
+
+NESTED = (
+    "fy doesn't support a project inside another one's checkout, since that one's box can write "
+    "this one's files and this one's box what that one reads"
+)
+
+
+class _Claim(NamedTuple):
+    """Where a record lies, for :func:`_judged`: by what its real path IS (device and inode) and
+    what each existing directory above it is — never by how a path is spelled (case, Unicode
+    normalisation), which a disk may ignore."""
+
+    main: Path
+    kind: str  # "main" | "worktree" | "root"
+    path: Path
+    ident: tuple | None  # what it is, if it exists
+    up: tuple  # what each existing directory above it is, nearest first
+    name: str = ""
+
+
+def _claim(
+    main: Path, kind: str, path: Path, ident_of, name: str = "", real_of=os.path.realpath
+) -> _Claim:
+    """``path``'s claim, by its real path (a link on the way is followed: callers that mustn't
+    follow one check :func:`_linked` first). A directory that isn't there yet (a root before its
+    first worktree) has no identity: it goes by its real path, folded as macOS's disks compare
+    names (case, Unicode normalisation), which can only match another that isn't there either."""
+    real = real_of(path)
+
+    def what(p: str) -> tuple:
+        ident = ident_of(p)
+        if ident is not None:
+            return ident
+        folded = unicodedata.normalize("NFD", p).casefold() if sys.platform == "darwin" else p
+        return ("path", folded)
+
+    return _Claim(main, kind, path, what(real), tuple(what(p) for p in _lineage(real)[1:]), name)
+
+
+def _linked(path: Path) -> bool:
+    """Is ``path`` reached through a link (its real path isn't it)?"""
+    return os.path.realpath(path) != os.path.normpath(path)
+
+
+class _Overlaps:
+    """Each claim by what it is and by each directory above it, to tell for another claim whether
+    it is at, inside or around one."""
+
+    def __init__(self, claims: Iterable[_Claim]):
+        self.at: dict[tuple, list[_Claim]] = {}
+        self.under: dict[tuple, list[_Claim]] = {}
+        for claim in claims:
+            if claim.ident is not None:
+                self.at.setdefault(claim.ident, []).append(claim)
+            for ident in claim.up:
+                self.under.setdefault(ident, []).append(claim)
+
+    def of(self, claim: _Claim, kinds: tuple[str, ...] = ("main", "worktree", "root")):
+        """``(other, how)`` for each claim of another project's that ``claim`` is ``"at"``,
+        ``"inside"`` (nearest first) or ``"around"``."""
+        if claim.ident is not None:
+            for other in self.at.get(claim.ident, ()):
+                if other.main != claim.main and other.kind in kinds:
+                    yield other, "at"
+        for ident in claim.up:
+            for other in self.at.get(ident, ()):
+                if other.main != claim.main and other.kind in kinds:
+                    yield other, "inside"
+        if claim.ident is not None:
+            for other in self.under.get(claim.ident, ()):
+                if other.main != claim.main and other.kind in kinds:
+                    yield other, "around"
+
+
+def _root_spares(other: _Claim, how: str) -> bool:
+    """A root inside another project's root isn't the one that bridges them: the outer one mounts
+    the inner one's worktrees, never the other way round. So the outer one loses, and the inner one
+    — perhaps a sibling's own `<main>-worktrees` under a root that holds them all — stands."""
+    return other.kind == "root" and how == "inside"
+
+
+def _inert(root: _Claim, main: _Claim) -> bool:
+    """A root at or holding its own main (`worktrees_root = ".."`): it claims nothing, and isn't
+    a claim on anyone else's directory either."""
+    return root.ident is not None and (root.ident == main.ident or root.ident in main.up)
+
+
+def _what(claim: _Claim) -> str:
+    from .term import printable  # lazy: config is imported everywhere
+
+    main = printable(str(claim.main))
+    if claim.kind == "main":
+        return f"{main}'s checkout"
+    if claim.kind == "worktree":
+        return f"{main}'s registered worktree '{printable(claim.name)}'"
+    return f"{main}'s worktrees root"
+
+
+def _judged(projects: dict[Path, list[_Claim]]) -> tuple[dict, dict, set, list]:
+    """Which records stand, by where they lie (:data:`NESTED`): ``(stale, nested, dropped,
+    problems)``. In order:
+
+    - a main adopted before a worktree was always main's that is another main's REGISTERED worktree
+      is that worktree (``stale``: its main → that claim);
+    - a root claims nothing wherever it overlaps another project's main, registered worktree or
+      root — at, inside or around it, but for inside another's root (:func:`_root_spares`)
+      (``dropped``; and :func:`mount_conflict` refuses to mount it);
+    - a main at or inside another project's checkout or registered worktree is skipped (``nested``:
+      that one's mount holds it anyway);
+    - a registered worktree at or inside another project's checkout or worktree claims nothing.
+
+    A root at or holding its own main (`..`) is inert throughout. ``problems`` are ``(the mains
+    they concern, text)``."""
+    from .term import printable  # lazy: config is imported everywhere
+
+    def shown(path: Path) -> str:
+        return printable(str(path))
+
+    problems: list[tuple[frozenset, str]] = []
+    dropped: set[_Claim] = set()
+
+    def drop(claim: _Claim, how: str, by: _Claim) -> None:
+        dropped.add(claim)
+        what = "worktrees root" if claim.kind == "root" else "registered worktree"
+        problems.append(
+            (
+                frozenset({claim.main, by.main}),
+                f"{shown(claim.main)}'s {what} {shown(claim.path)} is {how} {shown(by.path)}, "
+                f"{_what(by)}: {NESTED}, so it claims nothing",
+            )
+        )
+
+    live = {
+        main: [c for c in claims if not (c.kind == "root" and _inert(c, claims[0]))]
+        for main, claims in projects.items()
+    }
+    everyone = _Overlaps(c for claims in live.values() for c in claims)
+    stale: dict[Path, _Claim] = {}
+    for main, claims in live.items():
+        for other, how in everyone.of(claims[0], ("worktree",)):
+            if how == "at":
+                stale[main] = other
+                problems.append(
+                    (
+                        frozenset({main, other.main}),
+                        f"{shown(main)} was adopted as a project of its own, but it is "
+                        f"{_what(other)}: fy acts on it as that worktree, and doesn't read the "
+                        "old adoption",
+                    )
+                )
+                break
+    alive = {m: c for m, c in live.items() if m not in stale}
+    overlaps = _Overlaps(c for claims in alive.values() for c in claims)
+    for claims in alive.values():
+        for root in (c for c in claims if c.kind == "root"):
+            for other, how in overlaps.of(root):
+                if _root_spares(other, how):
+                    continue
+                drop(root, how, other)
+                break
+    nested: dict[Path, _Claim] = {}
+    for main, claims in alive.items():
+        for outer, how in overlaps.of(claims[0], ("main", "worktree")):
+            if how == "around" or (how == "at" and outer.kind == "main"):
+                continue  # one inside this checkout is that one's; at it, the same adopted twice
+            nested[main] = outer
+            problems.append(
+                (
+                    frozenset({main, outer.main}),
+                    f"{shown(main)} is adopted as a project of its own {how} {shown(outer.path)}, "
+                    f"{_what(outer)}: {NESTED}, so it acts on neither there. Move it out, or make "
+                    f"it part of {shown(outer.main)}'s project",
+                )
+            )
+            break
+    survivors = _Overlaps(c for m, claims in alive.items() if m not in nested for c in claims)
+    for main, claims in alive.items():
+        if main in nested:
+            continue
+        for wt in (c for c in claims if c.kind == "worktree"):
+            for other, how in survivors.of(wt, ("main", "worktree")):
+                if how == "around" or (how == "at" and other.kind == "worktree"):
+                    continue  # (two registries at one directory: refused where it is)
+                drop(wt, how, other)
+                break
+    return stale, nested, dropped, problems
+
+
+_RECORDS: list = []  # [(signature, records, problems, claims, linked)]: once per change of files
+
+
+def _records() -> tuple[tuple[_Record, ...], tuple[tuple[frozenset, str], ...]]:
+    """Every record that stands (see above), and what was wrong with each one that doesn't, as
+    ``(the mains it concerns, text)``. Read again when the adoption markers or the registry
+    directory change (by their stat), or a record that was reached through a link no longer is.
+    Which stand is decided here, by what the records' real paths are (:func:`_judged`); one reached
+    through a link when read neither stands nor counts against another. A record that can't be read
+    is skipped and said (the ``worktrees`` doctor row): one project's bad value never stops fy in
+    another."""
+    return _read_records()[:2]
+
+
+def _read_records() -> tuple:
+    from . import configpin, worktree_registry  # lazy: both stdlib-only; configpin imports config
+    from .term import printable  # lazy: config is imported everywhere
+
+    pins, registry = configpin._pin_root(), worktree_registry._root()
+    try:
+        entries = sorted(os.listdir(pins))
+    except OSError:
+        entries = []
+    signature = (
+        str(pins),
+        _stamp(pins),
+        _stamp(registry),
+        tuple((e, _stamp(pins / e / configpin.ADOPTED_MARKER)) for e in entries),
+    )
+    cached = _RECORDS[0] if _RECORDS else None  # read once: clear_caches may empty it meanwhile
+    if cached is not None and cached[0] == signature and all(_linked(p) for p in cached[4]):
+        return cached[1:4]
+    seen: dict[str, tuple[int, int] | None] = {}  # mains share their parents: stat each once
+
+    def ident_of(path: Path | str) -> tuple[int, int] | None:
+        if (key := str(path)) not in seen:
+            seen[key] = _stat_ident(key)
+        return seen[key]
+
+    links: dict[str, bool] = {}
+
+    def through_a_link(path: Path) -> bool:  # :func:`_linked`, each shared prefix lstat'ed once
+        for prefix in reversed(_lineage(os.path.normpath(path))):
+            if prefix not in links:
+                links[prefix] = os.path.islink(prefix)
+            if links[prefix]:
+                return True
+        return False
+
+    def real_of(path: Path) -> str:  # for a path with no link on the way, its real path
+        return os.path.normpath(path)
+
+    problems: list[tuple[frozenset, str]] = []
+    linked: list[Path] = []
+    built: dict[Path, list[_Record]] = {}
+    projects: dict[Path, list[_Claim]] = {}
+    for main, declared in configpin.adopted_worktrees_roots().items():
+        if through_a_link(main):
+            linked.append(main)
+            problems.append((frozenset({main}), _through_a_link("main", main, main)))
+            continue
+        own = built[main] = [_Record("main", main, main, ident=_ident(main))]
+        claims = projects[main] = [_claim(main, "main", main, ident_of, real_of=real_of)]
+        for name, path in worktree_registry.recorded(main).items():
+            if through_a_link(path):
+                linked.append(path)
+                problems.append((frozenset({main}), _through_a_link("worktree", main, path)))
+                continue
+            own.append(_Record("worktree", main, path, name, ident=_ident(path)))
+            claims.append(_claim(main, "worktree", path, ident_of, name, real_of))
+        try:
+            root = _declared_root(main, declared)
+        except (RuntimeError, ValueError, OSError) as e:  # `~nosuchuser`, a NUL in the path
+            problems.append(
+                (
+                    frozenset({main}),
+                    f"{printable(str(main))}'s [machine].worktrees_root "
+                    f"{printable(repr(declared))} names no directory ({printable(str(e))}), so "
+                    "it claims none",
+                )
+            )
+            continue
+        if through_a_link(root):
+            linked.append(root)
+            problems.append((frozenset({main}), _through_a_link("worktrees root", main, root)))
+            continue
+        own.append(_root_record(main, root, ident_of))
+        claims.append(_claim(main, "root", root, ident_of, real_of=real_of))
+    stale, nested, dropped, judged = _judged(projects)
+    problems += judged
+    gone = {(c.main, c.kind, c.path) for c in dropped}
+    records = tuple(
+        r
+        for main, own in built.items()
+        if main not in stale and main not in nested
+        for r in own
+        if (r.main, r.kind, r.path) not in gone
+    ) + tuple(
+        _Record("nested", outer.main, main, ident=_ident(main)) for main, outer in nested.items()
+    )
+    claims = tuple(
+        c
+        for main, own in projects.items()
+        if main not in stale and main not in nested
+        for c in own
+        if not (c.kind == "root" and _inert(c, own[0]))
+    )
+    _RECORDS[:] = [(signature, records, tuple(problems), claims, tuple(linked))]
+    return records, tuple(problems), claims
+
+
+def recorded_mains() -> list[Path]:
+    """The main checkouts your computer's records stand by (on your computer): every adopted one
+    but one that is another's worktree or lies inside another project's (:func:`_judged`)."""
+    return [] if in_box() else sorted(r.main for r in _records()[0] if r.kind == "main")
+
+
+def _against_others(main: Path, mine: list[_Claim], *, mounting: bool = False) -> str | None:
+    """Why ``mine`` (a would-be project's, or a would-be worktree's, claims) can't stand beside the
+    other projects' (:data:`NESTED`), or ``None``. An adoption may make no overlap at all;
+    ``mounting`` a root inside another's is let be (:func:`_root_spares`)."""
+    from .term import printable  # lazy: config is imported everywhere
+
+    def shown(path: Path) -> str:
+        return printable(str(path))
+
+    others = _Overlaps(c for c in _read_records()[2] if _stat_ident(c.main) != _stat_ident(main))
+    for claim in mine:
+        for other, how in others.of(claim):
+            if claim.kind == "main" and how == "at" and other.kind == "main":
+                continue  # the same checkout
+            if mounting and _root_spares(other, how):
+                continue
+            what = {"main": "", "root": "the worktrees root ", "worktree": "the worktree "}
+            if how == "around":
+                return (
+                    f"{what[claim.kind]}{shown(claim.path)} holds {shown(other.path)}, "
+                    f"{_what(other)}: {NESTED}. Move one of them out"
+                )
+            return (
+                f"{what[claim.kind]}{shown(claim.path)} is {how} {shown(other.path)}, "
+                f"{_what(other)}: {NESTED}. Move it out to make it a project of its own, or make "
+                f"it part of {shown(other.main)}'s project"
+            )
+    return None
+
+
+def nesting_conflict(path: Path, worktrees_root: object = None) -> str | None:
+    """Why the directory ``path`` can't be adopted as a project of its own (``configpin.adopt``,
+    `fy init`), with ``worktrees_root`` as the tree to adopt declares it: it or its root (where it
+    really is: a link on the way is followed) would lie at, inside or around another project's
+    checkout, registered worktree or root (:data:`NESTED`). ``None`` when it can, and always in a
+    box. Re-adopting a main that stands is no new nesting."""
+    if in_box():
+        return None
+    main = Path(os.path.realpath(path))
+    mine = [_claim(main, "main", main, _stat_ident)]
+    try:
+        root = _declared_root(main, worktrees_root)
+    except (RuntimeError, ValueError, OSError):
+        root = None
+    if root is not None:
+        claim = _claim(main, "root", root, _stat_ident)
+        if not _inert(claim, mine[0]):
+            mine.append(claim)
+    return _against_others(main, mine)
+
+
+def mount_conflict(main: Path, root: Path) -> str | None:
+    """Why ``main``'s worktrees root ``root`` (as it is mounted: a link on the way is followed)
+    mustn't be mounted: it lies at, inside or around another project's checkout, registered
+    worktree or root, so that project's files would be in this one's VM (:data:`NESTED`). ``None``
+    when it may, and always in a box. A root at or holding its own main (`..`) is let be."""
+    if in_box():
+        return None
+    from .term import printable  # lazy: config is imported everywhere
+
+    main = Path(os.path.realpath(main))
+    claim = _claim(main, "root", Path(root), _stat_ident)
+    if _inert(claim, _claim(main, "main", main, _stat_ident)):
+        return None
+    why = _against_others(main, [claim], mounting=True)
+    if why is None:
+        return None
+    return (
+        f"{why} — not mounted. Set [machine].worktrees_root to a directory of its own (then "
+        f"`fy config adopt` in {printable(str(main))}); a VM made before keeps its mount until "
+        "`fy machine recreate`"
+    )
+
+
+def refuse_mount_conflict(main: Path, root: Path) -> None:
+    """:func:`mount_conflict`, said and exited on: every place that mounts the root or hands it to
+    what does (``machine.ensure``/``recreate``, the stack's env that the box mounts from)."""
+    if why := mount_conflict(main, root):
+        print(f"✗ {why}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def claimed_elsewhere(path: Path, main: Path) -> str | None:
+    """Why a new worktree of ``main`` can't be at ``path`` (`fy worktree add`): its root, inside
+    main, is reached through a link there (the box's to swap); or where it really is lies at,
+    inside or around another project's checkout, registered worktree or root (:data:`NESTED`)."""
+    if in_box():
+        return None
+    from .term import printable  # lazy: config is imported everywhere
+
+    main = Path(os.path.realpath(main))
+    parent = Path(os.path.normpath(path)).parent
+    if str(parent).startswith(os.path.join(str(main), "")):
+        below = tuple(str(parent)[len(str(main)) + 1 :].split(os.sep))
+        if _walked_ident(main, below) is None and os.path.lexists(parent):
+            return (
+                f"the worktrees root {printable(str(parent))} is inside {printable(str(main))} "
+                "but reached through a link there, which fy doesn't follow"
+            )
+    return _against_others(main, [_claim(main, "worktree", Path(path), _stat_ident)])
+
+
+def _nested_at(where: Path, records: tuple[_Record, ...]) -> _Record | None:
+    """The project adopted inside another's before that was refused, at ``where``, if any — while
+    its path is still its real one (a link swapped in above it would make it another directory)."""
+    ident = _ident(where)
+    for r in records:
+        if r.kind == "nested" and ident is not None and _live_ident(r)[0] == ident:
+            return r
+    return None
+
+
+def _through_a_link(kind: str, main: Path, path: Path) -> str:
+    from .term import printable  # lazy: config is imported everywhere
+
+    what = "the main checkout" if kind == "main" else f"a {kind} of {printable(str(main))}"
+    return (
+        f"{printable(str(path))} ({what}) is reached through a link now "
+        f"({printable(os.path.realpath(path))}), so it claims nothing until that's undone "
+        "(declare its real path)"
+    )
+
+
+def record_problems(main: Path | None = None) -> tuple[str, ...]:
+    """What was wrong with each record :func:`placement` skipped (on your computer), or only those
+    that concern ``main``'s project: what one project's box did is said in its own doctor alone."""
+    if in_box():
+        return ()
+    records, problems = _records()
+    found = problems + tuple(_index(records)[1])
+    if main is None:
+        return tuple(text for _, text in found)
+    ident = _stat_ident(main)
+    return tuple(
+        text
+        for mains, text in found
+        if any(m == main or (ident is not None and _stat_ident(m) == ident) for m in mains)
+    )
+
+
+def _index(
+    records: tuple[_Record, ...],
+) -> tuple[dict[tuple[int, int], list[_Record]], list[tuple[frozenset, str]]]:
+    """Each record by what its directory is NOW (:func:`_live_ident`, :func:`_root_ident`), and
+    each one a link on the way kept out."""
+    index: dict[tuple[int, int], list[_Record]] = {}
+    problems: list[tuple[frozenset, str]] = []
+    for record in records:
+        if record.kind == "nested":
+            continue
+        if record.kind == "root":
+            ident = _root_ident(record)
+            linked = ident is None and os.path.lexists(record.path) and _linked(record.path)
+            what = "worktrees root"
+        else:
+            ident, linked = _live_ident(record)
+            what = record.kind
+        if linked:
+            problems.append(
+                (frozenset({record.main}), _through_a_link(what, record.main, record.path))
+            )
+        if ident is not None:
+            index.setdefault(ident, []).append(record)
+    return index, problems
+
+
+def _gitdir_of(checkout: Path) -> Path | None:
+    """The git dir ``checkout``'s ``.git`` FILE names (a linked worktree's, a submodule's), or
+    ``None``: no such file, or not that shape. A regular file only, never through a link, read
+    without blocking (``mountwrite.read_regular``): the box writes it."""
+    import stat
+
+    from . import mountwrite  # lazy, and stdlib-only
+
+    try:
+        if not stat.S_ISREG(os.lstat(checkout / ".git").st_mode):
+            return None  # a repository's own `.git` directory: no open needed to say so
+        text = mountwrite.read_regular(checkout / ".git", limit=4096, follow=False).decode()
+    except (OSError, ValueError):
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    return Path(os.path.normpath(checkout / text.removeprefix("gitdir:").strip()))
+
+
+def _submodule(where: Path, main: Path) -> bool:
+    """``where``'s ``.git`` is a FILE naming a git dir under ``modules/`` in main's git dir (main's,
+    or a linked worktree's admin dir there): a submodule, whose files are the checkout's own. Read
+    as part of the checkout it names no project; refused, fy would refuse in every submodule."""
+    gitdir = _gitdir_of(where)
+    common = _stat_ident(_git_dir(main))
+    if gitdir is None or common is None:
+        return False
+    for parent in gitdir.parents:
+        if _stat_ident(parent) == common:
+            return "modules" in gitdir.parts[len(parent.parts) :]
+    return False
+
+
+def _refused(why: str, main: Path | None = None, checkout: Path | None = None, **kw) -> Placed:
+    return Placed("refused", main, checkout, why=why, **kw)
+
+
+def _made_outside_fy(
+    top: Path, suggest: Path | None, main: Path | None = None, within: Path | None = None
+) -> Placed:
+    """The refusal for a worktree made outside fy at ``top``, suggesting ``suggest`` (a record's
+    main, or the one its ``.git`` names); ``main`` and ``within`` only from the records."""
+    from .term import printable  # lazy: config is imported everywhere
+
+    run = f" Run fy from your main checkout: {printable(str(suggest))}" if suggest else ""
+    return _refused(
+        f"✗ {printable(str(top))} is a worktree made outside fy (plain `git worktree add`, or "
+        f"Claude Code's own), which fy doesn't act in.{run}",
+        main,
+        within=within,
+    )
+
+
+def _placed_at(
+    chain: list[Path], at: int, records: list[_Record], every: tuple[_Record, ...]
+) -> Placed:
+    """What the records found at ``chain[at]`` (``chain`` runs up from where fy runs) make of it;
+    ``every`` is all of them, read once for the lookup."""
+    from .term import printable  # lazy: config is imported everywhere
+
+    def shown(path: Path) -> str:
+        return printable(str(path))
+
+    here = chain[at]
+    # A main or a registered worktree is recorded for what it is; a root claims whatever is in it.
+    # Another project's root declared on this very checkout claims none of it: one project's
+    # adopted config must never stop fy in another.
+    records = [r for r in records if r.kind != "root"] or records
+    mains = {_stat_ident(r.main) or r.main for r in records}
+    if len(mains) > 1:
+        names = ", ".join(sorted({shown(r.main) for r in records}))
+        claimed = chain[at - 1] if at and all(r.kind == "root" for r in records) else here
+        return _refused(
+            f"✗ fy can't tell which project {shown(claimed)} belongs to: the records of more than "
+            f"one claim it ({names}). Run fy from its main checkout, and register it there "
+            "(`fy worktree add <name>`)."
+        )
+    record = min(records, key=lambda r: ("main", "worktree", "root").index(r.kind))
+    main = record.main
+    if record.kind == "root":
+        if at == 0:
+            return _refused(
+                f"✗ {shown(here)} is {shown(main)}'s worktrees root, not a checkout: fy acts in "
+                f"{shown(main)} and its worktrees. Run fy from one of those.",
+                main,
+            )
+        checkout, name, below = chain[at - 1], chain[at - 1].name, chain[: at - 1]
+        # Named for main and reading nothing, a stray still goes by its directory's name
+        # (`WORKTREE`), which must never be a registered worktree's elsewhere: that one's config
+        # would be read for it.
+        registered = next(
+            (
+                r.path
+                for r in every
+                # By name as a disk takes it: `FEAT` and `feat` are one directory on macOS.
+                if r.kind == "worktree" and r.main == main and r.name.casefold() == name.casefold()
+            ),
+            None,
+        )
+        if registered is not None:
+            return _refused(
+                f"✗ {shown(checkout)} is in {shown(main)}'s worktrees root, but "
+                f"'{printable(name)}' is the worktree registered at {shown(registered)}, so fy "
+                "won't act on this one as either. Move it out of the root, or remove it.",
+                main,
+            )
+    else:
+        # The record's own path, not the walked one: the adoption is keyed by it (a path spelled
+        # in another case on a case-insensitive disk reads nothing adopted).
+        checkout, name, below = record.path, record.name, chain[:at]
+    # Between where fy runs and the record, what the box wrote can only refuse: a linked worktree
+    # made outside fy, or a repository or project of its own inside the checkout (:data:`NESTED`).
+    for where in chain[:at]:  # a stray's own directory too: one adopted in a root before
+        if (inner := _nested_at(where, every)) is not None:
+            what = "worktrees root" if record.kind == "root" else "project's checkout"
+            return _refused(
+                f"✗ {shown(inner.path)} is adopted as a project of its own inside "
+                f"{shown(record.path)}, {shown(main)}'s {what}: {NESTED}, so it acts on neither "
+                f"there. Move it out, or make it part of {shown(main)}'s project.",
+                main,
+            )
+    for where in below:
+        if _linked_admin(where) is not None:
+            return _made_outside_fy(
+                where, main, main, within=main if record.kind == "main" else None
+            )
+    for where in below:
+        found = [m for m in (".git", "foldyard.toml") if os.path.lexists(where / m)]
+        if found == [".git"] and _submodule(where, main):
+            continue
+        if found:
+            return _refused(
+                f"✗ {shown(where)} is inside {shown(checkout)}, a checkout of {shown(main)}'s "
+                f"project, but holds a {found[0]} of its own: {NESTED}. Move it out to make it a "
+                f"project of its own, or run fy from {shown(checkout)}.",
+                main,
+            )
+    if record.kind == "main" and (admin := _linked_admin(checkout)) is not None:
+        return _made_outside_fy_or_bare(checkout, admin)  # adopted as a project before
+    if record.kind == "worktree" and not _is_worktree_of(checkout, main):
+        return _refused(
+            f"✗ {shown(checkout)} is a worktree of {shown(main)} by your computer's records, "
+            "but its .git doesn't say so (missing, emptied or pointing elsewhere), so fy "
+            f"won't act in it. `git worktree repair {shown(checkout)}` run in {shown(main)} "
+            "mends it.",
+            main,
+        )
+    kind = "stray" if record.kind == "root" else record.kind
+    return Placed(kind, main, checkout, name)
+
+
+def _walk(chain: list[Path], index: dict, every: tuple[_Record, ...]) -> Placed | None:
+    for at, here in enumerate(chain):
+        if (records := index.get(_ident(here))) is not None:
+            return _placed_at(chain, at, records, every)
+    return None
+
+
+def _unrecorded(chain: list[Path]) -> Placed | None:
+    """No record holds it: a new project, adoptable as ever — unless it is a worktree made outside
+    fy (plain `git worktree add`), which is never a project of its own."""
+    from . import worktree_registry  # lazy, and stdlib-only
+
+    top = next((d for d in chain if os.path.lexists(d / ".git")), None)
+    admin = _linked_admin(top) if top is not None else None
+    if top is None or admin is None:
+        return None
+    main = _suggested_main(admin)
+    if main is not None and any(
+        _ident(p) == _ident(top) for p in worktree_registry.recorded(main).values()
+    ):
+        from .term import printable  # lazy: config is imported everywhere
+
+        return _refused(
+            f"✗ {printable(str(top))} is a worktree of {printable(str(main))}, whose config your "
+            f"computer hasn't adopted. Run fy from {printable(str(main))} first (`fy up` there "
+            "asks)."
+        )
+    return _made_outside_fy_or_bare(top, admin)
+
+
+def _made_outside_fy_or_bare(top: Path, admin: Path) -> Placed:
+    """:func:`_made_outside_fy`, or, for a checkout of a bare repository (the `.bare/` plus
+    `git worktree add main` layout), that: fy acts in no such checkout, so the way forward is a
+    normal clone. Which one is told by the git dir's own config, which the box can write: it only
+    picks the words of a refusal."""
+    from . import mountwrite  # lazy, and stdlib-only
+    from .term import printable  # lazy: config is imported everywhere
+
+    common = admin.parent.parent
+    try:
+        text = mountwrite.read_regular(common / "config", limit=1 << 16, follow=False).decode()
+    except (OSError, ValueError):
+        text = ""
+    if not re.search(r"(?im)^\s*bare\s*=\s*true\s*$", text):
+        return _made_outside_fy(top, _suggested_main(admin))
+    return _refused(
+        f"✗ {printable(str(top))} is a checkout made from a bare repository "
+        f"({printable(str(common))}), which fy doesn't act in. Use a normal clone as your main "
+        "checkout (`git clone <url>`), and `fy worktree add <name>` there for more."
+    )
+
+
+def placement(start: Path) -> Placed | None:
+    """Where your computer's records place the directory ``start`` (its real path): see
+    :class:`Placed`. ``None`` when no record does — a new project — and always in a box, which
+    isn't the trust boundary from its own side."""
+    if in_box():
+        return None
+    return _placement(start, _records()[0])
+
+
+def _placement(start: Path, every: tuple[_Record, ...]) -> Placed | None:
+    real = Path(os.path.realpath(start))
+    chain = [real, *real.parents]
+    return _walk(chain, _index(every)[0], every) or _unrecorded(chain)
+
+
+# Help and the project-free verbs act on no project: the CLI resolves them without the records
+# (:func:`unplaced`), so they don't pay for reading every adopted project's.
+_UNPLACED: contextvars.ContextVar[bool] = contextvars.ContextVar("unplaced", default=False)
+
+
+@contextmanager
+def unplaced() -> Iterator[None]:
+    """Resolve the ambient config without your computer's records (:func:`placement_here` is
+    ``None``): for what acts on no project — help, a project-free verb — whose only read of the
+    project's config is the version window (``compat``). Everything memoized inside is dropped on
+    the way out, so nothing resolved this way answers the verb that follows."""
+    token = _UNPLACED.set(True)
+    clear_caches()
+    try:
+        yield
+    finally:
+        _UNPLACED.reset(token)
+        clear_caches()
+
+
+# One verb, one placement: the CLI's front door pins what it placed (:func:`pin_placement`), so
+# every reader after it sees that, not a later lookup a box's plant mid-verb could change. Per
+# context (a thread starts without), and dropped with the caches (:func:`clear_caches`).
+_PINNED: contextvars.ContextVar[tuple | None] = contextvars.ContextVar("pinned", default=None)
+
+
+def pin_placement(placed: Placed | None) -> None:
+    """Make ``placed`` what :func:`placement_here` answers until :func:`clear_caches`."""
+    _PINNED.set((placed,))
+
+
+def placement_here() -> Placed | None:
+    """:func:`placement` for where fy runs: ``FOLDYARD_REPO``, else the working directory. Reached
+    through a link (``FOLDYARD_REPO`` as written, or the shell's ``$PWD``) by a path that runs
+    through a record, and the records place that path elsewhere than the real one, it is refused:
+    you'd think you were in one project and fy would act on another. What the CLI pinned for this
+    verb, once it has."""
+    if _UNPLACED.get():
+        return None
+    pinned = _PINNED.get()
+    return pinned[0] if pinned is not None else _placement_here()
+
+
+def _placement_here() -> Placed | None:
+    if in_box():
+        return None
+    env = os.environ.get("FOLDYARD_REPO")
+    start = Path(env).expanduser() if env else Path.cwd()
+    every = _records()[0]  # read once for both walks
+    placed = _placement(start, every)
+    if env:
+        logical = Path(os.path.abspath(start))
+    else:
+        pwd = os.environ.get("PWD", "")
+        try:
+            if not os.path.isabs(pwd) or not os.path.samefile(pwd, start):
+                return placed
+        except OSError:
+            return placed
+        logical = Path(os.path.normpath(pwd))
+    if logical == Path(os.path.realpath(start)):
+        return placed
+    seen = _walk([logical, *logical.parents], _index(every)[0], every)
+    if seen is None or (placed is not None and placed.kind == "refused") or _same(seen, placed):
+        return placed
+    from .term import printable  # lazy: config is imported everywhere
+
+    real = printable(os.path.realpath(start))
+    return _refused(
+        f"✗ {printable(str(logical))} is reached through a link: it is really {real}, which isn't "
+        "the checkout the path you came by runs through. cd to its real path and run fy there: "
+        f"{real}"
+    )
+
+
+def _same(a: Placed, b: Placed | None) -> bool:
+    def ident(path: Path | None) -> tuple[int, int] | None:
+        return _stat_ident(path) if path is not None else None
+
+    return (
+        b is not None
+        and (a.kind, a.name) == (b.kind, b.name)
+        and ident(a.main) == ident(b.main)
+        and ident(a.checkout) == ident(b.checkout)
+    )
+
+
 @lru_cache(maxsize=1)
 def _identity_ambient() -> dict:
-    """:func:`identity_from` for the ambient checkout: ``{}`` when it is adopted, or in the box."""
-    if in_box() or ambient_adopted():
+    """The identity the ambient checkout inherits: its main's (:func:`worktree_identity`) wherever
+    your computer's records place it under a main but not in main itself (a worktree, a stray, a
+    place fy refuses), else ``{}``. In a box, what your computer baked in, for main too."""
+    if in_box():
+        return _baked_identity() or {}
+    placed = placement_here()
+    if placed is None or placed.main is None or placed.kind == "main":
         return {}
-    root = _repo_root_ambient()
-    main = _git_main(root)
-    return identity_from(main, root) if main is not None else {}
+    return worktree_identity(placed.main)
 
 
 def _identity_value(table: str, key: str) -> object:
-    """``[table].key`` from the config, else from the inherited identity (bound or ambient)."""
-    value = _table(table).get(key)
-    if value:
-        return value
+    """``[table].key``: for a worktree, from the identity it inherits (bound or ambient) whatever
+    its own config declares — which the adoption review and the doctor say is not read; for main,
+    from its config."""
     bound = _BOUND.get()
     inherited = bound.identity if bound is not None else _identity_ambient()
-    return inherited.get(table, {}).get(key)
+    if inherited:
+        return inherited.get(table, {}).get(key)
+    return _table(table).get(key) or None
 
 
 def _toml() -> dict:

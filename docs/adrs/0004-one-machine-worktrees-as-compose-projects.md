@@ -4,7 +4,9 @@
   2026-07-06 (`de962868`), pinned offsets added with PR #21
 - **Amended 2026-11-23:** a box can make a worktree itself, with no stack of its own
   (`fy worktree add`, in a box; *Worktrees a box makes* below). **Amended 2026-11-24:** a box can
-  remove any worktree your computer never registered (same section).
+  remove any worktree your computer never registered (same section). **Amended 2026-11-27:** your
+  computer's records alone decide which project a directory belongs to, and a worktree is always in
+  main's project (*Which project a directory is in* below).
 - **Sources:** SPIKE.md ("Worktrees — one machine, namespaced projects"), PLAN.md §4.1,
   `src/foldyard/worktree.py`, `src/foldyard/stack.py`, `src/foldyard/machine.py`
 
@@ -87,6 +89,22 @@ from it. The same list carries each worktree's pooled ports and offset: a runnin
 command on a worktree registered since it was made, `fy box exec` into that worktree's own box
 included, and recreating it ends the sessions in it. Not chosen: asking the engine for mounts over
 the worktree's dependency dirs (none without `shadow_volumes`, or under gVisor).
+
+**Which project a directory is in (amended 2026-11-27).** Your computer used to combine three
+sources: its records, what git says (a worktree's `.git`), and the nearest `foldyard.toml`. Four
+review rounds each found a disagreement between two of them that the box, which writes `.git` and
+`foldyard.toml`, could use to make a verb on your computer act on a project of its choosing. Now one
+rule: the records decide (the adopted mains, their registered worktrees, and each one's worktrees
+root by its adopted config, where it holds no main), matched by device and inode from where fy runs,
+nearest first; anything the box can write may only make fy refuse. A worktree is always in main's
+project: its names come from main's adopted config, and a box is given them when it is made. Plain
+`git worktree add` worktrees, Claude Code's included, aren't fy worktrees and are refused, except
+that `fy box exec` in one inside main runs in main's box, so a commit's git hooks keep working
+there. No project lies inside another's checkout or worktrees root: the outer box could write the
+inner project's files and the inner box what the outer one reads, bridging the two walls, so
+adopting one is refused and one adopted before is skipped. Rejected: *trusting git where the records
+agree* (each such rule was the next gap), *a worktree's own `[project].name`* (a branch could name
+another project's state), and *nested projects as their own* (the bridge above).
 
 **Escape hatch:** for a genuinely untrusted worktree — reviewing unknown code — spin a *throwaway
 dedicated machine* for just that one. Isolation is a spectrum, light by default; the heavy shape is

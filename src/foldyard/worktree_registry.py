@@ -121,6 +121,13 @@ def is_recorded(main: Path, name: str) -> bool:
     return name in _load(main)
 
 
+def recorded(main: Path) -> dict[str, Path]:
+    """Every entry recorded for ``main``, whatever is there now (no ``.git``, gone, swapped for a
+    link): what your computer's records place (``config.placement``), not what it may act on
+    (:func:`checkouts`)."""
+    return {name: Path(p) for name, p in _load(main).items()}
+
+
 def checkouts(main: Path) -> dict[str, Path]:
     """The registered worktrees the host may act on: name → recorded path, for every entry whose
     directory is still exactly what was recorded."""

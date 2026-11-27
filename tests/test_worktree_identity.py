@@ -1,15 +1,17 @@
-"""A registered worktree with nothing adopted carries its PROJECT's identity, not its directory's.
+"""A worktree carries its PROJECT's identity — main's — never its directory's or its own config's.
 
 On your computer an unadopted checkout reads an empty config (ADR-0022), so its project, prefix,
 machine and backend fell back to defaults — the project named after the worktree's directory, the
 machine after that, the backend `lima`. A consumer's post-checkout hook running `fy box exec` in a
 fresh worktree was told "lima machine 'sec-dead-routes' does not exist" on a podman host whose VM
-is `tangible`, and every state path for that worktree pointed at a project that doesn't exist.
+is `tangible`, and every state path for that worktree pointed at a project that doesn't exist. And
+one adopted from a branch declaring another `[project].name` was another project.
 
-The identity now comes from MAIN's adopted snapshot, and only when the host vouches for the link:
-the worktree is in its own registry under that main. Only identity: the worktree's config stays
-empty (``configpin.effective``), so the supervisor still runs nothing for it and every launch verb
-still asks for the adoption. These run the real host read (conftest's seams point it at the tree).
+The identity comes from MAIN's adopted snapshot, for every worktree your computer's records place
+under that main (``config.placement``: its registry, or its worktrees root), adopted or not. Only
+identity: an unadopted worktree's config stays empty (``configpin.effective``), so the supervisor
+still runs nothing for it and every launch verb still asks for the adoption. These run the real
+host read (conftest's seams point it at the tree). ``tests/test_worktree_records.py`` has the rest.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from foldyard import config, configpin, devmode, stack, worktree_registry
 _REAL_HOST_TOML = config._host_toml
 _REAL_PIN_DIR = configpin.pin_dir
 _REAL_MAIN_REPO = devmode.main_repo
+_REAL_LINKED_ADMIN = config._linked_admin
 
 MAIN_TOML = (
     '[project]\nname = "acme"\nprefix = "ac"\n\n'
@@ -38,8 +41,8 @@ def _git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
 
 
-def _adopt(root):
-    configpin.adopt(config.resolve(worktree="", repo=root))
+def _adopt(root, worktree=""):
+    configpin.adopt(config.resolve(worktree=worktree, repo=root))
     config.clear_caches()
 
 
@@ -103,12 +106,12 @@ def test_the_bound_worktree_config_stays_empty_but_named(project):
     }
 
 
-def test_an_unregistered_worktree_inherits_nothing(project):
-    # The registry is the host's own word that this checkout belongs to that main — git's link
-    # (`.git` in the worktree) is box-writable, so it alone vouches for nothing.
+def test_an_unregistered_worktree_in_the_root_is_still_mains(project):
+    # Not registered, it reads nothing of its own; in main's worktrees root, it is named for main.
     worktree_registry.unregister(project["main"], "feat")
     config.clear_caches()
-    assert config.project() == "feat"
+    assert config.project() == "acme"
+    assert config.current().toml == {}
 
 
 # ── a directory the box made under the worktrees root ─────────────────────────────────────
@@ -185,14 +188,8 @@ def test_nothing_is_read_from_a_box_made_worktree_dir(project, monkeypatch, tmp_
     link.symlink_to(other)
     asked: list = []
     real = configpin.adopted_toml
+    config.placement(project["main"])  # your computer's records, read once: every adoption
     monkeypatch.setattr(configpin, "adopted_toml", lambda root: asked.append(root) or real(root))
-    real_git = config._git_main
-
-    def git_main(root):
-        assert Path(root) not in (link, other), f"git asked of {root}"
-        return real_git(root)
-
-    monkeypatch.setattr(config, "_git_main", git_main)
     cfg = devmode.worktree_config("stray")
     assert cfg.project() == "acme" and cfg.toml == {}
     assert project["main"] in asked  # main's adoption names it…
@@ -244,7 +241,7 @@ def test_nothing_asks_git_of_a_registered_worktree_while_its_config_is_bound(
     wt = project["wt"]
     if adopted:
         (wt / "foldyard.toml").write_text('[project]\nname = "acme"\n')
-        _adopt(wt)
+        _adopt(wt, "feat")
     (wt / ".git").write_text("gitdir: /nowhere\n")
     cfg = devmode.worktree_config("feat")
     assert bool(cfg.toml) is adopted
@@ -266,21 +263,26 @@ def test_nothing_asks_git_of_a_registered_worktree_while_its_config_is_bound(
     assert asked == []
 
 
-def test_nothing_is_inherited_when_main_is_not_adopted(project, tmp_path):
+def test_a_worktree_of_a_main_that_is_not_adopted_is_refused(project, tmp_path, monkeypatch):
+    # No record of main, so none of its worktrees: fy says to start from main, which asks.
     for child in (tmp_path / "state" / "adopted").iterdir():
         if child.name.startswith("main-"):
             import shutil
 
             shutil.rmtree(child)
+    monkeypatch.setattr(config, "_linked_admin", _REAL_LINKED_ADMIN)
     config.clear_caches()
-    assert config.project() == "feat"
+    placed = config.placement(project["wt"])
+    assert placed is not None and placed.kind == "refused"
+    assert "whose config your computer hasn't adopted" in placed.why
 
 
-def test_a_worktree_with_its_own_adoption_reads_only_that(project):
+def test_a_worktree_with_its_own_adoption_is_still_named_for_main(project):
+    # Its config is its own adoption; what names the project is main's (and the review says so).
     (project["wt"] / "foldyard.toml").write_text('[project]\nname = "acme-feat"\n')
-    _adopt(project["wt"])
-    assert config.project() == "acme-feat"
-    assert config.machine_name() == "acme-feat"  # its own adoption is all it reads
+    _adopt(project["wt"], "feat")
+    assert config.project() == "acme"
+    assert config.machine_name() == "acme-vm"
 
 
 def test_main_reads_its_own_adoption(project, fresh_config):
@@ -301,10 +303,11 @@ def test_the_worktree_inference_finds_it_under_the_projects_root(project, monkey
     assert stack._active_worktree(stack.worktrees_root(project["main"])) == "feat"
 
 
-def test_a_worktree_adopted_empty_still_reads_only_its_own(project):
-    # Adopting a checkout with no foldyard.toml is an adoption (an empty one): from then on the
-    # worktree is configured by it, and inherits nothing — on both read paths.
+def test_a_worktree_adopted_empty_is_still_named_for_main(project):
+    # Adopting a checkout with no foldyard.toml is an adoption (an empty one): its config is empty,
+    # and its name is main's — on both read paths.
     (project["wt"] / "foldyard.toml").unlink()
-    _adopt(project["wt"])
-    assert config.project() == "feat"
-    assert devmode.worktree_config("feat").project() == "feat"
+    _adopt(project["wt"], "feat")
+    assert config.project() == "acme"
+    assert devmode.worktree_config("feat").project() == "acme"
+    assert devmode.worktree_config("feat").toml == {}
