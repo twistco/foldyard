@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime
 import json
 import logging
 import os
@@ -1325,7 +1326,9 @@ def test_a_relayed_compose_verb_is_restyled_by_what_it_says(fake_repo, monkeypat
     assert stack._compose(ctx, ["ps"]) == 0
     assert stack._compose(ctx, ["logs", "-f", "--timestamps"], stamps=True) == 0
     plain, stamped = styles
-    line = "[web] | 2026-11-26T10:00:00Z ERROR hi"
+    # Stamped now, so it is always "today" and shows as time of day (an older one adds its date).
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = f"[web] | {now} ERROR hi"
     assert plain(line, False, False) == stamped(line, False, False) == line  # a file, a pipe
     assert plain(line, True, True) != line  # coloured on a terminal
     assert re.fullmatch(r"\d\d:\d\d:\d\d \[web\] \| ERROR hi", stamped(line, True, False))
