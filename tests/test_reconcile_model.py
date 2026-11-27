@@ -211,26 +211,39 @@ class ModeStateModel(RuleBasedStateMachine):
     def _now(self) -> datetime:
         return datetime.now(UTC) + timedelta(seconds=self.offset)
 
+    def _lapsed(self, wt: str) -> bool:
+        """A TTL in checkout ``wt``'s file has run out and nothing has written it back yet."""
+        now = self._now()
+        return any(d <= now for d in self.deadline[wt].values())
+
+    def _expired(self, wt: str) -> dict:
+        """Checkout ``wt``'s file state with the lapsed rungs at their default, nothing settled:
+        what set_mode applies its updates to (read(settle=False))."""
+        now = self._now()
+        deadline = self.deadline[wt]
+        return {
+            axis: DEFAULTS[axis] if axis in deadline and deadline[axis] <= now else value
+            for axis, value in self.raw[wt].items()
+        }
+
     def _live(self, wt: str) -> dict:
         """The expiry-applied view of checkout ``wt``'s file state — what read() should say: the
         lapsed rungs at their default, and what they strand settled with them, as the tick's
         expiry will write it."""
-        now = self._now()
-        deadline = self.deadline[wt]
-        live = {
-            axis: DEFAULTS[axis] if axis in deadline and deadline[axis] <= now else value
-            for axis, value in self.raw[wt].items()
-        }
-        lapsed = any(deadline[a] <= now for a in deadline)
-        return {**live, "dep": "off"} if lapsed and _errors(live) else live
+        live = self._expired(wt)
+        return {**live, "dep": "off"} if self._lapsed(wt) and _errors(live) else live
 
     def _merged_caps(self, live: dict) -> dict[str, bool]:
         """axis → merged probe verdict the tick should compute for one checkout's live mode."""
         return {} if live["ident"] == "off" else {"ident": self.probe_ok}
 
     def _set(self, wt: str, axis: str, rung: str, ttl: int) -> None:
-        live = self._live(wt)
-        prospective = {**live, axis: rung}
+        # set_mode settles a lapse not yet written back AFTER its own update, and never lowers
+        # the switch it sets: `ident=sa` after ident=user ran out keeps dep=live, which it gives
+        # what it needs; `dep=live` with ident lapsed is the coherence gate's to refuse.
+        prospective = {**self._expired(wt), axis: rung}
+        if self._lapsed(wt) and axis != "dep" and _errors(prospective):
+            prospective["dep"] = "off"
         with config.using(self._cfgs[wt]):
             if _errors(prospective):
                 # The coherence gate: an error combination is refused atomically — no write.
@@ -481,3 +494,37 @@ TestModeStateModel = ModeStateModel.TestCase
 TestModeStateModel.settings = settings(
     max_examples=scaled_examples(60), stateful_step_count=40, deadline=None
 )
+
+
+def test_renewing_what_a_lapsed_dependent_needs_keeps_it():
+    # Replays the sequence the dev profile found: dep=live on ident=user, the TTL runs out with
+    # no tick, then `fy mode ident=sa`. That command gives dep what it needs, so set_mode keeps
+    # it (nothing stranded, nothing lowered), and the model, the file and the box view agree.
+    state = ModeStateModel()
+    try:
+        state.init_posture(wt="", posture=(("ident", "user"), ("dep", "live")), ttl=600, up=("",),
+                           probe=False)  # fmt: skip
+        state.advance_clock(seconds=1800)
+        state.set_rung(wt="", axis_rung=("ident", "sa"), ttl=600)
+        state.read_view_matches_the_model()
+        state.box_view_matches_the_model()
+        assert state.raw[""] == {"ident": "sa", "dep": "live"}
+        state.tick()
+        state.read_view_matches_the_model()
+        state.box_view_matches_the_model()
+    finally:
+        state.teardown()
+
+
+def test_setting_the_dependent_while_what_it_needs_lapsed_is_refused():
+    # The other half: `fy mode dep=live` after ident=user ran out is the coherence gate's to
+    # refuse, never quietly lowered by the lapse it would be stranded by.
+    state = ModeStateModel()
+    try:
+        state.init_posture(wt="", posture=(("ident", "user"),), ttl=600, up=(), probe=False)
+        state.advance_clock(seconds=1800)
+        state.set_rung(wt="", axis_rung=("dep", "live"), ttl=600)
+        state.read_view_matches_the_model()
+        assert state.raw[""] == {"ident": "user", "dep": "off"}  # nothing written
+    finally:
+        state.teardown()
