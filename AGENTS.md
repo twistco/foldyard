@@ -139,7 +139,7 @@ consumer they run against.
 | Area | Modules |
 | -- | -- |
 | CLI, config | `cli` · `config` · `configpin` (the adopted config) · `privatecfg` · `exposure` · `experimental` · `features` · `projects` |
-| Stack | `stack` · `composeguard` · `guestcompose` · `registrylogins` · `confighash` · `reconcile` · `state_view` |
+| Stack | `stack` · `buildlog` · `composeguard` · `guestcompose` · `registrylogins` · `confighash` · `reconcile` · `state_view` |
 | Posture | `devmode` · `verify` · `preflight` · `allowlist` · `keyless` · `credscope` · `plugins/` |
 | VM | `machine` · `machine_backend` · `basevm` · `upgrade` · `guestfiles` · `boxmounts` · `hostwall` · `sandbox` · `guestlog` · `prereq` |
 | Box | `box` · `boximage` · `crossmask` · `crossinject` · `agents` · `boxpackages` · `paste` · `hostclock` · `hostgit` |

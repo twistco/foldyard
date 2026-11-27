@@ -330,9 +330,9 @@ def _verbose_option():
 
 def _builds_shown(verbose: bool) -> None:
     if verbose:
-        from . import stack
+        from . import buildlog
 
-        stack.stream_builds_live()
+        buildlog.stream_builds_live()
 
 
 @app.command()

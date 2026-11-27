@@ -464,7 +464,7 @@ def stream_here(
     ``clean_only_terminals``: a stream that isn't going to a terminal (a file, a pipe) gets the
     process's bytes as they are, for output that is data (``fy box exec 'pg_dump' > dump.sql``).
     ``style``: each cleaned line restyled on its way to you (:func:`compose_style`). ``to``: both
-    streams' cleaned lines go there instead of to you (a build's log, ``stack.BuildLog``).
+    streams' cleaned lines go there instead of to you (a build's log, ``buildlog.BuildLog``).
 
     It runs in a process group of its own, so the terminal's Ctrl-C reaches foldyard alone: the
     relay stops printing, then stops the group (the process and what it started on your computer;

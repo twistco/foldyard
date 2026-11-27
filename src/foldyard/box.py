@@ -52,6 +52,7 @@ from . import (
     boximage,
     boxmounts,
     boxworktree,
+    buildlog,
     config,
     crossinject,
     crossmask,
@@ -671,7 +672,7 @@ def _gated_build(
     cmd: list, tail: list, env: dict, context: str, what: str, *, log: str, in_vm: bool = False
 ) -> int:
     """Run one ``build`` through the build gate (``buildgate``), proxy build-args in between, its
-    output into the build log ``log`` (``stack.BuildLog``), emptied by each attempt.
+    output into the build log ``log`` (``buildlog.BuildLog``), emptied by each attempt.
     ``in_vm``: the client runs in the guest (:mod:`foldyard.guestcompose`), where ``context`` must
     be visible, so it packs what the VM sees."""
 
@@ -693,7 +694,7 @@ def _gated_build(
             # Relayed, like the guest's: what a build prints is its Dockerfile's.
             return guestcompose.stream_here(full, env, context, to=line)
 
-        return stack.run_build_logged(log, what, "+ " + shlex.join(shown), into)
+        return buildlog.run_build_logged(log, what, "+ " + shlex.join(shown), into)
 
     from . import buildgate
 

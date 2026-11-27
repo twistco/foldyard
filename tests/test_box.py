@@ -18,7 +18,17 @@ from typing import Any
 import pytest
 
 import foldyard
-from foldyard import box, boximage, boxworktree, config, crossinject, crossmask, stack, supervisor
+from foldyard import (
+    box,
+    boximage,
+    boxworktree,
+    buildlog,
+    config,
+    crossinject,
+    crossmask,
+    stack,
+    supervisor,
+)
 
 
 class _Proc:
@@ -877,7 +887,7 @@ def test_box_build_output_goes_to_its_log_and_your_terminal_gets_the_path(
     _build_prints(monkeypatch, ["STEP 1/3: FROM debian", "\x1b]52;c;ZXZpbA==\x07\x1b[2K✓ ok"])
     assert box.main("build") == 0
     out, err = capsys.readouterr()
-    log = stack.build_log_path("box-build")
+    log = buildlog.build_log_path("box-build")
     assert "STEP 1/3" not in out + err
     assert f"▶ build output → {log}" in err
     assert f"✓ box image build done (log: {log})" in err
@@ -896,23 +906,23 @@ def test_a_failed_box_build_shows_its_logs_tail_and_where_it_is(fake, monkeypatc
     err = capsys.readouterr().err
     assert "✗ box image build failed (exit 1) — last 3 log lines:" in err
     assert "  BOOM: no space left on device\n" in err
-    assert f"  full log: cat {stack.build_log_path('box-build')}" in err
+    assert f"  full log: cat {buildlog.build_log_path('box-build')}" in err
 
 
 def test_the_packages_layer_logs_apart_from_the_image(fake, monkeypatch):
     _with_packages(fake, monkeypatch)
     _build_prints(monkeypatch, ["a build line"])
     assert box.main("build") == 0
-    assert "a build line" in stack.build_log_path("box-build").read_text()
-    assert _LAYER in stack.build_log_path("box-packages-build").read_text()
+    assert "a build line" in buildlog.build_log_path("box-build").read_text()
+    assert _LAYER in buildlog.build_log_path("box-packages-build").read_text()
 
 
 def test_verbose_shows_the_box_build_as_it_comes(fake, monkeypatch, capsys):
-    monkeypatch.setattr(stack, "_builds_live", True)
+    monkeypatch.setattr(buildlog, "_builds_live", True)
     _build_prints(monkeypatch, ["STEP 1/3: \x1b[1mFROM debian"])
     assert box.main("build") == 0
     assert "STEP 1/3: FROM debian\n" in capsys.readouterr().err
-    assert "STEP 1/3: FROM debian" in stack.build_log_path("box-build").read_text()
+    assert "STEP 1/3: FROM debian" in buildlog.build_log_path("box-build").read_text()
 
 
 @pytest.mark.parametrize(

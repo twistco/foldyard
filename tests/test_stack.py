@@ -1217,7 +1217,7 @@ def test_podman_build_reports_progress_while_it_runs(
     import threading
     import types
 
-    monkeypatch.setattr(stack, "_BUILD_HEARTBEAT", 0.05)
+    monkeypatch.setattr(stack.buildlog, "_BUILD_HEARTBEAT", 0.05)
     # The slow build stays pending until a beat has seen it go quiet — a bounded wait on what the
     # assertions need, not a fixed sleep that a busy runner can outlast.
     quiet = threading.Event()
@@ -1229,7 +1229,7 @@ def test_podman_build_reports_progress_while_it_runs(
         if "still building slow — 1/2 done" in msg and msg.endswith("(no new output)"):
             quiet.set()
 
-    monkeypatch.setattr(stack, "_err", spy_err)
+    monkeypatch.setattr(stack.buildlog, "_err", spy_err)  # the heartbeat says it
     cfg = json.dumps(
         {
             "services": {
