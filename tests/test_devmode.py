@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -3136,3 +3137,430 @@ def test_to_box_row_says_why_a_hypervisor_has_none(to_box_row, monkeypatch):
 def test_to_box_row_silent_before_the_vm(to_box_row, monkeypatch):
     monkeypatch.setattr(devmode, "_BACKEND", _ToBoxBackend(exists=False))
     assert list(devmode._to_box_check()) == []
+
+
+# ── a TTL lapse under a running stack (reported, never reconciled from the tick) ─────────
+
+
+def _lapse_gcp_user(state) -> None:
+    """gcp=user set, then its TTL backdated past now — lapsed, but not yet written back."""
+    devmode.set_mode({"gcp": "user"}, ttl=60)
+    raw = json.loads(state["auth"].read_text())
+    raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
+    state["auth"].write_text(json.dumps(raw))
+
+
+def test_a_change_after_a_lapse_reconciles_the_lapsed_switch_too(isolated_state, monkeypatch):
+    # The running stack still has what gcp=user set up (the metadata profile) until something
+    # reconciles it, so the "before" of the next change is the file as written, not the posture
+    # with the lapse already applied: otherwise before and after both say gcp=off, and the
+    # emulator the lapsed level added outlives the change.
+    _lapse_gcp_user(isolated_state)
+    seen: list[tuple[dict, dict]] = []
+    monkeypatch.setattr(devmode, "reconcile_stack", lambda p, n, sink=None: seen.append((p, n)))
+
+    devmode.set_mode({"github": "on"})
+
+    ((prev, new),) = seen
+    assert prev["env"].get("COMPOSE_PROFILES") == "metadata"
+    assert new["env"].get("COMPOSE_PROFILES", "") == ""
+    durable = devmode.read(apply_expiry=False)
+    assert durable["mode"]["gcp"] == "off" and "gcp" not in durable["expires"]  # lapse written
+
+
+_GCP_USER = {"switch": "gcp", "level": "user", "label": "your own identity", "at": "x"}
+_LAPSE = {"lapsed": [_GCP_USER], "since": 1.0}
+
+
+def _lapse_world(monkeypatch, verdict="drift", record=_LAPSE) -> list[int]:
+    """A host lapse record, and the stack scope's verdict on the running stack (``ok``,
+    ``drift`` or ``unknown``). Returns a list that grows by one each time the verdict is asked."""
+    from foldyard import reconcile
+
+    if record is not None:
+        config.stack_lapse_file().parent.mkdir(parents=True, exist_ok=True)
+        config.stack_lapse_file().write_text(json.dumps(record))
+    asked: list[int] = []
+
+    def rows(self, state):
+        asked.append(1)
+        return [reconcile.ScopeRow(verdict, "stack", "d", "o")]
+
+    monkeypatch.setattr(reconcile.StackScope, "rows", rows)
+    return asked
+
+
+def _lapse_rows() -> list[tuple[str, str, str]]:
+    """The lapse check's rows, each `running` placeholder checked to be resolved by a later real
+    row of the same name (doctor's contract) and left out."""
+    rows = list(devmode._stack_lapse_check())
+    for i, (status, name, _) in enumerate(rows):
+        if status == "running":
+            assert any(s != "running" and n == name for s, n, _ in rows[i + 1 :]), rows
+    return [row for row in rows if row[0] != "running"]
+
+
+def test_the_lapse_row_names_the_switch_and_the_fix_while_the_stack_drifts(
+    isolated_state, monkeypatch
+):
+    _lapse_world(monkeypatch, "drift")
+
+    ((status, name, detail),) = _lapse_rows()
+
+    assert (status, name) == ("warn", "stack after a time limit")
+    assert "gcp=user" in detail and "your own identity" in detail
+    assert "the running stack still has" in detail and devmode.LAPSE_FIX in detail
+
+
+def test_a_stack_whose_state_cant_be_checked_keeps_the_row_but_doesnt_claim_it_runs(
+    isolated_state, monkeypatch
+):
+    # The engine or the render can't say (a stopped VM reads the same): the row stays, worded for
+    # a stack that may or may not be running.
+    _lapse_world(monkeypatch, "unknown")
+    ((status, _, detail),) = _lapse_rows()
+    assert status == "warn" and "gcp=user" in detail and devmode.LAPSE_FIX in detail
+    assert "if the stack is running" in detail and "the running stack still has" not in detail
+    assert config.stack_lapse_file().exists()
+
+
+def test_the_lapse_row_reads_ok_once_the_stack_is_in_line_and_the_host_drops_the_record(
+    isolated_state, monkeypatch
+):
+    # `fy up` from the box (which can't write your computer's state), `fy down`, or a stack that
+    # was never up: the drift verdict says it's in line, so the row says so (resolving its
+    # placeholder), and the record that would keep asking goes.
+    _lapse_world(monkeypatch, "ok")
+    assert [status for status, _, _ in _lapse_rows()] == ["ok"]
+    assert not config.stack_lapse_file().exists()
+    assert _lapse_rows() == []  # and the next doctor has nothing to say
+
+
+def test_the_box_never_clears_the_hosts_record_and_has_nothing_to_say_once_in_line(
+    isolated_state, monkeypatch
+):
+    # The box can't clear your computer's record, so a ✓ would repeat on every box doctor until
+    # your computer does: in line, the box says nothing, and never spins (its doctor skips them).
+    _lapse_world(monkeypatch, "ok")
+    devmode.write_mirror({"gcp": "off"}, {}, {})
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    assert list(devmode._stack_lapse_check()) == []
+    assert config.stack_lapse_file().exists()
+
+
+def test_the_box_lapse_row_doesnt_spin(isolated_state, monkeypatch):
+    _lapse_world(monkeypatch, "drift")
+    devmode.write_mirror({"gcp": "off"}, {}, {})
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    assert [status for status, _, _ in devmode._stack_lapse_check()] == ["warn"]
+
+
+def test_a_switch_lowered_with_the_expired_one_is_named_as_that(isolated_state, monkeypatch):
+    record = {
+        **_LAPSE,
+        "lapsed": [
+            _GCP_USER,
+            {"switch": "llm", "level": "record", "label": "", "at": "x", "lowered": True},
+        ],
+    }
+    _lapse_world(monkeypatch, "drift", record)
+    ((_, _, detail),) = _lapse_rows()
+    assert "gcp=user" in detail and "llm=record was lowered with it" in detail
+
+
+def test_no_lapse_row_once_the_level_is_on_again(isolated_state, monkeypatch):
+    # gcp=user again: what the lapse took away is wanted back, and the row would say the time
+    # limit ran out about a level that's live. No verdict needed to see that.
+    devmode.set_mode({"gcp": "user"}, ttl=60, reconcile=False)
+    asked = _lapse_world(monkeypatch, "drift")
+    assert _lapse_rows() == []
+    assert asked == [] and not config.stack_lapse_file().exists()
+
+
+def test_only_a_lowered_switch_left_doesnt_say_its_time_ran_out(isolated_state, monkeypatch):
+    # gcp=user is on again; llm=record, lowered with it, isn't: it never had a time limit.
+    record = {
+        **_LAPSE,
+        "lapsed": [
+            _GCP_USER,
+            {"switch": "llm", "level": "record", "label": "", "at": "x", "lowered": True},
+        ],
+    }
+    devmode.set_mode({"gcp": "user"}, ttl=60, reconcile=False)
+    _lapse_world(monkeypatch, "drift", record)
+    ((_, _, detail),) = _lapse_rows()
+    assert "gcp=user" not in detail and "llm=record" in detail
+    assert "its time limit ran out" not in detail and "lowered when a time limit ran out" in detail
+
+
+def test_no_lapse_row_without_a_record_and_no_verdict_asked(isolated_state, monkeypatch):
+    asked = _lapse_world(monkeypatch, "drift", record=None)
+    assert _lapse_rows() == []
+    assert asked == []
+
+
+def test_the_host_never_reads_a_lapse_record_from_the_mirror(isolated_state, monkeypatch):
+    # The mirror is in the checkout, so the box writes it: the host's own record is in its state
+    # dir, and a record planted in the mirror says nothing on your computer.
+    isolated_state["mirror"].write_text(json.dumps({"stack_lapse": _LAPSE}))
+    _lapse_world(monkeypatch, "drift", record=None)
+    assert devmode.stack_lapse() is None
+    assert _lapse_rows() == []
+
+
+def test_the_box_reads_the_lapse_record_the_host_copies_into_the_mirror(
+    isolated_state, monkeypatch
+):
+    _lapse_world(monkeypatch, "drift")
+    devmode.write_mirror({"gcp": "off"}, {}, {})
+    assert json.loads(isolated_state["mirror"].read_text())["stack_lapse"] == _LAPSE
+
+    monkeypatch.setattr(devmode, "in_box", lambda: True)
+    ((status, _, detail),) = _lapse_rows()
+    assert status == "warn" and "gcp=user" in detail
+
+
+def test_a_mirror_without_a_record_carries_none(isolated_state):
+    devmode.write_mirror({"gcp": "off"}, {}, {})
+    assert "stack_lapse" not in json.loads(isolated_state["mirror"].read_text())
+
+
+def test_doctor_carries_the_lapse_row(isolated_state, monkeypatch):
+    _lapse_world(monkeypatch, "drift")
+    monkeypatch.setattr(devmode, "_run", lambda cmd, timeout=8: (0, "ok"))
+    names = [name for status, name, _ in devmode.doctor(deep=False) if status != "running"]
+    assert "stack after a time limit" in names
+
+
+def test_a_record_is_cleared_only_while_it_holds_what_was_read(isolated_state):
+    # `fy up` reads the record before it renders and clears it after: a lapse recorded meanwhile
+    # (a newer `since`) was rendered from the mode before it, so it stays.
+    devmode.record_stack_lapse({"gcp": "user"}, {})
+    seen = devmode.stack_lapse()
+    assert seen is not None
+    devmode.record_stack_lapse({"github-user": "on"}, {})
+    devmode.clear_stack_lapse(seen)
+    assert config.stack_lapse_file().exists()
+    devmode.clear_stack_lapse(None)  # nothing read: nothing of this run's to clear
+    assert config.stack_lapse_file().exists()
+    devmode.clear_stack_lapse(devmode.stack_lapse())
+    assert not config.stack_lapse_file().exists()
+
+
+def test_a_new_lapse_keeps_the_ones_still_standing(isolated_state):
+    # Another switch's lapse stays beside the new one; the same switch's is replaced; one whose
+    # level is on again goes.
+    devmode.set_mode({"github": "on"}, reconcile=False)
+    devmode.record_stack_lapse({"llm": "record"}, {})
+    devmode.record_stack_lapse({"github": "on"}, {})
+    devmode.record_stack_lapse({"gcp": "user"}, {"llm": "record"})
+    record = devmode.stack_lapse()
+    assert record is not None
+    assert [(e["switch"], e["level"], bool(e.get("lowered"))) for e in record["lapsed"]] == [
+        ("gcp", "user", False),
+        ("llm", "record", True),
+    ]
+    assert record["lapsed"][0]["label"] == devmode.mode_blurb()[("gcp", "user")]
+
+
+def test_a_record_that_cant_be_written_or_removed_doesnt_raise(isolated_state, monkeypatch):
+    devmode.record_stack_lapse({"gcp": "user"}, {})
+    seen = devmode.stack_lapse()
+
+    def refuse(*_a, **_k):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(devmode.Path, "unlink", refuse)
+    monkeypatch.setattr(devmode.os, "replace", refuse)
+    devmode.clear_stack_lapse(seen)
+    devmode.record_stack_lapse({"llm": "record"}, {})
+
+
+def test_in_a_worktree_the_lapse_row_asks_that_worktrees_stack(isolated_state, monkeypatch):
+    # feat's emulator outlived gcp=user while main's stack is down: asking main's project said
+    # "stack down", hid the row and dropped feat's record. `fy state` in feat had the same bug.
+    from conftest import FULL_TOML, make_config
+    from foldyard import reconcile
+
+    emulator = ("c-emu", {"com.docker.compose.service": "metadata-emulator",
+                          "com.docker.compose.project.config_files": "compose.yml"})  # fmt: skip
+    asked: list[str] = []
+
+    def ps_labels(args, timeout=None):
+        asked.append(args[-1])
+        return [emulator] if args[-1].endswith(f"={config.project_prefix()}-feat") else []
+
+    monkeypatch.setattr(devmode, "ps_labels", ps_labels)
+    monkeypatch.setattr(reconcile.StackScope, "_resolve", lambda self: (object(), ""))
+    monkeypatch.setattr(reconcile.StackScope, "_desired_hashes", lambda self, c, d: ({}, "", "h"))
+    monkeypatch.setattr(
+        reconcile.StackScope,
+        "_left_over",
+        lambda self, c, outside, d: outside & {"metadata-emulator"},
+    )
+    with config.using(make_config(FULL_TOML, worktree="feat")):
+        config.stack_lapse_file().parent.mkdir(parents=True, exist_ok=True)
+        config.stack_lapse_file().write_text(json.dumps(_LAPSE))
+        ((status, _, detail),) = _lapse_rows()
+        assert config.stack_lapse_file().exists()
+    assert status == "warn" and "the running stack still has" in detail
+    assert asked == [f"label=com.docker.compose.project={config.project_prefix()}-feat"]
+
+
+def test_the_verdict_resolves_the_checkout_it_filters_on(isolated_state, monkeypatch):
+    from conftest import FULL_TOML, make_config
+    from foldyard import reconcile, stack
+
+    seen: list = []
+    monkeypatch.setattr(stack, "resolve", lambda **kw: seen.append(kw) or object())
+    with config.using(make_config(FULL_TOML, worktree="feat")):
+        reconcile.StackScope()._resolve()
+    assert seen == [{"no_machine": True, "worktree": "feat"}]
+
+
+def test_a_worktree_named_with_a_slash_is_the_project_stack_labels(monkeypatch):
+    monkeypatch.setattr(config, "active_worktree", lambda: "team/feat")
+    assert devmode.active_project() == f"{config.project_prefix()}-team-feat"
+
+
+def test_the_stack_verdict_bounds_every_call_behind_it(isolated_state, monkeypatch):
+    # `fy doctor` asks it, and the render reads the box's files: nothing behind it waits for good.
+    from foldyard import confighash, reconcile, stack
+
+    seen: dict[str, float | None] = {}
+    running = [
+        ("c-app", {"com.docker.compose.service": "app",
+                   "com.docker.compose.project.config_files": "compose.yml", confighash.LABEL: "h"}),
+        ("c-emu", {"com.docker.compose.service": "metadata-emulator",
+                   "com.docker.compose.project.config_files": "compose.yml"}),
+    ]  # fmt: skip
+    monkeypatch.setattr(devmode, "ps_labels", lambda args, timeout=None: running)
+    monkeypatch.setattr(stack, "resolve", lambda **_kw: object())
+
+    def extra(ctx, deadline=None, also=()):
+        seen["extra"] = deadline
+        return []
+
+    def desired(ctx, extra_profiles=None, timeout=None):
+        seen["render"] = timeout
+        return {"app": "h"}, ""
+
+    def dropped(ctx, deadline=None, running=None):
+        seen["dropped"] = deadline
+        return set()
+
+    monkeypatch.setattr(stack, "_running_extra_profiles", extra)
+    monkeypatch.setattr(confighash, "desired", desired)
+    monkeypatch.setattr(stack, "_dropped_mode_services", dropped)
+    start = time.monotonic()
+    (row,) = reconcile.StackScope().rows(devmode.read())
+    assert row.status == "ok" and set(seen) == {"extra", "render", "dropped"}
+    render, deadline = seen["render"], seen["extra"]
+    assert render is not None and render <= reconcile.VERDICT_TIMEOUT
+    assert deadline is not None and deadline <= start + reconcile.VERDICT_TIMEOUT + 1
+    assert seen["dropped"] == deadline
+
+
+def test_the_lapse_row_spins_before_the_verdict(isolated_state, monkeypatch):
+    _lapse_world(monkeypatch, "drift")
+    rows = list(devmode._stack_lapse_check())
+    assert rows[0] == ("running", "stack after a time limit", "")
+
+
+def test_renewing_a_lapsed_level_keeps_what_depends_on_it(isolated_state, monkeypatch):
+    # `fy mode gcp=user` again after its time ran out but before the supervisor wrote it back
+    # (or with no supervisor): llm=record works with it, so the same command keeps it.
+    monkeypatch.setattr(devmode, "reconcile_stack", lambda *a, **k: None)
+    devmode.set_mode({"gcp": "sa", "llm": "record"})
+    _lapse_gcp_user(isolated_state)
+    devmode.set_mode({"gcp": "user"}, ttl=60)
+    durable = devmode.read(apply_expiry=False)["mode"]
+    assert durable["gcp"] == "user" and durable["llm"] == "record"
+
+
+def test_a_change_after_a_lapse_lowers_what_it_strands_and_says_so(
+    isolated_state, monkeypatch, capsys
+):
+    monkeypatch.setattr(devmode, "reconcile_stack", lambda *a, **k: None)
+    devmode.set_mode({"gcp": "sa", "llm": "record"})
+    _lapse_gcp_user(isolated_state)
+    capsys.readouterr()
+    devmode.set_mode({"github": "on"})
+    durable = devmode.read(apply_expiry=False)["mode"]
+    assert durable["gcp"] == "off" and durable["llm"] == "off" and durable["github"] == "on"
+    assert "llm" in capsys.readouterr().err
+
+
+def test_a_switch_the_command_sets_is_never_lowered_for_a_lapse(isolated_state, monkeypatch):
+    # llm=live without gcp can't work: that's the coherence gate's to refuse, not the lapse's to
+    # quietly undo.
+    monkeypatch.setattr(devmode, "reconcile_stack", lambda *a, **k: None)
+    devmode.set_mode({"gcp": "sa"})
+    _lapse_gcp_user(isolated_state)
+    with pytest.raises(SystemExit, match="incoherent"):
+        devmode.set_mode({"llm": "live"})
+
+
+def test_a_lapsed_level_reads_with_what_it_strands_lowered(isolated_state):
+    # What the supervisor will write: llm=record can't work without gcp, so a `fy up` reading
+    # before the write renders llm off too, not a mode nothing will ever hold.
+    devmode.set_mode({"gcp": "sa", "llm": "record"})
+    _lapse_gcp_user(isolated_state)
+    assert devmode.read(apply_expiry=False)["mode"]["llm"] == "record"
+    mode = devmode.read()["mode"]
+    assert mode["gcp"] == "off" and mode["llm"] == "off"
+
+
+def test_a_verdict_that_raises_reads_as_one_that_cant_say(isolated_state, monkeypatch):
+    from foldyard import reconcile
+
+    _lapse_world(monkeypatch, "drift")
+
+    def raises(self, state):
+        raise RuntimeError("render blew up")
+
+    monkeypatch.setattr(reconcile.StackScope, "rows", raises)
+    ((status, _, detail),) = _lapse_rows()
+    assert status == "warn" and "if the stack is running" in detail
+
+
+# ── which compose profiles the mode system owns ──────────────────────────────────────────
+
+
+def test_every_profile_a_level_derives_is_declared_by_its_plugin(isolated_state):
+    # The declaration is what `fy up` and a mode change trust to tell a level's services from
+    # yours: a profile some mode derives but no plugin declares would be kept as yours, and the
+    # emulator a level that's off wanted would outlive it. Every mode of the full config's
+    # switches is tried (gcp=sa|user adds `metadata`, storage=staging with gcp adds `cloudsql`).
+    import itertools
+
+    rungs = devmode.axes()
+    derived: set[str] = set()
+    for combo in itertools.product(*rungs.values()):
+        mode = dict(zip(rungs, combo, strict=True))
+        derived.update(
+            p for p in devmode.derive_env(mode).get("COMPOSE_PROFILES", "").split(",") if p
+        )
+    assert derived == {"metadata", "cloudsql"}
+    assert devmode.registry().compose_profiles() == derived
+
+
+def test_a_profile_no_mode_can_derive_is_not_a_levels(isolated_state):
+    # Without a storage overlay there's no storage switch, so no mode adds `cloudsql`: a
+    # `cloudsql` service you run by hand is yours, not one `fy up` removes. Without a gcp
+    # project there's no gcp switch either.
+    from conftest import FULL_TOML, make_config
+    from foldyard import plugins
+
+    no_storage = json.loads(json.dumps(FULL_TOML))  # a deep copy to cut down
+    no_storage["overlay"] = [o for o in no_storage["overlay"] if "storage" not in o["when"]]
+    no_storage["require"] = [r for r in no_storage["require"] if r.get("switch") != "storage"]
+    with config.using(make_config(no_storage)):
+        assert "storage" not in devmode.axes()
+        assert devmode.registry().compose_profiles() == {"metadata"}
+    no_gcp = json.loads(json.dumps(no_storage))
+    no_gcp["plugins"]["gcp-metadata"] = {}
+    plugins._clear_registry_cache()
+    with config.using(make_config(no_gcp)):
+        assert "gcp" not in devmode.axes()
+        assert not devmode.registry().compose_profiles()

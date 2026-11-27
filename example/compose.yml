@@ -28,3 +28,11 @@ services:
         condition: service_healthy
     ports:
       - "${API_PORT:-8080}:8080"
+
+  # Runs only under `fakecred=user` (the fakecred plugin adds the `fakecred` profile): a service
+  # only a level wants, standing in for the gcp metadata emulator, so leaving the level is seen to
+  # remove it. Nothing to build or publish; it exits on the stop signal.
+  fake-sidecar:
+    image: docker.io/library/alpine:3.20
+    profiles: ["fakecred"]
+    command: ["sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 1; done"]

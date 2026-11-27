@@ -42,6 +42,7 @@ its main():
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import fcntl
 import getpass
@@ -53,7 +54,7 @@ import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -183,12 +184,15 @@ def _load(path: Path) -> dict:
         return {}
 
 
-def read(apply_expiry: bool = True) -> dict:
+def read(apply_expiry: bool = True, settle: bool = True) -> dict:
     """Current posture from the right source for where we run.
 
     Returns {"mode": {axis: value}, "expires": {axis: iso}, "written": iso|None,
     "daemons": {...}|None, "source": str}. With apply_expiry, a lapsed TTL reads as
-    off (the supervisor separately writes that back).
+    off, and a switch that can't work without it as lowered too (:func:`settle_incoherent`):
+    what the supervisor writes back, so nothing reading meanwhile (`fy up` rendering the stack)
+    sees a mode the supervisor won't write. ``settle=False`` leaves that to the caller
+    (:func:`set_mode`, whose own updates may be what a stranded switch needs).
     """
     src = config.mirror_file() if in_box() else config.mode_file()
     raw = _load(src)
@@ -202,17 +206,22 @@ def read(apply_expiry: bool = True) -> dict:
             mode[axis] = defaults[axis]
     expires = {a: t for a, t in (raw.get("expires") or {}).items() if a in rungs}
     if apply_expiry:
+        lapsed = False
         for axis, iso in list(expires.items()):
             exp = _parse(iso)
             if exp is None or exp <= now():
                 mode[axis] = defaults[axis]
                 del expires[axis]
+                lapsed = True
+        if lapsed and settle:
+            mode.update(settle_incoherent(mode))
     return {
         "mode": mode,
         "expires": expires,
         "written": raw.get("written"),
         "daemons": raw.get("daemons"),
         "capabilities": raw.get("capabilities"),  # box mirror only; the host reads the state file
+        "stack_lapse": raw.get("stack_lapse"),  # box mirror only; see stack_lapse()
         "source": str(src),
     }
 
@@ -227,6 +236,10 @@ def write_mirror(
     payload = {**mode, "expires": expires, "written": _iso(now()), "daemons": daemons or {}}
     if capabilities is not None:
         payload["capabilities"] = capabilities
+    # A COPY of the host's record of a lapse the running stack hasn't caught up with, so the box's
+    # `fy doctor` can say it too. The host never reads it back from here (stack_lapse).
+    if lapse := _load(config.stack_lapse_file()):
+        payload["stack_lapse"] = lapse
     # On the mount: never through a symlink the box planted there (mountwrite).
     data = (json.dumps(payload, indent=2) + "\n").encode()
     mountwrite.write_file(config.mirror_file(), data, within=config.repo_root())
@@ -311,14 +324,32 @@ def set_mode(
     validate_updates(updates)
     emergency_rungs = emergency()
 
-    state = read(apply_expiry=True)
+    state = read(apply_expiry=True, settle=False)
     mode, expires = state["mode"], state["expires"]
-    prev_posture = posture_signature(mode)  # before applying the updates
+    written = read(apply_expiry=False)
+    lapsed = written["expires"].keys() - expires.keys()
+    # The "before" is the file AS WRITTEN, a lapsed level included: until something reconciles
+    # it, the running stack still has what that level set up, and the supervisor's expiry writes
+    # the lapse back without reconciling. So a change made after a lapse reconciles the lapsed
+    # switch too, and the expiry itself sees the change it made.
+    prev_posture = posture_signature(written["mode"])
     for axis, value in updates.items():
         mode[axis] = value
         if value in emergency_rungs.get(axis, ()):  # plugin-declared emergency rungs carry a TTL
             expires[axis] = _iso(now() + timedelta(seconds=ttl or DEFAULT_TTL))
         else:
+            expires.pop(axis, None)
+    # A lapse the supervisor hasn't written back yet: lower what it strands, as the expiry would,
+    # but only after this command's updates (renewing the level keeps what needs it), never a
+    # switch it sets, and saying so.
+    if lapsed:
+        for axis, value in settle_incoherent(mode, keep=updates).items():
+            print(
+                f"⚠ {printable(axis)}={printable(str(mode[axis]))} lowered to "
+                f"{printable(value)}: a time limit ran out on what it needs",
+                file=sys.stderr,
+            )
+            mode[axis] = value
             expires.pop(axis, None)
 
     # Coherence gate (plugin mode_issues, on the FULL prospective mode): an "error" combination
@@ -352,7 +383,8 @@ def set_mode(
     # overlay/env-only changes (llm=off→record flips TANGIBLE_LLM_MODE) both count. Best-effort +
     # already-up-only; see stack.reconcile_posture. `reconcile=False` lets the TUI apply the file
     # FIRST (instant button highlight) then run the slow compose reconcile off the UI thread via
-    # `reconcile_stack`.
+    # `reconcile_stack`. The supervisor's expiry passes it too, and never reconciles: compose in
+    # the tick can outlast the heartbeat, so it records the lapse instead (record_stack_lapse).
     if reconcile:
         reconcile_stack(prev_posture, new_posture, sink=reconcile_sink)
     return {
@@ -391,7 +423,7 @@ def reconcile_stack(
     )
 
 
-def settle_incoherent(mode: dict) -> dict[str, str]:
+def settle_incoherent(mode: dict, keep: Collection[str] = ()) -> dict[str, str]:
     """Extra axis→default flips that make ``mode`` coherent — the expiry cascade (proposal E).
 
     TTL expiry is a forced de-escalation that must never be refused, but reverting one axis can
@@ -408,7 +440,9 @@ def settle_incoherent(mode: dict) -> dict[str, str]:
     Two switches whose injection rules overlap are left alone. An expiry only turns switches off,
     so it never creates an overlap, and resolving one it finds would mean picking which credential
     survives by declaration order, the same accident the overlap check exists to remove. The proxy
-    injects neither side meanwhile (``Registry.injecting_rules``) and the operator decides."""
+    injects neither side meanwhile (``Registry.injecting_rules``) and the operator decides.
+
+    ``keep``: switches never lowered (the ones a `fy mode` command sets itself)."""
 
     def _errors(m: dict) -> list[str]:
         return [msg for sev, msg in registry().mode_issues(m, overlaps=False) if sev == "error"]
@@ -418,7 +452,7 @@ def settle_incoherent(mode: dict) -> dict[str, str]:
     defaults = axis_defaults()
     while errors := _errors(current):
         for axis, default in defaults.items():
-            if current.get(axis, default) == default:
+            if axis in keep or current.get(axis, default) == default:
                 continue
             trial = {**current, axis: default}
             if len(_errors(trial)) < len(errors):
@@ -431,10 +465,10 @@ def settle_incoherent(mode: dict) -> dict[str, str]:
             # everything-at-rest; if THAT is coherent, settle every non-default axis down.
             # Still downgrade-only; if even all-defaults errors (a plugin's unconditional
             # error), leave the posture visible rather than thrash.
-            all_default = dict(defaults)
+            all_default = {**defaults, **{a: current[a] for a in keep if a in current}}
             if not _errors(all_default):
                 flips.update(
-                    {a: d for a, d in defaults.items() if current.get(a, d) != d},
+                    {a: d for a, d in all_default.items() if current.get(a, d) != d},
                 )
             break
     return flips
@@ -1587,6 +1621,7 @@ def doctor(deep: bool = False):
     yield from _stack_shadow_check()
     yield from _stack_env_override_check()
     yield from _stack_container_env_check()
+    yield from _stack_lapse_check()
     yield from _disk_headroom_check()
 
     if in_box():
@@ -1861,11 +1896,174 @@ def _box_shadow_check():
 
 def active_project() -> str:
     """The compose project name for the ACTIVE checkout — ``<prefix>`` for main, ``<prefix>-<wt>``
-    for a worktree, matching what ``stack`` labels containers with. Derived from config alone so
-    doctor never calls ``stack.resolve()``, which would provision a VM on a read-only path."""
+    for a worktree, matching what ``stack`` labels containers with (a ``/`` in the worktree name
+    as ``-``, as ``stack._context`` has it). Derived from config alone, so the doctor rows that
+    only need the name don't resolve the stack; the lapse row's drift verdict does, read-only
+    (``stack.resolve(no_machine=True)`` never provisions a VM)."""
     worktree = config.active_worktree()
     prefix = config.project_prefix()
-    return f"{prefix}-{worktree}" if worktree else prefix
+    return f"{prefix}-{worktree.replace('/', '-')}" if worktree else prefix
+
+
+def stack_lapse() -> dict | None:
+    """The record of a TTL lapse that changed what this checkout's stack should run
+    (``config.stack_lapse_file``), or None: ``lapsed``, ``[{switch, level, label, at[, lowered]}]``,
+    and ``since``, when it was last written (unix seconds; what a clearer compares,
+    :func:`clear_stack_lapse`). Whether the stack has caught up isn't in it: `fy doctor` asks the
+    drift verdict for that (:func:`_stack_lapse_check`).
+
+    On your computer only the host's own record counts: the mirror is in the checkout, so the box
+    can write it. In the box, the copy the host put there."""
+    raw = read().get("stack_lapse") if in_box() else _load(config.stack_lapse_file())
+    if not isinstance(raw, dict):
+        return None
+    lapsed = [e for e in raw.get("lapsed") or [] if isinstance(e, dict)]
+    since = raw.get("since")
+    if not lapsed or not isinstance(since, int | float):
+        return None
+    return {"lapsed": lapsed, "since": float(since)}
+
+
+@contextlib.contextmanager
+def _lapse_lock() -> Iterator[None]:
+    """Held by the record's two writers, around a file read and write and nothing else (never an
+    engine or compose call): the supervisor adding a lapse, and `fy up`, a mode change or
+    `fy doctor` clearing one. So a clear never removes a lapse recorded after it read, and a
+    lapse never writes back one just cleared."""
+    path = config.stack_lapse_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def record_stack_lapse(expired: dict[str, str], lowered: dict[str, str]) -> list[dict]:
+    """Note a TTL lapse that changes what this checkout's stack should run: the levels that
+    expired and any switch lowered with them, each in its plugin's own words. Added to a standing
+    record: another switch's entry stays unless its level is on again, and the same switch's is
+    replaced. The supervisor's, before it writes the mode back (so a supervisor that dies between
+    the two finds the lapse again). Returns the entries it added, written or not. Host only;
+    best-effort."""
+    import time
+
+    blurbs = mode_blurb()
+    at = _iso(now())
+    entries = [
+        {"switch": a, "level": r, "label": blurbs.get((a, r), ""), "at": at}
+        | ({"lowered": True} if a in lowered else {})
+        for a, r in {**expired, **lowered}.items()
+    ]
+    path = config.stack_lapse_file()
+    try:
+        with _lapse_lock():
+            mode = read(apply_expiry=False)["mode"]
+            standing = [
+                e
+                for e in (stack_lapse() or {}).get("lapsed", [])
+                if e.get("switch") not in {**expired, **lowered}
+                and mode.get(e.get("switch")) != e.get("level")
+            ]
+            record = {"lapsed": standing + entries, "since": time.time()}
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(record, indent=2) + "\n")
+            os.replace(tmp, path)
+    except OSError:
+        pass
+    return entries
+
+
+def clear_stack_lapse(seen: dict | None) -> None:
+    """Drop this checkout's lapse record, if it's still the one ``seen`` (what
+    :func:`stack_lapse` returned before the caller looked at the stack): `fy up` or a mode
+    change's reconcile just brought the running stack in line with the mode it read, or
+    `fy doctor`'s verdict found it in line. A lapse recorded since is newer than that, so it
+    stays. A no-op in the box, which can't write your computer's state (and reads only the
+    mirror's copy). Best-effort."""
+    if seen is None or in_box():
+        return
+    try:
+        with _lapse_lock():
+            current = stack_lapse()
+            if current is not None and current["since"] == seen["since"]:
+                config.stack_lapse_file().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# What brings a running stack in line after a lapse: `fy up` recreates what the lapsed level
+# shaped, then removes the services only it wanted (stack._dropped_mode_services), and a mode change
+# does the same. `fy down` for a stack you'd rather stop: only an emulator a level started may be
+# running, and `fy up` would start the whole stack.
+LAPSE_FIX = "`fy up` brings it in line (or `fy down` stops it)"
+
+
+def lapse_message(entries: list[dict], running: bool = True) -> str:
+    """What a lapse left in the stack and how to bring it in line, in one line — the doctor row's
+    and (``running=False``: the supervisor doesn't ask whether the stack runs) the notification's
+    body. Each level in its plugin's own words (its ``fy mode`` blurb), and a switch lowered along
+    with an expired one named as that."""
+
+    def named(group: list[dict]) -> str:
+        return "; ".join(
+            f"{printable(str(e.get('switch')))}={printable(str(e.get('level')))}"
+            + (f" ({printable(str(e['label']))})" if e.get("label") else "")
+            for e in group
+        )
+
+    expired = [e for e in entries if not e.get("lowered")]
+    lowered = [e for e in entries if e.get("lowered")]
+    them = "they" if len(entries) > 1 else "it"
+    if not expired:  # the expired level is on again; what was lowered with it isn't
+        what = f"{named(lowered)}: lowered when a time limit ran out"
+    else:
+        its, it = ("its time limit", "it") if len(expired) == 1 else ("their time limits", "they")
+        with_it = f", and {named(lowered)} was lowered with {it}" if lowered else ""
+        what = f"{named(expired)}: {its} ran out{with_it}"
+    if running:
+        return f"{what}, but the running stack still has what {them} set up — {LAPSE_FIX}"
+    return f"{what}; if the stack is running, it still has what {them} set up — {LAPSE_FIX}"
+
+
+def _stack_lapse_check():
+    """Doctor row: a TTL lapse (:func:`stack_lapse`) the running stack hasn't caught up with,
+    with how to bring it in line. Whether it has is the stack scope's drift verdict, asked here
+    and only while there's a record (what `fy state` shows, and what `fy up` would recreate):
+    drift says so, a verdict that can't be had keeps the row without claiming the stack runs, and
+    a stack in line (or down) reads ✓ once on your computer, which drops the record. The box can't
+    drop it (its copy is the mirror's), so there the row just goes until your computer does. Not
+    for a level that's on again. The supervisor never reconciles the stack itself, so this and its
+    notification are how you hear of it, on your computer and in the box.
+
+    The verdict rests on what the engine's labels and the compose render say, and the box can
+    shape both: it may hide the row, or clear the record. That's acceptable only because the row
+    is advisory: the token service stopped with the lapse, so nothing new is granted either way.
+    WARN, for the same reason."""
+    from . import reconcile
+
+    record = stack_lapse()
+    if record is None:
+        return
+    state = read()
+    entries = [e for e in record["lapsed"] if state["mode"].get(e.get("switch")) != e.get("level")]
+    if not entries:
+        clear_stack_lapse(record)
+        return
+    name = "stack after a time limit"
+    if not in_box():  # the box's doctor skips placeholders, and fy tui runs on your computer
+        yield ("running", name, "")  # the verdict renders the stack (bounded): let a UI spin
+    try:
+        verdict = {row.status for row in reconcile.StackScope().rows(state)}
+    except Exception:  # a doctor row never takes the report down: it just can't say
+        verdict = {"unknown"}
+    if verdict <= {"ok"}:
+        if not in_box():  # resolves the placeholder, once: the record goes with it
+            clear_stack_lapse(record)
+            yield _result(True, name, "the stack has caught up with the mode", "")
+        return
+    yield _result(None, name, "", lapse_message(entries, running="drift" in verdict))
 
 
 def _engine_refused_check():

@@ -13,7 +13,8 @@ Scenario map (trigger → expected reconcilers):
                            (only if a box is up / mirror exists)
   supervisor tick        → TTL expiry+settle, daemon convergence, mirror write (up boxes
                            only), capability probe publish
-  TTL lapse on a tick    → durable settled write + the daemon for the lapsed rung dropped
+  TTL lapse on a tick    → durable settled write + the daemon for the lapsed rung dropped,
+                           and NO stack reconcile (a running stack is reported instead)
 """
 
 from __future__ import annotations
@@ -85,6 +86,9 @@ def tick_world(isolated_state, monkeypatch):
     # this the tick would ask a REAL loopback port — where a developer's live proxy listens.
     monkeypatch.setattr(supervisor, "answers", lambda port, url: True)
     monkeypatch.setattr(devmode, "probe", lambda port, host=None: False)
+    # A lapse that changes the stack's posture is recorded and told; this project has a stack.
+    monkeypatch.setattr(config, "has_compose_stack", lambda: True)
+    monkeypatch.setattr(supervisor, "_notify", lambda title, body: None)
     return world
 
 
@@ -211,13 +215,16 @@ def test_tick_runs_nothing_for_a_checkout_nobody_adopted(tick_world, monkeypatch
     assert tick_world["launched"] == []
 
 
-def test_tick_expires_settles_and_drops_the_lapsed_rungs_daemon(tick_world):
+def test_tick_expires_settles_and_drops_the_lapsed_rungs_daemon(
+    tick_world, recorded_stack_reconcile
+):
     devmode.set_mode({"gcp": "sa", "llm": "live"})
     devmode.set_mode({"gcp": "user"}, ttl=60)
     raw = json.loads(tick_world["state"]["auth"].read_text())
     raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
     tick_world["state"]["auth"].write_text(json.dumps(raw))
     tick_world["up"] = [""]
+    recorded_stack_reconcile.clear()
 
     children: dict = {}
     supervisor.reconcile_once(children, {})
@@ -227,6 +234,10 @@ def test_tick_expires_settles_and_drops_the_lapsed_rungs_daemon(tick_world):
     assert "gcp-minter" not in children  # the lapsed rung's daemon is not desired
     mirror = json.loads(tick_world["state"]["mirror"].read_text())
     assert mirror["gcp"] == "off" and mirror["llm"] == "off"
+    # The tick ran no compose for it: it recorded the lapse instead, and the box's mirror carries
+    # the copy its `fy doctor` reads.
+    assert recorded_stack_reconcile == []
+    assert [e["switch"] for e in mirror["stack_lapse"]["lapsed"]] == ["gcp", "llm"]
 
 
 def test_tick_stops_a_daemon_the_new_posture_no_longer_wants(tick_world):

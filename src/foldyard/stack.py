@@ -863,12 +863,12 @@ def _compose_output(
     return _run([*ctx.compose, *args], env=ctx.env, cwd=str(ctx.main), timeout=timeout)
 
 
-# One deadline over every compose call a posture reconcile makes: a TTL expiry that settles a
-# dependent switch runs it in the supervisor's tick, where a client that never returns stops
-# everything after it (other expiries, the escalated daemons' stop, the heartbeat). Generous,
-# since the `up` it bounds may pull. It bounds a hang, nothing more: a reconcile in the tick
-# that runs past devmode.HEARTBEAT_STALE_SECONDS still reads as a wedged supervisor to the
-# launch paths meanwhile, as any slow compose call there always has.
+# One deadline over every compose call a posture reconcile makes: the box can swap a FIFO in for
+# a compose file after _not_regular looked, and a client that never returns would hang `fy mode`
+# or the TUI's reconcile worker for good. Generous, since the `up` it bounds may pull. It bounds a
+# hang, nothing more. The supervisor's tick never runs the reconcile (a TTL expiry reports what
+# the running stack still has instead), since even a bounded one there would outlast
+# devmode.HEARTBEAT_STALE_SECONDS and read as a wedged supervisor.
 RECONCILE_TIMEOUT = 600.0
 # The orphan sweep after a successful `up` gets at least this long, whatever the `up` left of
 # RECONCILE_TIMEOUT: a pull can spend it all, and the sweep's render would get a tenth of a second.
@@ -879,8 +879,8 @@ def _not_regular(ctx: Context) -> list[str]:
     """The ``-f`` files that are there but aren't regular files. The checkout is the box's, and
     the compose client on your computer opens each with a blocking ``open``: a FIFO waits for a
     writer that never comes, a link to ``/dev/zero`` reads without end. A cheap first line only:
-    the box can swap one in after this looks, so the calls the supervisor's tick can reach carry
-    a deadline too (:data:`RECONCILE_TIMEOUT`). A file that isn't there is compose's to report.
+    the box can swap one in after this looks, so the posture reconcile's calls carry a deadline
+    too (:data:`RECONCILE_TIMEOUT`). A file that isn't there is compose's to report.
     Not the project ``.env``: the client skips one that isn't a regular file itself, and people
     have them (``.env -> /dev/null``, the FIFO a secrets manager serves it as)."""
     files = [Path(f) if Path(f).is_absolute() else ctx.main / f for f in _compose_files(ctx)]
@@ -1744,6 +1744,8 @@ def up() -> int:
         main = main_repo()
         if boxworktree.refuse_stack(main, _active_worktree(config.worktrees_root(main)), "fy up"):
             return 1
+    # Read before the mode is: a lapse recorded during this run was rendered without, so it stays.
+    lapse = devmode.stack_lapse()
     ctx = resolve()  # ensures the machine (so it's up even when there's no stack to start)
     _print_banner(ctx.env)
     # A successful `fy up` always restores the host-side half of the machine lifecycle, including
@@ -1776,6 +1778,7 @@ def up() -> int:
     extra = _running_extra_profiles(ctx)
     if extra:
         print(f"▶ including running profile(s): {','.join(extra)}")
+    dropped = _dropped_mode_services(ctx)  # removed once the up has recreated their dependents
     # external_network consumer: compose declares `{project}_default` external, so it never
     # creates (or removes) it — foldyard does, before the first thing tries to attach.
     if config.external_network():
@@ -1802,6 +1805,17 @@ def up() -> int:
             _say_registry_logins()
     if rc != 0:
         return rc
+    # Only now that the up has recreated their dependents (an app on the old posture still points
+    # at the emulator): the services only a level that's off wanted. A skipped removal is said.
+    sweep = (
+        _remove_orphan_containers(ctx, _err, extra_profiles=extra, only=dropped)
+        if dropped
+        else None
+    )
+    # What a lapse left is gone, so its doctor row goes with it: not when the removal was skipped,
+    # nor when which services only a level wanted couldn't be told.
+    if dropped is not None and sweep is None:
+        devmode.clear_stack_lapse(lapse)
     # Containers are on the new images now; the ones the build replaced can go.
     _remove_superseded(ctx, superseded)
     # Dump-browse only: the Auth0 sim container rsyncs the read-only-mounted harness
@@ -1894,18 +1908,20 @@ def _remove_orphan_containers(
     emit: Callable[[str], None],
     extra_profiles: list[str] | None = None,
     deadline: float | None = None,
+    only: set[str] | None = None,
 ) -> str | None:
-    """Remove this project's containers whose compose SERVICE is no longer in the rendered
-    config — the targeted replacement for handing ``--remove-orphans`` to the reconcile's
-    ``up``. The bundled podman-compose (1.6.0) implements ``up --remove-orphans`` by running
-    an internal ``down`` that INHERITS the flag, and that down's orphan branch stops and
-    removes EVERY container labelled with the project — service scoping ignored — then the
-    up re-creates only the changed subset. One ``fy mode gcp=sa→user`` flip removed a whole
-    running dev stack that way (2026-08-05). So foldyard computes orphans itself: render the
-    current config's service list, list the project's containers, and remove exactly those
-    whose service label left the config (e.g. the metadata emulator after leaving the gcp
-    rungs). Fail-safe in every direction — a failed render/probe, an empty service list, or
-    a container with no service label all mean "remove nothing" (stale-but-running beats
+    """Remove this project's containers whose compose SERVICE is no longer in the rendered config
+    (of the services in ``only``, when given: ``fy up`` removes just what a level wanted,
+    :func:`_dropped_mode_services`) — the targeted replacement for handing ``--remove-orphans``
+    to the reconcile's ``up``. The bundled podman-compose (1.6.0) implements ``up
+    --remove-orphans`` by running an internal ``down`` that INHERITS the flag, and that down's
+    orphan branch stops and removes EVERY container labelled with the project — service scoping
+    ignored — then the up re-creates only the changed subset. One ``fy mode gcp=sa→user`` flip
+    removed a whole running dev stack that way (2026-08-05). So foldyard computes orphans
+    itself: render the current config's service list, list the project's containers, and remove
+    exactly those whose service label left the config (e.g. the metadata emulator after leaving
+    the gcp rungs). Fail-safe in every direction — a failed render/probe, an empty service list,
+    or a container with no service label all mean "remove nothing" (stale-but-running beats
     swept-by-accident); named volumes are never touched. Returns why the sweep was skipped (and
     says so through ``emit``), or None when it ran."""
 
@@ -1927,7 +1943,11 @@ def _remove_orphan_containers(
         listed = _project_services(ctx, stopped=True)
         if listed is None:
             return skipped("the engine couldn't list the project's containers")
-        orphans = [(cid, svc) for cid, svc in listed if svc and svc not in services]
+        orphans = [
+            (cid, svc)
+            for cid, svc in listed
+            if svc and svc not in services and (only is None or svc in only)
+        ]
         if not orphans:
             return None
         from .term import printable  # the service label is anyone's on the engine: the box's too
@@ -1947,6 +1967,7 @@ def _remove_orphan_containers(
                 f"⚠ the engine refused to remove some of them (exit {rm.returncode}), so they "
                 f"stay: {_engine_says(rm)}"
             )
+            return f"the engine refused to remove {names}"
     except subprocess.TimeoutExpired as e:
         return skipped(f"compose didn't answer within {int(e.timeout)}s")
     except Exception as e:  # best-effort: an orphan left running is recoverable, a bad sweep not
@@ -2218,7 +2239,9 @@ def reconcile_posture(
     The ``up`` also spans every profile that currently has RUNNING services (see
     ``_running_extra_profiles``), so profile-gated services a developer started outside the mode
     system — e.g. the ``data`` workers from ``just data-up`` — are re-rendered into the new
-    posture instead of silently keeping the old identity/env. Host-only and best-effort: any
+    posture instead of silently keeping the old identity/env. Not a profile only a level adds:
+    the emulator of a level just left is out of the render, so the sweep removes it, after the
+    up recreated what pointed at it. Host-only and best-effort: any
     environment hiccup is swallowed so it never breaks ``fy mode`` — but a compose run that
     actually FAILED returns False so callers (the TUI) can say so instead of claiming success.
 
@@ -2240,6 +2263,7 @@ def reconcile_posture(
             # Cheap, subprocess-free skip for stack-less consumers under the bound config.
             if not config.has_compose_stack():
                 return True
+            lapse = devmode.stack_lapse()  # before the mode is read: see clear_stack_lapse
             ctx = resolve(no_machine=True, worktree=cfg.worktree if cfg is not None else None)
             from .plugins import registry
 
@@ -2310,6 +2334,10 @@ def reconcile_posture(
                 + ")"
                 + (f"; removing containers whose service left it skipped: {sweep}" if sweep else "")
             )
+            # The whole stack is on the mode as it is now, a lapsed level's change included, so
+            # a lapse the supervisor recorded is behind it — unless something was left in place.
+            if sweep is None:
+                devmode.clear_stack_lapse(lapse)
     except subprocess.TimeoutExpired:  # a client stuck (a FIFO the box planted): never success
         emit(
             f"✗ stack mode reconcile skipped: compose didn't answer within "
@@ -2322,8 +2350,8 @@ def reconcile_posture(
         )
         return False
     # A refusal meant for a verb (a staging that can't be done safely, a worktree gone) mustn't
-    # end the supervisor's tick, which runs this for a TTL expiry that settles a dependent switch;
-    # nothing was reconciled, so it isn't reported as done.
+    # end the caller (the TUI's reconcile worker, or a mode write that already landed); nothing
+    # was reconciled, so it isn't reported as done.
     except SystemExit as e:
         emit(f"✗ stack mode reconcile skipped: {e}")
         _host_log(f"stack reconcile skipped: {e} ({posture})")
@@ -2474,29 +2502,81 @@ def _running_extra_profiles(
     took a running one for departed. Each service's profiles come from the ``-f`` files
     themselves (:func:`_service_profiles`), not ``config --profiles``: the bundled podman-compose
     has no such flag, so discovery always came back empty there (#33). Fully generic, no profile
-    names baked in. Best-effort: [] on any error (the reconcile then covers just the derived set,
-    as before). ``deadline`` bounds the probe (the heal's); ``also`` names services to span as if
-    running — the crashed ones the heal brings back."""
+    names baked in. Not a profile a level adds (:func:`_mode_owned`: the metadata emulator's
+    ``metadata``) that no level enables now: a service only in those runs because a level wanted
+    it, so it leaves the render and is removed after the run (:func:`_dropped_mode_services`).
+    Best-effort: [] on any error (the reconcile then covers just the derived set, as before).
+    ``deadline`` bounds the probe (the heal's); ``also`` names services to span as if running —
+    the crashed ones the heal brings back."""
     try:
         running = (_running_services(ctx, deadline) or set()) | set(also)
         if not running:
             return []
         profiles = _service_profiles(ctx, timeout=_left(deadline))
-        enabled = {p for p in (ctx.env.get("COMPOSE_PROFILES") or "").split(",") if p}
+        enabled = set(_profile_list(ctx.env.get("COMPOSE_PROFILES")))
+        owned = _mode_owned(ctx) or frozenset()  # can't say: every running profile stays
         extra: list[str] = []
         # As FEW profiles as enable every running service: an unscoped reconcile `up` starts every
         # service of each profile it names. Single-profile services go first — they leave no
-        # choice — so a multi-profile one reuses theirs before adding its own first profile.
+        # choice — so a multi-profile one reuses theirs before adding its own first profile. A
+        # profile only a level adds is never one of yours to keep (see _dropped_mode_services).
         gated = sorted(
             ((profiles[s], s) for s in running if profiles.get(s)), key=lambda x: (len(x[0]), x[1])
         )
         for service_profiles, _ in gated:
-            if not enabled.intersection(service_profiles):
-                enabled.add(service_profiles[0])
-                extra.append(service_profiles[0])
+            if enabled.intersection(service_profiles):
+                continue
+            yours = [p for p in service_profiles if p not in owned]
+            if yours:
+                enabled.add(yours[0])
+                extra.append(yours[0])
         return sorted(extra)
     except Exception:
         return []
+
+
+def _profile_list(value: str | None) -> list[str]:
+    """A ``COMPOSE_PROFILES`` value's profiles."""
+    return [p for p in (value or "").split(",") if p]
+
+
+def _mode_owned(ctx: Context) -> frozenset[str] | None:
+    """The profiles a level adds (``Registry.compose_profiles``) that are off now: neither one
+    the levels on now derive nor one ``ctx`` enables. Both, since an exported ``COMPOSE_PROFILES``
+    wins in ``ctx`` (``COMPOSE_PROFILES=data fy up``) and mustn't make the emulator gcp=sa wants
+    read as one only a level that's off wanted. None when they can't be had."""
+    try:
+        posture = devmode.derive_env(devmode.read()["mode"]).get("COMPOSE_PROFILES")
+        on = {*_profile_list(posture), *_profile_list(ctx.env.get("COMPOSE_PROFILES"))}
+        return devmode.registry().compose_profiles() - on
+    except Exception:
+        return None
+
+
+def _dropped_mode_services(
+    ctx: Context, deadline: float | None = None, running: set[str] | None = None
+) -> set[str] | None:
+    """Running services that run only because a level wanted them: every profile they're in is one
+    a level adds (the metadata emulator's ``metadata``, the Cloud SQL proxy's ``cloudsql``) and
+    none of those is on now (:func:`_mode_owned`). Re-rendering leaves them out
+    (:func:`_running_extra_profiles`), and the run that recreates their dependents removes them
+    afterwards, so no container is left pointing at a host that's gone (``fy up``; the mode
+    change's reconcile does it with its wider sweep). A service also in one of your own profiles
+    (``data``) stays. ``running``: the running services when the caller has them (`fy state`),
+    instead of asking compose. None when it can't say (the engine, the files or the plugins
+    didn't answer): nothing is removed, and `fy up` doesn't count the stack as in line."""
+    try:
+        if running is None:
+            running = _running_services(ctx, deadline)
+        if not running:
+            return None if running is None else set()
+        owned = _mode_owned(ctx)
+        if not owned:
+            return None if owned is None else set()
+        profiles = _service_profiles(ctx, timeout=_left(deadline))
+        return {s for s in running if profiles.get(s) and set(profiles[s]) <= owned}
+    except Exception:
+        return None
 
 
 def _service_profiles(ctx: Context, timeout: float | None = None) -> dict[str, list[str]]:

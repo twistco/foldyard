@@ -89,3 +89,24 @@ def test_fakecred_ttl_expiry_settles_fakedep(fakecred_bound, monkeypatch):
     assert mode["fakecred"] == "off" and mode["fakedep"] == "off"
     durable = devmode.read(apply_expiry=False)["mode"]
     assert durable["fakecred"] == "off" and durable["fakedep"] == "off"
+
+
+def test_the_emergency_level_adds_its_own_profile(fakecred_bound):
+    # example/compose.yml's `fake-sidecar` runs behind it: the stand-in for the gcp metadata
+    # emulator, a service only a level wants, so the host tier can watch a lapse take it away.
+    assert devmode.derive_env({"fakecred": "user"})["COMPOSE_PROFILES"] == "fakecred"
+    assert "COMPOSE_PROFILES" not in devmode.derive_env({"fakecred": "on"})
+    assert "fakecred" in devmode.registry().compose_profiles()
+
+
+def test_the_example_puts_only_the_sidecar_behind_that_profile():
+    from pathlib import Path
+
+    import yaml
+
+    example = Path(__file__).resolve().parent.parent / "example"
+    services = yaml.safe_load((example / "compose.yml").read_text())["services"]
+    gated = {name: s["profiles"] for name, s in services.items() if s.get("profiles")}
+    assert gated == {"fake-sidecar": ["fakecred"]}
+    sidecar = services["fake-sidecar"]
+    assert "ports" not in sidecar and "build" not in sidecar  # nothing to publish or build

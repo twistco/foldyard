@@ -212,13 +212,17 @@ class ModeStateModel(RuleBasedStateMachine):
         return datetime.now(UTC) + timedelta(seconds=self.offset)
 
     def _live(self, wt: str) -> dict:
-        """The expiry-applied view of checkout ``wt``'s file state — what read() should say."""
+        """The expiry-applied view of checkout ``wt``'s file state — what read() should say: the
+        lapsed rungs at their default, and what they strand settled with them, as the tick's
+        expiry will write it."""
         now = self._now()
         deadline = self.deadline[wt]
-        return {
+        live = {
             axis: DEFAULTS[axis] if axis in deadline and deadline[axis] <= now else value
             for axis, value in self.raw[wt].items()
         }
+        lapsed = any(deadline[a] <= now for a in deadline)
+        return {**live, "dep": "off"} if lapsed and _errors(live) else live
 
     def _merged_caps(self, live: dict) -> dict[str, bool]:
         """axis → merged probe verdict the tick should compute for one checkout's live mode."""
@@ -443,12 +447,13 @@ class ModeStateModel(RuleBasedStateMachine):
                 assert seen["mode"] == DEFAULTS and seen["capabilities"] is None
                 continue
             now = self._now()
+            lapsed = {a for a, d in mirror["expires"].items() if d <= now}
             expected = {
-                axis: DEFAULTS[axis]
-                if axis in mirror["expires"] and mirror["expires"][axis] <= now
-                else value
+                axis: DEFAULTS[axis] if axis in lapsed else value
                 for axis, value in mirror["mode"].items()
             }
+            if lapsed and _errors(expected):  # settled with the lapse, as the host reads it
+                expected["dep"] = "off"
             assert seen["mode"] == expected
             if mirror["caps"] is None:
                 assert seen["capabilities"] is None

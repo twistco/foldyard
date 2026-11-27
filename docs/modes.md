@@ -100,7 +100,10 @@ Two guard rails keep this honest:
   level, and the supervisor stops the token service and writes the switch back to its default. If
   that would leave a *dependent* switch in a combination that can only fail, the same write lowers
   that one to its default too (the supervisor logs it). So an expiry always lands on a mode that
-  works offline.
+  works offline. A stack that's running when a level expires keeps what that level set up (the gcp
+  metadata emulator, the environment its overlays set) until you run `fy up` or change the mode: the
+  supervisor doesn't restart your stack for you, so it says so instead: a notification, and a
+  `fy doctor` row (in the box too) while `fy state` shows the stack out of line with the mode.
 - **Combinations that can't work are refused.** Some levels only work alongside another switch's
   level. `fy mode` checks the whole resulting mode and refuses a combination that can't work. The
   error includes the exact `fy mode a=x b=y` command that fixes it (updates apply together).
@@ -308,6 +311,13 @@ set an environment variable a service reads. When you change the mode, foldyard 
 affected services of a running stack for you — no manual `down`/`up`. A mode change never *starts* a
 stack that wasn't running. Recipes pick up mode-derived variables as defaults (`${K:-v}`), so
 anything you export yourself still wins.
+
+Leaving a level also removes the services only it wanted: a running service whose profiles are all
+ones a level adds (the gcp metadata emulator's `metadata`, or `cloudsql`, which storage=staging
+adds) goes once no level enables them, after the services that pointed at it were recreated without
+that setting. The same holds for `fy up`. A profile of your own (`data` workers, say) is never
+touched, and neither is a service that's also in one. A service you start by hand in a profile a
+level adds goes at the next mode change or `fy up` that doesn't enable it.
 
 ## Writing your own switch
 

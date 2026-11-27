@@ -427,6 +427,15 @@ class GcpPlugin(Plugin):
                     "write through one. Remove it and retry."
                 ) from None
 
+    def compose_profiles(self) -> tuple[str, ...]:
+        # Only what a mode of this config can derive: `metadata` takes the gcp switch, and
+        # `cloudsql` the storage one too. A `cloudsql` service a consumer without that switch
+        # runs by hand stays theirs.
+        names = {s.name for s in self.switches()}
+        if "gcp" not in names:
+            return ()
+        return ("metadata", "cloudsql") if "storage" in names else ("metadata",)
+
     def derive_env(self, mode: dict) -> dict[str, str]:
         # Stack-side (not box) env: which compose profiles `fy up` runs. The metadata emulator
         # runs whenever a gcp rung is active; the box wiring is mode-INDEPENDENT (see box_args), so

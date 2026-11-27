@@ -3533,3 +3533,29 @@ def test_box_doctor_speaks_for_an_undeclared_agent_only_when_it_finds_a_login(
     plant(agent_home)
     [(status, name, _detail)] = list(plugin().box_doctor_checks(_ctx()))
     assert status == "fail" and name == f"{label.lower()} login"
+
+
+def test_compose_profiles_from_several_plugins_are_unioned():
+    # gcp=user's `metadata` and fakecred=user's `fakecred` both run: a plain merge kept the last
+    # plugin's, so the metadata emulator's profile vanished from the posture, and re-rendering
+    # took the live level's emulator for one no level wants.
+    class A(plugins.Plugin):
+        name = "a"
+
+        def derive_env(self, mode):
+            return {"COMPOSE_PROFILES": "metadata,cloudsql", "A": "1"}
+
+    class B(plugins.Plugin):
+        name = "b"
+
+        def derive_env(self, mode):
+            return {"COMPOSE_PROFILES": "fakecred,metadata", "B": "2"}
+
+    class C(plugins.Plugin):
+        name = "c"
+
+        def derive_env(self, mode):
+            return {"A": "3"}
+
+    env = plugins.Registry([A(), B(), C()]).derive_env({})
+    assert env == {"COMPOSE_PROFILES": "metadata,cloudsql,fakecred", "A": "3", "B": "2"}

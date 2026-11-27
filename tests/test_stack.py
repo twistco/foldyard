@@ -2887,6 +2887,42 @@ def test_running_extra_profiles_discovers_from_compose(fake_repo, monkeypatch):
     assert stack._running_extra_profiles(ctx) == []
 
 
+def test_running_extra_profiles_leaves_out_what_only_the_mode_wanted(fake_repo, monkeypatch):
+    # The metadata emulator (`metadata`) and the Cloud SQL proxy (`cloudsql`) run because a level
+    # wanted them: once none does, re-rendering mustn't keep them alive as if you had started
+    # them. Your own profile (`data`) stays, and so does a service that is also in one of yours.
+    base = fake_repo / "compose.base.yml"
+    base.write_text(
+        "services:\n"
+        "  app: {image: a}\n"
+        "  queue-worker: {image: q, profiles: [data]}\n"
+        "  metadata-emulator: {image: m, profiles: [metadata]}\n"
+        "  cloudsql-proxy: {image: c, profiles: [cloudsql]}\n"
+        "  graph-api: {image: g, profiles: [metadata, data]}\n"
+    )
+    ctx = stack.Context(
+        main=fake_repo,
+        env={"COMPOSE_PROFILES": ""},
+        compose=["podman", "compose", "-f", str(base)],
+        app="app",
+        project="p",
+        worktree="",
+    )
+    running = {"app", "queue-worker", "metadata-emulator", "cloudsql-proxy", "graph-api"}
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, deadline=None: running)
+    monkeypatch.setattr(stack.devmode, "read", lambda *a, **k: {"mode": {}})
+    monkeypatch.setattr(
+        stack.devmode.registry(),
+        "compose_profiles",
+        lambda: frozenset({"metadata", "cloudsql"}),
+    )
+    assert stack._running_extra_profiles(ctx) == ["data"]
+    assert stack._dropped_mode_services(ctx) == {"metadata-emulator", "cloudsql-proxy"}
+    ctx.env["COMPOSE_PROFILES"] = "metadata"  # a level wants the emulator: it's no extra at all
+    assert stack._running_extra_profiles(ctx) == ["data"]
+    assert stack._dropped_mode_services(ctx) == {"cloudsql-proxy"}
+
+
 def test_running_extra_profiles_also_spans_the_services_named(fake_repo, monkeypatch):
     # The heal revives a CRASHED service too, and a crashed one isn't running: naming it enables
     # its profile even when nothing else in that profile runs.
@@ -3879,3 +3915,257 @@ def test_podman_compose_reads_every_compose_argv_as_meant(
         assert any(ns.command == verb and expected.items() <= vars(ns).items() for ns in parsed), (
             f"podman-compose read no `{verb}` {expected} from {case}: {shown}"
         )
+
+
+# ── leaving a level: its services go, after their dependents are recreated (tangible-shaped) ──
+
+
+_TANGIBLE_COMPOSE = """\
+services:
+  app: {image: a}
+  postgres: {image: p}
+  metadata-emulator: {image: m, profiles: [metadata]}
+  cloudsql-proxy: {image: c, profiles: [cloudsql]}
+  queue-worker: {image: q, profiles: [data]}
+"""
+
+
+@pytest.fixture
+def tangible_world(fake_repo, monkeypatch):
+    """The real consumer's shape: an identity overlay (GCE_METADATA_HOST on the app) under
+    gcp=sa|user, the metadata emulator behind `metadata` and the Cloud SQL proxy behind `cloudsql`
+    (both profiles a level adds), and your own `data` worker. The engine and compose are scripted
+    at stack's own seams; ``world["events"]`` is what ran, in order."""
+    (fake_repo / "compose.podman.yml").write_text(_TANGIBLE_COMPOSE)
+    (fake_repo / "compose.identity.yml").write_text(
+        "services:\n  app: {environment: {GCE_METADATA_HOST: 'metadata-emulator:80'}}\n"
+    )
+    (fake_repo / "compose.storage.yml").write_text("services: {}\n")
+    (fake_repo / "foldyard.toml").write_text(
+        _FAKE_TOML
+        + '\n[[overlay]]\nfile = "compose.identity.yml"\nwhen = { gcp = ["sa", "user"] }\n'
+        + '\n[[overlay]]\nfile = "compose.storage.yml"\nwhen = { storage = "staging" }\n'
+    )
+    config.clear_caches()
+    world: dict = {
+        "mode": {"gcp": "off", "storage": "local", "github": "off"},
+        "running": {
+            "app": "c-app",
+            "postgres": "c-pg",
+            "metadata-emulator": "c-emu",
+            "cloudsql-proxy": "c-csql",
+            "queue-worker": "c-q",
+        },
+        "events": [],
+        "up_rc": 0,
+    }
+    monkeypatch.setattr(devmode, "read", lambda *a, **k: {"mode": dict(world["mode"])})
+    profiles_of = {"metadata-emulator": {"metadata"}, "cloudsql-proxy": {"cloudsql"}}
+    profiles_of["queue-worker"] = {"data"}
+
+    def services(ctx, args):
+        flags = [args[i + 1] for i, a in enumerate(args) if a == "--profile"]
+        active = set(flags or (ctx.env.get("COMPOSE_PROFILES") or "").split(","))
+        names = ["app", "postgres", "metadata-emulator", "cloudsql-proxy", "queue-worker"]
+        return [n for n in names if not profiles_of.get(n) or profiles_of[n] & active]
+
+    def compose_output(ctx, args, timeout=None):
+        out = "\n".join(services(ctx, args)) + "\n" if "config" in args else ""
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    def up(ctx, args, extra_profiles=None, **_kw):
+        world["events"].append(("up", list(ctx.compose), list(extra_profiles or []), list(args)))
+        return world["up_rc"]
+
+    def run(cmd, **_kw):
+        if cmd[1:3] == ["rm", "-f"]:
+            gone = set(cmd[3:])
+            world["events"].append(("rm", sorted(gone)))
+            world["running"] = {s: c for s, c in world["running"].items() if c not in gone}
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(stack, "_running_services", lambda ctx, d=None: set(world["running"]))
+    monkeypatch.setattr(
+        stack,
+        "_project_services",
+        lambda ctx, *, stopped: [(c, s) for s, c in world["running"].items()],
+    )
+    monkeypatch.setattr(stack, "_compose_output", compose_output)
+    monkeypatch.setattr(stack, "_compose", lambda ctx, args, **kw: up(ctx, args, **kw))
+    monkeypatch.setattr(
+        stack, "_compose_captured", lambda ctx, args, emit, **kw: up(ctx, args, **kw)
+    )
+    monkeypatch.setattr(stack, "_run", run)
+    monkeypatch.setattr(stack.subprocess, "run", lambda cmd, **kw: _FakeProc())
+    monkeypatch.setattr(stack, "_render_config", lambda *a, **k: {"services": {}})
+    monkeypatch.setattr(stack, "_remove_stranded_dependents", lambda *a, **k: True)
+    monkeypatch.setattr(stack, "_reconcile_foreign_containers", lambda *a, **k: None)
+    monkeypatch.setattr(stack, "_stack_is_up", lambda *a, **k: True)
+    monkeypatch.setattr(stack, "_build", lambda *a, **k: 0)
+    monkeypatch.setattr(stack, "reclaim", lambda *a, **k: None)
+    monkeypatch.setattr(stack, "_remove_superseded", lambda *a, **k: None)
+    monkeypatch.setattr(config, "in_box", lambda: False)
+    return world
+
+
+def _the_up(world) -> tuple:
+    (up,) = [e for e in world["events"] if e[0] == "up" and e[3][:1] == ["up"]]
+    return up
+
+
+def test_leaving_gcp_recreates_the_app_then_removes_the_emulator(tangible_world):
+    # gcp=sa → off with the stack up: the app is recreated without the identity overlay, and
+    # only then does the emulator go (with the Cloud SQL proxy, whose profile only a level
+    # adds); your `data` worker is re-rendered and stays.
+    tangible_world["mode"]["gcp"] = "off"
+    sa = devmode.posture_signature({"gcp": "sa", "storage": "local", "github": "off"})
+    off = devmode.posture_signature(dict(tangible_world["mode"]))
+
+    assert stack.reconcile_posture(sa, off, sink=lambda _l: None) is True
+
+    _, files, extra, _args = _the_up(tangible_world)
+    assert not any("compose.identity.yml" in f for f in files)  # the app loses GCE_METADATA_HOST
+    assert extra == ["data"]
+    events = tangible_world["events"]
+    assert events.index(_the_up(tangible_world)) < events.index(("rm", ["c-csql", "c-emu"]))
+    assert set(tangible_world["running"]) == {"app", "postgres", "queue-worker"}
+
+
+def _a_lapse_record(since: float = 1.0) -> None:
+    lapse = {"lapsed": [{"switch": "gcp", "level": "user"}], "since": since}
+    config.stack_lapse_file().parent.mkdir(parents=True, exist_ok=True)
+    config.stack_lapse_file().write_text(json.dumps(lapse))
+
+
+def test_fy_up_after_a_lapse_removes_what_only_the_lapsed_level_wanted(tangible_world):
+    # The supervisor doesn't run compose for a lapse; `fy up` is what brings the stack in line,
+    # and the lapse's doctor row goes with it.
+    _a_lapse_record()
+    tangible_world["running"]["retired"] = "c-old"  # a service you took out of compose
+
+    assert stack.up() == 0
+
+    _, files, extra, args = _the_up(tangible_world)
+    assert args[:2] == ["up", "-d"] and extra == ["data"]
+    assert not any("compose.identity.yml" in f for f in files)
+    events = tangible_world["events"]
+    assert events.index(_the_up(tangible_world)) < events.index(("rm", ["c-csql", "c-emu"]))
+    # Only what a level wanted: `fy up` never removed what left your compose, and still doesn't.
+    assert set(tangible_world["running"]) == {"app", "postgres", "queue-worker", "retired"}
+    assert not config.stack_lapse_file().exists()
+
+
+def test_fy_up_keeps_a_level_s_services_while_it_is_on(tangible_world):
+    tangible_world["mode"]["gcp"] = "sa"
+    assert stack.up() == 0
+    _, files, _extra, _args = _the_up(tangible_world)
+    assert any("compose.identity.yml" in f for f in files)
+    assert ("rm", ["c-csql"]) in tangible_world["events"]  # storage stays local: no level wants it
+    assert "metadata-emulator" in tangible_world["running"]
+
+
+def test_a_failed_up_removes_nothing(tangible_world):
+    _a_lapse_record()
+    tangible_world["up_rc"] = 1
+
+    assert stack.up() == 1
+
+    assert not [e for e in tangible_world["events"] if e[0] == "rm"]
+    assert "metadata-emulator" in tangible_world["running"]
+    assert config.stack_lapse_file().exists()  # not in line yet
+
+
+def test_a_reconcile_that_brought_the_stack_in_line_drops_the_lapse_record(tangible_world):
+    _a_lapse_record()
+    sa = devmode.posture_signature({"gcp": "sa", "storage": "local", "github": "off"})
+    off = devmode.posture_signature(dict(tangible_world["mode"]))
+    assert stack.reconcile_posture(sa, off, sink=lambda _l: None) is True
+    assert not config.stack_lapse_file().exists()
+
+
+def test_a_refused_removal_keeps_the_lapse_record(tangible_world, monkeypatch):
+    # The emulator is still there: the stack isn't in line, whatever else the run did.
+    _a_lapse_record()
+
+    def refuse(cmd, **_kw):
+        return subprocess.CompletedProcess(cmd, 125 if cmd[1:3] == ["rm", "-f"] else 0, "", "no")
+
+    monkeypatch.setattr(stack, "_run", refuse)
+    assert stack.up() == 0
+    assert config.stack_lapse_file().exists()
+    sa = devmode.posture_signature({"gcp": "sa", "storage": "local", "github": "off"})
+    off = devmode.posture_signature(dict(tangible_world["mode"]))
+    assert stack.reconcile_posture(sa, off, sink=lambda _l: None) is True
+    assert config.stack_lapse_file().exists()
+
+
+def test_a_skipped_reconcile_keeps_the_lapse_record(tangible_world, monkeypatch):
+    _a_lapse_record()
+
+    def hiccup(*_a, **_k):
+        raise RuntimeError("engine went away")
+
+    monkeypatch.setattr(stack, "_compose_captured", hiccup)
+    sa = devmode.posture_signature({"gcp": "sa", "storage": "local", "github": "off"})
+    off = devmode.posture_signature(dict(tangible_world["mode"]))
+    stack.reconcile_posture(sa, off, sink=lambda _l: None)
+    assert config.stack_lapse_file().exists()
+
+
+def test_a_lapse_recorded_during_fy_up_outlives_it(tangible_world, monkeypatch):
+    # The up rendered the mode it read before the lapse was written back, so the stack hasn't
+    # caught up with that one: only the record the up read is its to clear.
+    _a_lapse_record(since=1.0)
+    real = stack._compose
+
+    def lapses_meanwhile(ctx, args, **kw):
+        _a_lapse_record(since=2.0)
+        return real(ctx, args, **kw)
+
+    monkeypatch.setattr(stack, "_compose", lapses_meanwhile)
+    assert stack.up() == 0
+    assert json.loads(config.stack_lapse_file().read_text())["since"] == 2.0
+
+
+def test_a_lapse_recorded_during_a_reconcile_outlives_it(tangible_world, monkeypatch):
+    _a_lapse_record(since=1.0)
+    real = stack._compose_captured
+
+    def lapses_meanwhile(ctx, args, emit, **kw):
+        _a_lapse_record(since=2.0)
+        return real(ctx, args, emit, **kw)
+
+    monkeypatch.setattr(stack, "_compose_captured", lapses_meanwhile)
+    sa = devmode.posture_signature({"gcp": "sa", "storage": "local", "github": "off"})
+    off = devmode.posture_signature(dict(tangible_world["mode"]))
+    assert stack.reconcile_posture(sa, off, sink=lambda _l: None) is True
+    assert json.loads(config.stack_lapse_file().read_text())["since"] == 2.0
+
+
+def test_an_exported_compose_profiles_doesnt_take_the_emulator_a_level_wants(
+    tangible_world, monkeypatch
+):
+    # `COMPOSE_PROFILES=data fy up` under gcp=sa: the export wins in the env compose sees, but the
+    # emulator is gcp=sa's, so it is kept running and in the render, not swept as left over.
+    tangible_world["mode"]["gcp"] = "sa"
+    monkeypatch.setenv("COMPOSE_PROFILES", "data")
+    assert stack.up() == 0
+    _, _files, extra, _args = _the_up(tangible_world)
+    assert "metadata" in extra
+    assert "metadata-emulator" in tangible_world["running"]
+
+
+def test_fy_up_keeps_the_lapse_record_when_it_cant_tell_a_levels_services(
+    tangible_world, monkeypatch
+):
+    # Which services only a level wanted couldn't be told (the files didn't answer): nothing was
+    # removed, so the stack isn't known to be in line.
+    _a_lapse_record()
+
+    def unreadable(ctx, timeout=None):
+        raise OSError("the VM couldn't read compose.podman.yml")
+
+    monkeypatch.setattr(stack, "_service_profiles", unreadable)
+    assert stack.up() == 0
+    assert "metadata-emulator" in tangible_world["running"]
+    assert config.stack_lapse_file().exists()

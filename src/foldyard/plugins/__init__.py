@@ -507,6 +507,13 @@ class Plugin:
         """Recipe env the mode implies (merged as ``${K:-v}`` defaults; explicit env wins)."""
         return {}
 
+    def compose_profiles(self) -> Iterable[str]:
+        """Every compose profile some level of this plugin's can add (the ``COMPOSE_PROFILES``
+        its :meth:`derive_env` may return): the services in only these run because a level wants
+        them, so `fy up` and a mode change remove them once none does. A profile left undeclared
+        is treated as yours and kept. Default: none."""
+        return ()
+
     def env_defaults(self, mode: dict) -> dict[str, str]:
         """HOST-process env this mode can derive from committed, non-secret config (e.g. a
         Pulumi App id, a deterministic SA email) instead of requiring a human to hand-populate
@@ -816,9 +823,17 @@ class Registry:
         return out
 
     def derive_env(self, mode: dict) -> dict[str, str]:
+        """Every plugin's env for ``mode``, a later plugin's value winning — except
+        ``COMPOSE_PROFILES``, which is the union (in order, each once): two levels from two
+        plugins (gcp=user's ``metadata``, fakecred=user's ``fakecred``) each need theirs."""
         out: dict[str, str] = {}
+        profiles: list[str] = []
         for plugin in self.plugins:
-            out.update(plugin.derive_env(mode))
+            env = dict(plugin.derive_env(mode))
+            profiles += [p for p in env.pop("COMPOSE_PROFILES", "").split(",") if p]
+            out.update(env)
+        if profiles:
+            out["COMPOSE_PROFILES"] = ",".join(dict.fromkeys(profiles))
         return out
 
     def env_defaults(self, mode: dict) -> dict[str, str]:
@@ -920,6 +935,10 @@ class Registry:
         for plugin in self.plugins:
             out.update(plugin.mode_services(mode))
         return out
+
+    def compose_profiles(self) -> frozenset[str]:
+        """Every compose profile some plugin's level can add (:meth:`Plugin.compose_profiles`)."""
+        return frozenset(p for plugin in self.plugins for p in plugin.compose_profiles())
 
     def tui_panels(self) -> list[TuiPanel]:
         out: list[TuiPanel] = []

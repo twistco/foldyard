@@ -21,6 +21,7 @@ import pytest
 
 from e2e_host import (
     NETWORK,
+    PROJECT,
     _adopt_on_host,
     _engine,
     _engine_env,
@@ -98,3 +99,63 @@ def test_mode_off_takes_the_fake_minter_down_again(repo):
     )
     assert "fake-minter" not in clean.out, clean.out
     assert "compose.feature.yml" not in clean.out, clean.out
+
+
+def _doctor_lapse_row(repo) -> str | None:
+    """The `stack after a time limit` doctor warning on your computer, or None without one (a ✓
+    row, the stack having caught up, counts as none)."""
+    out = fy(["doctor"], repo, timeout=180).out
+    return next(
+        (ln for ln in out.splitlines() if "stack after a time limit" in ln and "fy up" in ln), None
+    )
+
+
+def _service_ids(service: str) -> list[str]:
+    """The running containers of the example stack's ``service``, by engine id."""
+    out = subprocess.run(
+        [
+            _engine(), "ps", "-q", "--no-trunc",
+            "--filter", f"label=io.podman.compose.project={PROJECT}",
+            "--filter", f"label=com.docker.compose.service={service}",
+        ],
+        env=_engine_env(), capture_output=True, text=True, timeout=30,
+    )  # fmt: skip
+    return out.stdout.split()
+
+
+def test_a_lapse_under_the_running_stack_is_reported_until_fy_up(repo):
+    # fakecred=user adds the `fakecred` profile, so its `fake-sidecar` runs: the stand-in for the
+    # gcp metadata emulator. The supervisor never runs compose for an expiry, so the lapse leaves
+    # the sidecar and fakedep's overlay in place, `fy doctor` says so, and `fy up` brings the
+    # stack in line: the api recreated without the overlay first, then the sidecar removed.
+    fy_ok(["mode", "fakecred=user", "fakedep=on", "ttl=1h"], repo, timeout=300)
+    wait_for(
+        lambda: (r := fy(["state"], repo, timeout=60)).rc == 0 and r,
+        timeout=180,
+        what="fy state clean with the overlay",
+    )
+    sidecar = wait_for(lambda: _service_ids("fake-sidecar"), timeout=120, what="the sidecar")
+    fy_ok(["up"], repo, timeout=900)  # while the level holds, `fy up` keeps what it wants
+    assert _service_ids("fake-sidecar") == sidecar
+    try:
+        fy_ok(["clock", "ff", "2h"], repo)
+        row = wait_for(lambda: _doctor_lapse_row(repo), timeout=120, what="the lapse's doctor row")
+    finally:
+        fy(["clock", "reset"], repo)
+    assert "fakecred=user" in row and "`fy up` brings it in line" in row, row
+    assert _service_ids("fake-sidecar") == sidecar  # the lapse alone ran no compose
+    assert '"on"' in _api_root()  # still the lapsed posture's overlay
+    api = _service_ids("api")
+
+    up = fy_ok(["up"], repo, timeout=900)
+
+    assert _service_ids("fake-sidecar") == [], up.out
+    assert _service_ids("api") != api, up.out  # recreated without the overlay
+    # Removed only after the up that recreated the api: the sweep's line follows compose's `up`.
+    lines = up.out.splitlines()
+    up_at = next(i for i, ln in enumerate(lines) if " up -d" in ln)
+    removed_at = next(i for i, ln in enumerate(lines) if "fake-sidecar" in ln and "removing" in ln)
+    assert up_at < removed_at, up.out
+    assert _doctor_lapse_row(repo) is None
+    body = wait_for(lambda: (b := _api_root()) and '"feature"' in b and b, timeout=120, what="/")
+    assert '"on"' not in body, body

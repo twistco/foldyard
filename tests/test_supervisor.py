@@ -1120,68 +1120,160 @@ def test_expiry_without_dependents_reverts_only_the_lapsed_axis(isolated_state):
     assert mode["gcp"] == "off" and mode["github"] == "on"  # unrelated raised axis kept
 
 
-@pytest.mark.parametrize("swapped", [False, True])
-def test_an_expiry_returns_with_a_fifo_for_the_compose_file(
-    isolated_state, monkeypatch, special, tmp_path, swapped
-):
-    # An expiry that settles a dependent switch (llm=record without gcp) changes the stack's
-    # posture, so the tick reconciles the stack (set_mode → StackScope → reconcile_posture), whose
-    # host compose client opens the checkout's compose files with a blocking open: a FIFO there
-    # stopped the tick for good, the daemons' stop and the heartbeat with it. `swapped`: planted
-    # after the regular-file check looked, so the deadline is what returns.
-    import contextvars
-    import stat
-    import subprocess
+def _backdate(state, axis: str) -> None:
+    from foldyard import devmode
 
+    raw = json.loads(state["auth"].read_text())
+    raw["expires"][axis] = devmode._iso(devmode.now() - timedelta(hours=1))
+    state["auth"].write_text(json.dumps(raw))
+
+
+@pytest.fixture
+def lapse_world(isolated_state, monkeypatch):
+    """A TTL lapse on a real state file, with the seams it must (not) reach recorded: the stack
+    reconcile (compose), the engine, the compose files and the notifications."""
     from foldyard import config, devmode, stack
 
-    devmode.set_mode({"gcp": "sa", "llm": "record"})
-    raw = json.loads(isolated_state["auth"].read_text())
-    raw["expires"]["gcp"] = devmode._iso(devmode.now() - timedelta(hours=1))
-    isolated_state["auth"].write_text(json.dumps(raw))
-
-    fifo = special(tmp_path / "compose.yml", "fifo")
-    ctx = stack.Context(
-        main=tmp_path,
-        env={"FOLDYARD_CHECKOUT": str(tmp_path)},
-        compose=["podman", "compose", "-f", str(fifo)],
-        app="",
-        project="p",
-        worktree="",
-    )
-    compose_calls: list = []
-
-    def client(cmd, timeout=None, **_kw):  # the host compose client: a blocking open of each -f
-        if cmd[1:2] != ["compose"]:
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        compose_calls.append(timeout)
-        if timeout is None:
-            open(fifo).close()
-        elif stat.S_ISFIFO(os.stat(fifo).st_mode):
-            raise subprocess.TimeoutExpired(cmd, timeout)
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    # The test config's llm shapes no stack env: a signature that follows the mode, so it does.
-    monkeypatch.setattr(
-        devmode, "posture_signature", lambda mode: {"env": dict(mode), "overlays": []}
-    )
+    world: dict[str, Any] = {"reconciled": [], "notified": [], "asked": [], "state": isolated_state}
     monkeypatch.setattr(config, "has_compose_stack", lambda: True)
-    monkeypatch.setattr(stack, "resolve", lambda **_kw: ctx)
-    monkeypatch.setattr(stack, "_stack_is_up", lambda ctx, ignore_services=frozenset(): True)
-    monkeypatch.setattr(stack.subprocess, "run", client)
-    monkeypatch.setattr(stack.devmode, "run_stream", lambda *a, **k: -9)
-    checked: list[bool] = []
-    real = stack._not_regular
-    monkeypatch.setattr(
-        stack, "_not_regular", lambda c: (checked.append(True), [] if swapped else real(c))[1]
-    )
 
-    bound = contextvars.copy_context()  # the bound config (a contextvar) isn't a thread's
-    mode = special.promptly(lambda: bound.run(supervisor.expire_user_modes))
+    def asked(what):
+        return lambda *a, **k: world["asked"].append(what)
+
+    monkeypatch.setattr(
+        stack, "reconcile_posture", lambda *a, **k: world["reconciled"].append(a) or True
+    )
+    monkeypatch.setattr(devmode, "ps_labels", asked("engine"))
+    monkeypatch.setattr(stack, "resolve", asked("compose files"))
+    monkeypatch.setattr(stack, "_service_profiles", asked("compose files"))
+    monkeypatch.setattr(supervisor, "_notify", lambda t, b: world["notified"].append((t, b)))
+    return world
+
+
+def _lapse(world, settles: bool = False) -> None:
+    """gcp=user (over llm=record when ``settles``), its TTL backdated, as set from `fy mode`."""
+    from foldyard import devmode
+
+    devmode.set_mode({"gcp": "sa", **({"llm": "record"} if settles else {})})
+    devmode.set_mode({"gcp": "user"}, ttl=60)
+    world["reconciled"].clear()
+    _backdate(world["state"], "gcp")
+
+
+def _lapse_record() -> Any:
+    from foldyard import config
+
+    path = config.stack_lapse_file()
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+@pytest.mark.parametrize("settles", [False, True])
+def test_an_expiry_never_runs_compose_nor_asks_the_engine_or_the_files(lapse_world, settles):
+    # Compose from the tick can outlast the heartbeat (a stale one gets the supervisor restarted)
+    # and the box can stall it (a FIFO for a compose file): an expiry writes the mode, stops the
+    # token service, and records the lapse — whether or not it also lowers a dependent switch
+    # (llm=record without gcp), which used to reconcile from here. Whether the stack has caught
+    # up is `fy doctor`'s to ask.
+    _lapse(lapse_world, settles)
+
+    mode = supervisor.expire_user_modes()
+
     assert mode["gcp"] == "off" and mode["llm"] == "off"
-    assert checked  # the expiry did reach the stack's compose
-    assert all(t is not None for t in compose_calls)
-    assert bool(compose_calls) == swapped
+    assert lapse_world["reconciled"] == [] and lapse_world["asked"] == []
+
+
+def test_a_lapse_that_changes_the_stack_is_told_and_recorded(lapse_world):
+    from foldyard import config, devmode
+
+    _lapse(lapse_world)
+
+    supervisor.expire_user_modes()
+
+    ((title, body),) = lapse_world["notified"]
+    assert config.project() in title and "gcp=user lapsed" in title
+    assert devmode.mode_blurb()[("gcp", "user")] in body  # the plugin's own words for the level
+    assert devmode.LAPSE_FIX in body and "if the stack is running" in body
+    record = _lapse_record()
+    assert [(e["switch"], e["level"]) for e in record["lapsed"]] == [("gcp", "user")]
+
+
+def test_a_cascaded_switch_is_named_with_the_lapse(lapse_world):
+    _lapse(lapse_world, settles=True)
+
+    supervisor.expire_user_modes()
+
+    ((title, body),) = lapse_world["notified"]
+    assert "gcp=user lapsed" in title and "llm" not in title
+    assert "llm=record" in body and "lowered with it" in body
+
+
+def test_a_lapse_that_shapes_no_stack_is_not_news(lapse_world):
+    # github-user is an [[inject]] emergency switch: the proxy injects it, compose never sees it.
+    from foldyard import devmode
+
+    devmode.set_mode({"github-user": "on"}, ttl=60)
+    _backdate(lapse_world["state"], "github-user")
+
+    mode = supervisor.expire_user_modes()
+
+    assert mode["github-user"] == "off"
+    assert lapse_world["notified"] == [] and _lapse_record() is None
+
+
+def test_a_lapse_in_a_project_without_a_stack_is_not_news(lapse_world, monkeypatch):
+    from foldyard import config
+
+    monkeypatch.setattr(config, "has_compose_stack", lambda: False)
+    _lapse(lapse_world)
+
+    supervisor.expire_user_modes()
+
+    assert lapse_world["notified"] == [] and _lapse_record() is None
+
+
+def test_a_supervisor_that_dies_before_the_mode_write_tells_it_next_tick(lapse_world, monkeypatch):
+    from foldyard import devmode
+
+    _lapse(lapse_world)
+    real = devmode.set_mode
+
+    def dies(*_a, **_k):
+        raise KeyboardInterrupt  # killed between the record and the mode write
+
+    monkeypatch.setattr(devmode, "set_mode", dies)
+    with pytest.raises(KeyboardInterrupt):
+        supervisor.expire_user_modes()
+    assert _lapse_record() is not None and lapse_world["notified"] == []
+    monkeypatch.setattr(devmode, "set_mode", real)
+
+    supervisor.expire_user_modes()  # the restarted supervisor finds the lapse again
+
+    ((title, _),) = lapse_world["notified"]
+    assert "gcp=user lapsed" in title
+    assert [e["switch"] for e in _lapse_record()["lapsed"]] == ["gcp"]
+
+
+def test_a_second_lapse_keeps_the_first_in_the_record_and_tells_only_itself(lapse_world):
+    from foldyard import config
+
+    _lapse(lapse_world)
+    earlier = {
+        "lapsed": [{"switch": "llm", "level": "record", "label": "x", "at": "y"}],
+        "since": 1,
+    }
+    config.stack_lapse_file().parent.mkdir(parents=True, exist_ok=True)
+    config.stack_lapse_file().write_text(json.dumps(earlier))
+
+    supervisor.expire_user_modes()
+
+    record = _lapse_record()
+    assert [(e["switch"], e["level"]) for e in record["lapsed"]] == [
+        ("llm", "record"),
+        ("gcp", "user"),
+    ]
+    assert record["since"] != 1
+    ((title, body),) = lapse_world["notified"]
+    assert "gcp=user" in title and "llm" not in body  # only the news is pushed
 
 
 # ── capability probes (consolidation proposal B) ─────────────────────────────────────────

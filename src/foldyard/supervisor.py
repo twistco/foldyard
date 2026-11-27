@@ -4,7 +4,9 @@
 Reads the authoritative mode file (devmode.py) every couple of seconds and reconciles
 the daemons to it: switching an injector on rewrites the proxy's live rule set,
 setting an axis to off stops its daemon, and a lapsed `user` TTL kills the daemon AND
-writes the axis back to off (the structural guarantee that emergencies never linger).
+writes the axis back to off (the structural guarantee that emergencies never linger). The tick
+never runs compose for it: a running stack the lapse changed is reported (a notification and a
+`fy doctor` row), not recreated.
 Each tick also stamps a project-shared liveness heartbeat (so the launch paths can tell a
 healthy holder from a wedged one) and refreshes each active worktree's mirror with daemon
 health so box sessions' `fy mode` shows live status. Capability probes ride the tick too:
@@ -970,26 +972,59 @@ def expire_user_modes() -> dict:
     combination (a rung that can only fail without the identity it consumed) cascades down to
     its default in the SAME atomic write (devmode.settle_incoherent), so an emergency lapse
     always lands on a posture that works offline instead of one that errors until the next
-    interactive `fy mode`."""
+    interactive `fy mode`.
+
+    It never reconciles the stack, and asks neither the engine nor the compose files: compose in
+    the tick can outlast the heartbeat (and get a healthy supervisor bounced), and the box can
+    stall it. A lapse that changes what the stack should run is recorded and SAID instead (a
+    notification, and the `fy doctor` row, which asks whether the stack has caught up,
+    devmode._stack_lapse_check). The token service stops with the level either way, so nothing
+    new is minted meanwhile."""
     lapsed = devmode.read(apply_expiry=False)
-    live = devmode.read(apply_expiry=True)
-    defaults = devmode.axis_defaults()
-    flips = {a: defaults[a] for a in devmode.axes() if lapsed["mode"][a] != live["mode"][a]}
-    if flips:
-        settle = devmode.settle_incoherent(live["mode"])
-        if settle:
+    live = devmode.read(apply_expiry=True)  # the expired levels off, and what they strand settled
+    changed = {a: r for a, r in lapsed["mode"].items() if r != live["mode"][a]}
+    if changed:
+        gone = lapsed["expires"].keys() - live["expires"].keys()
+        expired = {a: r for a, r in changed.items() if a in gone}
+        lowered = {a: r for a, r in changed.items() if a not in gone}
+        flips = {a: live["mode"][a] for a in changed}
+        if lowered:
             log(
                 "TTL expiry strands dependent switches — settling "
-                + ", ".join(f"{a}={r}" for a, r in settle.items())
+                + ", ".join(f"{a}={flips[a]}" for a in lowered)
             )
-        flips.update(settle)
         log(f"TTL expired → {', '.join(f'{a}={r}' for a, r in flips.items())}")
+        settled = live["mode"]
+        # The signatures set_mode compares: a lapse that leaves them equal (an injected header)
+        # changes nothing compose runs. Recorded BEFORE the mode write, so a supervisor that dies
+        # between the two records it again on its next tick, where a lapse already written back
+        # would never come round.
+        shapes_stack = config.has_compose_stack() and devmode.posture_signature(
+            lapsed["mode"]
+        ) != devmode.posture_signature(settled)
+        news = devmode.record_stack_lapse(expired, lowered) if shapes_stack else []
         # force: an expiry is a de-escalation and must NEVER be refused — if settle couldn't
         # fully resolve it (no single downgrade helps), that's surfaced by `fy mode` and gates
         # the next interactive set instead of crashing the supervisor loop.
-        devmode.set_mode(flips, force=True)
-        return {**live["mode"], **settle}
+        devmode.set_mode(flips, force=True, reconcile=False)
+        if news:
+            _tell_stack_lapse(news)
+        return settled
     return live["mode"]
+
+
+def _tell_stack_lapse(entries: list[dict]) -> None:
+    """Push a lapse that changes what this checkout's stack should run (its record's new
+    ``entries``). The supervisor doesn't ask whether the stack runs (an engine call the tick
+    can't afford to wait on), so the message says what a running one still has, and the
+    `fy doctor` row says whether it does."""
+    message = devmode.lapse_message(entries, running=False)
+    wt = config.active_worktree()
+    where = f" [worktree {wt}]" if wt else ""
+    named = [e for e in entries if not e.get("lowered")]
+    levels = ", ".join(f"{e['switch']}={e['level']}" for e in named)
+    log(f"⚠ stack{where}: {message}")
+    _notify(f"fy {config.project()}: {levels} lapsed{where}", message)
 
 
 # Capability-probe results, keyed (worktree, probe name, the probed axis's rung). Each entry

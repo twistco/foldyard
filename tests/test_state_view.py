@@ -22,10 +22,11 @@ def no_render(monkeypatch):
     'unavailable' unless a test says what it is (tests/test_confighash.py covers the render)."""
     from foldyard import reconcile
 
+    monkeypatch.setattr(reconcile.StackScope, "_resolve", lambda self: (object(), ""))
     monkeypatch.setattr(
         reconcile.StackScope,
         "_desired_hashes",
-        lambda self: (None, "not rendered in unit tests", HASH),
+        lambda self, ctx, deadline: (None, "not rendered in unit tests", HASH),
     )
 
 
@@ -165,12 +166,29 @@ def _container(service: str, *overlays: str, hash: str = "current") -> tuple[str
     )
 
 
-def _stack_rows(monkeypatch, running, rendered: set[str] | None = None):
+def _stack_rows(
+    monkeypatch,
+    running,
+    rendered: set[str] | None = None,
+    left_over: frozenset[str] | None = frozenset(),
+):
     """The stack scope's rows over ``running``, with every ``rendered`` service's fresh hash
-    ``<service>-current`` (default: every running service); None = the render is unavailable."""
+    ``<service>-current`` (default: every running service); None = the render is unavailable.
+    ``left_over``: the services outside the render that only a level that's off wanted (None:
+    that can't be told)."""
     from foldyard import reconcile
 
     monkeypatch.setattr(devmode, "ps_labels", lambda *a, **k: running)
+    # Through the real _left_over: what stack._dropped_mode_services answers for them.
+    from foldyard import stack
+
+    monkeypatch.setattr(
+        stack,
+        "_dropped_mode_services",
+        lambda ctx, deadline=None, running=None: (
+            None if left_over is None else set(left_over) & (running or set())
+        ),
+    )
     if rendered is not None or running:
         names = (
             rendered
@@ -180,7 +198,7 @@ def _stack_rows(monkeypatch, running, rendered: set[str] | None = None):
         monkeypatch.setattr(
             reconcile.StackScope,
             "_desired_hashes",
-            lambda self: ({n: f"{n}-current" for n in names}, "", HASH),
+            lambda self, ctx, deadline: ({n: f"{n}-current" for n in names}, "", HASH),
         )
     return reconcile.StackScope().rows(devmode.read())
 
@@ -189,7 +207,9 @@ def _unrendered(monkeypatch):
     from foldyard import reconcile
 
     monkeypatch.setattr(
-        reconcile.StackScope, "_desired_hashes", lambda self: (None, "podman-compose moved", HASH)
+        reconcile.StackScope,
+        "_desired_hashes",
+        lambda self, ctx, deadline: (None, "podman-compose moved", HASH),
     )
 
 
@@ -249,6 +269,32 @@ def test_stack_container_outside_the_render_is_not_compared(overlay_repo, monkey
     )
     assert row.status == "ok"
     assert row.observed == "1 containers match the rendered config; 1 not in it (e2e-app)"
+
+
+def test_stack_reports_a_mode_service_left_running_as_drift(overlay_repo, monkeypatch):
+    # The emulator a level that's off started: `fy up` removes it, so it isn't a service of yours
+    # the render merely doesn't name.
+    (row,) = _stack_rows(
+        monkeypatch,
+        [_container("postgres"), _container("metadata-emulator")],
+        rendered={"postgres"},
+        left_over=frozenset({"metadata-emulator"}),
+    )
+    assert row.status == "drift"
+    assert "metadata-emulator" in row.observed and "`fy up` removes it" in row.observed
+
+
+def test_stack_cant_say_when_it_cant_tell_a_levels_services(overlay_repo, monkeypatch):
+    # The emulator runs outside the render, and which services only a level wanted can't be told
+    # (the compose files didn't answer in time): that's not "in line", whatever else matches.
+    (row,) = _stack_rows(
+        monkeypatch,
+        [_container("postgres"), _container("metadata-emulator")],
+        rendered={"postgres"},
+        left_over=None,
+    )
+    assert row.status == "unknown"
+    assert "metadata-emulator" in row.observed
 
 
 def test_stack_without_a_render_falls_back_to_overlays_but_never_to_ok(overlay_repo, monkeypatch):

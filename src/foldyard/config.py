@@ -2459,6 +2459,15 @@ def mode_file() -> Path:
     return new
 
 
+def stack_lapse_file() -> Path:
+    """This worktree's record of a TTL lapse that changed what its stack should run: the levels
+    that lapsed (``devmode.record_stack_lapse``, from the supervisor). `fy up`, a mode change's
+    reconcile and `fy doctor` finding the stack in line drop it; `fy doctor` reads it here on your
+    computer, and the box reads the copy :func:`foldyard.devmode.write_mirror` puts in the
+    mirror."""
+    return posture_dir() / "stack-lapse.json"
+
+
 def host_env_file() -> Path:
     """The SHARED identity env (App IDs, PEM secret names) — one per project, not per worktree
     (the minters serving every branch read it). ``FOLDYARD_HOST_ENV`` wins, else

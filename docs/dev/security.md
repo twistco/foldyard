@@ -99,10 +99,11 @@ anything a person might need to read exactly uses `printable`.
   files with a blocking `open`, so every compose call on your computer checks the `-f` files are
   regular first (`stack._not_regular`) and says so when one isn't. Not the project `.env`: the
   client skips one that isn't regular itself. The posture reconcile also runs under one deadline
-  (`stack.RECONCILE_TIMEOUT`), since the box can swap a file in after the check and the supervisor's
-  tick can run it: a TTL expiry does when it also turns off a switch that can't work without the
-  expired one (a plain expiry leaves the stack alone). Running out is a reconcile skipped, never one
-  done.
+  (`stack.RECONCILE_TIMEOUT`), since the box can swap a file in after the check. Running out is a
+  reconcile skipped, never one done. The supervisor's tick never runs it, nor reads a compose file:
+  a TTL expiry writes the mode and records the lapse (`devmode.record_stack_lapse`), and `fy doctor`
+  asks the stack scope's drift verdict whether the stack has caught up, every call behind it under
+  one deadline (`reconcile.VERDICT_TIMEOUT`).
 - **Names from config in the TUI**: never in a widget id or a selector. A switch name only has to be
   printable, and Textual raises on an id that isn't an identifier (`api.v2`, `a[b]`). A readable one
   can also be foldyard's own (switch `fix` made `fix-on`, a Doctor repair button's id). Keep the
@@ -135,6 +136,11 @@ anything a person might need to read exactly uses `printable`.
 - **Engine listings**: read `ps --format json` and act only on the engine's own `Id`
   (`stack._project_services`). In a `--format` template with one line per container, a label holding
   a newline starts a line of its own, and its first word reads as an id.
+- **Verdicts built on labels or the guest's answers** (the stack scope's drift, which `fy state`
+  shows) are the box's to shape, so they may only inform. When that verdict says the stack is in
+  line, the lapse row in `fy doctor` reads ✓ and your computer drops its record (in the box, the row
+  just goes): acceptable only because the row is advisory, since the supervisor already stopped the
+  level's token service.
 - **Paths in general**: never follow a link the box could have placed. Compare `realpath`s before
   trusting that something is where it says it is.
 - **Commands**: none from config, and none run from the mount (ADR-0023). A consumer's script runs

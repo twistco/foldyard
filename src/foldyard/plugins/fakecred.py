@@ -8,7 +8,9 @@ them on a real host with `fy host` + `fy mode` + `fy clock`, with zero secrets a
 (docs/testing-modes.md is the walkthrough):
 
   fakecred   off | on | user     the "credential": on runs the fake minter daemon; user is
-                                 an EMERGENCY rung (TTL + auto-revert, like gcp=user)
+                                 an EMERGENCY rung (TTL + auto-revert, like gcp=user) that
+                                 also adds the `fakecred` compose profile (the example's
+                                 `fake-sidecar`, standing in for the gcp metadata emulator)
   fakedep    off | on            a dependent behaviour rung: `on` REQUIRES fakecred≠off
                                  (a mode_issues error, like llm≠off requires gcp=sa) — so a
                                  fakecred TTL lapse exercises the expiry settle cascade
@@ -101,6 +103,17 @@ class FakecredPlugin(Plugin):
                 "requires": [],
             }
         }
+
+    def compose_profiles(self) -> tuple[str, ...]:
+        return ("fakecred",)
+
+    def derive_env(self, mode: dict) -> dict[str, str]:
+        # A service only the emergency level wants, like the metadata emulator gcp=user runs:
+        # example/compose.yml's `fake-sidecar` sits behind this profile, so a lapse followed by
+        # `fy up` can be watched removing it, after the services it shaped were recreated.
+        if mode.get("fakecred", "off") == "user":
+            return {"COMPOSE_PROFILES": "fakecred"}
+        return {}
 
     def capability_probes(self, mode: dict) -> list[CapabilityProbe]:
         if mode.get("fakecred", "off") == "off":

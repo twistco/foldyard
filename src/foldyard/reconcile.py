@@ -32,6 +32,7 @@ imported lazily — it rides in with the bundled podman-compose.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -180,6 +181,10 @@ class CapabilityScope(Scope):
         return rows or [ScopeRow("ok", self.name, "none (no active level is probed)", "—")]
 
 
+# The stack scope's verdict, all of it: the render and every compose call behind it.
+VERDICT_TIMEOUT = 30.0
+
+
 class StackScope(Scope):
     """The running compose stack vs its rendered config. The action is the mode-change edge
     (:meth:`reconcile` → ``stack.reconcile_posture``). The verdict is the compose provider's own
@@ -198,17 +203,41 @@ class StackScope(Scope):
 
         return stack.reconcile_posture(prev_posture, new_posture, cfg=cfg, sink=sink)
 
-    def _desired_hashes(self) -> tuple[dict[str, str] | None, str, str]:
+    def _resolve(self):
+        """``(ctx, "")``: this checkout's stack context, read-only (never provisions a machine),
+        or ``(None, why)``."""
+        from . import stack
+
+        try:
+            # The checkout the engine filter names (devmode.active_project), not cwd's.
+            return stack.resolve(no_machine=True, worktree=config.active_worktree()), ""
+        except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
+            return None, f"{type(e).__name__}: {e}"
+
+    def _desired_hashes(self, ctx, deadline: float) -> tuple[dict[str, str] | None, str, str]:
         """``(hashes, why, label)``: the fresh render's hashes (spanning the running profiles) or
         None with why, and the label podman-compose records its hash under."""
         from . import confighash, stack
 
         try:
-            ctx = stack.resolve(no_machine=True)
-            hashes, why = confighash.desired(ctx, stack._running_extra_profiles(ctx))
+            extra = stack._running_extra_profiles(ctx, deadline)
+            hashes, why = confighash.desired(
+                ctx, extra, timeout=max(0.1, deadline - time.monotonic())
+            )
             return hashes, why, confighash.LABEL
-        except (Exception, SystemExit) as e:  # resolve aborts a missing worktree with SystemExit
+        except Exception as e:
             return None, f"{type(e).__name__}: {e}", ""
+
+    def _left_over(self, ctx, outside: set[str], deadline: float) -> set[str] | None:
+        """Of the running services ``outside`` the render, the ones only a level that's off
+        wanted (``stack._dropped_mode_services``): `fy up` and a mode change remove those, so one
+        still running is drift, not a service of yours the render doesn't name. None when that
+        can't be told (the files or the plugins didn't answer in time)."""
+        from . import stack
+
+        if not outside:
+            return set()
+        return stack._dropped_mode_services(ctx, deadline, running=outside)
 
     def rows(self, state: dict) -> list[ScopeRow]:
         signature = devmode.posture_signature(state["mode"])
@@ -217,8 +246,12 @@ class StackScope(Scope):
         profiles = signature["env"].get("COMPOSE_PROFILES", "")
         if profiles:
             desired += f" · profiles: {profiles}"
+        # Bounded as a whole: the render and the compose calls behind it read the box's files,
+        # and `fy doctor` asks this too (devmode._stack_lapse_check).
+        deadline = time.monotonic() + VERDICT_TIMEOUT
+        # THIS checkout's project: a worktree's stack is `<prefix>-<worktree>`, not main's.
         rows = devmode.ps_labels(
-            ["--filter", f"label=com.docker.compose.project={config.project_prefix()}"], timeout=5
+            ["--filter", f"label=com.docker.compose.project={devmode.active_project()}"], timeout=5
         )
         if rows is None:
             return [ScopeRow("unknown", self.name, desired, "engine unreachable")]
@@ -233,7 +266,10 @@ class StackScope(Scope):
             ]
         why = _overlay_reasons(overlays, containers)
         fix = "`fy up` recreates them (or change any mode to reconcile)"
-        hashes, unavailable, label = self._desired_hashes()
+        ctx, unavailable = self._resolve()
+        hashes, label = None, ""
+        if ctx is not None:
+            hashes, unavailable, label = self._desired_hashes(ctx, deadline)
         if hashes is None:
             if why:
                 return [ScopeRow("drift", self.name, desired, f"{_explain(why)} — {fix}")]
@@ -252,6 +288,27 @@ class StackScope(Scope):
             reasons = {svc: why.get(svc) or "its rendered config changed" for svc in stale}
             return [ScopeRow("drift", self.name, desired, f"{_explain(reasons)} — {fix}")]
         outside = sorted({svc or "?" for svc, _ in containers if svc not in hashes})
+        left_over = self._left_over(ctx, set(outside), deadline)
+        if left_over is None:
+            return [
+                ScopeRow(
+                    "unknown",
+                    self.name,
+                    desired,
+                    f"{len(outside)} running outside the rendered config ({', '.join(outside)}), "
+                    "and whether only a level that's off wanted them can't be checked",
+                )
+            ]
+        if left := sorted(left_over):
+            return [
+                ScopeRow(
+                    "drift",
+                    self.name,
+                    desired,
+                    f"{_explain(dict.fromkeys(left, 'runs, but no level wants it any more'))} — "
+                    "`fy up` removes it",
+                )
+            ]
         observed = f"{len(compared)} containers match the rendered config"
         if outside:
             observed += f"; {len(outside)} not in it ({', '.join(outside)})"
